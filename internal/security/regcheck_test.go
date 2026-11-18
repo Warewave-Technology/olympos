@@ -2,6 +2,8 @@ package security
 
 import (
 	"context"
+	"github.com/Warewave-Technology/olympos/internal/apitest"
+	"github.com/Warewave-Technology/olympos/internal/server"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -38,5 +40,16 @@ func TestPingRegistryBearer(t *testing.T) {
 	err := pingRegistry(context.Background(), host, "bot", "wrong")
 	if err == nil || strings.Contains(err.Error(), "wrong") {
 		t.Fatalf("bad credential: %v", err)
+	}
+}
+
+func TestScanAllWithoutImages(t *testing.T) {
+	e := apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
+		return []server.Module{&API{DB: e.DB, Log: e.Log, Envelope: e.Envelope}}
+	}})
+	c := e.Login(e.Principal("op", "Member", "operator"))
+	code, body := c.Raw("POST", "/api/v1/images/scan", nil)
+	if code != http.StatusConflict || !strings.Contains(body, "Add a cluster") {
+		t.Fatalf("scan with no images: %d %s", code, body)
 	}
 }

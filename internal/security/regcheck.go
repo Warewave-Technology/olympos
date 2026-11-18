@@ -33,6 +33,19 @@ func (a *API) scanAll(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
+	var inScope int
+	if err := a.DB.QueryRow(ctx, `SELECT count(DISTINCT digest) FROM image_usage WHERE cluster_id = ANY($1)`, ids).Scan(&inScope); err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if inScope == 0 {
+		msg := "No running images to scan yet. Add a cluster first; its agent reports images within a minute."
+		if len(ids) > 0 {
+			msg = "No running images reported yet by the clusters you operate. Images appear within a minute of the agent connecting."
+		}
+		httpx.Error(w, http.StatusConflict, msg)
+		return
+	}
 	var n int64
 	err = store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = ''
