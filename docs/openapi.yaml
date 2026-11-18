@@ -171,6 +171,10 @@ paths:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
   /notifications/channels/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [notifications]
+      responses:
+        "200": {description: Channel, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
     patch:
       tags: [notifications]
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ChannelInput"}}}}
@@ -178,7 +182,9 @@ paths:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
     delete:
       tags: [notifications]
-      responses: {"204": {description: Deleted}}
+      responses:
+        "204": {description: Deleted (routes to it are removed)}
+        "409": {description: Used as override channel by backup jobs or audit schedules}
   /notifications/channels/{id}/test:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
@@ -217,7 +223,9 @@ paths:
       summary: Create destination (admin, scope all). Runs the destination test first; 422 if the test fails. A credential that can delete is saved with a warning (never silently).
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationInput"}}}}
       responses:
-        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+        "201": {description: Created (check `warnings`), content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+        "409": {description: Name already used}
+        "422": {description: Invalid input (fields) or destination test failed (test), content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTestFailed"}}}}
   /destinations/test:
     post:
       tags: [backups]
@@ -227,11 +235,18 @@ paths:
         "200": {description: Report, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTest"}}}}
   /destinations/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [backups]
+      responses:
+        "200": {description: Destination, content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
     patch:
       tags: [backups]
+      summary: Partial update (absent fields keep their value; omit `sas` to keep the current SAS). Re-runs the destination test like create.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationInput"}}}}
       responses:
-        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+        "200": {description: Updated (check `warnings`), content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+        "409": {description: Name already used}
+        "422": {description: Invalid input or destination test failed, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTestFailed"}}}}
     delete:
       tags: [backups]
       responses:
@@ -838,6 +853,8 @@ components:
         last_test_ok: {type: [boolean, "null"]}
         last_test: {$ref: "#/components/schemas/DestinationTest"}
         jobs: {type: integer}
+        created_at: {type: string, format: date-time}
+        warnings: {type: array, items: {type: string}, description: "Only on create/patch responses: things the admin must see (credential can delete, account SAS, expiry < 14 days)"}
     DestinationTest:
       type: object
       properties:
@@ -859,7 +876,17 @@ components:
             missing: {type: array, items: {type: string}, description: "required of r,c,w,t not granted"}
             extra: {type: array, items: {type: string}, description: "e.g. d, l"}
             scope: {type: string, enum: [container, account, service, unknown]}
+            user_delegation: {type: boolean, description: User delegation SAS (works with allowSharedKeyAccess=false)}
+            stored_policy: {type: string, description: Stored access policy name (si) when used}
+            notes: {type: array, items: {type: string}}
         error: {type: string}
+        probe_path: {type: string, description: "{prefix}/.olympos-probe/<uuid>"}
+    DestinationTestFailed:
+      type: object
+      properties:
+        error: {type: string}
+        fields: {type: object, additionalProperties: {type: string}}
+        test: {$ref: "#/components/schemas/DestinationTest"}
 
     # ---------------------------------------------------- backups
     CredentialInput:
