@@ -18,7 +18,7 @@ import (
 
 // LockSASExpiry is the advisory lock key of the sas.expiring job (single
 // active replica).
-const LockSASExpiry int64 = 0x4f4c5910
+const LockSASExpiry = schedule.LockSASExpiry
 
 // ExpiryThresholds are the days-before-expiry at which sas.expiring fires
 // (SPEC §10.3). 0 means "has expired".

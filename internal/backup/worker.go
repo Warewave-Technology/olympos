@@ -1,6 +1,8 @@
 package backup
 
 import (
+	"github.com/Warewave-Technology/olympos/internal/schedule"
+
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -25,7 +27,7 @@ import (
 
 // lockClaim serializes run claims across replicas (transaction-scoped), so
 // per-cluster limits hold.
-const lockClaim int64 = 0x4f4c5910
+const lockClaim = schedule.LockBackupClaim
 
 // ErrAgentOffline is the error stored on runs whose cluster is offline.
 const errAgentOffline = "agent_offline"

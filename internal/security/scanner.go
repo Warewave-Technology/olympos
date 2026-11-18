@@ -23,7 +23,7 @@ import (
 
 // LockScanner is the advisory lock key of the scanner leader. Only the
 // leader scans: it is also the replica whose cache holds a fresh trivy DB.
-const LockScanner int64 = 0x4f4c5951
+const LockScanner = schedule.LockScanner
 
 // Settings keys.
 const (

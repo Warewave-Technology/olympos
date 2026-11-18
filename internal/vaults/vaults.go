@@ -8,6 +8,8 @@
 package vaults
 
 import (
+	"github.com/Warewave-Technology/olympos/internal/schedule"
+
 	"context"
 	"encoding/json"
 	"errors"
@@ -35,7 +37,7 @@ const (
 	requestTimout = 30 * time.Second
 
 	// LockVaults is the advisory lock of the vaults maintenance leader.
-	LockVaults int64 = 0x4f4c5931
+	LockVaults = schedule.LockVaults
 
 	// AppRole / policy names created by configure.
 	PolicyName = "olympos"

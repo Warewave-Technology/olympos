@@ -76,12 +76,22 @@ func (s Spec) Interval(from time.Time) time.Duration {
 	return ts[len(ts)-1].Sub(ts[0]) / time.Duration(len(ts)-1)
 }
 
-// Lock keys for pg_try_advisory_lock; one per scheduler.
+// Advisory lock keys. EVERY Olympos advisory lock key lives here so keys
+// cannot collide (a session-level leader lock on a key another module uses
+// for short transaction locks blocks that module forever). The test in
+// schedule_test.go checks uniqueness.
 const (
 	LockBackupScheduler int64 = 0x4f4c5901
 	LockAuditScheduler  int64 = 0x4f4c5902
 	LockMaintenance     int64 = 0x4f4c5903
+	LockSASExpiry       int64 = 0x4f4c5910
+	LockBackupClaim     int64 = 0x4f4c5920 // transaction-scoped
+	LockVaults          int64 = 0x4f4c5931
+	LockScanner         int64 = 0x4f4c5951
 )
+
+// AllLocks lists every key (for the uniqueness test).
+var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance, LockSASExpiry, LockBackupClaim, LockVaults, LockScanner}
 
 // RunLeader runs tick every interval while holding the advisory lock. Only
 // one replica holds it at a time; others retry each interval.

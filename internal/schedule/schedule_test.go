@@ -29,3 +29,13 @@ func TestParseAndNextInZone(t *testing.T) {
 		t.Fatalf("interval %v", d)
 	}
 }
+
+func TestLockKeysUnique(t *testing.T) {
+	seen := map[int64]bool{}
+	for _, k := range AllLocks {
+		if seen[k] {
+			t.Fatalf("advisory lock key %#x used twice", k)
+		}
+		seen[k] = true
+	}
+}
