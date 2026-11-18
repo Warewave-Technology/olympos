@@ -1,12 +1,13 @@
 import { useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
-import { api } from '../api/client';
+import { ApiError, api, errorMessage } from '../api/client';
 import type { ChangeItemInput, ChangeRequest, SecretDetail, Vault, VaultInspect } from '../api/types';
 import { shortDate } from '../lib/format';
 import { CheckIcon } from '../ui/icons';
 import { Badge, Drawer, Field, FormError, Modal, TypeToConfirm, aria, fieldError, useAction } from '../ui/kit';
 import { crLabel } from '../ui/status';
+import { VaultIdentity, vaultIdentityProps, vaultPath } from '../ui/vault';
 
 const KEY_RE = /^[A-Za-z0-9_.-]{1,128}$/;
 
@@ -23,14 +24,14 @@ function useCrSubmit() {
   return { ...a, submit };
 }
 
-function Submitted({ cr, onClose }: { cr: ChangeRequest; onClose: () => void }) {
+function Submitted({ cr, vault, onClose }: { cr: ChangeRequest; vault: Vault; onClose: () => void }) {
   return (
     <>
       <div className="note ok" role="status">
         <div className="note-title">
           Submitted <span className="mono">{crLabel(cr)}</span> for approval
         </div>
-        The value is sealed until a second person approves it. It is never shown again, also not to you.
+        For <span className="mono">{vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })}</span> ({vault.provider === 'openbao' ? 'OpenBao' : 'HashiCorp Vault'} {vault.version}). The value is sealed until a second person approves it. It is never shown again, also not to you.
       </div>
       {cr.items.some((i) => i.fingerprint) && (
         <div>
@@ -147,11 +148,17 @@ export function ChangeRequestDrawer({
       }
       initialFocus={adding ? keyRef : valueRef}
     >
-      <div className="muted mono small" style={{ marginTop: -10 }}>
-        {full} · {vault.target.service} · {vault.target.cluster_name}
+      <div className="id-box" style={{ marginTop: -6 }}>
+        <div className="eyebrow" style={{ marginBottom: 6 }}>
+          Changes go to
+        </div>
+        <VaultIdentity {...vaultIdentityProps(vault)} compact />
+        <div className="mono small" style={{ marginTop: 6 }}>
+          <span className="muted">path</span> {full}
+        </div>
       </div>
       {done ? (
-        <Submitted cr={done} onClose={close} />
+        <Submitted cr={done} vault={vault} onClose={close} />
       ) : (
         <form onSubmit={submit} className="stack-sm" style={{ gap: 18, flex: 1 }} noValidate autoComplete="off">
           <div className="inline-sm">
@@ -176,11 +183,14 @@ export function ChangeRequestDrawer({
           <div className="note">
             The value is sealed with a Key Vault key until approved, then applied and deleted. After you submit, only its HMAC fingerprint is shown. The request expires in 72 h. You cannot approve your own request.
           </div>
-          <div className="drawer-foot">
+          <div className="muted small" id="cr-target-confirm">
+            Submitting a change to <span className="mono strong">{vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })}</span> · <span className="mono">{full}</span>
+          </div>
+          <div className="drawer-foot" style={{ marginTop: 0 }}>
             <button type="button" className="btn" onClick={close}>
               Cancel
             </button>
-            <button type="submit" className="btn pri" disabled={s.pending}>
+            <button type="submit" className="btn pri" disabled={s.pending} aria-describedby="cr-target-confirm">
               {s.pending ? 'Submitting…' : 'Submit for approval'}
             </button>
           </div>
@@ -268,7 +278,7 @@ export function DeleteDestroyDialog({
     return (
       <Modal open={open} onClose={close} size="narrow" eyebrow="Change request" title="Submitted for approval">
         <div className="note ok" role="status">
-          <span className="mono">{crLabel(done)}</span> waits for a second person with <span className="mono">vault-approver</span>. Nothing changes in Vault until it is approved.
+          <span className="mono">{crLabel(done)}</span> for <span className="mono">{vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })}</span> waits for a second person with <span className="mono">vault-approver</span>. Nothing changes in Vault until it is approved.
         </div>
         <div className="end">
           <Link to="/approvals" search={{ view: 'mine', cr: done.id }} className="btn">
@@ -296,7 +306,7 @@ export function DeleteDestroyDialog({
         }
         description={
           <span className="mono small">
-            {full} · current version v{cur}
+            {vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })} · {full} · current version v{cur}
           </span>
         }
       >
@@ -340,6 +350,7 @@ export function DeleteDestroyDialog({
           Destroy history of <span className="mono" style={{ fontSize: 16 }}>{full}</span>
         </>
       }
+      description={<span className="mono small">{vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })}</span>}
     >
       <form onSubmit={submitDestroy} className="stack-sm" style={{ gap: 18 }} noValidate>
         <div className="note crit" role="note">
@@ -503,11 +514,7 @@ export function VaultConfigureDialog({ open, onClose, vault }: { open: boolean; 
       open={open}
       onClose={close}
       eyebrow="Configure vault"
-      title={
-        <>
-          <span className="mono" style={{ fontSize: 17 }}>{vault.target.service}</span> · {vault.target.cluster_name}
-        </>
-      }
+      title={<span className="mono" style={{ fontSize: 17 }}>{vaultPath({ cluster: vault.target.cluster_name, namespace: vault.target.namespace, service: vault.target.service })}</span>}
       description={
         <>
           {provider} {mounts?.version || vault.version} · raft · {vault.target.tls_ok ? 'TLS verified' : vault.target.tls_ok === false ? 'no TLS' : 'TLS not probed'}
@@ -584,7 +591,7 @@ export function VaultConfigureDialog({ open, onClose, vault }: { open: boolean; 
             ))}
             {fieldError(configure.error, 'mounts') && <div className="field-error">{fieldError(configure.error, 'mounts')}</div>}
           </fieldset>
-          <FormError error={(inspect.error && !fieldError(inspect.error, 'root_token') ? inspect.error : null) ?? (configure.error && !fieldError(configure.error, 'root_token') && !fieldError(configure.error, 'mounts') ? configure.error : null)} />
+          <ServerErrorNote error={(inspect.error && !fieldError(inspect.error, 'root_token') ? inspect.error : null) ?? (configure.error && !fieldError(configure.error, 'root_token') && !fieldError(configure.error, 'mounts') ? configure.error : null)} clusterId={vault.target.cluster_id} clusterName={vault.target.cluster_name} />
           <div className="end">
             <button type="button" className="btn" onClick={close}>
               Cancel
@@ -602,5 +609,38 @@ export function VaultConfigureDialog({ open, onClose, vault }: { open: boolean; 
         </>
       )}
     </Modal>
+  );
+}
+
+/** Mentions of TLS in a server message (handshake, plain HTTP to HTTPS, x509). */
+export const mentionsTls = (msg: string) => /\btls\b|https|x509|certificate|plain http/i.test(msg);
+
+/**
+ * A server error shown as sent: multi-line text keeps its lines. When it is about TLS,
+ * a short hint links to the cluster's transfer mode.
+ */
+export function ServerErrorNote({ error, clusterId, clusterName }: { error: unknown; clusterId?: string; clusterName?: string }) {
+  if (!error) return null;
+  const msg = errorMessage(error);
+  const text = msg ? msg[0].toUpperCase() + msg.slice(1) : msg;
+  const fields = error instanceof ApiError ? Object.keys(error.fields) : [];
+  return (
+    <div className="note crit" role="alert">
+      <pre className="err-text">{text}</pre>
+      {fields.length > 0 && <div className="muted small">Check the highlighted fields.</div>}
+      {mentionsTls(msg) && (
+        <div className="err-hint small">
+          Olympos only talks to a vault over TLS, because the root token and secret values would otherwise cross the agent in clear. Enable TLS on the vault listener, or change the transfer mode of{' '}
+          {clusterId ? (
+            <Link to="/settings/clusters" search={{ cluster: clusterId }}>
+              {clusterName ?? 'this cluster'} in Settings › Clusters
+            </Link>
+          ) : (
+            <Link to="/settings/clusters">the cluster in Settings › Clusters</Link>
+          )}
+          .
+        </div>
+      )}
+    </div>
   );
 }

@@ -30,5 +30,7 @@ export default defineConfig({
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
     css: false,
+    // page tests render the whole SPA against the mock API (with its artificial delays)
+    testTimeout: 20_000,
   },
 });

@@ -4,9 +4,10 @@ import { api, errorMessage } from '../../api/client';
 import type { Registry, RegistryInput, UnmatchedRegistry } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { plural } from '../../lib/format';
-import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useAction, useToast } from '../../ui/kit';
+import { Badge, EmptyState, Field, FormError, Modal, aria, fieldError, useAction, useToast } from '../../ui/kit';
 import { Select } from '../../ui/Select';
 import { SettingsLayout } from './SettingsLayout';
+import { DataTable } from '../../ui/DataTable';
 
 type Source = 'keyvault_ref' | 'stored' | 'managed_identity';
 interface RegistriesResponse {
@@ -51,45 +52,34 @@ export function RegistriesPage() {
             </button>
           )}
         </div>
-        <QueryView
-          q={q}
+        <DataTable
+          label="Registries"
           what="registries"
-          isEmpty={(d) => d.items.length === 0}
+          rows={q.data?.items}
+          loading={q.isPending}
+          error={q.isError ? q.error : undefined}
+          onRetry={() => q.refetch()}
+          rowKey={(r) => r.id}
+          initialSort={{ id: 'host', dir: 'asc' }}
           empty={<EmptyState title="No registry credentials yet">Public images are scanned anonymously. Add a read-only credential for each private registry so trivy can pull its images.</EmptyState>}
-        >
-          {(d) => (
-            <div className="table-wrap">
-              <table className="t">
-                <thead>
-                  <tr>
-                    <th>Host pattern</th>
-                    <th>Credential</th>
-                    <th className="num">Images</th>
-                    <th>
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.items.map((r) => (
-                    <tr key={r.id}>
-                      <td className="mono">{r.host_pattern}</td>
-                      <td>{credCell(r)}</td>
-                      <td className="num">{r.images}</td>
-                      <td className="actions">
-                        {canAdmin && (
-                          <button type="button" className="btn sm" onClick={() => setDeleting(r)} aria-label={`Remove credential for ${r.host_pattern}`}>
-                            Remove
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </QueryView>
+          columns={[
+            { id: 'host', header: 'Host pattern', sortValue: (r) => r.host_pattern, className: 'mono', cell: (r) => r.host_pattern },
+            { id: 'cred', header: 'Credential', sortValue: (r) => r.credential_source || 'anonymous', cell: credCell },
+            { id: 'images', header: 'Images', align: 'num', sortValue: (r) => r.images, defaultDir: 'desc', cell: (r) => r.images },
+            {
+              id: 'actions',
+              header: 'Actions',
+              srOnlyHeader: true,
+              align: 'actions',
+              hidden: !canAdmin,
+              cell: (r) => (
+                <button type="button" className="btn sm" onClick={() => setDeleting(r)} aria-label={`Remove credential for ${r.host_pattern}`}>
+                  Remove
+                </button>
+              ),
+            },
+          ]}
+        />
         <div className="card-spacer" />
       </section>
 

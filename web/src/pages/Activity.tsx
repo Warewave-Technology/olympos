@@ -5,7 +5,8 @@ import { api } from '../api/client';
 import type { ActivityEntry, ItemList } from '../api/types';
 import { dateTime } from '../lib/format';
 import { activityRoute } from '../router';
-import { Badge, EmptyState, ErrorState, Loading, type Tone } from '../ui/kit';
+import { Badge, EmptyState, type Tone } from '../ui/kit';
+import { DataTable, type Column } from '../ui/DataTable';
 import { PageHead } from '../ui/status';
 
 const PAGE = 50;
@@ -49,6 +50,20 @@ function csv(rows: ActivityEntry[]): string {
   const head = ['time', 'actor', 'actor_kind', 'action', 'object_type', 'object_id', 'details'];
   return [head.join(','), ...rows.map((r) => [r.at, r.actor_name, r.actor_kind, r.action, r.object_type, r.object_id, detailsText(r.details)].map((v) => esc(String(v ?? ''))).join(','))].join('\n');
 }
+
+const COLUMNS: Column<ActivityEntry>[] = [
+  { id: 'at', header: 'Time', sortValue: (e) => e.at, defaultDir: 'desc', className: 'mono', cell: (e) => dateTime(e.at) },
+  { id: 'actor', header: 'Actor', sortValue: (e) => e.actor_name || e.actor_kind, className: (e) => (e.actor_kind === 'user' ? undefined : 'muted'), cell: (e) => e.actor_name || e.actor_kind },
+  { id: 'action', header: 'Action', sortValue: (e) => e.action, cell: (e) => <Badge tone={actionTone(e.action)}>{e.action}</Badge> },
+  {
+    id: 'object',
+    header: 'Object',
+    sortValue: (e) => objectLabel(e) || null,
+    className: (e) => (e.object_id ? 'mono' : 'muted'),
+    cell: (e) => <span title={e.object_id}>{objectLabel(e) || '—'}</span>,
+  },
+  { id: 'details', header: 'Details', className: 'muted wrap', cell: (e) => detailsText(e.details) || '—' },
+];
 
 export function ActivityPage() {
   const search = activityRoute.useSearch();
@@ -104,52 +119,32 @@ export function ActivityPage() {
         </div>
       </div>
       <section className="card" aria-label="Activity entries">
-        {q.isPending ? (
-          <Loading label="Loading activity…" />
-        ) : q.isError ? (
-          <ErrorState what="the activity log" error={q.error} onRetry={() => q.refetch()} />
-        ) : rows.length === 0 ? (
-          <EmptyState title={search.q || group ? 'No matching activity' : 'No activity yet'}>{search.q || group ? 'Try a broader search or another filter.' : 'Sign-ins, grants, backups and change requests are recorded here as they happen.'}</EmptyState>
-        ) : (
-          <div className="table-wrap">
-            <table className="t">
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Actor</th>
-                  <th>Action</th>
-                  <th>Object</th>
-                  <th>Details</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rows.map((e) => (
-                  <tr key={e.id}>
-                    <td className="mono">{dateTime(e.at)}</td>
-                    <td className={e.actor_kind === 'user' ? undefined : 'muted'}>{e.actor_name || e.actor_kind}</td>
-                    <td>
-                      <Badge tone={actionTone(e.action)}>{e.action}</Badge>
-                    </td>
-                    <td className={e.object_id ? 'mono' : 'muted'} title={e.object_id}>
-                      {objectLabel(e) || '—'}
-                    </td>
-                    <td className="muted wrap">{detailsText(e.details) || '—'}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-        {rows.length > 0 && (
-          <div className="card-foot spread">
-            <span>Showing {rows.length.toLocaleString('en-US')} · values and tokens are never logged</span>
-            {q.hasNextPage && (
+        <DataTable
+          label="Activity entries"
+          what="the activity log"
+          rows={q.data ? rows : undefined}
+          loading={q.isPending}
+          error={q.isError ? q.error : undefined}
+          onRetry={() => q.refetch()}
+          rowKey={(e) => e.id}
+          columns={COLUMNS}
+          pageSize={50}
+          pageSizes={[50, 100, 200]}
+          initialSort={{ id: 'at', dir: 'desc' }}
+          countNoun={q.hasNextPage ? 'loaded' : undefined}
+          resetKey={`${search.q ?? ''}|${group}`}
+          empty={<EmptyState title={search.q || group ? 'No matching activity' : 'No activity yet'}>{search.q || group ? 'Try a broader search or another filter.' : 'Sign-ins, grants, backups and change requests are recorded here as they happen.'}</EmptyState>}
+          footerExtra={
+            q.hasNextPage ? (
               <button type="button" className="btn sm" onClick={() => void q.fetchNextPage()} disabled={q.isFetchingNextPage}>
-                {q.isFetchingNextPage ? 'Loading…' : 'Load older entries'}
+                {q.isFetchingNextPage ? 'Loading…' : `Load ${PAGE} older entries`}
               </button>
-            )}
-          </div>
-        )}
+            ) : rows.length > 0 ? (
+              <span className="muted small">All entries loaded</span>
+            ) : null
+          }
+        />
+        {rows.length > 0 && <div className="card-foot">Values and tokens are never logged. Search and filters run on the server; older entries load page by page.</div>}
       </section>
     </>
   );
