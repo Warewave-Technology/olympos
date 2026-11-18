@@ -255,14 +255,14 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 
 func ensureJob(t *testing.T, c *client, targetID, destID string, cred, opts map[string]any) string {
 	t.Helper()
-	var jobs struct{ Items []backup.Job }
+	var jobs struct{ Items []backup.JobView }
 	c.must("GET", "/backup/jobs", nil, &jobs, 200)
 	for _, j := range jobs.Items {
-		if j.Target.ID == targetID {
+		if j.Target.ID == targetID && j.Destination.ID.String() == destID {
 			return j.ID.String()
 		}
 	}
-	var j backup.Job
+	var j backup.JobView
 	c.must("POST", "/backup/jobs", map[string]any{
 		"target_id": targetID, "credential": cred, "destination_id": destID, "engine_options": opts,
 		"cron": "0 2 * * *", "timezone": "Europe/Istanbul", "enabled": false,
