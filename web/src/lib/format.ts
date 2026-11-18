@@ -162,3 +162,35 @@ export function personName(p: { upn?: string; display_name?: string; object_id?:
   if (!p) return '—';
   return p.upn || p.display_name || shortId(p.object_id);
 }
+
+/**
+ * Joins storage path segments with exactly one "/" between them: trims each part,
+ * drops empty parts and collapses repeated slashes ("olympos/" + "/lab" → "olympos/lab").
+ * A leading "/" on the first part is kept (absolute NFS paths).
+ */
+export function joinPath(...parts: (string | null | undefined)[]): string {
+  const list = parts.map((p) => (p ?? '').trim()).filter((p) => p.replace(/\/+/g, '') !== '');
+  if (list.length === 0) return '';
+  const abs = list[0].startsWith('/');
+  const joined = list
+    .map((p) => p.replace(/^\/+|\/+$/g, ''))
+    .join('/')
+    .replace(/\/{2,}/g, '/');
+  return abs ? `/${joined}` : joined;
+}
+
+/** "14:05" (local time); "Nov 19 14:05" when not today. */
+export function clockTime(iso: string | null | undefined, now: Date = new Date()): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  const same = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  return same ? hm : `${MONTHS[d.getMonth()]} ${pad(d.getDate())} ${hm}`;
+}
+
+/** First line of a long technical message, cut at `max` characters. */
+export function shortText(s: string | null | undefined, max = 72): string {
+  if (!s) return '';
+  const line = s.split('\n')[0].trim();
+  return line.length > max ? line.slice(0, max - 1).trimEnd() + '…' : line;
+}

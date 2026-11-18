@@ -2,16 +2,17 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, ItemList, SchedulePreview, Target } from '../api/types';
+import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, ItemList, SchedulePreview, Target, Vault } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, formatInZone, nextRuns, presetFor, timeZones, tzOffsetLabel, validateCron } from '../lib/cron';
-import { age, between, bytes, daysUntil, duration, engineLabel, money } from '../lib/format';
+import { age, between, bytes, daysUntil, duration, engineLabel, joinPath, money } from '../lib/format';
 import { backupWizardRoute } from '../router';
 import { CheckIcon } from '../ui/icons';
 import { Badge, EmptyState, ErrorState, Field, FormError, Loading, Spinner, aria, fieldError, useAction, useToast } from '../ui/kit';
 import { PageHead, RunBadge } from '../ui/status';
 import { KindBadge, authLabel, destLocation } from '../ui/destinations';
 import { Select } from '../ui/Select';
+import { TagInput, validateDatabaseName } from '../ui/TagInput';
 
 type Step = 1 | 2 | 3 | 4;
 const STEPS: { n: Step; name: string; hint: string }[] = [
@@ -26,7 +27,7 @@ interface Form {
   kvName: string;
   secretName: string;
   username: string;
-  databases: string;
+  databases: string[];
   destinationId: string;
   cron: string;
   custom: boolean;
@@ -53,7 +54,7 @@ function parseRef(ref: string): { kv: string; secret: string } {
 
 function initialForm(job?: BackupJob): Form {
   if (!job) {
-    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: '', destinationId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false };
+    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: [], destinationId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false };
   }
   const r = parseRef(job.credential.ref);
   const dbs = (job.engine_options?.databases as string[] | undefined) ?? [];
@@ -62,7 +63,7 @@ function initialForm(job?: BackupJob): Form {
     kvName: r.kv,
     secretName: r.secret,
     username: job.credential.username,
-    databases: dbs.join(', '),
+    databases: dbs,
     destinationId: job.destination.id,
     cron: job.cron,
     custom: !presetFor(job.cron),
@@ -71,7 +72,7 @@ function initialForm(job?: BackupJob): Form {
     weekly: String(job.retention.weekly),
     monthly: String(job.retention.monthly),
     notifyChannelId: job.notify_channel_id ?? '',
-    notifyOnSuccess: Boolean((job as unknown as { notify_on_success?: boolean }).notify_on_success),
+    notifyOnSuccess: !!job.notify_on_success,
   };
 }
 
@@ -153,7 +154,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const [runId, setRunId] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const isVault = target.engine === 'vault';
+  const [dbDraftErr, setDbDraftErr] = useState<string | null>(null);
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((p) => ({ ...p, [k]: v }));
+  // Vault/OpenBao snapshots use the Olympos AppRole of that vault: it must be configured first.
+  const vaultsQ = useQuery({ queryKey: ['vaults'], queryFn: () => api.get<ItemList<Vault>>('/vaults'), enabled: isVault });
+  const vault = isVault ? findVault(vaultsQ.data?.items, target) : undefined;
+  const vaultReady = !isVault || vault?.status === 'configured';
 
   const clusterQ = useQuery({ queryKey: ['clusters', target.cluster_id], queryFn: () => api.get<Cluster>(`/clusters/${target.cluster_id}`) });
   const destQ = useQuery({ queryKey: ['destinations'], queryFn: () => api.get<ItemList<Destination>>('/destinations') });
@@ -197,7 +203,11 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
 
   const validate = (s: Step): Record<string, string> => {
     const e: Record<string, string> = {};
+    if (s === 2 && isVault && !vaultReady) {
+      e.vault = vaultsQ.isPending ? 'Checking the vault…' : 'Configure this vault in Olympos first (Vaults › Configure). Backups use its Olympos AppRole.';
+    }
     if (s === 2 && !isVault) {
+      if (dbDraftErr) e.databases = dbDraftErr;
       if (!f.username.trim()) e.username = 'Enter the database user the backup connects as.';
       if (f.source === 'keyvault_ref') {
         if (!/^[a-zA-Z0-9-]{3,24}$/.test(f.kvName.trim())) e.kvName = 'Key Vault names are 3–24 letters, digits and dashes.';
@@ -252,16 +262,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
     target_id: target.id,
     credential: credential(),
     destination_id: f.destinationId,
-    engine_options: isVault
-      ? {}
-      : target.engine === 'postgresql'
-        ? { databases: f.databases.split(',').map((s) => s.trim()).filter(Boolean), globals: true }
-        : { databases: f.databases.split(',').map((s) => s.trim()).filter(Boolean) },
+    engine_options: isVault ? {} : target.engine === 'postgresql' ? { databases: f.databases, globals: true } : { databases: f.databases },
     cron: f.cron.trim(),
     timezone: f.timezone,
     retention: { daily: Number(f.daily), weekly: Number(f.weekly), monthly: Number(f.monthly) },
     notify_channel_id: f.notifyChannelId || null,
-    ...({ notify_on_success: f.notifyOnSuccess } as object),
+    notify_on_success: f.notifyOnSuccess,
   });
 
   const save = useAction<BackupJob>();
@@ -314,7 +320,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
 
   const fe = (name: string) => errs[name] ?? fieldError(save.error, name) ?? fieldError(test.error, name);
   const tlsHint = target.tls_ok ? 'TLS verified' : target.tls_ok === false ? 'no TLS' : 'TLS not probed';
-  const stepHint = (n: Step) => (n === 1 ? `${target.service} · ${tlsHint}` : STEPS[n - 1].hint);
+  const stepHint = (n: Step) => (n === 1 ? `${target.service} · ${tlsHint}` : n === 2 && isVault ? 'Olympos AppRole, no password' : STEPS[n - 1].hint);
   const annotation = [
     'metadata:',
     '  annotations:',
@@ -380,7 +386,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
             </h2>
             <p className="section-sub">
               {step === 1 && 'What the agent found. Check it is the right database before adding credentials.'}
-              {step === 2 && 'The server connects to the database through the agent tunnel. The password is used on the server only.'}
+              {step === 2 && (isVault ? 'Snapshots are taken by the server through the agent tunnel, with the Olympos AppRole of this vault.' : 'The server connects to the database through the agent tunnel. The password is used on the server only.')}
               {step === 3 && 'Where backups go, how often, and how long they are kept.'}
               {step === 4 && (target.engine === 'postgresql' ? 'A dry run takes a schema-only dump end to end, so problems show up now and not at night.' : 'A dry run takes a small test backup end to end, so problems show up now and not at night.')}
             </p>
@@ -458,9 +464,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
           {step === 2 && (
             <>
               {isVault ? (
-                <div className="note">
-                  Raft snapshots use the Olympos AppRole created when this vault was configured (Vaults › Configure). The policy only allows <span className="mono">sys/storage/raft/snapshot</span> read; no credential is needed here.
-                </div>
+                <VaultCredentialStep vault={vault} target={target} loading={vaultsQ.isPending} error={vaultsQ.isError ? vaultsQ.error : null} onRetry={() => vaultsQ.refetch()} />
               ) : (
                 <>
                   <fieldset className="opts">
@@ -480,34 +484,60 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                       </span>
                     </label>
                   </fieldset>
-                  <div className="grid-2">
+                  <div className={f.source === 'keyvault_ref' ? 'grid-3' : 'grid-2'} data-testid="w-cred-fields">
+                    <Field label="Username" htmlFor="w-user" error={fe('username')}>
+                      <input className="in mono" {...aria('w-user', fe('username'))} value={f.username} onChange={(e) => set('username', e.target.value)} placeholder="backup_ro" autoComplete="off" spellCheck={false} />
+                    </Field>
                     {f.source === 'keyvault_ref' ? (
                       <>
                         <Field label="Key Vault" htmlFor="w-kv" error={fe('kvName') ?? fe('ref')}>
                           <input className="in mono" {...aria('w-kv', fe('kvName') ?? fe('ref'))} value={f.kvName} onChange={(e) => set('kvName', e.target.value)} placeholder="kv-platform-weu" autoComplete="off" spellCheck={false} />
                         </Field>
-                        <Field label="Secret name" htmlFor="w-sec" error={fe('secretName')} hint="The secret holds the password.">
-                          <input className="in mono" {...aria('w-sec', fe('secretName'), true)} value={f.secretName} onChange={(e) => set('secretName', e.target.value)} placeholder={`${target.service}-backup`} autoComplete="off" spellCheck={false} />
+                        <Field label="Secret name (holds the password)" htmlFor="w-sec" error={fe('secretName')}>
+                          <input className="in mono" {...aria('w-sec', fe('secretName'))} value={f.secretName} onChange={(e) => set('secretName', e.target.value)} placeholder={`${target.service}-backup`} autoComplete="off" spellCheck={false} />
                         </Field>
                       </>
                     ) : (
-                      <Field
-                        label="Password"
-                        htmlFor="w-pw"
-                        error={fe('password')}
-                        hint={savedJob?.credential.source === 'stored' ? 'A password is stored. Leave empty to keep it.' : 'Sent once over TLS, envelope-encrypted, never shown again.'}
-                        className="grid-span"
-                      >
+                      <Field label="Password" htmlFor="w-pw" error={fe('password')} hint={savedJob?.credential.source === 'stored' ? 'A password is stored. Leave empty to keep it.' : 'Sent once over TLS, envelope-encrypted, never shown again.'}>
                         <input className="in mono" type="password" {...aria('w-pw', fe('password'), true)} value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
                       </Field>
                     )}
-                    <Field label="Username" htmlFor="w-user" error={fe('username')}>
-                      <input className="in mono" {...aria('w-user', fe('username'))} value={f.username} onChange={(e) => set('username', e.target.value)} placeholder="backup_ro" autoComplete="off" spellCheck={false} />
-                    </Field>
-                    <Field label="Databases" htmlFor="w-dbs" error={fe('databases')} hint={target.engine === 'postgresql' ? 'Comma separated. Empty = all databases. Globals (roles) are always included.' : 'Comma separated. Empty = all databases.'}>
-                      <input className="in mono" {...aria('w-dbs', fe('databases'), true)} value={f.databases} onChange={(e) => set('databases', e.target.value)} placeholder={conn?.databases.join(', ') || 'orders, orders_archive'} autoComplete="off" spellCheck={false} />
-                    </Field>
                   </div>
+                  <Field
+                    label="Databases"
+                    htmlFor="w-dbs"
+                    error={fe('databases')}
+                    hint={
+                      <>
+                        {f.databases.length === 0 ? <b>All databases will be backed up.</b> : `${f.databases.length === 1 ? '1 database' : `${f.databases.length} databases`} selected.`} Press Enter, comma or space after each name; leave empty for all databases.
+                        {target.engine === 'postgresql' ? ' Globals (roles) are always included.' : ''}
+                      </>
+                    }
+                  >
+                    <TagInput
+                      id="w-dbs"
+                      mode="values"
+                      value={f.databases}
+                      onChange={(v) => set('databases', v)}
+                      validate={validateDatabaseName}
+                      placeholder={f.databases.length ? undefined : 'All databases · type a name to limit, e.g. orders'}
+                      listLabel="Databases to back up"
+                      onDraftError={setDbDraftErr}
+                      aria-describedby={fe('databases') ? undefined : 'w-dbs-hint'}
+                    />
+                  </Field>
+                  {conn?.ok && conn.databases.some((d) => !f.databases.includes(d)) && (
+                    <div className="inline-sm small" style={{ marginTop: -8 }}>
+                      <span className="muted">Visible on the server:</span>
+                      {conn.databases
+                        .filter((d) => !f.databases.includes(d))
+                        .map((d) => (
+                          <button key={d} type="button" className="pill mono" style={{ minHeight: 26, padding: '2px 10px' }} onClick={() => set('databases', [...f.databases, d])} aria-label={`Add database ${d}`}>
+                            + {d}
+                          </button>
+                        ))}
+                    </div>
+                  )}
                 </>
               )}
 
@@ -557,10 +587,17 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   Back
                 </button>
                 <div className="inline">
-                  <button type="button" className="btn" onClick={() => void runTest()} disabled={test.pending}>
-                    Test connection
-                  </button>
-                  <button type="button" className="btn pri" onClick={() => go(3)}>
+                  {isVault && !vaultReady && !vaultsQ.isPending && (
+                    <span className="muted small" id="w-next-why">
+                      Configure the vault first
+                    </span>
+                  )}
+                  {!isVault && (
+                    <button type="button" className="btn" onClick={() => void runTest()} disabled={test.pending}>
+                      Test connection
+                    </button>
+                  )}
+                  <button type="button" className="btn pri" onClick={() => go(3)} disabled={!vaultReady} aria-describedby={isVault && !vaultReady ? 'w-next-why' : undefined}>
                     Next: destination
                   </button>
                 </div>
@@ -720,7 +757,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   <>
                     <dt>Databases</dt>
                     <dd className="mono">
-                      {f.databases.trim() || 'all databases'}
+                      {f.databases.length ? f.databases.join(', ') : 'all databases'}
                       {target.engine === 'postgresql' ? ' + globals' : ''}
                     </dd>
                     <dt>Credentials</dt>
@@ -739,9 +776,17 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     </dd>
                   </>
                 )}
+                {isVault && (
+                  <>
+                    <dt>Credentials</dt>
+                    <dd>
+                      Olympos AppRole of <span className="mono">{vault ? `${vault.target.cluster_name} / ${vault.target.namespace} / ${vault.target.service}` : target.service}</span> · raft snapshot
+                    </dd>
+                  </>
+                )}
                 <dt>Destination</dt>
                 <dd className="mono">
-                  {dest ? `${dest.name} · ${dest.prefix || ''}${target.cluster_name}/${target.namespace}/${target.service}/${target.engine}/` : '—'}
+                  {dest ? `${dest.name} · ${joinPath(dest.prefix, target.cluster_name, target.namespace, target.service, target.engine)}/` : '—'}
                 </dd>
                 <dt>Schedule</dt>
                 <dd>
@@ -858,5 +903,50 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
         </section>
       </div>
     </>
+  );
+}
+
+/** The vault behind a Vault/OpenBao backup target (same target, else same Service). */
+export function findVault(list: Vault[] | undefined, t: Target): Vault | undefined {
+  if (!list) return undefined;
+  return list.find((v) => v.target.id === t.id) ?? list.find((v) => v.target.cluster_id === t.cluster_id && v.target.namespace === t.namespace && v.target.service === t.service);
+}
+
+function VaultCredentialStep({ vault, target, loading, error, onRetry }: { vault: Vault | undefined; target: Target; loading: boolean; error: unknown; onRetry: () => void }) {
+  const name = target.vault_provider === 'openbao' ? 'OpenBao' : 'Vault';
+  if (loading) return <Loading label="Checking the vault…" />;
+  if (error) return <ErrorState what="vaults" error={error} onRetry={onRetry} />;
+  const id = (
+    <span className="mono">
+      {target.cluster_name} / {target.namespace} / {target.service}
+    </span>
+  );
+  if (vault?.status === 'configured') {
+    return (
+      <div className="note ok" role="status">
+        <div className="note-title">No credentials needed</div>
+        This job uses the Olympos AppRole of {id}, created when the {name} was configured{vault.configured_at ? ` (${age(vault.configured_at)} ago by ${vault.configured_by_name || 'an admin'})` : ''}. Its policy only allows <span className="mono">sys/storage/raft/snapshot</span> read; nothing is stored for this job.
+      </div>
+    );
+  }
+  return (
+    <div className="note warn" role="alert">
+      <div className="note-title">
+        {vault?.status === 'error' ? `The ${name} reports an error` : `This ${name} is not configured in Olympos yet`}
+      </div>
+      Backups of {id} use the Olympos AppRole of that {name}, so it has to be configured first. An admin configures it once with a root token, which is not stored.
+      {vault?.last_error && <div className="mono small" style={{ marginTop: 6 }}>{vault.last_error}</div>}
+      <div style={{ marginTop: 8 }}>
+        {vault ? (
+          <Link to="/vaults" search={{ vault: vault.id }}>
+            Open Vaults › Configure
+          </Link>
+        ) : (
+          <>
+            Olympos has not discovered this {name} yet: annotate the Service with <span className="mono">olympos.io/vault: {target.vault_provider || 'hashicorp'}</span>, then <Link to="/vaults">open Vaults</Link>.
+          </>
+        )}
+      </div>
+    </div>
   );
 }

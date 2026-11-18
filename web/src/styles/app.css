@@ -641,6 +641,311 @@ code,
   color: var(--crit-fg);
 }
 
+/* ---- DataTable: sticky header, sortable headers, pager */
+.dt {
+  min-width: 0;
+}
+.dt-scroll {
+  max-height: var(--dt-max-h, min(72vh, 1100px));
+  overflow: auto;
+}
+.dt-scroll .t thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-surface);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.boxed .dt-scroll .t thead th {
+  background: var(--bg-surface);
+}
+.t th.sortable {
+  padding: 0;
+}
+.th-sort {
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-muted);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 10px 14px;
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  text-align: inherit;
+}
+.t th.num .th-sort {
+  justify-content: flex-end;
+}
+.th-sort:hover,
+.th-sort.on {
+  color: var(--fg-strong);
+}
+.th-sort:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: var(--radius-sm);
+}
+.th-sort-ico {
+  width: 12px;
+  height: 12px;
+  opacity: 0;
+  transition: transform 0.12s ease;
+  flex: 0 0 auto;
+}
+.th-sort:hover .th-sort-ico {
+  opacity: 0.5;
+}
+.th-sort-ico.asc,
+.th-sort-ico.desc {
+  opacity: 1;
+  color: var(--accent);
+}
+.th-sort-ico.asc {
+  transform: rotate(180deg);
+}
+.t tr.clickable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.t tr.clickable:focus-visible td {
+  background: var(--bg-hover);
+}
+.dt-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+.dt-range {
+  color: var(--fg-soft);
+}
+.dt-controls {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.card-head .search-sm {
+  width: 260px;
+  max-width: 100%;
+  min-height: 34px;
+  padding: 6px 10px;
+}
+/* stat cards that switch tabs */
+button.stat {
+  font: inherit;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+  width: 100%;
+}
+button.stat:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+button.stat[aria-pressed='true'] {
+  border-color: var(--accent-strong);
+}
+.stat .go {
+  font-size: 12px;
+  color: var(--link);
+  margin-top: 6px;
+  display: block;
+}
+/* scan status cell */
+.scan-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-start;
+  white-space: normal;
+  max-width: 280px;
+  min-width: 170px;
+}
+.scan-why {
+  font-size: 12px;
+  color: var(--fg-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 270px;
+}
+/* server error text kept as sent (multi-line) */
+.err-text {
+  font-family: var(--font-ui);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  color: var(--fg);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.err-text + .err-hint {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--crit-border);
+}
+/* vault identity (detail header, drawer, confirmation) */
+.vault-id {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.vault-id .path {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  color: var(--fg-strong);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.vault-id .path .sep {
+  color: var(--fg-muted);
+  font-weight: 400;
+  padding: 0 4px;
+}
+.vault-id.compact .path {
+  font-size: 13px;
+}
+.id-box {
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--accent-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-page);
+  padding: 10px 12px;
+}
+/* vault list: search, groups */
+.vsearch {
+  padding: 4px 4px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.vsearch .in {
+  min-height: 36px;
+  padding: 7px 10px;
+}
+.vgroup-head {
+  font: inherit;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 8px;
+  background: none;
+  border: 0;
+  border-radius: var(--radius);
+  color: var(--fg-nav);
+  cursor: pointer;
+  text-align: left;
+  flex-wrap: wrap;
+}
+.vgroup-head:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+.vgroup-head .chev {
+  transition: transform 0.12s ease;
+  transform: rotate(-90deg);
+  flex: 0 0 auto;
+  color: var(--fg-muted);
+}
+.vgroup-head[aria-expanded='true'] .chev {
+  transform: none;
+}
+.vgroup-head .name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg);
+}
+.vgroup-head .count {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+.vgroup-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 0;
+  padding: 0 8px 4px 30px;
+}
+.vgroup-labels .chip {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+.vgroup-items {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 14px;
+}
+.vgroup-items .li {
+  padding: 9px 12px;
+}
+.vlist {
+  flex: 0 0 auto;
+  max-height: 52vh;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vres-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 8px 4px;
+}
+.vres {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  padding: 8px 10px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.vres:hover,
+.vres:focus-visible {
+  background: var(--bg-hover);
+}
+.vres[aria-current='true'] {
+  background: var(--bg-hover);
+  border-color: var(--accent-strong);
+}
+.vres .p {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg-strong);
+  overflow-wrap: anywhere;
+}
+.vres .w {
+  font-size: 12px;
+  color: var(--fg-muted);
+  margin-top: 2px;
+}
+mark {
+  background: var(--warn-bg);
+  color: var(--accent);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
 /* ------------------------------------------------------------ badges / chips */
 .badge {
   display: inline-flex;

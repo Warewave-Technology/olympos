@@ -10,6 +10,7 @@ import { backupsRoute } from '../router';
 import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
 import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
+import { DataTable, type Column } from '../ui/DataTable';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
 const ENGINES = [
@@ -198,87 +199,97 @@ function JobsTab({ jobsQ, canOperate }: { jobsQ: Q<ItemList<BackupJob>>; canOper
     },
     onError: (e) => toast(`Could not change the job: ${errorMessage(e)}`, 'crit'),
   });
+  const [text, setText] = useState('');
+  const jobColumns: Column<BackupJob>[] = [
+    {
+      id: 'target',
+      header: 'Target',
+      sortValue: (j) => j.target.service,
+      searchText: (j) => `${j.target.service} ${j.target.cluster_name} ${j.target.namespace} ${j.engine} ${j.destination.name}`,
+      cell: (j) => (
+        <>
+          <div className="mono">{j.target.service}</div>
+          <div className="mono muted small">
+            {j.target.cluster_name} / {j.target.namespace} · {engineLabel(j.engine)}
+          </div>
+        </>
+      ),
+    },
+    {
+      id: 'cron',
+      header: 'Schedule',
+      sortValue: (j) => j.cron,
+      cell: (j) => (
+        <>
+          <span className="mono">{j.cron}</span> <span className="muted small">{j.timezone}</span>
+        </>
+      ),
+    },
+    { id: 'dest', header: 'Destination', sortValue: (j) => j.destination.name, className: 'mono', cell: (j) => j.destination.name },
+    { id: 'next', header: 'Next run', sortValue: (j) => (j.enabled ? j.next_run_at : null), className: 'mono', cell: (j) => (j.enabled && j.next_run_at ? relDateTime(j.next_run_at) : '—') },
+    { id: 'last', header: 'Last run', sortValue: (j) => j.last_run?.status ?? null, cell: (j) => (j.last_run ? <RunBadge run={j.last_run} /> : <span className="muted">Never</span>) },
+    { id: 'bytes', header: 'Est. monthly transfer', align: 'num', sortValue: (j) => j.estimated_monthly_bytes || null, defaultDir: 'desc', cell: (j) => (j.estimated_monthly_bytes ? bytes(j.estimated_monthly_bytes) : '—') },
+    { id: 'cost', header: 'Est. cost', align: 'num', sortValue: (j) => j.estimated_monthly_cost, defaultDir: 'desc', cell: (j) => (j.estimated_monthly_cost != null ? `≈ ${money(j.estimated_monthly_cost)}` : <span className="muted">no rate</span>) },
+    { id: 'status', header: 'Status', sortValue: (j) => (j.paused_reason ? 1 : !j.enabled ? 2 : j.last_run && j.last_run.status !== 'succeeded' ? 0 : 3), cell: jobStatus },
+    {
+      id: 'actions',
+      header: 'Actions',
+      srOnlyHeader: true,
+      align: 'actions',
+      hidden: !canOperate,
+      cell: (j) => (
+        <>
+          <button type="button" className="btn sm" onClick={() => runNow.mutate(j.id)} disabled={runNow.isPending || !j.enabled} aria-label={`Run ${j.target.service} now`}>
+            Run now
+          </button>
+          <button type="button" className="btn sm" onClick={() => toggle.mutate(j)} disabled={toggle.isPending}>
+            {j.enabled ? 'Pause' : 'Enable'}
+          </button>
+          <Link to="/backups/new" search={{ job: j.id }} className="btn sm">
+            Edit
+          </Link>
+        </>
+      ),
+    },
+  ];
   const totalBytes = (jobsQ.data?.items ?? []).reduce((s, j) => s + (j.estimated_monthly_bytes || 0), 0);
   const totalCost = (jobsQ.data?.items ?? []).reduce((s, j) => s + (j.estimated_monthly_cost ?? 0), 0);
   return (
     <section className="card" aria-labelledby="jobs-t">
       <div className="card-head">
-        <h2 id="jobs-t">Backup jobs</h2>
-        {totalBytes > 0 && (
-          <span className="muted small">
-            Est. monthly transfer {bytes(totalBytes)}
-            {totalCost > 0 ? ` · ≈ ${money(totalCost)} egress` : ''}
-          </span>
-        )}
+        <div>
+          <h2 id="jobs-t">Backup jobs</h2>
+          {totalBytes > 0 && (
+            <div className="desc">
+              Est. monthly transfer {bytes(totalBytes)}
+              {totalCost > 0 ? ` · ≈ ${money(totalCost)} egress` : ''}
+            </div>
+          )}
+        </div>
+        <span>
+          <label className="sr-only" htmlFor="jobs-q">
+            Search jobs
+          </label>
+          <input id="jobs-q" type="search" className="in search-sm" placeholder="Search target, cluster, destination…" value={text} onChange={(e) => setText(e.target.value)} />
+        </span>
       </div>
-      <QueryView
-        q={jobsQ}
+      <DataTable
+        label="Backup jobs"
         what="backup jobs"
-        isEmpty={(d) => d.items.length === 0}
+        rows={jobsQ.data?.items}
+        loading={jobsQ.isPending}
+        error={jobsQ.isError ? jobsQ.error : undefined}
+        onRetry={() => jobsQ.refetch()}
+        rowKey={(j) => j.id}
+        filterText={text}
+        initialSort={{ id: 'target', dir: 'asc' }}
         empty={
           <EmptyState title="No backup jobs yet">
             Configure one from the <Link to="/backups">Candidates</Link> tab: pick a discovered database, add credentials, a destination and a schedule, then run a dry run.
           </EmptyState>
         }
-      >
-        {(d) => (
-          <div className="table-wrap">
-            <table className="t">
-              <thead>
-                <tr>
-                  <th>Target</th>
-                  <th>Schedule</th>
-                  <th>Destination</th>
-                  <th>Next run</th>
-                  <th>Last run</th>
-                  <th className="num">Est. monthly transfer</th>
-                  <th className="num">Est. cost</th>
-                  <th>Status</th>
-                  <th>
-                    <span className="sr-only">Actions</span>
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {d.items.map((j) => (
-                  <tr key={j.id}>
-                    <td>
-                      <div className="mono">{j.target.service}</div>
-                      <div className="mono muted small">
-                        {j.target.cluster_name} / {j.target.namespace} · {engineLabel(j.engine)}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="mono">{j.cron}</span> <span className="muted small">{j.timezone}</span>
-                    </td>
-                    <td className="mono">{j.destination.name}</td>
-                    <td className="mono">{j.enabled && j.next_run_at ? relDateTime(j.next_run_at) : '—'}</td>
-                    <td>{j.last_run ? <RunBadge run={j.last_run} /> : <span className="muted">Never</span>}</td>
-                    <td className="num">{j.estimated_monthly_bytes ? bytes(j.estimated_monthly_bytes) : '—'}</td>
-                    <td className="num">{j.estimated_monthly_cost != null ? `≈ ${money(j.estimated_monthly_cost)}` : <span className="muted">no rate</span>}</td>
-                    <td>{jobStatus(j)}</td>
-                    <td className="actions">
-                      {canOperate && (
-                        <>
-                          <button type="button" className="btn sm" onClick={() => runNow.mutate(j.id)} disabled={runNow.isPending || !j.enabled} aria-label={`Run ${j.target.service} now`}>
-                            Run now
-                          </button>
-                          <button type="button" className="btn sm" onClick={() => toggle.mutate(j)} disabled={toggle.isPending}>
-                            {j.enabled ? 'Pause' : 'Enable'}
-                          </button>
-                          <Link to="/backups/new" search={{ job: j.id }} className="btn sm">
-                            Edit
-                          </Link>
-                        </>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </QueryView>
+        columns={jobColumns}
+      />
       <div className="card-foot">Estimated transfer = wire bytes of recent runs × runs per month. Cost is shown where the cluster has an egress rate (Settings › Clusters & agents).</div>
     </section>
   );
@@ -298,7 +309,7 @@ function RunsTab() {
           ))}
         </div>
       </div>
-      <RunsTable limit={50} status={status} />
+      <RunsTable limit={500} status={status} />
       <div className="card-foot">Runs are append-only. Backups are never deleted by Olympos; retention is enforced by Blob lifecycle rules.</div>
     </section>
   );
@@ -310,55 +321,53 @@ function RunsTable({ limit, status = '', compact }: { limit: number; status?: st
     queryFn: () => api.get<ItemList<BackupRun>>('/backup/runs', { limit, status }),
     refetchInterval: 30_000,
   });
+  const columns: Column<BackupRun>[] = [
+    { id: 'started', header: 'Started', sortValue: (r) => r.started_at ?? r.scheduled_for, defaultDir: 'desc', className: 'mono', cell: (r) => relDateTime(r.started_at ?? r.scheduled_for) },
+    {
+      id: 'target',
+      header: 'Target',
+      sortValue: (r) => r.target_service,
+      searchText: (r) => `${r.target_service} ${r.cluster_name} ${r.destination_name ?? ''} ${r.error}`,
+      cell: (r) => (
+        <>
+          <span className="mono">{r.target_service}</span>
+          {!compact && <span className="mono muted small"> {r.cluster_name}</span>}
+        </>
+      ),
+    },
+    {
+      id: 'trigger',
+      header: 'Trigger',
+      hidden: compact,
+      sortValue: (r) => r.trigger,
+      cell: (r) => (
+        <>
+          <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
+          {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
+        </>
+      ),
+    },
+    { id: 'dest', header: 'Destination', sortValue: (r) => r.destination_name || null, cell: (r) => r.destination_name || <span className="muted">—</span> },
+    { id: 'size', header: 'Size', align: 'num', sortValue: (r) => r.bytes || null, defaultDir: 'desc', cell: (r) => (r.bytes ? bytes(r.bytes) : '—') },
+    { id: 'wire', header: 'On the wire', align: 'num', hidden: compact, sortValue: (r) => r.wire_bytes || null, defaultDir: 'desc', cell: (r) => (r.wire_bytes ? bytes(r.wire_bytes) : '—') },
+    { id: 'dur', header: 'Duration', align: 'num', sortValue: (r) => between(r.started_at, r.finished_at), defaultDir: 'desc', cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))) },
+    { id: 'result', header: 'Result', sortValue: (r) => r.status, cell: (r) => <RunBadge run={r} /> },
+  ];
   return (
-    <QueryView
-      q={q}
+    <DataTable
+      label={compact ? 'Recent runs' : 'Backup runs'}
       what="backup runs"
-      isEmpty={(d) => d.items.length === 0}
+      rows={q.data?.items}
+      loading={q.isPending}
+      error={q.isError ? q.error : undefined}
+      onRetry={() => q.refetch()}
+      rowKey={(r) => r.id}
+      columns={columns}
+      pageSize={compact ? false : 25}
+      stickyHeader={!compact}
+      initialSort={{ id: 'started', dir: 'desc' }}
+      resetKey={status}
       empty={<EmptyState title={status ? `No ${status} runs` : 'No runs yet'}>{status ? 'Try another filter.' : 'Runs appear here once a job runs on its schedule, or when you start a dry run or a manual run.'}</EmptyState>}
-    >
-      {(d) => (
-        <div className="table-wrap">
-          <table className="t">
-            <thead>
-              <tr>
-                <th>Started</th>
-                <th>Target</th>
-                {!compact && <th>Trigger</th>}
-                <th>Destination</th>
-                <th className="num">Size</th>
-                {!compact && <th className="num">On the wire</th>}
-                <th className="num">Duration</th>
-                <th>Result</th>
-              </tr>
-            </thead>
-            <tbody>
-              {d.items.map((r) => (
-                <tr key={r.id}>
-                  <td className="mono">{relDateTime(r.started_at ?? r.scheduled_for)}</td>
-                  <td>
-                    <span className="mono">{r.target_service}</span>
-                    {!compact && <span className="mono muted small"> {r.cluster_name}</span>}
-                  </td>
-                  {!compact && (
-                    <td>
-                      <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
-                      {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
-                    </td>
-                  )}
-                  <td>{r.destination_name || <span className="muted">—</span>}</td>
-                  <td className="num">{r.bytes ? bytes(r.bytes) : '—'}</td>
-                  {!compact && <td className="num">{r.wire_bytes ? bytes(r.wire_bytes) : '—'}</td>}
-                  <td className="num">{r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))}</td>
-                  <td>
-                    <RunBadge run={r} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-    </QueryView>
+    />
   );
 }

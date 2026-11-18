@@ -1,5 +1,5 @@
 // DEV-ONLY request handlers for the VITE_MOCK fixture layer.
-import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role } from '../api/types';
+import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
@@ -396,14 +396,17 @@ const routes: [string, string, Handler][] = [
       const b = r.body as BackupJobInput;
       const t = db.targets.find((x) => x.id === b.target_id);
       if (!t) return invalid('invalid job', { target_id: 'Target not found.' });
-      if (!b.credential?.username) return invalid('invalid job', { username: 'Username is required.' });
+      if (t.engine === 'vault') {
+        const v = db.vaults.find((x) => x.target.id === t.id);
+        if (!v || v.status !== 'configured') return invalid('vault not configured', { target_id: 'Configure this vault in Olympos first (Vaults > Configure): backups use its Olympos AppRole.' });
+      } else if (!b.credential?.username) return invalid('invalid job', { username: 'Username is required.' });
       const dest = db.destinations.find((d) => d.id === b.destination_id);
       if (!dest) return invalid('invalid job', { destination_id: 'Pick a destination.' });
       const job = {
         id: db.uuid(),
         target: t,
         engine: t.engine,
-        credential: { id: db.uuid(), source: b.credential.source, ref: b.credential.ref ?? '', username: b.credential.username },
+        credential: b.credential ? { id: db.uuid(), source: b.credential.source, ref: b.credential.ref ?? '', username: b.credential.username } : { id: '', source: 'approle', ref: '', username: 'approle' },
         destination: { id: dest.id, name: dest.name },
         engine_options: b.engine_options ?? {},
         cron: b.cron ?? '0 2 * * *',
@@ -412,6 +415,7 @@ const routes: [string, string, Handler][] = [
         enabled: !!b.enabled,
         paused_reason: '',
         notify_channel_id: b.notify_channel_id ?? null,
+        notify_on_success: !!b.notify_on_success,
         next_run_at: null,
         last_run: null,
         estimated_monthly_bytes: 3.1e9 * runsPerMonth(b.cron ?? '0 2 * * *'),
@@ -443,6 +447,7 @@ const routes: [string, string, Handler][] = [
         if (d) j.destination = { id: d.id, name: d.name };
       }
       if (b.notify_channel_id !== undefined) j.notify_channel_id = b.notify_channel_id;
+      if (b.notify_on_success !== undefined) j.notify_on_success = b.notify_on_success;
       if (b.engine_options) j.engine_options = b.engine_options;
       if (b.credential) j.credential = { ...j.credential, source: b.credential.source, ref: b.credential.ref ?? '', username: b.credential.username };
       db.record(b.enabled ? 'backup.job_enabled' : 'backup.job_updated', 'backup_job', j.target.service, '');
@@ -514,6 +519,28 @@ const routes: [string, string, Handler][] = [
 
   // -------------------------------------------------------- vaults
   ['GET', '/vaults', () => items(db.vaults)],
+  [
+    'GET',
+    '/vaults/search',
+    async (r) => {
+      await sleep(150);
+      const q = (r.query.get('q') ?? '').trim().toLowerCase();
+      if (q.length < 2) return invalid('invalid query', { q: 'Type at least 2 characters.' });
+      const hits: unknown[] = [];
+      const base = (v: Vault) => ({ vault_id: v.id, vault_name: v.target.service, provider: v.provider, cluster_id: v.target.cluster_id, cluster_name: v.target.cluster_name, namespace: v.target.namespace });
+      for (const v of db.vaults) {
+        const labels = Object.entries(v.cluster_labels ?? {}).map(([k, x]) => `${k}=${x}`).join(' ');
+        const hay = `${v.target.service} ${v.target.cluster_name} ${v.target.namespace} ${v.provider === 'openbao' ? 'openbao' : 'hashicorp vault'} ${labels}`.toLowerCase();
+        if (hay.includes(q)) hits.push({ match: 'vault', ...base(v) });
+      }
+      for (const v of db.vaults) {
+        for (const sm of db.summaries(v.id)) {
+          if (`${sm.mount}${sm.path}`.toLowerCase().includes(q)) hits.push({ match: 'path', ...base(v), mount: sm.mount, path: sm.path, keys: sm.keys });
+        }
+      }
+      return items(hits.slice(0, 50));
+    },
+  ],
   ['GET', '/vaults/:id', (_r, p) => {
     const v = db.vaults.find((x) => x.id === p.id);
     return v ? ok(v) : notFound();
@@ -521,9 +548,19 @@ const routes: [string, string, Handler][] = [
   [
     'POST',
     '/vaults/:id/inspect',
-    async (r) => {
+    async (r, p) => {
       await sleep(800);
       const tok = String(r.body?.root_token ?? '');
+      const vi = db.vaults.find((x) => x.id === p.id);
+      if (vi && vi.target.tls_ok === false) {
+        const c = db.clusters.find((x) => x.id === vi.target.cluster_id);
+        return {
+          status: 502,
+          body: {
+            error: `could not reach ${vi.provider === 'openbao' ? 'OpenBao' : 'Vault'} at ${vi.target.service}.${vi.target.namespace}.svc:${vi.target.port}: the listener answered plain HTTP to an HTTPS request.\nTLS is required for vaults: the root token and secret values would otherwise cross the agent in clear.\nTo fix it, either:\n  - enable TLS on the listener (listener "tcp" { tls_cert_file / tls_key_file }) and set olympos.io/tls-server-name on the Service, or\n  - switch the transfer mode of cluster ${c?.name ?? vi.target.cluster_name} to compressed (Settings > Clusters).`,
+          },
+        };
+      }
       if (!/^(hvs\.|s\.)/.test(tok) || tok.length < 10) return invalid('token rejected', { root_token: 'Vault rejected this token (permission denied). Paste a root token or one with sys and auth admin rights.' });
       return ok({ version: '1.17.6', sealed: false, mounts: [{ path: 'kv/', version: 2, managed: false, description: 'apps' }, { path: 'apps/', version: 2, managed: false, description: '' }, { path: 'legacy/', version: 1, managed: false, description: 'old integrations' }] });
     },
@@ -701,10 +738,10 @@ const routes: [string, string, Handler][] = [
       const i = db.images.find((x) => x.digest === decodeURIComponent(p.digest));
       if (!i) return notFound();
       return ok({
+        scan_error: '',
         ...i,
         usage: [{ cluster_id: db.clusters[0].id, cluster_name: db.clusters[0].name, namespace: 'erp', workload_kind: 'Deployment', workload_name: 'payments-api', container: 'api' }],
         vulns: i.critical ? [{ cve_id: 'CVE-2026-31337', severity: 'critical', package: 'openssl', installed: '3.0.13', fixed_in: '3.0.15', title: 'Buffer overflow in X.509 name checks' }, { cve_id: 'CVE-2026-1021', severity: 'high', package: 'libexpat', installed: '2.5.0', fixed_in: '2.6.3', title: 'Integer overflow in XML parser' }] : [],
-        scan_error: i.scan_status === 'missing_credential' ? 'No registry credential matches harbor.factory.local' : '',
       });
     },
   ],
@@ -716,7 +753,23 @@ const routes: [string, string, Handler][] = [
         ? { status: 409, body: { error: 'No running images to scan yet. Add a cluster first; its agent reports running images within a minute.' } }
         : { status: 202 },
   ],
-  ['POST', '/images/:digest/scan', () => ({ status: 202 })],
+  [
+    'POST',
+    '/images/:digest/scan',
+    (_r, p) => {
+      if (!perms().operate) return forbidden();
+      const i = db.images.find((x) => x.digest === decodeURIComponent(p.digest));
+      if (!i) return notFound();
+      const before = i.scan_status;
+      Object.assign(i, { scan_status: 'scanning', next_retry_at: null });
+      setTimeout(() => {
+        if (before === 'unavailable') Object.assign(i, { scan_status: 'unavailable', scan_attempts: (i.scan_attempts ?? 0) + 1 });
+        else if (before === 'missing_credential') Object.assign(i, { scan_status: 'missing_credential' });
+        else Object.assign(i, { scan_status: 'scanned', scan_error: '', scan_attempts: 0, next_retry_at: null, last_scanned_at: new Date().toISOString() });
+      }, 2500);
+      return { status: 202 };
+    },
+  ],
   ['GET', '/security/kyverno', () => items(db.kyverno)],
   ['GET', '/security/netpol', () => items(db.netpol)],
   ['GET', '/registries', () => ok({ items: db.registries, unmatched: db.unmatched })],

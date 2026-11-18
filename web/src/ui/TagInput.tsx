@@ -3,11 +3,9 @@ import { equalityTerms, formatLabels, matchesSelector, parseLabelTerm, parseSele
 import { plural } from '../lib/format';
 import { IconClose } from './icons';
 
-export interface TagInputProps {
+interface TagInputCommon {
   /** Id of the text field (a <label htmlFor={id}> names it). */
   id: string;
-  value: Record<string, string>;
-  onChange: (value: Record<string, string>) => void;
   placeholder?: string;
   readOnly?: boolean;
   disabled?: boolean;
@@ -20,20 +18,60 @@ export interface TagInputProps {
   'aria-invalid'?: boolean | 'true' | 'false';
   'aria-describedby'?: string;
 }
+/** Kubernetes labels: key=value chips. */
+export interface TagInputLabelsProps extends TagInputCommon {
+  mode?: 'labels';
+  value: Record<string, string>;
+  onChange: (value: Record<string, string>) => void;
+}
+/** Plain values (database names, …): one chip per value, duplicates ignored. */
+export interface TagInputValuesProps extends TagInputCommon {
+  mode: 'values';
+  value: string[];
+  onChange: (value: string[]) => void;
+  /** Returns an error message for a value that is not accepted (default: no spaces or commas). */
+  validate?: (value: string) => string | null;
+}
+export type TagInputProps = TagInputLabelsProps | TagInputValuesProps;
 
 const normalize = (s: string) => s.replace(/\s*=\s*/g, '=');
 
+/** Loose check for a plain value chip: not empty, no whitespace or commas, at most 128 characters. */
+export function validatePlainValue(v: string): string | null {
+  if (!v) return 'Enter a value.';
+  if (/[\s,;]/.test(v)) return `"${v}" contains a space or comma. Enter one name per chip.`;
+  if (v.length > 128) return 'Use at most 128 characters.';
+  return null;
+}
+
+/** PostgreSQL / ClickHouse database identifier, checked loosely (quoted identifiers allow almost anything). */
+export function validateDatabaseName(v: string): string | null {
+  const e = validatePlainValue(v);
+  if (e) return e.replace('Enter a value.', 'Enter a database name.');
+  if (/["'`\\]/.test(v)) return `"${v}" contains a quote or backslash. Use the plain database name.`;
+  if (v.length > 63) return 'Database names are at most 63 characters.';
+  return null;
+}
+
+type Parsed = { ok: true; key: string; label: string } | { ok: false; error: string };
+
 /**
- * Kubernetes labels as chips. Type key=value and press Enter, comma or Tab; a pasted
- * "a=b,c=d" becomes several chips. Invalid text stays in the field with a message.
- * Backspace in the empty field removes the last chip.
+ * Chips input. `mode="labels"` (default): Kubernetes labels, type key=value and press
+ * Enter, comma or Tab; a pasted "a=b,c=d" becomes several chips. `mode="values"`: plain
+ * values such as database names (no key=value). Invalid text stays in the field with a
+ * message. Backspace in the empty field removes the last chip.
  */
-export function TagInput({ id, value, onChange, placeholder = 'key=value', readOnly, disabled, listLabel = 'Labels added', emptyText = 'none', onDraftError, ...rest }: TagInputProps) {
+export function TagInput(props: TagInputProps) {
+  const { id, readOnly, disabled, onDraftError, ...rest } = props;
+  const values = props.mode === 'values';
+  const placeholder = props.placeholder ?? (values ? 'name' : 'key=value');
+  const listLabel = props.listLabel ?? (values ? 'Values added' : 'Labels added');
+  const emptyText = props.emptyText ?? 'none';
   const [text, setText] = useState('');
   const [error, setErrorState] = useState<string | null>(null);
   const [announce, setAnnounce] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const entries = Object.entries(value);
+  const items: { key: string; label: string }[] = props.mode === 'values' ? props.value.map((v) => ({ key: v, label: v })) : Object.entries(props.value).map(([k, v]) => ({ key: k, label: `${k}=${v}` }));
   const errId = `${id}-tagerr`;
 
   const setError = (e: string | null) => {
@@ -41,36 +79,59 @@ export function TagInput({ id, value, onChange, placeholder = 'key=value', readO
     onDraftError?.(e);
   };
 
+  const parse = (raw: string): Parsed => {
+    if (props.mode === 'values') {
+      const e = (props.validate ?? validatePlainValue)(raw);
+      return e ? { ok: false, error: e } : { ok: true, key: raw, label: raw };
+    }
+    const t = parseLabelTerm(raw);
+    return t.ok ? { ok: true, key: t.key, label: `${t.key}=${t.value}` } : { ok: false, error: t.error };
+  };
+
   /** Adds valid terms; returns the rejected ones and the first error. */
   const addTerms = (terms: string[]): { rest: string[]; error: string | null } => {
-    const next = { ...value };
     const restTerms: string[] = [];
     const added: string[] = [];
     let err: string | null = null;
-    for (const raw of terms) {
-      const t = parseLabelTerm(raw);
-      if (!t.ok) {
-        restTerms.push(raw);
-        err ??= t.error;
-        continue;
+    if (props.mode === 'values') {
+      const next = [...props.value];
+      for (const raw of terms) {
+        const t = parse(raw);
+        if (!t.ok) {
+          restTerms.push(raw);
+          err ??= t.error;
+          continue;
+        }
+        if (next.includes(t.key)) continue; // already there: nothing to add
+        next.push(t.key);
+        added.push(t.label);
       }
-      if (t.key in next && next[t.key] !== t.value) {
-        restTerms.push(raw);
-        err ??= `${t.key} is already set to "${next[t.key]}". Remove that tag first.`;
-        continue;
+      if (added.length) props.onChange(next);
+    } else {
+      const next = { ...props.value };
+      for (const raw of terms) {
+        const t = parseLabelTerm(raw);
+        if (!t.ok) {
+          restTerms.push(raw);
+          err ??= t.error;
+          continue;
+        }
+        if (t.key in next && next[t.key] !== t.value) {
+          restTerms.push(raw);
+          err ??= `${t.key} is already set to "${next[t.key]}". Remove that tag first.`;
+          continue;
+        }
+        next[t.key] = t.value;
+        added.push(`${t.key}=${t.value}`);
       }
-      next[t.key] = t.value;
-      added.push(`${t.key}=${t.value}`);
+      if (added.length) props.onChange(next);
     }
-    if (added.length) {
-      onChange(next);
-      setAnnounce(`Added ${added.join(', ')}`);
-    }
+    if (added.length) setAnnounce(`Added ${added.join(', ')}`);
     return { rest: restTerms, error: err };
   };
 
   const commit = (src: string): boolean => {
-    const terms = splitTerms(normalize(src));
+    const terms = splitTerms(values ? src : normalize(src));
     if (terms.length === 0) {
       setText('');
       setError(null);
@@ -83,18 +144,21 @@ export function TagInput({ id, value, onChange, placeholder = 'key=value', readO
   };
 
   const remove = (key: string) => {
-    const next = { ...value };
-    const label = `${key}=${next[key]}`;
-    delete next[key];
-    onChange(next);
-    setAnnounce(`Removed ${label}`);
+    const item = items.find((i) => i.key === key);
+    if (props.mode === 'values') props.onChange(props.value.filter((v) => v !== key));
+    else {
+      const next = { ...props.value };
+      delete next[key];
+      props.onChange(next);
+    }
+    setAnnounce(`Removed ${item?.label ?? key}`);
     inputRef.current?.focus();
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter' || e.key === ',') {
+    if (e.key === 'Enter' || e.key === ',' || (values && e.key === ' ')) {
       if (!text.trim()) {
-        if (e.key === ',') e.preventDefault();
+        if (e.key !== 'Enter') e.preventDefault();
         return; // empty Enter submits the form as usual
       }
       e.preventDefault();
@@ -105,17 +169,17 @@ export function TagInput({ id, value, onChange, placeholder = 'key=value', readO
       commit(text); // focus moves on as usual
       return;
     }
-    if (e.key === 'Backspace' && text === '' && entries.length > 0) {
+    if (e.key === 'Backspace' && text === '' && items.length > 0) {
       e.preventDefault();
-      remove(entries[entries.length - 1][0]);
+      remove(items[items.length - 1].key);
     }
   };
 
   const onPaste = (e: ClipboardEvent<HTMLInputElement>) => {
     const pasted = e.clipboardData.getData('text');
-    if (!/[,;\n\s]/.test(normalize(pasted).trim())) return;
+    if (!/[,;\n\s]/.test((values ? pasted : normalize(pasted)).trim())) return;
     e.preventDefault();
-    commit(text + pasted);
+    commit(text + (text && values ? ',' : '') + pasted);
   };
 
   const describedBy = [rest['aria-describedby'], error ? errId : null].filter(Boolean).join(' ') || undefined;
@@ -132,15 +196,13 @@ export function TagInput({ id, value, onChange, placeholder = 'key=value', readO
           }
         }}
       >
-        {entries.length > 0 ? (
+        {items.length > 0 ? (
           <ul className="tags" aria-label={listLabel} id={readOnly ? id : undefined}>
-            {entries.map(([k, v]) => (
-              <li key={k} className="tag">
-                <span className="mono">
-                  {k}={v}
-                </span>
+            {items.map((it) => (
+              <li key={it.key} className="tag">
+                <span className="mono">{it.label}</span>
                 {!readOnly && !disabled && (
-                  <button type="button" className="tag-x" aria-label={`Remove ${k}=${v}`} onClick={() => remove(k)}>
+                  <button type="button" className="tag-x" aria-label={`Remove ${it.label}`} onClick={() => remove(it.key)}>
                     <IconClose width={12} height={12} />
                   </button>
                 )}
@@ -169,7 +231,7 @@ export function TagInput({ id, value, onChange, placeholder = 'key=value', readO
             onBlur={() => {
               if (text.trim()) commit(text);
             }}
-            placeholder={entries.length ? undefined : placeholder}
+            placeholder={items.length ? undefined : placeholder}
             aria-invalid={invalid || undefined}
             aria-describedby={describedBy}
             autoComplete="off"

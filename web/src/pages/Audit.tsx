@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
-import type { AuditRun, AuditSchedule, AuditScheduleInput, AuditTool, Channel, Cluster, Finding, ItemList } from '../api/types';
+import type { AuditRun, AuditSchedule, AuditScheduleInput, AuditTool, BenchNode, Channel, Cluster, Finding, ItemList } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, validateCron } from '../lib/cron';
 import { dateTime, duration, plural } from '../lib/format';
@@ -11,6 +11,7 @@ import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError
 import { PageHead, SeverityBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { ScopeInput } from '../ui/TagInput';
+import { DataTable, type Column } from '../ui/DataTable';
 
 const TOOL_LABEL: Record<string, string> = { kubescape: 'Kubescape', polaris: 'Polaris', 'kube-bench': 'kube-bench' };
 
@@ -23,6 +24,90 @@ function lastResult(r: AuditRun | null) {
   return <Badge tone="ok">No change</Badge>;
 }
 
+const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
+
+const KS_COLUMNS: Column<AuditRun>[] = [
+  {
+    id: 'run',
+    header: 'Run',
+    sortValue: (r) => r.started_at,
+    defaultDir: 'desc',
+    className: 'mono',
+    cell: (r) => (
+      <>
+        {dateTime(r.started_at)}
+        {r.status !== 'succeeded' && (
+          <>
+            {' '}
+            <Badge tone={r.status === 'failed' ? 'crit' : 'info'}>{r.status}</Badge>
+          </>
+        )}
+      </>
+    ),
+  },
+  { id: 'score', header: 'Score', align: 'num', sortValue: (r) => r.score, defaultDir: 'desc', cell: (r) => (r.score != null ? `${r.score.toFixed(1)}%` : '—') },
+  { id: 'new', header: 'New', align: 'num', sortValue: (r) => r.new_findings, defaultDir: 'desc', className: (r) => (r.new_findings > 0 ? 'up' : undefined), cell: (r) => (r.new_findings > 0 ? `+${r.new_findings}` : 0) },
+  { id: 'resolved', header: 'Resolved', align: 'num', sortValue: (r) => r.resolved_findings, defaultDir: 'desc', className: (r) => (r.resolved_findings > 0 ? 'down' : undefined), cell: (r) => (r.resolved_findings > 0 ? `−${r.resolved_findings}` : 0) },
+];
+
+const FINDING_COLUMNS: Column<Finding>[] = [
+  {
+    id: 'control',
+    header: 'Control',
+    sortValue: (f) => f.control_id,
+    className: 'wrap',
+    cell: (f) => (
+      <>
+        <span className="mono">{f.control_id}</span> {f.title}
+      </>
+    ),
+  },
+  { id: 'sev', header: 'Severity', sortValue: (f) => SEV_ORDER.indexOf(f.severity), cell: (f) => <SeverityBadge s={f.severity} /> },
+  { id: 'cluster', header: 'Cluster', sortValue: (f) => f.cluster_name, className: 'mono', cell: (f) => f.cluster_name },
+  { id: 'res', header: 'Resource', sortValue: (f) => f.resource_ref, className: 'mono wrap break', cell: (f) => f.resource_ref },
+];
+
+function benchColumns(r: AuditRun): Column<BenchNode>[] {
+  const ran = (n: BenchNode) => n.state === 'done' || n.state === 'succeeded';
+  return [
+    { id: 'node', header: 'Node', sortValue: (n) => n.node_name, className: 'mono', cell: (n) => n.node_name },
+    { id: 'cluster', header: 'Cluster', sortValue: (n) => n.cluster_name ?? r.cluster_name, className: 'mono', cell: (n) => n.cluster_name ?? r.cluster_name },
+    {
+      id: 'bench',
+      header: 'Benchmark',
+      sortValue: (n) => n.benchmark,
+      cell: (n) => (
+        <span className="inline-sm">
+          <span className="mono">
+            {n.benchmark}
+            {n.control_plane_na ? ' (auto)' : ''}
+          </span>
+          {n.control_plane_na && <Badge tone="mute">Control plane N/A · managed</Badge>}
+        </span>
+      ),
+    },
+    { id: 'pass', header: 'Pass', align: 'num', sortValue: (n) => (ran(n) ? n.pass : null), defaultDir: 'desc', className: (n) => (ran(n) ? undefined : 'muted'), cell: (n) => (ran(n) ? n.pass : '—') },
+    { id: 'fail', header: 'Fail', align: 'num', sortValue: (n) => (ran(n) ? n.fail : null), defaultDir: 'desc', className: (n) => (ran(n) ? (n.fail > 0 ? 'up' : undefined) : 'muted'), cell: (n) => (ran(n) ? n.fail : '—') },
+    { id: 'warn', header: 'Warn', align: 'num', sortValue: (n) => (ran(n) ? n.warn : null), defaultDir: 'desc', className: (n) => (ran(n) ? undefined : 'muted'), cell: (n) => (ran(n) ? n.warn : '—') },
+    {
+      id: 'job',
+      header: 'Job',
+      sortValue: (n) => n.state,
+      cell: (n) =>
+        ran(n) ? (
+          <Badge tone="ok">Done{n.duration_s ? ` · ${duration(n.duration_s)}` : ''} · cleaned up</Badge>
+        ) : n.state === 'running' ? (
+          <Badge tone="info">Running</Badge>
+        ) : (
+          <Badge tone="crit">
+            {n.state === 'skipped' ? 'Skipped' : 'Failed'}
+            {n.message ? ` · ${n.message}` : ''}
+          </Badge>
+        ),
+    },
+  ];
+}
+
 export function AuditPage() {
   const canOperate = useCan('operate');
   const qc = useQueryClient();
@@ -30,14 +115,14 @@ export function AuditPage() {
   const [creating, setCreating] = useState(false);
   const schedQ = useQuery({ queryKey: ['audit-schedules'], queryFn: () => api.get<ItemList<AuditSchedule>>('/audit/schedules') });
   const clustersQ = useQuery({ queryKey: ['clusters'], queryFn: () => api.get<ItemList<Cluster>>('/clusters') });
-  const ksRunsQ = useQuery({ queryKey: ['audit-runs', 'kubescape'], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { tool: 'kubescape', limit: 8 }) });
+  const ksRunsQ = useQuery({ queryKey: ['audit-runs', 'kubescape'], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { tool: 'kubescape', limit: 100 }) });
   const benchRunsQ = useQuery({ queryKey: ['audit-runs', 'kube-bench'], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { tool: 'kube-bench', limit: 1 }) });
   const benchId = benchRunsQ.data?.items[0]?.id;
   const benchQ = useQuery({ queryKey: ['audit-runs', benchId], queryFn: () => api.get<AuditRun>(`/audit/runs/${benchId}`), enabled: !!benchId });
   const lastKs = ksRunsQ.data?.items.find((r) => r.status === 'succeeded');
   const newQ = useQuery({
     queryKey: ['findings', { run_id: lastKs?.id }],
-    queryFn: () => api.get<ItemList<Finding>>('/findings', { run_id: lastKs!.id, status: 'open', limit: 20 }),
+    queryFn: () => api.get<ItemList<Finding>>('/findings', { run_id: lastKs!.id, status: 'open', limit: 200 }),
     enabled: !!lastKs,
   });
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
@@ -156,58 +241,7 @@ export function AuditPage() {
         </div>
         {benchId ? (
           <QueryView q={benchQ} what="kube-bench results" isEmpty={(r) => !r.bench_nodes?.length} empty={<EmptyState title="No node results in the last run">The run had no nodes in scope. Check that bench.enabled is set on at least one cluster.</EmptyState>}>
-            {(r) => (
-              <div className="table-wrap">
-                <table className="t">
-                  <thead>
-                    <tr>
-                      <th>Node</th>
-                      <th>Cluster</th>
-                      <th>Benchmark</th>
-                      <th className="num">Pass</th>
-                      <th className="num">Fail</th>
-                      <th className="num">Warn</th>
-                      <th>Job</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {r.bench_nodes!.map((n) => {
-                      const ran = n.state === 'done' || n.state === 'succeeded';
-                      return (
-                        <tr key={n.node_name + (n.cluster_name ?? '')}>
-                          <td className="mono">{n.node_name}</td>
-                          <td className="mono">{n.cluster_name ?? r.cluster_name}</td>
-                          <td>
-                            <span className="inline-sm">
-                              <span className="mono">
-                                {n.benchmark}
-                                {n.control_plane_na ? ' (auto)' : ''}
-                              </span>
-                              {n.control_plane_na && <Badge tone="mute">Control plane N/A · managed</Badge>}
-                            </span>
-                          </td>
-                          <td className={`num${ran ? '' : ' muted'}`}>{ran ? n.pass : '—'}</td>
-                          <td className={`num${ran ? (n.fail > 0 ? ' up' : '') : ' muted'}`}>{ran ? n.fail : '—'}</td>
-                          <td className={`num${ran ? '' : ' muted'}`}>{ran ? n.warn : '—'}</td>
-                          <td>
-                            {ran ? (
-                              <Badge tone="ok">Done{n.duration_s ? ` · ${duration(n.duration_s)}` : ''} · cleaned up</Badge>
-                            ) : n.state === 'running' ? (
-                              <Badge tone="info">Running</Badge>
-                            ) : (
-                              <Badge tone="crit">
-                                {n.state === 'skipped' ? 'Skipped' : 'Failed'}
-                                {n.message ? ` · ${n.message}` : ''}
-                              </Badge>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            {(r) => <DataTable label="kube-bench nodes" what="node results" rows={r.bench_nodes!} rowKey={(n) => n.node_name + (n.cluster_name ?? '')} columns={benchColumns(r)} initialSort={{ id: 'fail', dir: 'desc' }} />}
           </QueryView>
         ) : (
           <QueryView q={benchRunsQ} what="kube-bench runs" isEmpty={() => true} empty={<EmptyState title="kube-bench has not run yet">Enable it on a cluster (Helm value <span className="mono">bench.enabled=true</span>) and add a kube-bench schedule.</EmptyState>}>
@@ -223,38 +257,7 @@ export function AuditPage() {
             <h2 id="ksh-t">Kubescape run history</h2>
           </div>
           <QueryView q={ksRunsQ} what="Kubescape runs" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No Kubescape runs yet">Runs appear after the first scheduled or manual run.</EmptyState>}>
-            {(d) => (
-              <div className="table-wrap">
-                <table className="t">
-                  <thead>
-                    <tr>
-                      <th>Run</th>
-                      <th className="num">Score</th>
-                      <th className="num">New</th>
-                      <th className="num">Resolved</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {d.items.map((r) => (
-                      <tr key={r.id}>
-                        <td className="mono">
-                          {dateTime(r.started_at)}
-                          {r.status !== 'succeeded' && (
-                            <>
-                              {' '}
-                              <Badge tone={r.status === 'failed' ? 'crit' : 'info'}>{r.status}</Badge>
-                            </>
-                          )}
-                        </td>
-                        <td className="num">{r.score != null ? `${r.score.toFixed(1)}%` : '—'}</td>
-                        <td className={`num${r.new_findings > 0 ? ' up' : ''}`}>{r.new_findings > 0 ? `+${r.new_findings}` : 0}</td>
-                        <td className={`num${r.resolved_findings > 0 ? ' down' : ''}`}>{r.resolved_findings > 0 ? `−${r.resolved_findings}` : 0}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
+            {(d) => <DataTable label="Kubescape run history" what="Kubescape runs" rows={d.items} rowKey={(r) => r.id} columns={KS_COLUMNS} pageSize={10} pageSizes={[10, 25, 50]} initialSort={{ id: 'run', dir: 'desc' }} />}
           </QueryView>
           <div className="card-foot">Raw reports kept in Blob for 400 days</div>
         </section>
@@ -270,34 +273,7 @@ export function AuditPage() {
           </div>
           {lastKs ? (
             <QueryView q={newQ} what="new findings" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No new findings">The last run found nothing that was not already open.</EmptyState>}>
-              {(d) => (
-                <div className="table-wrap">
-                  <table className="t">
-                    <thead>
-                      <tr>
-                        <th>Control</th>
-                        <th>Severity</th>
-                        <th>Cluster</th>
-                        <th>Resource</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {d.items.map((f) => (
-                        <tr key={f.id}>
-                          <td className="wrap">
-                            <span className="mono">{f.control_id}</span> {f.title}
-                          </td>
-                          <td>
-                            <SeverityBadge s={f.severity} />
-                          </td>
-                          <td className="mono">{f.cluster_name}</td>
-                          <td className="mono wrap break">{f.resource_ref}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
+              {(d) => <DataTable label="New findings" what="new findings" rows={d.items} rowKey={(f) => f.id} columns={FINDING_COLUMNS} pageSize={10} pageSizes={[10, 25, 50]} initialSort={{ id: 'sev', dir: 'asc' }} />}
             </QueryView>
           ) : (
             <EmptyState title="Nothing to compare yet">New findings are listed after the second Kubescape run.</EmptyState>

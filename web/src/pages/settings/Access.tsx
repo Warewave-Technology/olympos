@@ -9,8 +9,9 @@ import { GUEST_FORBIDDEN_ROLES, isSelf } from '../../auth/permissions';
 import { age, personName, plural, shortDate, shortId } from '../../lib/format';
 import { parseSelector } from '../../lib/labels';
 import { ScopeInput } from '../../ui/TagInput';
-import { Badge, Chip, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../../ui/kit';
+import { Badge, Chip, EmptyState, Field, FormError, Modal, aria, fieldError, useToast } from '../../ui/kit';
 import { SettingsLayout } from './SettingsLayout';
+import { DataTable, type Column } from '../../ui/DataTable';
 
 interface PersonRow {
   key: string;
@@ -51,6 +52,51 @@ export function SettingsAccessPage() {
   const rows = useMemo(() => groupGrants(grantsQ.data?.items ?? []), [grantsQ.data]);
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
   const accessChannel = chanQ.data?.items.find((c) => c.routes.includes('grant.changed'))?.name;
+  const [text, setText] = useState('');
+  const columns: Column<PersonRow>[] = [
+    {
+      id: 'person',
+      header: 'Person',
+      sortValue: (r) => personName(r.principal),
+      searchText: (r) => `${personName(r.principal)} ${r.principal.display_name} ${r.principal.object_id} ${r.scope} ${r.grants.map((g) => g.role).join(' ')}`,
+      cell: (r) => (
+        <>
+          <span className="inline-sm">
+            {personName(r.principal)}
+            {r.is_guest && <Badge tone="warn">Guest</Badge>}
+          </span>
+          {r.principal.display_name && r.principal.upn && <div className="muted small">{r.principal.display_name}</div>}
+        </>
+      ),
+    },
+    { id: 'oid', header: 'Object ID', className: 'mono muted', cell: (r) => <span title={r.principal.object_id}>{shortId(r.principal.object_id)}</span> },
+    { id: 'roles', header: 'Roles', sortValue: (r) => ROLES.length - Math.min(...r.grants.map((g) => ROLES.indexOf(g.role))), className: 'wrap', cell: (r) => r.grants.map((g) => <Chip key={g.id}>{g.role}</Chip>) },
+    { id: 'scope', header: 'Scope', sortValue: (r) => (!r.scope || r.scope === 'all' ? '' : r.scope), cell: (r) => scopeLabel(r.scope) },
+    {
+      id: 'granted',
+      header: 'Granted',
+      sortValue: (r) => r.grants[r.grants.length - 1].granted_at,
+      defaultDir: 'desc',
+      className: 'mono',
+      cell: (r) => {
+        const first = r.grants[r.grants.length - 1];
+        return first.granted_by ? `${shortDate(first.granted_at)} · ${(first.granted_by_name || '').split('@')[0] || 'admin'}` : 'Bootstrap';
+      },
+    },
+    { id: 'status', header: 'Status', sortValue: (r) => (r.stale ? 0 : 1), cell: (r) => (r.stale ? <Badge tone="warn">Stale · account disabled</Badge> : <Badge tone="ok">Active</Badge>) },
+    {
+      id: 'actions',
+      header: 'Actions',
+      srOnlyHeader: true,
+      align: 'actions',
+      hidden: !canAdmin,
+      cell: (r) => (
+        <button type="button" className="btn sm" onClick={() => setRevoking(r)} aria-label={`Revoke access for ${personName(r.principal)}`}>
+          Revoke
+        </button>
+      ),
+    },
+  ];
 
   return (
     <SettingsLayout current="access" sub="Access is granted to people by Entra object ID · tokens from other tenants are refused">
@@ -60,67 +106,31 @@ export function SettingsAccessPage() {
             <h2 id="grants-t">Access grants</h2>
             <div className="desc">Granted to people (Entra object ID), not groups.{accessChannel ? ` Every change is posted to ${accessChannel}.` : ' Every change is recorded in the activity log.'}</div>
           </div>
-          {canAdmin && (
-            <button type="button" className="btn pri" onClick={() => setGranting(true)}>
-              Grant access
-            </button>
-          )}
+          <div className="inline">
+            <label className="sr-only" htmlFor="grants-q">
+              Search grants
+            </label>
+            <input id="grants-q" type="search" className="in search-sm" placeholder="Search person, role, scope…" value={text} onChange={(e) => setText(e.target.value)} />
+            {canAdmin && (
+              <button type="button" className="btn pri" onClick={() => setGranting(true)}>
+                Grant access
+              </button>
+            )}
+          </div>
         </div>
-        <QueryView q={grantsQ} what="access grants" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No grants">Only the bootstrap admins from the server configuration can sign in until someone is granted access.</EmptyState>}>
-          {() => (
-            <div className="table-wrap">
-              <table className="t">
-                <thead>
-                  <tr>
-                    <th>Person</th>
-                    <th>Object ID</th>
-                    <th>Roles</th>
-                    <th>Scope</th>
-                    <th>Granted</th>
-                    <th>Status</th>
-                    <th>
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((r) => {
-                    const first = r.grants[r.grants.length - 1];
-                    return (
-                      <tr key={r.key}>
-                        <td>
-                          <span className="inline-sm">
-                            {personName(r.principal)}
-                            {r.is_guest && <Badge tone="warn">Guest</Badge>}
-                          </span>
-                          {r.principal.display_name && r.principal.upn && <div className="muted small">{r.principal.display_name}</div>}
-                        </td>
-                        <td className="mono muted" title={r.principal.object_id}>
-                          {shortId(r.principal.object_id)}
-                        </td>
-                        <td className="wrap">
-                          {r.grants.map((g) => (
-                            <Chip key={g.id}>{g.role}</Chip>
-                          ))}
-                        </td>
-                        <td>{scopeLabel(r.scope)}</td>
-                        <td className="mono">{first.granted_by ? `${shortDate(first.granted_at)} · ${(first.granted_by_name || '').split('@')[0] || 'admin'}` : 'Bootstrap'}</td>
-                        <td>{r.stale ? <Badge tone="warn">Stale · account disabled</Badge> : <Badge tone="ok">Active</Badge>}</td>
-                        <td className="actions">
-                          {canAdmin && (
-                            <button type="button" className="btn sm" onClick={() => setRevoking(r)} aria-label={`Revoke access for ${personName(r.principal)}`}>
-                              Revoke
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </QueryView>
+        <DataTable
+          label="Access grants"
+          what="access grants"
+          rows={grantsQ.data ? rows : undefined}
+          loading={grantsQ.isPending}
+          error={grantsQ.isError ? grantsQ.error : undefined}
+          onRetry={() => grantsQ.refetch()}
+          rowKey={(r) => r.key}
+          columns={columns}
+          filterText={text}
+          initialSort={{ id: 'person', dir: 'asc' }}
+          empty={<EmptyState title="No grants">Only the bootstrap admins from the server configuration can sign in until someone is granted access.</EmptyState>}
+        />
         <div className="card-foot">vault-approver and admin cannot be given to guest (#EXT#) accounts · Entra app requires assignment, so unassigned users get no token · stale grants do not authorize</div>
       </section>
 

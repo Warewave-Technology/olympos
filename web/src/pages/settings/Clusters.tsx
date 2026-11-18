@@ -7,12 +7,13 @@ import { useCan } from '../../auth/me';
 import { bytes, money, plural, shortDate } from '../../lib/format';
 import { formatLabels } from '../../lib/labels';
 import { clustersSettingsRoute } from '../../router';
-import { Badge, Chip, EmptyState, Field, FormError, Modal, QueryView, TypeToConfirm, aria, fieldError, useNow, useToast } from '../../ui/kit';
+import { Badge, Chip, EmptyState, Field, FormError, Modal, TypeToConfirm, aria, fieldError, useNow, useToast } from '../../ui/kit';
 import { ClusterStatusBadge } from '../../ui/status';
 import { Select } from '../../ui/Select';
 import { TagInput } from '../../ui/TagInput';
 import { AddClusterDialog } from '../AddClusterDialog';
 import { SettingsLayout } from './SettingsLayout';
+import { DataTable } from '../../ui/DataTable';
 
 const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'azure', label: 'Azure' },
@@ -32,6 +33,7 @@ export function ClustersSettingsPage() {
   const q = useQuery({ queryKey: ['clusters'], queryFn: () => api.get<ItemList<Cluster>>('/clusters'), refetchInterval: 30_000 });
   const list = q.data?.items ?? [];
   const selected = list.find((c) => c.id === selectedId) ?? list.find((c) => c.status !== 'revoked');
+  const [text, setText] = useState('');
 
   return (
     <SettingsLayout
@@ -46,56 +48,72 @@ export function ClustersSettingsPage() {
       }
     >
       <section className="card" aria-label="Clusters">
-        <QueryView
-          q={q}
+        <div className="card-head">
+          <h2>Clusters</h2>
+          <span>
+            <label className="sr-only" htmlFor="cl-q">
+              Search clusters
+            </label>
+            <input id="cl-q" type="search" className="in search-sm" placeholder="Search name, label, provider…" value={text} onChange={(e) => setText(e.target.value)} />
+          </span>
+        </div>
+        <DataTable
+          label="Clusters"
           what="clusters"
-          isEmpty={(d) => d.items.length === 0}
+          rows={q.data?.items}
+          loading={q.isPending}
+          error={q.isError ? q.error : undefined}
+          onRetry={() => q.refetch()}
+          rowKey={(c) => c.id}
+          filterText={text}
+          rowClassName={(c) => (c.id === selected?.id ? 'sel' : undefined)}
+          onRowClick={(c) => navigate({ search: { cluster: c.id }, replace: true })}
+          rowLabel={(c) => `Show settings of ${c.name}`}
+          initialSort={{ id: 'name', dir: 'asc' }}
           empty={
-            <EmptyState title="No clusters yet" action={canAdmin ? <button type="button" className="btn pri" onClick={() => setAdding(true)}>Add cluster</button> : undefined}>
+            <EmptyState
+              title="No clusters yet"
+              action={
+                canAdmin ? (
+                  <button type="button" className="btn pri" onClick={() => setAdding(true)}>
+                    Add cluster
+                  </button>
+                ) : undefined
+              }
+            >
               {canAdmin ? 'Add a cluster to get a one-time Helm command for the agent.' : 'No clusters are in your access scope.'}
             </EmptyState>
           }
-        >
-          {(d) => (
-            <div className="table-wrap">
-              <table className="t">
-                <thead>
-                  <tr>
-                    <th>Cluster</th>
-                    <th>Labels</th>
-                    <th>Provider</th>
-                    <th>Agent</th>
-                    <th>Transfer</th>
-                    <th>kube-bench</th>
-                    <th>Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.items.map((c) => (
-                    <tr key={c.id} className={c.id === selected?.id ? 'sel' : undefined}>
-                      <td>
-                        <button type="button" className="link-btn mono" onClick={() => navigate({ search: { cluster: c.id }, replace: true })} aria-current={c.id === selected?.id}>
-                          {c.name}
-                        </button>
-                      </td>
-                      <td className="wrap">{Object.keys(c.labels ?? {}).length ? Object.entries(c.labels).map(([k, v]) => <Chip key={k}>{`${k}=${v}`}</Chip>) : <span className="muted">none</span>}</td>
-                      <td>
-                        {c.provider_label || (c.status === 'pending' ? <span className="muted">after enrollment</span> : 'On-prem')}
-                        {c.provider_override && <span className="muted"> (override)</span>}
-                      </td>
-                      <td className="mono">{c.agent_version || '—'}</td>
-                      <td>{c.transfer_mode === 'compressed' ? <Badge tone="warn">compressed</Badge> : <Badge tone="ok">e2e-tls</Badge>}</td>
-                      <td>{c.bench_enabled ? <Badge tone="ok">On</Badge> : <Badge tone="mute">Off</Badge>}</td>
-                      <td>
-                        <ClusterStatusBadge c={c} now={now} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </QueryView>
+          columns={[
+            {
+              id: 'name',
+              header: 'Cluster',
+              sortValue: (c) => c.name,
+              searchText: (c) => `${c.name} ${formatLabels(c.labels ?? {}, ' ')} ${c.provider_label} ${c.region} ${c.agent_version}`,
+              cell: (c) => (
+                <button type="button" className="link-btn mono" onClick={() => navigate({ search: { cluster: c.id }, replace: true })} aria-current={c.id === selected?.id}>
+                  {c.name}
+                </button>
+              ),
+            },
+            { id: 'labels', header: 'Labels', className: 'wrap', cell: (c) => (Object.keys(c.labels ?? {}).length ? Object.entries(c.labels).map(([k, v]) => <Chip key={k}>{`${k}=${v}`}</Chip>) : <span className="muted">none</span>) },
+            {
+              id: 'provider',
+              header: 'Provider',
+              sortValue: (c) => c.provider_label || null,
+              cell: (c) => (
+                <>
+                  {c.provider_label || (c.status === 'pending' ? <span className="muted">after enrollment</span> : 'On-prem')}
+                  {c.provider_override && <span className="muted"> (override)</span>}
+                </>
+              ),
+            },
+            { id: 'agent', header: 'Agent', sortValue: (c) => c.agent_version || null, className: 'mono', cell: (c) => c.agent_version || '—' },
+            { id: 'transfer', header: 'Transfer', sortValue: (c) => c.transfer_mode, cell: (c) => (c.transfer_mode === 'compressed' ? <Badge tone="warn">compressed</Badge> : <Badge tone="ok">e2e-tls</Badge>) },
+            { id: 'bench', header: 'kube-bench', sortValue: (c) => c.bench_enabled, cell: (c) => (c.bench_enabled ? <Badge tone="ok">On</Badge> : <Badge tone="mute">Off</Badge>) },
+            { id: 'status', header: 'Status', sortValue: (c) => c.status, cell: (c) => <ClusterStatusBadge c={c} now={now} /> },
+          ]}
+        />
         <div className="card-spacer" />
       </section>
       {selected && <ClusterSettings key={selected.id + selected.status} c={selected} canAdmin={canAdmin} />}

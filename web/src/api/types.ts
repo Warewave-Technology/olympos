@@ -300,6 +300,8 @@ export interface BackupJobInput {
   retention?: Retention;
   enabled?: boolean;
   notify_channel_id?: string | null;
+  /** Also send backup.succeeded for this job. */
+  notify_on_success?: boolean;
 }
 export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'missed';
 export interface BackupRun {
@@ -337,6 +339,7 @@ export interface BackupJob {
   enabled: boolean;
   paused_reason: string;
   notify_channel_id: string | null;
+  notify_on_success?: boolean;
   next_run_at: string | null;
   last_run: BackupRun | null;
   estimated_monthly_bytes: number;
@@ -366,6 +369,8 @@ export interface KVMount {
 export interface Vault {
   id: string;
   target: Target;
+  /** Olympos labels of the vault's cluster (filtering). */
+  cluster_labels?: Record<string, string>;
   provider: 'hashicorp' | 'openbao';
   version: string;
   status: 'discovered' | 'configured' | 'error' | 'gone';
@@ -377,6 +382,20 @@ export interface Vault {
   secrets: number;
   drift: number;
   last_error: string;
+}
+/** GET /vaults/search?q= result: a vault, or a secret path inside one. */
+export interface VaultSearchHit {
+  match: 'vault' | 'path';
+  vault_id: string;
+  vault_name: string;
+  provider: string;
+  cluster_id: string;
+  cluster_name: string;
+  namespace: string;
+  /** path matches only */
+  mount?: string;
+  path?: string;
+  keys?: number;
 }
 export interface VaultInspect {
   version: string;
@@ -434,7 +453,8 @@ export interface ChangeRequest {
   id: string;
   /** Optional (openapi extension): short display number, e.g. CR-0142. */
   number?: string;
-  vault: { id: string; name: string; cluster_name: string; provider: string; version?: string };
+  /** namespace is an optional extension; the SPA falls back to GET /vaults. */
+  vault: { id: string; name: string; cluster_name: string; provider: string; version?: string; namespace?: string };
   maker: Principal;
   checker: Principal | null;
   justification: string;
@@ -532,6 +552,7 @@ export interface Finding {
 }
 
 // ---------------------------------------------------- security
+export type ScanStatus = 'pending' | 'scanning' | 'scanned' | 'missing_credential' | 'unavailable' | 'failed';
 export interface Image {
   digest: string;
   repo: string;
@@ -542,7 +563,15 @@ export interface Image {
   high: number;
   medium: number;
   low: number;
-  scan_status: 'pending' | 'scanning' | 'scanned' | 'missing_credential' | 'failed';
+  /**
+   * unavailable = the digest is not in the registry (locally built or retagged, e.g. kind
+   * node images); failed = transient error, retried automatically (scan_attempts, next_retry_at).
+   */
+  scan_status: ScanStatus;
+  /** Why the last scan did not succeed (also on list items). */
+  scan_error?: string;
+  scan_attempts?: number;
+  next_retry_at?: string | null;
   last_scanned_at: string | null;
   /** Vulnerabilities (any severity) that have a fixed version. */
   fixable?: number;
@@ -552,7 +581,6 @@ export interface Image {
 export interface ImageDetail extends Image {
   usage: { cluster_id: string; cluster_name: string; namespace: string; workload_kind: string; workload_name: string; container: string }[];
   vulns: { cve_id: string; severity: string; package: string; installed: string; fixed_in: string; title: string }[];
-  scan_error: string;
 }
 export interface KyvernoPolicy {
   cluster_id: string;

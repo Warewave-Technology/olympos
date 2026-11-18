@@ -2,13 +2,14 @@ import { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { ChangeRequest, ItemList } from '../api/types';
+import type { ChangeRequest, ItemList, Vault } from '../api/types';
 import { useMe } from '../auth/me';
 import { approveControl, can, isSelf, rejectControl } from '../auth/permissions';
 import { dateTime, personName, relDateTime, shortId, timeLeft } from '../lib/format';
 import { approvalsRoute } from '../router';
 import { Badge, DetailPlaceholder, EmptyState, ErrorState, Field, FormError, Loading, QueryView, aria, fieldError, useNow, useToast } from '../ui/kit';
 import { CrStatusBadge, OpBadge, PageHead, crLabel, opLabel } from '../ui/status';
+import { VaultIdentity, vaultPath } from '../ui/vault';
 
 type View = 'waiting' | 'mine' | 'all';
 
@@ -23,6 +24,16 @@ function summary(cr: ChangeRequest): string {
   const parts = [...counts.entries()].map(([op, n]) => `${words[op] ?? op} ${n}${op === 'destroy_history' ? '' : n === 1 ? ' key' : ' keys'}`);
   const s = parts.join(', ');
   return s[0].toUpperCase() + s.slice(1);
+}
+
+/** Namespace of the CR's vault: from the CR when the server sends it, else from GET /vaults. */
+function useVaultNamespaces(): (cr: ChangeRequest) => string | undefined {
+  const q = useQuery({ queryKey: ['vaults'], queryFn: () => api.get<ItemList<Vault>>('/vaults'), staleTime: 60_000 });
+  return (cr) => cr.vault.namespace || q.data?.items.find((v) => v.id === cr.vault.id)?.target.namespace;
+}
+
+export function crVaultPath(cr: ChangeRequest, ns?: string): string {
+  return vaultPath({ cluster: cr.vault.cluster_name, namespace: ns, service: cr.vault.name });
 }
 
 function pathOf(cr: ChangeRequest): string {
@@ -41,6 +52,7 @@ export function ApprovalsPage() {
   const listQ = useQuery({ queryKey: ['change-requests', params], queryFn: () => api.get<ItemList<ChangeRequest>>('/change-requests', params), refetchInterval: 30_000 });
   const items = listQ.data?.items ?? [];
   const selectedId = search.cr ?? items[0]?.id;
+  const nsOf = useVaultNamespaces();
 
   const views: { id: View; label: string }[] = [
     ...(canApprove ? [{ id: 'waiting' as const, label: 'Waiting for me' }] : []),
@@ -89,8 +101,9 @@ export function ApprovalsPage() {
                       )}
                     </div>
                     <div className="l2">{summary(cr)}</div>
+                    <div className="l3 mono">{crVaultPath(cr, nsOf(cr))}</div>
                     <div className="l3">
-                      {mine && cr.status === 'pending' ? 'Approve disabled: you are the maker' : `${personName(cr.maker)} · ${cr.vault.name} / ${pathOf(cr)}`}
+                      {mine && cr.status === 'pending' ? `Approve disabled: you are the maker · ${pathOf(cr)}` : `${personName(cr.maker)} · ${pathOf(cr)}`}
                     </div>
                   </button>
                 );
@@ -121,6 +134,7 @@ function CrDetail({ id }: { id: string }) {
   const qc = useQueryClient();
   const toast = useToast();
   const q = useQuery({ queryKey: ['change-requests', id], queryFn: () => api.get<ChangeRequest>(`/change-requests/${id}`) });
+  const nsOf = useVaultNamespaces();
   const [comment, setComment] = useState('');
   const [commentErr, setCommentErr] = useState<string | undefined>();
   const done = (verb: string) => (cr: ChangeRequest) => {
@@ -164,8 +178,7 @@ function CrDetail({ id }: { id: string }) {
         <dl className="dl narrow">
           <dt>Vault</dt>
           <dd>
-            <span className="mono">{cr.vault.name}</span> · {cr.vault.cluster_name} · {cr.vault.provider === 'openbao' ? 'OpenBao' : 'HashiCorp Vault'}
-            {cr.vault.version ? ` ${cr.vault.version}` : ''}
+            <VaultIdentity cluster={cr.vault.cluster_name} namespace={nsOf(cr)} service={cr.vault.name} provider={cr.vault.provider} version={cr.vault.version} compact />
           </dd>
           <dt>Maker</dt>
           <dd>

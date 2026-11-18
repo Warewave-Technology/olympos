@@ -112,7 +112,7 @@ export const clustersSettingsRoute = createRoute({
   component: ClustersSettingsPage,
 });
 
-const routeTree = rootRoute.addChildren([
+export const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
     dashboardRoute,
