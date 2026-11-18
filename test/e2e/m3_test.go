@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"encoding/json"
+	"net/http"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -41,10 +42,10 @@ func vaultCLI(t *testing.T, root string, args ...string) string {
 func grantedUser(t *testing.T, admin *client, name string, roles ...string) *client {
 	t.Helper()
 	oid := uuid.NewSHA1(uuid.NameSpaceOID, []byte("olympos-e2e-"+name)).String()
-	func() {
-		defer func() { _ = recover() }() // first dev-login is denied (no grants) but creates the principal
-		login(t, oid, name)
-	}()
+	// The first dev-login is denied (no grants yet) but creates the principal.
+	if r, err := http.Get(baseURL() + "/auth/dev-login?oid=" + oid + "&name=" + name); err == nil {
+		r.Body.Close()
+	}
 	code, raw := admin.do("POST", "/grants", map[string]any{"object_id": oid, "roles": roles, "scope": "env=lab"}, nil)
 	if code != 201 && !strings.Contains(raw, "already") {
 		// Re-runs: the grant may already exist (duplicate grants are harmless).

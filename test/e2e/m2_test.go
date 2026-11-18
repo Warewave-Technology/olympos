@@ -103,7 +103,9 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, _ = az.CreateContainer(ctx, "backups", nil)
+	if _, err := az.CreateContainer(ctx, "backups", nil); err != nil && !strings.Contains(err.Error(), "ContainerAlreadyExists") {
+		t.Fatalf("create container: %v", err)
+	}
 	q, err := sas.BlobSignatureValues{
 		Protocol: sas.ProtocolHTTPSandHTTP, ExpiryTime: time.Now().Add(30 * 24 * time.Hour), ContainerName: "backups",
 		Permissions: (&sas.ContainerPermissions{Read: true, Create: true, Write: true, Tag: true}).String(),

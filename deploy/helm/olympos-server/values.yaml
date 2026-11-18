@@ -68,10 +68,12 @@ localKeyVault:
     size: 64Mi
     storageClass: ""
 
+# trivy vulnerability + Java DBs (several GiB, growing). Keep it on a PVC:
+# an emptyDir over its sizeLimit gets the whole server pod evicted.
 trivyCache:
-  size: 2Gi
+  size: 10Gi
   storageClass: ""
-  persistent: false
+  persistent: true
 
 resources:
   requests: {cpu: 200m, memory: 256Mi}

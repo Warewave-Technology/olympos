@@ -32,12 +32,14 @@ type API struct {
 // Routes mounts the module under /api/v1.
 func (a *API) Routes(r chi.Router) {
 	r.Get("/images", a.listImages)
+	r.Post("/images/scan", a.scanAll)
 	r.Get("/images/{digest}", a.getImage)
 	r.Post("/images/{digest}/scan", a.scanImage)
 	r.Get("/security/kyverno", a.listKyverno)
 	r.Get("/security/netpol", a.listNetpol)
 	r.Get("/registries", a.listRegistries)
 	r.Post("/registries", a.createRegistry)
+	r.Post("/registries/test", a.testRegistry)
 	r.Patch("/registries/{id}", a.patchRegistry)
 	r.Delete("/registries/{id}", a.deleteRegistry)
 }

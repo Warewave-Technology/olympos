@@ -612,6 +612,11 @@ paths:
           description: Images by digest in scope
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Image"}}}}}}
         "422": {description: Invalid filter}
+  /images/scan:
+    post:
+      tags: [security]
+      summary: Queue a rescan of every running image now (Security › Scan now; operator).
+      responses: {"202": {description: Queued}}
   /images/{digest}:
     parameters: [{name: digest, in: path, required: true, schema: {type: string}, description: "sha256:..."}]
     get:
@@ -674,6 +679,13 @@ paths:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Registry"}}}}
         "403": {description: Not a global admin}
         "422": {description: Validation (incl. duplicate host_pattern)}
+  /registries/test:
+    post:
+      tags: [security]
+      summary: Test an unsaved registry credential with a manifest pull (Test pull). Never echoes the password.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RegistryInput"}}}}
+      responses:
+        "200": {description: Result, content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, error: {type: string}}}}}}
   /registries/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     patch:
@@ -798,6 +810,13 @@ components:
         eol: {type: boolean}
         inventory_at: {type: [string, "null"], format: date-time}
         created_at: {type: string, format: date-time}
+        zones: {type: array, items: {type: string}, description: "Optional. Distinct node zones (dashboard Region / zones column)."}
+        instance_types:
+          type: array
+          description: "Optional. Node count per instance type (dashboard Node sizes column)."
+          items: {type: object, properties: {instance_type: {type: string}, count: {type: integer}}}
+        backup_wire_bytes_30d: {type: integer, description: "Optional. Wire bytes of backup runs in the last 30 days (Settings › Clusters egress estimate)."}
+        backup_bytes_30d: {type: integer, description: "Optional. Uncompressed bytes of the same runs (shows the compression gain)."}
     ClusterList:
       type: object
       properties:
@@ -1015,6 +1034,7 @@ components:
         retention: {$ref: "#/components/schemas/Retention"}
         enabled: {type: boolean}
         notify_channel_id: {type: [string, "null"]}
+        notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3)."}
     BackupJob:
       type: object
       properties:
@@ -1030,6 +1050,7 @@ components:
         enabled: {type: boolean}
         paused_reason: {type: string, description: "e.g. target_gone"}
         notify_channel_id: {type: [string, "null"]}
+        notify_on_success: {type: boolean}
         next_run_at: {type: [string, "null"], format: date-time}
         last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}]}
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
@@ -1120,7 +1141,22 @@ components:
               deletion_time: {type: string}
               destroyed: {type: boolean}
               by_olympos: {type: boolean}
+              keys: {type: integer, description: "Optional. Number of keys in that version (destroy-history dialog)."}
         pending_change_requests: {type: integer}
+        updated_by_name: {type: string, description: "Optional. Who wrote the current version (maker of the applied CR, or 'outside Olympos')."}
+        key_info:
+          type: array
+          description: "Optional. Per-key metadata for the keys table. Never contains values."
+          items:
+            type: object
+            properties:
+              key: {type: string}
+              version: {type: integer, description: Version in which the key last changed}
+              updated_time: {type: [string, "null"], format: date-time}
+              pending_cr_id: {type: [string, "null"]}
+              pending_cr_label: {type: string}
+              last_cr_id: {type: [string, "null"]}
+              last_cr_label: {type: string}
     ChangeItemInput:
       type: object
       required: [mount, path, op]
@@ -1143,7 +1179,8 @@ components:
       type: object
       properties:
         id: {type: string}
-        vault: {type: object, properties: {id: {type: string}, name: {type: string}, cluster_name: {type: string}, provider: {type: string}}}
+        number: {type: string, description: "Optional. Short display number, e.g. CR-0142."}
+        vault: {type: object, properties: {id: {type: string}, name: {type: string}, cluster_name: {type: string}, provider: {type: string}, version: {type: string}}}
         maker: {$ref: "#/components/schemas/Principal"}
         checker: {oneOf: [{$ref: "#/components/schemas/Principal"}, {type: "null"}]}
         justification: {type: string}
@@ -1157,6 +1194,7 @@ components:
         can_approve: {type: boolean, description: Caller may approve/reject}
         approve_disabled_reason: {type: string, description: 'e.g. "You opened this request"'}
         can_cancel: {type: boolean}
+        eligible_approvers: {type: integer, description: "Optional. People with vault-approver in scope, excluding the maker."}
         items:
           type: array
           items:
@@ -1176,7 +1214,7 @@ components:
             type: object
             properties:
               at: {type: string, format: date-time}
-              kind: {type: string, enum: [opened, approved, rejected, applied, failed, expired, cancelled]}
+              kind: {type: string, enum: [opened, notified, approved, rejected, applied, failed, expired, cancelled], description: "notified = Slack link sent (details.channel)"}
               actor_name: {type: string}
               details: {type: object}
 
@@ -1242,6 +1280,8 @@ components:
               info: {type: integer}
               control_plane_na: {type: boolean, description: 'Managed cluster: show "Control plane N/A · managed" (control plane checks are never counted as failed or missing)'}
               message: {type: string}
+              cluster_name: {type: string, description: "Optional. Set when one run covers several clusters."}
+              duration_s: {type: number, description: "Optional. Job duration."}
     Finding:
       type: object
       properties:
