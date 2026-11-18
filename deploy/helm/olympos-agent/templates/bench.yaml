@@ -57,7 +57,7 @@ spec:
         namespaces: [{{ .Values.bench.namespace }}]
         selector:
           matchLabels:
-            app.kubernetes.io/name: olympos-kube-bench
+            app.kubernetes.io/name: olympos-bench
   conditions:
     all:
     - key: "{{`{{ request.object.spec.containers[].image }}`}}"

@@ -30,7 +30,7 @@ bench:
   namespace: olympos-bench
   # Image is pinned by digest inside the agent binary; this is used only for
   # the Kyverno PolicyException image match.
-  imagePattern: "docker.io/aquasec/kube-bench@sha256:*"
+  imagePattern: "docker.io/aquasec/kube-bench:*@sha256:*"
 
 resources:
   requests: {cpu: 50m, memory: 64Mi}
