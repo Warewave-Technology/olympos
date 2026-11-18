@@ -58,14 +58,14 @@ spec:
       containers:
       - name: vault
         image: hashicorp/vault:1.20
-        args: [server, -config=/vault/config/raft.hcl]
+        args: [server, -config=/vault/olympos/raft.hcl]
         env:
         - {name: VAULT_ADDR, value: "https://127.0.0.1:8200"}
         - {name: VAULT_SKIP_VERIFY, value: "true"}   # local admin CLI in the pod only
         - {name: SKIP_SETCAP, value: "true"}
         ports: [{containerPort: 8200}]
         volumeMounts:
-        - {name: config, mountPath: /vault/config}
+        - {name: config, mountPath: /vault/olympos}
         - {name: data, mountPath: /vault/data}
         - {name: tls, mountPath: /vault/tls, readOnly: true}
       volumes:

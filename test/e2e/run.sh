@@ -62,11 +62,15 @@ kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
 
-if ! kubectl get ns kyverno >/dev/null 2>&1; then
-  log "installing kyverno"
+# Kyverno 1.20 stopped executing legacy kyverno.io/v1 policies (SPEC §13.1
+# watches those); 1.19 is the last release that runs them.
+KYVERNO_CHART=3.9.2
+if ! helm -n kyverno list -o json 2>/dev/null | grep -q "kyverno-$KYVERNO_CHART"; then
+  log "installing kyverno chart $KYVERNO_CHART"
+  helm -n kyverno uninstall kyverno --wait >/dev/null 2>&1 || true
   helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null 2>&1 || true
   helm repo update kyverno >/dev/null
-  helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait --timeout 5m \
+  helm upgrade --install kyverno kyverno/kyverno --version "$KYVERNO_CHART" -n kyverno --create-namespace --wait --timeout 5m \
     --set admissionController.replicas=1 --set backgroundController.replicas=1 \
     --set cleanupController.enabled=false --set reportsController.replicas=1 >/dev/null
 fi
@@ -91,12 +95,12 @@ kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
 
 # Vault runs on raft storage (snapshots need it): init + unseal once per pod.
 vexec() { kubectl -n lab exec deploy/vault -- "$@"; }
-for i in $(seq 1 30); do vexec vault status -format=json >/dev/null 2>&1; [ $? -le 2 ] && break; sleep 2; done
-if vexec vault status -format=json 2>/dev/null | grep -q '"initialized": false'; then
+for i in $(seq 1 30); do rc=0; vexec vault status -format=json >/dev/null 2>&1 || rc=$?; [ "$rc" -le 2 ] && break; sleep 2; done
+if { vexec vault status -format=json 2>/dev/null || true; } | grep -q '"initialized": false'; then
   log "initializing lab vault"
   vexec vault operator init -key-shares=1 -key-threshold=1 -format=json > "$WORK/vault-init.json"
 fi
-if vexec vault status -format=json 2>/dev/null | grep -q '"sealed": true'; then
+if { vexec vault status -format=json 2>/dev/null || true; } | grep -q '"sealed": true'; then
   vexec vault operator unseal "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["unseal_keys_b64"][0])' "$WORK/vault-init.json")" >/dev/null
 fi
 ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/vault-init.json")
