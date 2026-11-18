@@ -312,6 +312,32 @@ paths:
       responses:
         "202": {description: Queued, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
         "409": {description: A run of this job is already queued or running, or the target is gone}
+  /backup/clusters:
+    get:
+      tags: [backups]
+      summary: Per-cluster backup summary.
+      responses:
+        "200":
+          description: One row per cluster in read scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cluster_id: {type: string}
+                        cluster_name: {type: string}
+                        targets: {type: integer}
+                        candidates: {type: integer, description: targets without a job}
+                        jobs: {type: integer}
+                        jobs_enabled: {type: integer}
+                        last_24h: {type: object, properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}}}
+                        last_success_at: {type: [string, "null"], format: date-time}
+                        bytes_30d: {type: integer}
   /backup/runs:
     get:
       tags: [backups]
@@ -596,6 +622,31 @@ paths:
         "403": {description: Visible cluster but not operator}
         "404": {description: Unknown schedule, or cluster outside the caller's scope}
         "422": {description: "Cluster not enrolled, kube-bench not enabled on the agent, or no eligible cluster"}
+  /audit/clusters:
+    get:
+      tags: [audit]
+      summary: Per-cluster audit summary (latest run per tool, open findings by severity).
+      responses:
+        "200":
+          description: One row per cluster in read scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cluster_id: {type: string}
+                        cluster_name: {type: string}
+                        provider: {type: string}
+                        bench_enabled: {type: boolean}
+                        last_runs:
+                          type: array
+                          items: {type: object, properties: {tool: {type: string}, run_id: {type: string}, status: {type: string}, score: {type: [number, "null"]}, finished_at: {type: [string, "null"], format: date-time}, new_findings: {type: integer}}}
+                        open_findings: {type: object, properties: {critical: {type: integer}, high: {type: integer}, medium: {type: integer}, low: {type: integer}}}
   /audit/runs:
     get:
       tags: [audit]
@@ -691,6 +742,99 @@ paths:
         "200":
           description: NetworkPolicy default-deny status per namespace
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/NetpolNamespace"}}}}}}
+  /security/clusters:
+    get:
+      tags: [security]
+      summary: Per-cluster security summary (cluster overview of the Security page).
+      responses:
+        "200":
+          description: One row per cluster in read scope
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cluster_id: {type: string}
+                        cluster_name: {type: string}
+                        provider: {type: string}
+                        status: {type: string}
+                        images: {type: integer}
+                        workloads: {type: integer}
+                        critical: {type: integer, description: critical CVEs across the cluster's images}
+                        high: {type: integer}
+                        images_with_critical: {type: integer}
+                        not_scanned: {type: integer}
+                        kyverno_installed: {type: boolean}
+                        kyverno_policies: {type: integer}
+                        kyverno_failures: {type: integer}
+                        namespaces: {type: integer}
+                        namespaces_without_default_deny: {type: integer}
+  /security/kyverno/policy:
+    get:
+      tags: [security]
+      summary: One Kyverno policy with its spec and current violations.
+      parameters:
+        - {name: cluster, in: query, required: true, schema: {type: string}}
+        - {name: kind, in: query, required: true, schema: {type: string}}
+        - {name: namespace, in: query, schema: {type: string}}
+        - {name: name, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Policy
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/KyvernoPolicy"
+                  - type: object
+                    properties:
+                      spec: {type: object, description: "The policy spec as stored in the cluster (metadata trimmed)"}
+                      yaml: {type: string, description: "The whole object as YAML (apiVersion, kind, name, spec)"}
+                      violations:
+                        type: array
+                        items: {type: object, properties: {rule: {type: string}, result: {type: string}, severity: {type: string}, message: {type: string}, resource_kind: {type: string}, resource_namespace: {type: string}, resource_name: {type: string}}}
+  /security/netpol/namespace:
+    get:
+      tags: [security]
+      summary: NetworkPolicies of one namespace with specs, plus labels for the policy simulator.
+      parameters:
+        - {name: cluster, in: query, required: true, schema: {type: string}}
+        - {name: namespace, in: query, required: true, schema: {type: string}}
+      responses:
+        "200":
+          description: Namespace
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cluster_id: {type: string}
+                  cluster_name: {type: string}
+                  namespace: {type: string}
+                  namespace_labels: {type: object, additionalProperties: {type: string}}
+                  default_deny: {type: boolean}
+                  excluded: {type: boolean}
+                  policies:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: {type: string}
+                        spec: {type: object, description: "networking.k8s.io/v1 NetworkPolicySpec as in the cluster"}
+                        yaml: {type: string}
+                  workloads:
+                    type: array
+                    description: "Workloads in the namespace with their pod template labels (example data for the simulator)"
+                    items: {type: object, properties: {kind: {type: string}, name: {type: string}, labels: {type: object, additionalProperties: {type: string}}, ports: {type: array, items: {type: integer}}}}
+                  other_namespaces:
+                    type: array
+                    description: "Other namespaces of the cluster with labels (namespaceSelector examples)"
+                    items: {type: object, properties: {name: {type: string}, labels: {type: object, additionalProperties: {type: string}}}}
   /registries:
     get:
       tags: [security]
@@ -1389,6 +1533,7 @@ components:
         scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, unavailable, failed], description: "unavailable = the digest is not in the registry (locally built or retagged, e.g. kind node images); failed = transient error, retried automatically (scan_attempts, next_retry_at)"}
         scan_error: {type: string, description: "Why the last scan did not succeed (also on list items)"}
         scan_attempts: {type: integer}
+        scanned_by: {type: string, enum: ["", digest, tag], description: "tag = the running digest is not in the registry; the registry's image with the same tag was scanned instead (results may differ from what runs)"}
         next_retry_at: {type: [string, "null"], format: date-time}
         last_scanned_at: {type: [string, "null"], format: date-time}
         registry: {type: string, description: "Matching registry host_pattern, \"public\" (anonymous pull), or \"\" (no credential)"}
