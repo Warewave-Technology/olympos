@@ -9,6 +9,8 @@
 package vclient
 
 import (
+	"github.com/Warewave-Technology/olympos/internal/targettls"
+
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -53,15 +55,10 @@ var (
 	sysPool     *x509.CertPool
 )
 
-// RootCAs returns the system pool plus the PEM bundle.
+// RootCAs returns the system pool, the server-wide target CA bundle
+// (targetTLS.caBundleFile) and the per-vault PEM bundle.
 func RootCAs(bundle []byte) (*x509.CertPool, error) {
-	sysPoolOnce.Do(func() {
-		p, err := x509.SystemCertPool()
-		if err != nil || p == nil {
-			p = x509.NewCertPool()
-		}
-		sysPool = p
-	})
+	sysPoolOnce.Do(func() { sysPool = targettls.RootCAs() })
 	pool := sysPool.Clone()
 	if len(strings.TrimSpace(string(bundle))) > 0 && !pool.AppendCertsFromPEM(bundle) {
 		return nil, errors.New("CA bundle contains no PEM certificates")

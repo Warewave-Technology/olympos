@@ -60,15 +60,19 @@ spec:
         image: hashicorp/vault:1.20
         args: [server, -config=/vault/config/raft.hcl]
         env:
-        - {name: VAULT_ADDR, value: "http://127.0.0.1:8200"}
+        - {name: VAULT_ADDR, value: "https://127.0.0.1:8200"}
+        - {name: VAULT_SKIP_VERIFY, value: "true"}   # local admin CLI in the pod only
         - {name: SKIP_SETCAP, value: "true"}
         ports: [{containerPort: 8200}]
         volumeMounts:
         - {name: config, mountPath: /vault/config}
         - {name: data, mountPath: /vault/data}
+        - {name: tls, mountPath: /vault/tls, readOnly: true}
       volumes:
       - name: config
         configMap: {name: vault-raft}
+      - name: tls
+        secret: {secretName: vault-tls}
       - {name: data, emptyDir: {}}
 ---
 apiVersion: v1
@@ -81,11 +85,12 @@ data:
       node_id = "vault-0"
     }
     listener "tcp" {
-      address     = "0.0.0.0:8200"
-      tls_disable = true
+      address       = "0.0.0.0:8200"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file  = "/vault/tls/tls.key"
     }
-    api_addr     = "http://vault.lab.svc:8200"
-    cluster_addr = "http://vault.lab.svc:8201"
+    api_addr     = "https://vault.lab.svc:8200"
+    cluster_addr = "https://vault.lab.svc:8201"
     disable_mlock = true
     ui = false
 ---
@@ -97,9 +102,10 @@ metadata:
   annotations:
     olympos.io/vault: hashicorp
     olympos.io/backup: vault
+    olympos.io/tls-server-name: vault.lab.svc
 spec:
   selector: {app: vault}
-  ports: [{name: http, port: 8200}]
+  ports: [{name: https, port: 8200}]
 ---
 apiVersion: apps/v1
 kind: Deployment
