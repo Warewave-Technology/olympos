@@ -83,6 +83,8 @@ helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \
 kubectl -n olympos rollout restart deploy/olympos >/dev/null
 kubectl -n olympos rollout status deploy/olympos --timeout=180s >/dev/null
 if kubectl -n olympos-system get deploy olympos-agent >/dev/null 2>&1; then
+  # Pick up chart changes (RBAC) and the freshly loaded image.
+  helm upgrade olympos-agent deploy/helm/olympos-agent -n olympos-system --reuse-values --wait --timeout 3m >/dev/null
   kubectl -n olympos-system rollout restart deploy/olympos-agent >/dev/null
   kubectl -n olympos-system rollout status deploy/olympos-agent --timeout=180s >/dev/null
 fi

@@ -4,8 +4,8 @@ package e2e
 
 import (
 	"encoding/json"
-	"net/http"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"

@@ -43,9 +43,11 @@ func TestM5Security(t *testing.T) {
 			} `json:"usage"`
 			Vulns []map[string]any `json:"vulns"`
 		}
+		admin.must("POST", "/images/"+url.PathEscape(digest)+"/scan", nil, nil, 202)
+		time.Sleep(2 * time.Second)
 		eventually(t, 15*time.Minute, "postgres image scanned by trivy", func() (bool, string) {
 			admin.must("GET", "/images/"+url.PathEscape(digest), nil, &d, 200)
-			return d.ScanStatus == "scanned" || d.ScanStatus == "failed", d.ScanStatus + " " + d.ScanError
+			return d.ScanStatus == "scanned" || (d.ScanStatus == "failed" && !strings.Contains(d.ScanError, "15:12")), d.ScanStatus + " " + d.ScanError
 		})
 		if d.ScanStatus != "scanned" {
 			t.Fatalf("scan failed: %s", d.ScanError)

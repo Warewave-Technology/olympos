@@ -41,7 +41,7 @@ spec:
       containers:
       - name: azurite
         image: mcr.microsoft.com/azure-storage/azurite:3.37.0
-        args: [azurite-blob, --blobHost, 0.0.0.0, --loose, --skipApiVersionCheck]
+        args: [azurite-blob, --blobHost, 0.0.0.0, --loose, --skipApiVersionCheck, --disableProductStyleUrl]
         ports: [{containerPort: 10000}]
 ---
 apiVersion: v1

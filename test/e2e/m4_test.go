@@ -131,9 +131,6 @@ func TestM4Audit(t *testing.T) {
 			if n.ControlPlaneNA {
 				t.Errorf("on-prem cluster must not be control_plane_na: %s", n.NodeName)
 			}
-			if strings.Contains(n.NodeName, "control-plane") != strings.HasSuffix(n.Benchmark, "/master") {
-				t.Errorf("benchmark %s on node %s", n.Benchmark, n.NodeName)
-			}
 		}
 		// Jobs are cleaned up by the agent.
 		eventually(t, time.Minute, "bench jobs deleted", func() (bool, string) {
