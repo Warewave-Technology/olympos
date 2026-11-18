@@ -38,7 +38,10 @@ type EngineContext struct {
 	// connections (pg_dump per database) call it repeatedly.
 	Dial func(ctx context.Context) (net.Conn, error)
 	// UseTLS is true in transfer mode e2e-tls (default): the engine MUST
-	// speak TLS end-to-end with the target. False in "compressed" mode.
+	// speak verified TLS end-to-end with the target whenever the target
+	// supports it. A target without TLS is still backed up (SPEC §7) and the
+	// engine reports RunResult.TLS=false so the tls.missing finding opens.
+	// False in "compressed" mode (plaintext inside the cluster).
 	UseTLS bool
 	// TLSServerName to verify; InsecureSkipVerify is never used. RootCAs is
 	// left to the engine (system pool + optional configured bundle).
@@ -52,9 +55,12 @@ type EngineContext struct {
 
 // RunResult is engine metadata stored in the manifest.
 type RunResult struct {
-	ServerVersion string         `json:"server_version"`
-	ToolVersion   string         `json:"tool_version,omitempty"`
-	Details       map[string]any `json:"details,omitempty"`
+	ServerVersion string `json:"server_version"`
+	ToolVersion   string `json:"tool_version,omitempty"`
+	// TLS reports whether the run spoke TLS with the target (nil = unknown).
+	// false opens the tls.missing finding (SPEC §7, §13.4).
+	TLS     *bool          `json:"tls,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
 // Privilege is one line of the connection test.

@@ -1,0 +1,270 @@
+package backup_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/blob"
+	"github.com/Warewave-Technology/olympos/internal/gateway"
+	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/store"
+	"github.com/Warewave-Technology/olympos/internal/targetid"
+)
+
+// fakeEngineName uses an engine name allowed by the targets CHECK; the
+// real ClickHouse engine is not linked into this test binary.
+const fakeEngineName = "clickhouse"
+
+// fakeEngine dials the target twice, then writes payload.
+type fakeEngine struct{}
+
+type fakeOpts struct {
+	Fail       bool `json:"fail"`
+	LeakSecret bool `json:"leak_secret"`
+	NoTLS      bool `json:"no_tls"`
+	Payload    int  `json:"payload"`
+}
+
+var fakePayload = bytes.Repeat([]byte("olympos-backup-"), 1000)
+
+func (fakeEngine) Name() string        { return fakeEngineName }
+func (fakeEngine) Ext() string         { return "tar" }
+func (fakeEngine) ContentType() string { return "application/x-tar" }
+
+func (fakeEngine) TestConnection(ctx context.Context, ec backup.EngineContext) (*backup.ConnectionTest, error) {
+	var o fakeOpts
+	_ = json.Unmarshal(ec.Options, &o)
+	c, err := ec.Credential(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := ec.Dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	conn.Close()
+	ct := &backup.ConnectionTest{OK: !o.Fail, ServerVersion: "fake 1.0", TLS: !o.NoTLS, Databases: []string{"a", "b"},
+		Privileges: []backup.Privilege{{Name: "connect", OK: true, Detail: "as " + c.Username}}}
+	if o.LeakSecret {
+		ct.Error = "auth failed for password " + string(c.Secret)
+		ct.OK = false
+	}
+	return ct, nil
+}
+
+func (fakeEngine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer) (*backup.RunResult, error) {
+	var o fakeOpts
+	_ = json.Unmarshal(ec.Options, &o)
+	c, _ := ec.Credential(ctx) // jobs without a credential are fine for the fake
+	for i := 0; i < 2; i++ {
+		conn, err := ec.Dial(ctx)
+		if err != nil {
+			return nil, err
+		}
+		conn.Close()
+	}
+	if o.Fail {
+		msg := "dump failed"
+		if o.LeakSecret {
+			msg += ": password=" + string(c.Secret) + " rejected (" + string(c.Secret) + ")"
+		}
+		return nil, errors.New(msg)
+	}
+	if _, err := w.Write(fakePayload); err != nil {
+		return nil, err
+	}
+	tls := !o.NoTLS && ec.UseTLS
+	return &backup.RunResult{ServerVersion: "fake 1.0", ToolVersion: "fakedump 2", TLS: &tls, Details: map[string]any{"restore": "cat"}}, nil
+}
+
+func init() { backup.RegisterEngine(fakeEngine{}) }
+
+// fakeDialer pretends agents are connected; every tunnel reports wire bytes.
+type fakeDialer struct {
+	mu        sync.Mutex
+	connected map[uuid.UUID]bool
+	dials     int
+}
+
+const wirePerConn = 1000
+
+func newDialer(ids ...uuid.UUID) *fakeDialer {
+	d := &fakeDialer{connected: map[uuid.UUID]bool{}}
+	for _, id := range ids {
+		d.connected[id] = true
+	}
+	return d
+}
+
+func (d *fakeDialer) Connected(id uuid.UUID) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.connected[id]
+}
+
+func (d *fakeDialer) Dial(ctx context.Context, clusterID uuid.UUID, targetID string, opt gateway.DialOptions) (gateway.Conn, error) {
+	if !d.Connected(clusterID) {
+		return nil, gateway.ErrAgentOffline
+	}
+	d.mu.Lock()
+	d.dials++
+	d.mu.Unlock()
+	a, b := net.Pipe()
+	b.Close()
+	return &fakeConn{Conn: a}, nil
+}
+
+type fakeConn struct{ net.Conn }
+
+func (fakeConn) WireBytes() int64 { return wirePerConn }
+
+// fakeBlobs stores uploads in memory.
+type fakeBlobs struct {
+	mu     sync.Mutex
+	prefix string
+	blobs  map[string][]byte
+	tags   map[string]map[string]string
+	fail   error
+}
+
+func newBlobs(prefix string) *fakeBlobs {
+	return &fakeBlobs{prefix: prefix, blobs: map[string][]byte{}, tags: map[string]map[string]string{}}
+}
+
+func (f *fakeBlobs) ForDestination(ctx context.Context, id uuid.UUID) (blob.Writer, error) {
+	return f, nil
+}
+func (f *fakeBlobs) Prefix() string { return f.prefix }
+
+func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct string, tags map[string]string) (blob.UploadResult, error) {
+	if f.fail != nil {
+		return blob.UploadResult{}, f.fail
+	}
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return blob.UploadResult{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.blobs[path] = b
+	f.tags[path] = tags
+	return blob.UploadResult{Bytes: int64(len(b))}, nil
+}
+
+// fixture is a cluster with one target and a destination.
+type fixture struct {
+	ClusterID uuid.UUID
+	Cluster   string
+	TargetID  string
+	DestID    uuid.UUID
+}
+
+func seed(t *testing.T, db *store.DB, name string, labels map[string]string, status string) fixture {
+	t.Helper()
+	ctx := context.Background()
+	f := fixture{Cluster: name}
+	lb, _ := json.Marshal(labels)
+	if err := db.QueryRow(ctx, `INSERT INTO clusters (name, labels, status, last_seen_at) VALUES ($1, $2, $3, now()) RETURNING id`,
+		name, lb, status).Scan(&f.ClusterID); err != nil {
+		t.Fatal(err)
+	}
+	f.TargetID = targetid.Compute(f.ClusterID.String(), "db", "orders", 9000)
+	if _, err := db.Exec(ctx, `INSERT INTO targets (id, cluster_id, namespace, service, port, engine) VALUES ($1,$2,'db','orders',9000,$3)`,
+		f.TargetID, f.ClusterID, fakeEngineName); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO destinations (name, account, container, prefix, auth) VALUES ($1, 'acct', 'backups', 'olympos', 'managed_identity')
+		ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name RETURNING id`, "dest").Scan(&f.DestID); err != nil {
+		t.Fatal(err)
+	}
+	return f
+}
+
+type jobOpts struct {
+	cron, tz   string
+	enabled    bool
+	last       *time.Time
+	options    string
+	credential *uuid.UUID
+	channel    *uuid.UUID
+}
+
+func addJob(t *testing.T, db *store.DB, f fixture, o jobOpts) uuid.UUID {
+	t.Helper()
+	if o.cron == "" {
+		o.cron = "0 2 * * *"
+	}
+	if o.tz == "" {
+		o.tz = "UTC"
+	}
+	if o.options == "" {
+		o.options = "{}"
+	}
+	var id uuid.UUID
+	if err := db.QueryRow(context.Background(), `INSERT INTO backup_jobs (target_id, destination_id, cron, timezone, enabled, last_scheduled_for,
+		engine_options, credential_id, notify_channel_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+		f.TargetID, f.DestID, o.cron, o.tz, o.enabled, o.last, o.options, o.credential, o.channel).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func addChannel(t *testing.T, db *store.DB) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := db.QueryRow(context.Background(), `INSERT INTO notification_channels (slack_channel_id, name) VALUES ('C123', 'backups') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type event struct {
+	Type    string
+	Channel *uuid.UUID
+	Payload map[string]any
+}
+
+func events(t *testing.T, db *store.DB, typ string) []event {
+	t.Helper()
+	rows, err := db.Query(context.Background(), `SELECT event_type, channel_id, payload FROM outbox WHERE event_type LIKE $1 ORDER BY created_at`, typ)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []event
+	for rows.Next() {
+		var e event
+		var p []byte
+		if err := rows.Scan(&e.Type, &e.Channel, &p); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.Unmarshal(p, &e.Payload)
+		out = append(out, e)
+	}
+	return out
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func mustContain(t *testing.T, s, sub string) {
+	t.Helper()
+	if !strings.Contains(s, sub) {
+		t.Fatalf("%q does not contain %q", s, sub)
+	}
+}
+
+type pgxTx = pgx.Tx
+
+func pbTarget(id string) *pb.Target { return &pb.Target{TargetId: id} }

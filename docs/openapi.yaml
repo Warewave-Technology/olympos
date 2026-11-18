@@ -248,16 +248,19 @@ paths:
   /backup/jobs:
     get:
       tags: [backups]
+      parameters:
+        - {name: target_id, in: query, schema: {type: string}}
       responses:
         "200":
           description: Jobs in scope
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/BackupJob"}}}}}}
     post:
       tags: [backups]
-      summary: Create a job (operator on the target's cluster). Usually created disabled, then dry-run, then enabled.
+      summary: Create a job (operator on the target's cluster; 404 when the target is outside the caller's scope). Usually created disabled, then dry-run, then enabled. Sets the target to `configured`.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+        "422": {description: "Validation (cron, timezone, credential.*, destination_id, ...)"}
   /backup/jobs/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -266,12 +269,13 @@ paths:
         "200": {description: Job, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
     patch:
       tags: [backups]
+      summary: Partial update. target_id cannot change. A new credential replaces (and deletes) the old one. Enabling or changing the schedule restarts it from now.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
     delete:
       tags: [backups]
-      summary: Delete the job (runs and blobs are kept).
+      summary: Delete the job (soft delete; runs and blobs are kept, the job's credential is removed, queued runs fail).
       responses: {"204": {description: Deleted}}
   /backup/jobs/{id}/run:
     parameters: [{$ref: "#/components/parameters/id"}]
@@ -284,6 +288,7 @@ paths:
             schema: {type: object, properties: {trigger: {type: string, enum: [manual, test], default: manual}}}
       responses:
         "202": {description: Queued, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
+        "409": {description: A run of this job is already queued or running, or the target is gone}
   /backup/runs:
     get:
       tags: [backups]
@@ -304,17 +309,21 @@ paths:
   /backup/test-connection:
     post:
       tags: [backups]
-      summary: Real connection check through the tunnel. Shows version, TLS and privileges. Never echoes the password.
+      summary: >-
+        Real connection check through the tunnel (operator on the target's cluster). Shows version, TLS and privileges.
+        Never echoes the password. Records the target's detected_version/tls_ok and opens or resolves its tls.missing finding.
+        The cluster's agent must be connected to the replica serving the request (else error "agent_offline").
       requestBody:
         content:
           application/json:
             schema:
               type: object
-              required: [target_id, credential]
+              required: [target_id]
               properties:
                 target_id: {type: string}
                 credential: {$ref: "#/components/schemas/CredentialInput"}
-                credential_id: {type: string, description: Existing job credential (instead of credential)}
+                credential_id: {type: string, description: "Existing credential of a job on this same target (instead of credential)"}
+                engine_options: {type: object, description: Same as BackupJobInput.engine_options}
       responses:
         "200": {description: Result, content: {application/json: {schema: {$ref: "#/components/schemas/ConnectionTest"}}}}
   /backup/schedule-preview:
@@ -326,8 +335,9 @@ paths:
         - {name: count, in: query, schema: {type: integer, default: 5}}
       responses:
         "200":
-          description: Next run times or a validation error (422)
+          description: Next run times (count max 50)
           content: {application/json: {schema: {type: object, properties: {next: {type: array, items: {type: string, format: date-time}}, description: {type: string}}}}}
+        "422": {description: "Invalid cron (fields.cron) or time zone (fields.timezone)"}
 
   # ------------------------------------------------------------ vaults (M3)
   /vaults:
@@ -884,7 +894,7 @@ components:
         destination_id: {type: string}
         engine_options:
           type: object
-          description: "postgresql: {databases: [..] (empty = all), globals: true}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
+          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}
@@ -908,7 +918,7 @@ components:
         next_run_at: {type: [string, "null"], format: date-time}
         last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}]}
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
-        estimated_monthly_cost: {type: [number, "null"], description: when the cluster has an egress rate}
+        estimated_monthly_cost: {type: [number, "null"], description: "estimated_monthly_bytes / GiB x cluster egress_rate_per_gb (when set)"}
         created_at: {type: string, format: date-time}
     BackupRun:
       type: object
@@ -921,14 +931,15 @@ components:
         trigger: {type: string, enum: [schedule, manual, test]}
         status: {type: string, enum: [queued, running, succeeded, failed, missed]}
         scheduled_for: {type: [string, "null"], format: date-time}
-        tier: {type: string, enum: ["", daily, weekly, monthly]}
+        tier: {type: string, enum: ["", daily, weekly, monthly, test], description: "GFS tier = blob index tag olympos-tier (test for dry runs)"}
         started_at: {type: [string, "null"], format: date-time}
         finished_at: {type: [string, "null"], format: date-time}
         bytes: {type: integer}
         wire_bytes: {type: integer}
         blob_path: {type: string}
         sha256: {type: string}
-        error: {type: string}
+        error: {type: string, description: "Secrets scrubbed; agent_offline when the cluster's agent is offline"}
+        created_at: {type: string, format: date-time}
     ConnectionTest:
       type: object
       properties:
