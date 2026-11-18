@@ -2957,6 +2957,10 @@ label.chk {
   flex: 1 1 auto;
   min-width: 0;
 }
+.bench-checks summary > .muted {
+  flex: none;
+  white-space: nowrap;
+}
 .bench-body {
   padding: 4px 12px 12px 74px;
   display: grid;

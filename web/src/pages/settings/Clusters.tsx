@@ -5,7 +5,7 @@ import { api } from '../../api/client';
 import type { Cluster, ItemList, Provider, TransferMode } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { bytes, money, plural, shortDate } from '../../lib/format';
-import { formatLabels } from '../../lib/labels';
+import { formatLabels, userLabels } from '../../lib/labels';
 import { clustersSettingsRoute } from '../../router';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, TypeToConfirm, aria, fieldError, useNow, useToast } from '../../ui/kit';
 import { ClusterStatusBadge } from '../../ui/status';
@@ -96,7 +96,7 @@ export function ClustersSettingsPage() {
                 </button>
               ),
             },
-            { id: 'labels', header: 'Labels', className: 'wrap', cell: (c) => (Object.keys(c.labels ?? {}).length ? Object.entries(c.labels).map(([k, v]) => <Chip key={k}>{`${k}=${v}`}</Chip>) : <span className="muted">none</span>) },
+            { id: 'labels', header: 'Labels', className: 'wrap', cell: (c) => (userLabels(c.labels).length ? userLabels(c.labels).map(([k, v]) => <Chip key={k}>{`${k}=${v}`}</Chip>) : <span className="muted">none</span>) },
             {
               id: 'provider',
               header: 'Provider',

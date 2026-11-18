@@ -173,3 +173,8 @@ export function equalityTerms(selector: string): Record<string, string> | null {
   }
   return out;
 }
+
+/** Labels set by users: drops the reserved olympos.io/ keys (e.g. olympos.io/cluster), which repeat the name. */
+export function userLabels(labels: Record<string, string> | undefined | null): [string, string][] {
+  return Object.entries(labels ?? {}).filter(([k]) => !k.startsWith('olympos.io/'));
+}

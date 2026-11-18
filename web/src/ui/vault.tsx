@@ -2,6 +2,7 @@
 // change-request drawer, confirmations, approvals).
 import type { ReactNode } from 'react';
 import type { Vault } from '../api/types';
+import { userLabels } from '../lib/labels';
 import { Badge, Chip } from './kit';
 
 export function providerName(p: string | undefined): string {
@@ -71,7 +72,7 @@ export function VaultIdentity({
         )}
         {status && <VaultStatusBadge v={{ status }} />}
         {labels &&
-          Object.entries(labels).map(([k, v]) => (
+          userLabels(labels).map(([k, v]) => (
             <Chip key={k}>
               {k}={v}
             </Chip>

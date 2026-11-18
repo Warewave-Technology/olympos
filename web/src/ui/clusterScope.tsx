@@ -6,6 +6,7 @@ import { Link } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { Cluster, ItemList } from '../api/types';
+import { userLabels } from '../lib/labels';
 import { DataTable, type Column } from './DataTable';
 import { EmptyState } from './kit';
 import { ClusterStatusBadge } from './status';
@@ -96,7 +97,7 @@ export function ClusterCell({ c, name }: { c?: ClusterInfo; name: string }) {
       </div>
       <div className="cl-meta">
         <span className="muted small">{providerText(c)}</span>
-        {Object.entries(c?.labels ?? {}).map(([k, v]) => (
+        {userLabels(c?.labels).map(([k, v]) => (
           <span key={k} className="chip">
             {k}={v}
           </span>

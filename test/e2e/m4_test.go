@@ -24,6 +24,12 @@ type auditRun struct {
 		Pass           int    `json:"pass"`
 		Fail           int    `json:"fail"`
 		ControlPlaneNA bool   `json:"control_plane_na"`
+		Checks         []struct {
+			ID          string `json:"id"`
+			Status      string `json:"status"`
+			Description string `json:"description"`
+			Remediation string `json:"remediation"`
+		} `json:"checks"`
 	} `json:"bench_nodes"`
 }
 
@@ -114,10 +120,14 @@ func TestM4Audit(t *testing.T) {
 		}
 		eventually(t, 2*time.Minute, "bench capability advertised", func() (bool, string) {
 			var c struct {
-				BenchEnabled bool   `json:"bench_enabled"`
-				Status       string `json:"status"`
+				BenchEnabled bool              `json:"bench_enabled"`
+				Status       string            `json:"status"`
+				Labels       map[string]string `json:"labels"`
 			}
 			admin.must("GET", "/clusters/"+labClusterID, nil, &c, 200)
+			if c.Labels["olympos.io/cluster"] == "" {
+				t.Fatalf("reserved cluster label missing: %v", c.Labels)
+			}
 			return c.BenchEnabled && c.Status == "online", fmt.Sprintf("%+v", c)
 		})
 		r := runAudit(t, admin, auditSchedule(t, admin, "kube-bench", nil), 15*time.Minute)
@@ -130,6 +140,16 @@ func TestM4Audit(t *testing.T) {
 			}
 			if n.ControlPlaneNA {
 				t.Errorf("on-prem cluster must not be control_plane_na: %s", n.NodeName)
+			}
+			// Every result is kept with its text, so the UI can show what failed.
+			if len(n.Checks) < n.Pass+n.Fail {
+				t.Errorf("node %s: %d checks for %d pass + %d fail", n.NodeName, len(n.Checks), n.Pass, n.Fail)
+			}
+			for _, ck := range n.Checks {
+				if ck.ID == "" || ck.Description == "" || ck.Status == "" {
+					t.Errorf("node %s: incomplete check %+v", n.NodeName, ck)
+					break
+				}
 			}
 		}
 		// Jobs are cleaned up by the agent.
