@@ -202,6 +202,9 @@ func TestTunnelEchoCompressedAndUnknownTargetRejected(t *testing.T) {
 		if _, err := io.ReadFull(conn, buf); err != nil || string(buf) != string(msg) {
 			t.Fatalf("echo: %q %v", buf, err)
 		}
+		if _, port, err := net.SplitHostPort(conn.LocalAddr().String()); err != nil || port == "" {
+			t.Fatalf("tunnel LocalAddr must look like host:port, got %q", conn.LocalAddr())
+		}
 		if conn.WireBytes() == 0 {
 			t.Fatal("wire bytes not counted")
 		}

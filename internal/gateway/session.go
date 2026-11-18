@@ -301,3 +301,11 @@ type tunnelConn struct {
 }
 
 func (c *tunnelConn) WireBytes() int64 { return c.counters.Total() }
+
+// tunnelAddr stands in for a TCP address. net.Pipe reports "pipe", and some
+// drivers send the local address to the server (ClickHouse rejects one
+// without a port).
+var tunnelAddr = &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0}
+
+func (c *tunnelConn) LocalAddr() net.Addr  { return tunnelAddr }
+func (c *tunnelConn) RemoteAddr() net.Addr { return tunnelAddr }
