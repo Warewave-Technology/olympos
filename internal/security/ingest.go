@@ -18,8 +18,8 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Warewave-Technology/olympos/internal/findings"
-	"github.com/Warewave-Technology/olympos/internal/notify"
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
 

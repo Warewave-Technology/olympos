@@ -32,7 +32,9 @@ data:
   DB_HOST: orders-pg.lab.svc
   tls.key: |
 %s`, sdAWS, sdPW, indent(sdPEM, "    ")))
-	t.Cleanup(func() { _, _ = runOK(t, "kubectl", "-n", "lab", "delete", "configmap", "e2e-leaky-config", "--ignore-not-found") })
+	t.Cleanup(func() {
+		_, _ = runOK(t, "kubectl", "-n", "lab", "delete", "configmap", "e2e-leaky-config", "--ignore-not-found")
+	})
 
 	type finding struct {
 		ResourceRef string         `json:"resource_ref"`

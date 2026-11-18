@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, screen, within } from '@testing-library/react';
+import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { renderApp } from './renderApp';
 
@@ -18,8 +18,10 @@ describe('olympos-self backup', () => {
     const card = await screen.findByRole('region', { name: /Olympos database/ }, T);
     expect(within(card).getByText(/Not backed up yet/)).toBeTruthy();
     expect(within(card).getByRole('img', { name: 'Built-in job, cannot be deleted' })).toBeTruthy();
-    await user.click(within(card).getByRole('combobox', { name: 'Destination' }));
-    const first = (await screen.findAllByRole('option'))[0];
+    const picker = within(card).getByRole('combobox', { name: 'Destination' });
+    await waitFor(() => expect((picker as HTMLButtonElement).disabled).toBe(false), T); // destinations loaded
+    await user.click(picker);
+    const first = (await screen.findAllByRole('option', {}, T))[0];
     await user.click(first);
     await user.click(within(card).getByRole('button', { name: 'Back up Olympos here' }));
     expect(await within(card).findByText('Last success', {}, T)).toBeTruthy();
