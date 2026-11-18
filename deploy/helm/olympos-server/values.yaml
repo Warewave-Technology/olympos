@@ -82,6 +82,15 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 podAnnotations: {}
+# Volumes for NFS backup destinations, mounted at /var/lib/olympos/nfs/<name>.
+# Any Kubernetes volume source works, e.g.
+#   - name: backup-nas
+#     nfs: {server: nas.contoso.internal, path: /exports/olympos}
+#   - name: lab
+#     persistentVolumeClaim: {claimName: olympos-backups}
+# Retention/WORM must be enforced by the storage (Olympos can delete there).
+nfsMounts: []
+
 extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []

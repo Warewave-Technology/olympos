@@ -64,6 +64,9 @@ spec:
         {{- if eq .Values.olympos.keyVault.provider "local" }}
         - {name: localkv, mountPath: /var/lib/olympos/localkv}
         {{- end }}
+        {{- range .Values.nfsMounts }}
+        - {name: nfs-{{ .name }}, mountPath: /var/lib/olympos/nfs/{{ .name }}}
+        {{- end }}
         {{- with .Values.extraVolumeMounts }}{{ toYaml . | nindent 8 }}{{ end }}
       volumes:
       - name: config
@@ -87,6 +90,10 @@ spec:
         {{- else }}
         emptyDir: {}
         {{- end }}
+      {{- end }}
+      {{- range .Values.nfsMounts }}
+      - name: nfs-{{ .name }}
+        {{- toYaml (omit . "name") | nindent 8 }}
       {{- end }}
       {{- with .Values.extraVolumes }}{{ toYaml . | nindent 6 }}{{ end }}
       {{- with .Values.nodeSelector }}

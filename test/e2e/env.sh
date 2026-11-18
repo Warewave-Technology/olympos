@@ -114,10 +114,14 @@ Add a cluster: Dashboard > Add cluster, copy the command, then run it from the r
   kubectl config use-context kind-olympos-edge     # or kind-olympos-lab
   <paste the command>
 
-Backups: Settings > Destinations > SAS token, stored:
-  account: devstoreaccount1   container: backups
-  endpoint override: http://azurite.olympos.svc:10000/devstoreaccount1
-  SAS: $SAS
+Backup destinations (Settings > Destinations > New destination):
+- Azure Blob (Azurite): account devstoreaccount1, container backups, auth SAS token (stored),
+    endpoint override http://azurite.olympos.svc:10000/devstoreaccount1
+    SAS: $SAS
+- S3 (MinIO, writer user WITHOUT delete): endpoint override http://minio.olympos.svc:9000, region us-east-1,
+    bucket backups, path-style ON, access key id olympos-backup, secret key lab-backup-secret-key (stored)
+    (MinIO root lab-root / lab-root-password can delete: use it to see the "can delete" warning)
+- NFS: mount "lab" (a PVC standing in for an NFS export), path /var/lib/olympos/nfs/lab/olympos
 Credentials: orders-pg (lab) backup / CANARY-lab-pg-password; payments-pg (edge) backup / edge-pg-password;
              metrics-ch (lab) backup / CANARY-lab-ch-password
 

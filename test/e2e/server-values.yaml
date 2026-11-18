@@ -17,3 +17,6 @@ extraVolumes:
   configMap: {name: target-ca}
 extraVolumeMounts:
 - {name: target-ca, mountPath: /etc/olympos/target-ca, readOnly: true}
+nfsMounts:
+- name: lab
+  persistentVolumeClaim: {claimName: olympos-backups}

@@ -50,3 +50,68 @@ metadata: {name: azurite, namespace: olympos}
 spec:
   selector: {app: azurite}
   ports: [{port: 10000}]
+---
+# S3-compatible storage for the S3 destination (MinIO).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: minio, namespace: olympos}
+spec:
+  selector: {matchLabels: {app: minio}}
+  template:
+    metadata: {labels: {app: minio}}
+    spec:
+      containers:
+      - name: minio
+        image: cgr.dev/chainguard/minio:latest
+        args: [server, /data, --console-address, ":9001"]
+        env:
+        - {name: MINIO_ROOT_USER, value: lab-root}
+        - {name: MINIO_ROOT_PASSWORD, value: lab-root-password}
+        ports: [{containerPort: 9000}, {containerPort: 9001}]
+        readinessProbe: {httpGet: {path: /minio/health/ready, port: 9000}, periodSeconds: 3}
+        volumeMounts: [{name: data, mountPath: /data}]
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: minio, namespace: olympos}
+spec:
+  selector: {app: minio}
+  ports: [{name: s3, port: 9000}, {name: console, port: 9001}]
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: minio-setup, namespace: olympos}
+data:
+  # Olympos's user can write, read and tag, but not delete (SPEC §0.6).
+  olympos-writer.json: |
+    {"Version": "2012-10-17", "Statement": [
+      {"Effect": "Allow", "Action": ["s3:GetBucketLocation", "s3:ListBucket"], "Resource": ["arn:aws:s3:::backups"]},
+      {"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:PutObjectTagging", "s3:GetObjectTagging",
+        "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"], "Resource": ["arn:aws:s3:::backups/*"]}]}
+---
+apiVersion: batch/v1
+kind: Job
+metadata: {name: minio-setup, namespace: olympos}
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      # The mc image has no shell: one command per init container.
+      initContainers:
+      - {name: bucket, image: cgr.dev/chainguard/minio-client:latest, args: [mb, --ignore-existing, lab/backups], env: &mc [{name: MC_HOST_lab, value: "http://lab-root:lab-root-password@minio.olympos.svc:9000"}]}
+      - {name: policy, image: cgr.dev/chainguard/minio-client:latest, args: [admin, policy, create, lab, olympos-writer, /setup/olympos-writer.json], env: *mc, volumeMounts: [{name: setup, mountPath: /setup}]}
+      - {name: user, image: cgr.dev/chainguard/minio-client:latest, args: [admin, user, add, lab, olympos-backup, lab-backup-secret-key], env: *mc}
+      - {name: attach, image: cgr.dev/chainguard/minio-client:latest, args: [admin, policy, attach, lab, olympos-writer, --user, olympos-backup], env: *mc}
+      containers:
+      - {name: done, image: cgr.dev/chainguard/minio-client:latest, args: [ls, lab/backups], env: *mc}
+      volumes: [{name: setup, configMap: {name: minio-setup}}]
+---
+# Stands in for an NFS export in the lab (same filesystem code path).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata: {name: olympos-backups, namespace: olympos}
+spec:
+  accessModes: [ReadWriteOnce]
+  resources: {requests: {storage: 2Gi}}
