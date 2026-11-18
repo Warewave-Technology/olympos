@@ -13,6 +13,9 @@ export function focusableIn(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => !el.hasAttribute('inert') && el.getAttribute('aria-hidden') !== 'true');
 }
 
+/** Open traps, innermost last: only the top one reacts to keys and focus (nested dialogs). */
+const stack: object[] = [];
+
 /**
  * Traps Tab/Shift+Tab inside `ref`, closes on Escape, focuses the first field on open
  * (or `initialFocus`), and returns focus to the previously focused element on close.
@@ -35,9 +38,15 @@ export function useFocusTrap<T extends HTMLElement>(active: boolean, onEscape: (
       items[0] ??
       root;
     first.focus();
+    const token = {};
+    stack.push(token);
+    const top = () => stack[stack.length - 1] === token;
 
     const onKey = (e: KeyboardEvent) => {
+      if (!top()) return;
       if (e.key === 'Escape') {
+        // An open popover (Select listbox) inside the dialog closes itself first.
+        if (e.target instanceof Element && e.target.closest('[data-popover-open="true"]')) return;
         e.stopPropagation();
         e.preventDefault();
         escRef.current();
@@ -62,6 +71,7 @@ export function useFocusTrap<T extends HTMLElement>(active: boolean, onEscape: (
       }
     };
     const onFocusIn = (e: FocusEvent) => {
+      if (!top()) return;
       if (root && e.target instanceof Node && !root.contains(e.target)) {
         const items = focusableIn(root);
         (items[0] ?? root).focus();
@@ -75,6 +85,8 @@ export function useFocusTrap<T extends HTMLElement>(active: boolean, onEscape: (
       document.removeEventListener('keydown', onKey, true);
       document.removeEventListener('focusin', onFocusIn);
       document.body.style.overflow = prevOverflow;
+      const i = stack.indexOf(token);
+      if (i >= 0) stack.splice(i, 1);
       if (previous && document.contains(previous)) previous.focus();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

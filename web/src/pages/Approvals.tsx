@@ -7,7 +7,7 @@ import { useMe } from '../auth/me';
 import { approveControl, can, isSelf, rejectControl } from '../auth/permissions';
 import { dateTime, personName, relDateTime, shortId, timeLeft } from '../lib/format';
 import { approvalsRoute } from '../router';
-import { Badge, EmptyState, ErrorState, Field, FormError, Loading, QueryView, aria, fieldError, useNow, useToast } from '../ui/kit';
+import { Badge, DetailPlaceholder, EmptyState, ErrorState, Field, FormError, Loading, QueryView, aria, fieldError, useNow, useToast } from '../ui/kit';
 import { CrStatusBadge, OpBadge, PageHead, crLabel, opLabel } from '../ui/status';
 
 type View = 'waiting' | 'mine' | 'all';
@@ -51,8 +51,8 @@ export function ApprovalsPage() {
   return (
     <>
       <PageHead title="Approvals" sub="Vault changes wait here for a second person. You cannot approve a request you opened." />
-      <div className="row">
-        <aside className="card list-card" aria-label="Change requests">
+      <div className="split">
+        <aside className="card split-list" aria-label="Change requests">
           <div className="pills" role="group" aria-label="Show" style={{ padding: '4px 4px 10px' }}>
             {views.map((v) => (
               <button key={v.id} type="button" className="pill" aria-pressed={view === v.id} onClick={() => navigate({ search: { view: v.id }, replace: true })}>
@@ -98,7 +98,19 @@ export function ApprovalsPage() {
             }
           </QueryView>
         </aside>
-        <div className="grow stack">{selectedId && <CrDetail id={selectedId} key={selectedId} />}</div>
+        <div className="split-detail">
+          {selectedId ? (
+            <CrDetail id={selectedId} key={selectedId} />
+          ) : (
+            <DetailPlaceholder title={listQ.isPending ? 'Loading change requests…' : view === 'waiting' ? 'Nothing to review right now' : 'No change request selected'}>
+              {view === 'waiting'
+                ? 'When a request waits for you, its keys, operations and value fingerprints open here, with Approve & apply and Reject.'
+                : view === 'mine'
+                  ? 'Requests you open from Vaults show up in the list; pick one to follow its approval trail.'
+                  : 'Pick a request from the list to see what it changes and who decided.'}
+            </DetailPlaceholder>
+          )}
+        </div>
       </div>
     </>
   );
@@ -133,10 +145,11 @@ function CrDetail({ id }: { id: string }) {
   return (
     <>
       <section className="card pad-lg" aria-labelledby="cr-t" style={{ gap: 20 }}>
-        <div className="spread" style={{ alignItems: 'flex-start' }}>
+        <div className="card-title">
           <div>
+            <div className="eyebrow">Change request</div>
             <div className="inline">
-              <h2 id="cr-t" className="mono" style={{ margin: 0, fontSize: 18, fontWeight: 500 }}>
+              <h2 id="cr-t" className="mono">
                 {crLabel(cr)}
               </h2>
               <CrStatusBadge cr={cr} />
@@ -197,7 +210,7 @@ function CrDetail({ id }: { id: string }) {
             <tbody>
               {cr.items.map((i) => (
                 <tr key={i.id}>
-                  <td className="mono">
+                  <td className="mono wrap break">
                     {i.mount}
                     {i.path}
                   </td>
@@ -283,7 +296,7 @@ function CrDetail({ id }: { id: string }) {
       </section>
 
       <section className="card pad" aria-labelledby="trail-t">
-        <h2 id="trail-t" className="title" style={{ marginBottom: 16 }}>
+        <h2 id="trail-t" className="title">
           Trail
         </h2>
         {cr.events.length === 0 ? (

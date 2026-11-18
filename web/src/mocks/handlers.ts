@@ -1,5 +1,5 @@
 // DEV-ONLY request handlers for the VITE_MOCK fixture layer.
-import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard, DestinationInput, DestinationTest, Grant, RegistryInput, Role } from '../api/types';
+import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role } from '../api/types';
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
@@ -304,6 +304,7 @@ const routes: [string, string, Handler][] = [
 
   // -------------------------------------------------------- destinations
   ['GET', '/destinations', () => items(db.destinations)],
+  ['GET', '/destinations/mounts', () => items(localStorage.getItem('olympos.mock.noMounts') === '1' ? [] : db.destinationMounts)],
   [
     'POST',
     '/destinations/test',
@@ -319,7 +320,11 @@ const routes: [string, string, Handler][] = [
       await sleep(900);
       const d = db.destinations.find((x) => x.id === p.id);
       if (!d) return notFound();
-      const t = destTest({ ...d, sas: d.auth === 'sas_token' ? { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` } : undefined });
+      const t = destTest({
+        ...d,
+        sas: d.auth === 'sas_token' ? (d.sas_source === 'keyvault_ref' ? { source: 'keyvault_ref', ref: d.sas_ref } : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }) : undefined,
+        secret_key: d.kind === 's3' ? { source: d.secret_key_source === 'stored' ? 'stored' : 'keyvault_ref', ref: d.secret_key_ref, value: d.secret_key_source === 'stored' ? 'stored-secret' : undefined } : undefined,
+      });
       d.last_test = t;
       d.last_test_at = new Date().toISOString();
       d.last_test_ok = t.ok;
@@ -331,40 +336,49 @@ const routes: [string, string, Handler][] = [
     '/destinations',
     async (r) => {
       if (!perms().admin_global) return forbidden();
-      const v = validateDest(r.body);
+      const b: DestinationInput = { kind: 'azure_blob', ...r.body };
+      const v = validateDest(b);
       if (v) return v;
-      const t = destTest(r.body);
-      if (!t.ok) return invalid('destination test failed', { sas: t.error || 'The test write failed.' });
-      const sas = r.body.auth === 'sas_token' && r.body.sas?.value ? parseSas(r.body.sas.value) : null;
-      const d = { id: db.uuid(), kind: 'azure_blob' as const, name: r.body.name, account: r.body.account, container: r.body.container, prefix: r.body.prefix ?? '', auth: r.body.auth, sas_source: r.body.auth === 'sas_token' ? r.body.sas?.source ?? 'stored' : '', sas_ref: r.body.sas?.ref ?? '', sas_expires_at: sas?.expiresAt ?? null, sas_permissions: sas?.permissions.join('') ?? '', endpoint_override: '', last_test_at: new Date().toISOString(), last_test_ok: true, last_test: t, jobs: 0 };
-      db.destinations.push(d as never);
+      if (db.destinations.some((x) => x.name === b.name)) return { status: 409, body: { error: `a destination named ${b.name} already exists` } };
+      await sleep(700);
+      const t = destTest(b);
+      if (!t.ok) return { status: 422, body: { error: `destination test failed: ${t.error}`, fields: {}, test: t } };
+      const d = { id: db.uuid(), jobs: 0, created_at: new Date().toISOString(), ...storeDest(b, emptyDest(b.kind!)), last_test_at: new Date().toISOString(), last_test_ok: true, last_test: t } as Destination;
+      db.destinations.push(d);
       db.record('destination.created', 'destination', d.name, t.can_delete ? 'saved with warning: credential can delete' : 'test passed');
-      return ok(d, 201);
+      return ok({ ...d, warnings: destWarnings(d, t) }, 201);
     },
   ],
   [
     'PATCH',
     '/destinations/:id',
-    (r, p) => {
+    async (r, p) => {
       if (!perms().admin_global) return forbidden();
       const d = db.destinations.find((x) => x.id === p.id);
       if (!d) return notFound();
-      const v = validateDest({ ...d, ...r.body });
+      if (r.body.kind && r.body.kind !== d.kind) return invalid('invalid destination', { kind: 'The kind of a destination cannot change.' });
+      // Partial: absent fields keep their value; an absent secret keeps the stored one.
+      const merged: DestinationInput = {
+        ...d,
+        ...r.body,
+        kind: d.kind,
+        sas: r.body.sas ?? (d.auth === 'sas_token' ? (d.sas_source === 'keyvault_ref' ? { source: 'keyvault_ref', ref: d.sas_ref } : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }) : undefined),
+        secret_key: r.body.secret_key ?? (d.kind === 's3' ? { source: d.secret_key_source === 'stored' ? 'stored' : 'keyvault_ref', ref: d.secret_key_ref, value: d.secret_key_source === 'stored' ? 'stored-secret' : undefined } : undefined),
+      };
+      const v = validateDest(merged);
       if (v) return v;
-      Object.assign(d, { name: r.body.name ?? d.name, account: r.body.account ?? d.account, container: r.body.container ?? d.container, prefix: r.body.prefix ?? d.prefix, auth: r.body.auth ?? d.auth });
-      if (r.body.auth === 'managed_identity') Object.assign(d, { sas_source: '', sas_expires_at: null, sas_permissions: '' });
-      if (r.body.sas?.value) {
-        const s = parseSas(r.body.sas.value);
-        Object.assign(d, { sas_source: 'stored', sas_expires_at: s.expiresAt, sas_permissions: s.permissions.join('') });
-      }
-      if (r.body.sas?.source === 'keyvault_ref') Object.assign(d, { sas_source: 'keyvault_ref', sas_ref: r.body.sas.ref });
+      await sleep(700);
+      const t = destTest(merged);
+      if (!t.ok) return { status: 422, body: { error: `destination test failed: ${t.error}`, fields: {}, test: t } };
+      Object.assign(d, storeDest(merged, d), { last_test: t, last_test_at: new Date().toISOString(), last_test_ok: true });
       db.record('destination.updated', 'destination', d.name, 'saved');
-      return ok(d);
+      return ok({ ...d, warnings: destWarnings(d, t) });
     },
   ],
   ['DELETE', '/destinations/:id', (_r, p) => {
     const d = db.destinations.find((x) => x.id === p.id);
     if (d && d.jobs > 0) return { status: 409, body: { error: `used by ${d.jobs} backup jobs; move them to another destination first` } };
+    if (d) db.destinations.splice(db.destinations.indexOf(d), 1);
     return { status: 204 };
   }],
 
@@ -676,6 +690,7 @@ const routes: [string, string, Handler][] = [
     (r) => {
       const q = (r.query.get('q') ?? '').toLowerCase();
       const sev = r.query.get('severity');
+      if (noImages()) return items([]);
       return items(db.images.filter((i) => (!q || i.repo.toLowerCase().includes(q) || i.digest.includes(q)) && (!sev || (sev === 'critical' ? i.critical > 0 : i.high > 0))));
     },
   ],
@@ -693,7 +708,14 @@ const routes: [string, string, Handler][] = [
       });
     },
   ],
-  ['POST', '/images/scan', () => ({ status: 202 })],
+  [
+    'POST',
+    '/images/scan',
+    () =>
+      noImages()
+        ? { status: 409, body: { error: 'No running images to scan yet. Add a cluster first; its agent reports running images within a minute.' } }
+        : { status: 202 },
+  ],
   ['POST', '/images/:digest/scan', () => ({ status: 202 })],
   ['GET', '/security/kyverno', () => items(db.kyverno)],
   ['GET', '/security/netpol', () => items(db.netpol)],
@@ -752,17 +774,115 @@ function decide(id: string, kind: 'approve' | 'reject', comment: string): MockRe
   return ok(withPerms(c));
 }
 
+/** Empty images list + 409 on Scan now: localStorage.setItem('olympos.mock.noImages', '1'). */
+function noImages() {
+  return localStorage.getItem('olympos.mock.noImages') === '1';
+}
+
+function validUrl(u: string | undefined): boolean {
+  if (!u) return true;
+  try {
+    const x = new URL(u);
+    return x.protocol === 'http:' || x.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
 function validateDest(b: DestinationInput): MockRes | null {
   const f: Record<string, string> = {};
-  if (!b.name) f.name = 'Name is required.';
-  if (!/^[a-z0-9]{3,24}$/.test(b.account ?? '')) f.account = 'Storage account names are 3–24 lowercase letters and digits.';
-  if (!b.container) f.container = 'Container is required.';
+  if (!b.name?.trim()) f.name = 'Name is required.';
+  if (!validUrl(b.endpoint_override)) f.endpoint_override = 'Use an http:// or https:// URL.';
+  if (b.kind === 's3') {
+    if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(b.bucket ?? '')) f.bucket = 'Bucket names are 3–63 lowercase letters, digits, dots and dashes.';
+    if (!b.access_key_id?.trim()) f.access_key_id = 'Access key ID is required.';
+    if (!b.secret_key || (b.secret_key.source === 'keyvault_ref' ? !b.secret_key.ref : !b.secret_key.value)) f.secret_key = b.secret_key?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the secret key.';
+  } else if (b.kind === 'nfs') {
+    const m = db.destinationMounts.find((x) => b.path === x.path || (b.path ?? '').startsWith(x.path + '/'));
+    if (!m) f.path = 'The path must be below one of the server mounts.';
+    else if (!m.writable) f.path = `Mount ${m.name} is read-only.`;
+    else if ((b.path ?? '').split('/').includes('..')) f.path = 'The path must stay below the mount.';
+  } else {
+    if (!/^[a-z0-9]{3,24}$/.test(b.account ?? '')) f.account = 'Storage account names are 3–24 lowercase letters and digits.';
+    if (!b.container) f.container = 'Container is required.';
+    if (b.auth === 'sas_token' && (!b.sas || (b.sas.source === 'keyvault_ref' ? !b.sas.ref : !b.sas.value))) f.sas = b.sas?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the SAS token.';
+  }
   return Object.keys(f).length ? invalid('invalid destination', f) : null;
 }
 
+function emptyDest(kind: Destination['kind']): Destination {
+  return { id: '', name: '', kind, prefix: '', endpoint_override: '', auth: 'none', account: '', container: '', sas_source: '', sas_ref: '', sas_expires_at: null, sas_permissions: '', last_test_at: null, last_test_ok: null, jobs: 0 };
+}
+
+/** What the server would persist: non-secret fields plus secret metadata, never the secret. */
+function storeDest(b: DestinationInput, base: Destination): Omit<Destination, 'id' | 'jobs' | 'last_test_at' | 'last_test_ok'> {
+  const out = { ...base, name: b.name ?? base.name, prefix: b.prefix ?? base.prefix, endpoint_override: b.endpoint_override ?? base.endpoint_override };
+  if (base.kind === 's3') {
+    return { ...out, auth: 'access_key', bucket: b.bucket, region: b.region || 'us-east-1', path_style: !!b.path_style, access_key_id: b.access_key_id, secret_key_source: b.secret_key?.source ?? base.secret_key_source ?? '', secret_key_ref: b.secret_key?.source === 'keyvault_ref' ? b.secret_key.ref : '' };
+  }
+  if (base.kind === 'nfs') return { ...out, auth: 'none', path: b.path };
+  const sas = b.auth === 'sas_token' && b.sas?.source === 'stored' && b.sas.value ? parseSas(b.sas.value) : null;
+  return {
+    ...out,
+    account: b.account ?? base.account,
+    container: b.container ?? base.container,
+    auth: b.auth === 'sas_token' ? 'sas_token' : 'managed_identity',
+    sas_source: b.auth === 'sas_token' ? (b.sas?.source ?? 'stored') : '',
+    sas_ref: b.auth === 'sas_token' && b.sas?.source === 'keyvault_ref' ? (b.sas.ref ?? '') : '',
+    sas_expires_at: b.auth !== 'sas_token' ? null : sas ? sas.expiresAt : b.sas?.source === 'keyvault_ref' ? new Date(Date.now() + 120 * 86400_000).toISOString() : base.sas_expires_at,
+    sas_permissions: b.auth !== 'sas_token' ? '' : sas ? sas.permissions.join('') : b.sas?.source === 'keyvault_ref' ? 'rcwt' : base.sas_permissions,
+  };
+}
+
+function destWarnings(d: Destination, t: DestinationTest): string[] {
+  const w: string[] = [];
+  if (d.kind === 'nfs') w.push('Olympos can delete files on this NFS path. Protect backups with storage-side snapshots or WORM; retention cannot be enforced by Olympos.');
+  else if (t.can_delete) w.push('This credential can delete backups. Remove the delete permission; the destination stays flagged until then.');
+  if (t.sas?.scope === 'account') w.push('This is an account SAS: it needs shared key access on the storage account.');
+  const days = d.sas_expires_at ? Math.floor((new Date(d.sas_expires_at).getTime() - Date.now()) / 86400_000) : null;
+  if (d.kind === 'azure_blob' && d.auth === 'sas_token' && days !== null && days < 14) w.push(`The SAS token expires in ${days} days.`);
+  return w;
+}
+
 function destTest(b: DestinationInput): DestinationTest {
+  const probe = `${b.prefix ?? ''}.olympos-probe/${db.uuid()}`;
+  if (b.kind === 's3') {
+    const host = b.endpoint_override ? new URL(b.endpoint_override).host : `s3.${b.region || 'us-east-1'}.amazonaws.com`;
+    if (/unreachable|invalid/.test(host)) {
+      return { ok: false, can_delete: false, error: `could not reach ${host}: connection refused`, steps: [{ name: 'endpoint', ok: false, detail: `dial tcp ${host}: connection refused` }], sas: null, probe_path: probe };
+    }
+    const canDelete = /admin|root/i.test(b.access_key_id ?? '');
+    return {
+      ok: true,
+      can_delete: canDelete,
+      probe_path: probe,
+      steps: [
+        { name: 'endpoint', ok: true, detail: `${host}${b.path_style ? ' · path-style' : ''}` },
+        { name: 'write', ok: true, detail: 'PutObject ok' },
+        { name: 'read', ok: true, detail: 'GetObject ok, sha256 matches' },
+        { name: 'tag', ok: true, detail: 'PutObjectTagging ok' },
+        { name: 'delete_refused', ok: !canDelete, detail: canDelete ? 'DeleteObject SUCCEEDED: this key can delete backups' : 'DeleteObject returned 403 AccessDenied' },
+      ],
+      sas: null,
+    };
+  }
+  if (b.kind === 'nfs') {
+    return {
+      ok: true,
+      can_delete: true,
+      probe_path: `${b.path}/${probe}`,
+      steps: [
+        { name: 'path', ok: true, detail: `${b.path} exists, writable` },
+        { name: 'write', ok: true, detail: 'probe file written' },
+        { name: 'read', ok: true, detail: 'read back, sha256 matches' },
+        { name: 'delete_refused', ok: false, detail: 'the server process can delete files here' },
+      ],
+      sas: null,
+    };
+  }
+  const endpointStep = b.endpoint_override ? [{ name: 'endpoint' as const, ok: true, detail: new URL(b.endpoint_override).host }] : [];
   if (b.auth !== 'sas_token') {
-    return { ok: true, can_delete: false, steps: [{ name: 'write', ok: true, detail: 'probe blob written' }, { name: 'read', ok: true, detail: 'read back, sha256 matches' }, { name: 'tag', ok: true, detail: 'olympos-tier tag set' }, { name: 'delete_refused', ok: true, detail: 'delete returned 403 AuthorizationPermissionMismatch' }], sas: null };
+    return { ok: true, can_delete: false, probe_path: probe, steps: [...endpointStep, { name: 'write', ok: true, detail: 'probe blob written' }, { name: 'read', ok: true, detail: 'read back, sha256 matches' }, { name: 'tag', ok: true, detail: 'olympos-tier tag set' }, { name: 'delete_refused', ok: true, detail: 'delete returned 403 AuthorizationPermissionMismatch' }], sas: null };
   }
   if (b.sas?.source === 'keyvault_ref') {
     return { ok: true, can_delete: false, steps: [{ name: 'sas_permissions', ok: true, detail: 'r c w t' }, { name: 'sas_expiry', ok: true, detail: 'expires in 120 days' }, { name: 'write', ok: true, detail: '' }, { name: 'read', ok: true, detail: '' }, { name: 'tag', ok: true, detail: '' }, { name: 'delete_refused', ok: true, detail: '' }], sas: { permissions: 'rcwt', expires_at: new Date(Date.now() + 120 * 86400_000).toISOString(), missing: [], extra: [], scope: 'container' } };

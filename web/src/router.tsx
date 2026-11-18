@@ -11,6 +11,7 @@ import { AuditPage } from './pages/Audit';
 import { ActivityPage } from './pages/Activity';
 import { SecurityPage } from './pages/Security';
 import { SettingsAccessPage } from './pages/settings/Access';
+import { SettingsNotificationsPage } from './pages/settings/Notifications';
 import { DestinationsPage } from './pages/settings/Destinations';
 import { RegistriesPage } from './pages/settings/Registries';
 import { ClustersSettingsPage } from './pages/settings/Clusters';
@@ -96,6 +97,7 @@ export const securityRoute = createRoute({
 });
 
 export const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings', component: SettingsAccessPage });
+export const notificationsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings/notifications', component: SettingsNotificationsPage });
 export const destinationsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/settings/destinations',
@@ -122,6 +124,7 @@ const routeTree = rootRoute.addChildren([
     activityRoute,
     securityRoute,
     settingsRoute,
+    notificationsRoute,
     destinationsRoute,
     registriesRoute,
     clustersSettingsRoute,

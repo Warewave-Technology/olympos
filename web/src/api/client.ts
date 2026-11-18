@@ -11,11 +11,14 @@ export const CSRF_HEADER = 'X-CSRF-Token';
 export class ApiError extends Error {
   readonly status: number;
   readonly fields: Record<string, string>;
-  constructor(status: number, message: string, fields: Record<string, string> = {}) {
+  /** Parsed JSON error body (e.g. a 422 DestinationTestFailed carries `test`). */
+  readonly body: unknown;
+  constructor(status: number, message: string, fields: Record<string, string> = {}, body?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.fields = fields;
+    this.body = body;
   }
   get isForbidden() {
     return this.status === 403;
@@ -116,7 +119,7 @@ export async function request<T>(path: string, opts: RequestOptions = {}): Promi
   }
   if (!res.ok) {
     const d = (data ?? {}) as { error?: string; fields?: Record<string, string> };
-    throw new ApiError(res.status, d.error || defaultMessage(res.status), d.fields ?? {});
+    throw new ApiError(res.status, d.error || defaultMessage(res.status), d.fields ?? {}, data);
   }
   return data as T;
 }

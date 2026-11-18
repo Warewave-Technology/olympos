@@ -5,10 +5,12 @@ import { api } from '../../api/client';
 import type { Cluster, ItemList, Provider, TransferMode } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { bytes, money, plural, shortDate } from '../../lib/format';
-import { formatLabels, parseLabels } from '../../lib/sas';
+import { formatLabels } from '../../lib/labels';
 import { clustersSettingsRoute } from '../../router';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, QueryView, TypeToConfirm, aria, fieldError, useNow, useToast } from '../../ui/kit';
 import { ClusterStatusBadge } from '../../ui/status';
+import { Select } from '../../ui/Select';
+import { TagInput } from '../../ui/TagInput';
 import { AddClusterDialog } from '../AddClusterDialog';
 import { SettingsLayout } from './SettingsLayout';
 
@@ -105,7 +107,8 @@ export function ClustersSettingsPage() {
 function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const [labels, setLabels] = useState(formatLabels(c.labels));
+  const [labels, setLabels] = useState<Record<string, string>>({ ...(c.labels ?? {}) });
+  const [labelDraftErr, setLabelDraftErr] = useState<string | null>(null);
   const [override, setOverride] = useState(c.provider_override);
   const [mode, setMode] = useState<TransferMode>(c.transfer_mode);
   const [rate, setRate] = useState(c.egress_rate_per_gb != null ? String(c.egress_rate_per_gb) : '');
@@ -136,14 +139,13 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    const pl = parseLabels(labels);
-    setLabelErr(pl.error ?? undefined);
+    setLabelErr(labelDraftErr ? 'Fix or remove the label you are typing.' : undefined);
     const n = rate.trim() === '' ? null : Number(rate.replace(/[^0-9.]/g, ''));
     const badRate = n !== null && (Number.isNaN(n) || n < 0);
     setRateErr(badRate ? 'Enter a number such as 0.09, or leave empty.' : undefined);
-    if (pl.error || badRate) return;
+    if (labelDraftErr || badRate) return;
     save.mutate({
-      labels: pl.labels,
+      labels,
       provider_override: override,
       transfer_mode: mode,
       ...(n === null ? { clear_egress_rate: true } : { egress_rate_per_gb: n }),
@@ -170,13 +172,13 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
   if (!canAdmin) {
     return (
       <section className="card pad-lg" aria-labelledby="cs-t">
-        <div>
-          <div className="muted small">Cluster settings</div>
-          <h2 id="cs-t" className="mono" style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 500 }}>
-            {c.name}
-          </h2>
-          <div className="muted small" style={{ marginTop: 4 }}>
-            {desc}
+        <div className="card-title">
+          <div>
+            <div className="eyebrow">Cluster settings</div>
+            <h2 id="cs-t" className="mono">
+              {c.name}
+            </h2>
+            <div className="card-desc">{desc}</div>
           </div>
         </div>
         <dl className="dl">
@@ -198,13 +200,13 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
 
   return (
     <section className="card pad-lg" aria-labelledby="cs-t" style={{ gap: 20 }}>
-      <div>
-        <div className="muted small">Cluster settings</div>
-        <h2 id="cs-t" className="mono" style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 500 }}>
-          {c.name}
-        </h2>
-        <div className="muted small" style={{ marginTop: 4 }}>
-          {desc}
+      <div className="card-title">
+        <div>
+          <div className="eyebrow">Cluster settings</div>
+          <h2 id="cs-t" className="mono">
+            {c.name}
+          </h2>
+          <div className="card-desc">{desc}</div>
         </div>
       </div>
       {revoked ? (
@@ -212,18 +214,16 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
       ) : (
         <form onSubmit={submit} className="stack" noValidate>
           <div className="grid-2">
-            <Field label="Labels" htmlFor="cs-labels" error={labelErr ?? fieldError(save.error, 'labels')} hint="key=value, comma separated">
-              <input className="in mono" {...aria('cs-labels', labelErr ?? fieldError(save.error, 'labels'), true)} value={labels} onChange={(e) => setLabels(e.target.value)} spellCheck={false} />
+            <Field label="Labels" htmlFor="cs-labels" error={labelErr ?? fieldError(save.error, 'labels')} hint="Type key=value and press Enter; Backspace removes the last one.">
+              <TagInput {...aria('cs-labels', labelErr ?? fieldError(save.error, 'labels'), true)} value={labels} onChange={setLabels} onDraftError={setLabelDraftErr} />
             </Field>
             <Field label="Provider" htmlFor="cs-prov" error={fieldError(save.error, 'provider_override')}>
-              <select id="cs-prov" className="in" value={override} onChange={(e) => setOverride(e.target.value)}>
-                <option value="">Detected: {detected} (from providerID)</option>
-                {PROVIDERS.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    Override: {p.label}
-                  </option>
-                ))}
-              </select>
+              <Select
+                id="cs-prov"
+                value={override}
+                onChange={setOverride}
+                options={[{ value: '', label: `Detected: ${detected}`, hint: 'from the nodes’ providerID' }, ...PROVIDERS.map((p) => ({ value: p.id as string, label: `Override: ${p.label}` }))]}
+              />
             </Field>
           </div>
           <fieldset className="opts">

@@ -10,12 +10,14 @@ import { backupWizardRoute } from '../router';
 import { CheckIcon } from '../ui/icons';
 import { Badge, EmptyState, ErrorState, Field, FormError, Loading, Spinner, aria, fieldError, useAction, useToast } from '../ui/kit';
 import { PageHead, RunBadge } from '../ui/status';
+import { KindBadge, authLabel, destLocation } from '../ui/destinations';
+import { Select } from '../ui/Select';
 
 type Step = 1 | 2 | 3 | 4;
 const STEPS: { n: Step; name: string; hint: string }[] = [
   { n: 1, name: 'Target', hint: '' },
   { n: 2, name: 'Credentials', hint: 'Where the password comes from' },
-  { n: 3, name: 'Destination & schedule', hint: 'Blob, cron, retention' },
+  { n: 3, name: 'Destination & schedule', hint: 'Storage, cron, retention' },
   { n: 4, name: 'Review & test run', hint: 'Dry run before enabling' },
 ];
 
@@ -323,6 +325,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   ].join('\n');
   const major = (target.detected_version || '').split('.')[0];
   const tzList = useMemo(() => timeZones(), []);
+  const tzOptions = useMemo(() => tzList.map((z) => ({ value: z, label: `${z} (${tzOffsetLabel(z)})`, text: `${z} ${tzOffsetLabel(z)}` })), [tzList]);
   const nextList = previewQ.data?.next ?? (previewQ.isError ? localNext : []);
 
   return (
@@ -340,7 +343,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
           </>
         }
       />
-      <div className="row" style={{ gap: 24 }}>
+      <div className="wizard">
         <ol aria-label="Steps" className="card steps">
           {STEPS.map((s) => {
             const done = s.n < step || (s.n <= maxStep && s.n !== step && s.n < maxStep);
@@ -368,7 +371,10 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
         </ol>
 
         <section className="card pad-xl wizard-body" aria-labelledby="step-t">
-          <div>
+          <div className="card-title" style={{ display: 'block' }}>
+            <div className="eyebrow">
+              Step {step} of {STEPS.length}
+            </div>
             <h2 className="section-title" id="step-t" ref={headingRef} tabIndex={-1}>
               {STEPS[step - 1].name}
             </h2>
@@ -576,14 +582,19 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                 )}
                 {destQ.data?.items.map((d) => {
                   const days = daysUntil(d.sas_expires_at);
+                  const sas = d.kind === 'azure_blob' && d.auth === 'sas_token';
                   return (
                     <label className="opt" key={d.id}>
                       <input type="radio" name="dst" checked={f.destinationId === d.id} onChange={() => set('destinationId', d.id)} />
-                      <span>
-                        <span className="t1 mono">{d.name}</span>
+                      <span style={{ minWidth: 0 }}>
+                        <span className="inline-sm">
+                          <span className="t1 mono">{d.name}</span>
+                          <KindBadge kind={d.kind} />
+                        </span>
                         <span className="t2">
-                          {d.auth === 'managed_identity' ? 'Managed Identity' : 'SAS token'} · <span className="mono">{d.account}</span>
-                          {d.auth === 'sas_token' && days !== null ? (days < 0 ? ' · SAS expired' : ` · expires in ${days} days`) : ''}
+                          <span className="mono">{destLocation(d).where}</span> · {authLabel(d)}
+                          {sas && days !== null ? (days < 0 ? ' · SAS expired' : ` · expires in ${days} days`) : ''}
+                          {d.kind === 'nfs' ? ' · retention must be enforced by the storage' : ''}
                         </span>
                       </span>
                     </label>
@@ -596,10 +607,10 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                 </div>
               )}
 
-              <div>
-                <div className="lbl" id="w-sched-l">
-                  Schedule
-                </div>
+              <div className="form-cols">
+              <div className="form-section">
+                <h3 id="w-sched-l">Schedule</h3>
+                <div>
                 <div className="pills" role="group" aria-labelledby="w-sched-l" style={{ marginBottom: 12 }}>
                   {CRON_PRESETS.map((p) => (
                     <button
@@ -628,13 +639,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     />
                   </Field>
                   <Field label="Timezone" htmlFor="w-tz">
-                    <select className="in" id="w-tz" value={f.timezone} onChange={(e) => set('timezone', e.target.value)}>
-                      {tzList.map((z) => (
-                        <option key={z} value={z}>
-                          {z} ({tzOffsetLabel(z)})
-                        </option>
-                      ))}
-                    </select>
+                    <Select id="w-tz" searchable searchLabel="Filter time zones" value={f.timezone} onChange={(v) => set('timezone', v)} options={tzOptions} />
                   </Field>
                 </div>
                 <div className="muted small" style={{ marginTop: 8 }} aria-live="polite">
@@ -651,10 +656,18 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     'This schedule never runs.'
                   )}
                 </div>
+                </div>
               </div>
 
-              <div>
-                <div className="lbl">Retention (enforced by Blob lifecycle rules via tags)</div>
+              <div className="form-section">
+                <h3>Retention &amp; notifications</h3>
+                <p className="muted small" style={{ margin: 0 }}>
+                  {dest?.kind === 'nfs'
+                    ? 'Kept per tier (GFS). On NFS the storage must protect old backups; Olympos can delete there.'
+                    : dest?.kind === 's3'
+                      ? 'Kept per tier (GFS), enforced by bucket lifecycle rules via object tags.'
+                      : 'Kept per tier (GFS), enforced by Blob lifecycle rules via index tags.'}
+                </p>
                 <div className="grid-3">
                   <Field label="Daily" htmlFor="w-rd" error={fe('daily')}>
                     <input className="in" inputMode="numeric" {...aria('w-rd', fe('daily'))} value={f.daily} onChange={(e) => set('daily', e.target.value)} />
@@ -666,23 +679,22 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     <input className="in" inputMode="numeric" {...aria('w-rm', fe('monthly'))} value={f.monthly} onChange={(e) => set('monthly', e.target.value)} />
                   </Field>
                 </div>
-              </div>
-
-              <div className="grid-2">
                 <Field label="Notify" htmlFor="w-nc" hint={chanQ.isError ? 'Channels could not be loaded; you can set this later.' : undefined}>
-                  <select className="in" {...aria('w-nc', undefined, chanQ.isError)} value={f.notifyChannelId} onChange={(e) => set('notifyChannelId', e.target.value)}>
-                    <option value="">Default routing (Settings › Notifications)</option>
-                    {chanQ.data?.items.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} · on failure and missed run
-                      </option>
-                    ))}
-                  </select>
+                  <Select
+                    {...aria('w-nc', undefined, chanQ.isError)}
+                    value={f.notifyChannelId}
+                    onChange={(v) => set('notifyChannelId', v)}
+                    options={[
+                      { value: '', label: 'Default routing', hint: 'Settings › Notifications' },
+                      ...(chanQ.data?.items ?? []).map((c) => ({ value: c.id, label: c.name, hint: 'on failure and missed run' })),
+                    ]}
+                  />
                 </Field>
-                <label className="opt" style={{ alignSelf: 'end' }}>
+                <label className="opt">
                   <input type="checkbox" checked={f.notifyOnSuccess} onChange={(e) => set('notifyOnSuccess', e.target.checked)} />
                   <span>Also notify on success</span>
                 </label>
+              </div>
               </div>
 
               <div className="foot-actions">

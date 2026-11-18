@@ -70,6 +70,24 @@ export const IconClock = (p: P) => (
   </Svg>
 );
 
+export const IconChevronDown = (p: P) => (
+  <Svg {...p}>
+    <path d="M6 9l6 6 6-6" />
+  </Svg>
+);
+export const IconSearch = (p: P) => (
+  <Svg {...p}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="M20 20l-3.5-3.5" />
+  </Svg>
+);
+export const IconInbox = (p: P) => (
+  <Svg {...p}>
+    <path d="M3 13l3-8h12l3 8" />
+    <path d="M3 13v6h18v-6h-6l-1.5 2h-3L9 13z" />
+  </Svg>
+);
+
 export function IconMicrosoft(p: SVGProps<SVGSVGElement>) {
   return (
     <svg width="18" height="18" viewBox="0 0 21 21" aria-hidden="true" focusable="false" {...p}>

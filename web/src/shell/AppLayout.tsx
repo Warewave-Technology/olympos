@@ -134,7 +134,9 @@ export function AppLayout() {
           </div>
         </nav>
         <main id="main" className="main" tabIndex={-1}>
-          <Outlet />
+          <div className="page">
+            <Outlet />
+          </div>
         </main>
       </div>
     </MeProvider>

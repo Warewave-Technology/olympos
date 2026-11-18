@@ -8,6 +8,7 @@ import { ago, age, engineLabel, shortDate } from '../lib/format';
 import { vaultsRoute } from '../router';
 import { Badge, EmptyState, ErrorState, Loading, QueryView, SecretValue, useToast } from '../ui/kit';
 import { PageHead } from '../ui/status';
+import { Select } from '../ui/Select';
 import { ChangeRequestDrawer, DeleteDestroyDialog, VaultConfigureDialog } from './VaultDialogs';
 
 function vaultStatus(v: Vault) {
@@ -99,8 +100,8 @@ export function VaultsPage() {
         </section>
       )}
       {vault && (
-        <div className="row">
-          <aside className="card list-card" aria-label="Vault instances">
+        <div className="split">
+          <aside className="card split-list" aria-label="Vault instances">
             <div className="eyebrow">Instances</div>
             {vaults.map((v) => (
               <button key={v.id} type="button" className="li" aria-current={v.id === vault.id} onClick={() => select({ vault: v.id, mount: undefined, path: undefined })}>
@@ -124,16 +125,10 @@ export function VaultsPage() {
                 <div className="divider" />
                 {v2.length > 1 && (
                   <div style={{ padding: '0 8px 8px' }}>
-                    <label className="lbl" htmlFor="v-mount">
+                    <label className="lbl" htmlFor="v-mount" id="v-mount-label">
                       Mount
                     </label>
-                    <select id="v-mount" className="in mono" value={mount} onChange={(e) => select({ mount: e.target.value, path: undefined })}>
-                      {v2.map((m) => (
-                        <option key={m.path} value={m.path}>
-                          {m.path}
-                        </option>
-                      ))}
-                    </select>
+                    <Select id="v-mount" mono value={mount ?? ''} onChange={(v) => select({ mount: v, path: undefined })} options={v2.map((m) => ({ value: m.path, label: m.path }))} />
                   </div>
                 )}
                 <div className="eyebrow" style={{ padding: '0 8px 6px' }}>
@@ -176,14 +171,16 @@ export function VaultsPage() {
             )}
           </aside>
 
-          <div className="grow stack">
+          <div className="split-detail">
             {vault.status !== 'configured' ? (
               <section className="card pad-lg">
-                <div>
+                <div className="card-title">
+                  <div>
                   <div className="eyebrow">{vault.status === 'discovered' ? 'Discovered' : vault.status === 'error' ? 'Error' : 'Gone'}</div>
-                  <h2 className="section-title mono" style={{ marginTop: 6, fontSize: 16 }}>
+                  <h2 className="mono">
                     {vault.target.service} · {vault.target.cluster_name}
                   </h2>
+                  </div>
                 </div>
                 {vault.status === 'discovered' && (
                   <p className="muted" style={{ margin: 0 }}>
@@ -272,7 +269,7 @@ function SecretPanel({
       <section className="card" aria-labelledby="sec-t">
         <div className="card-head">
           <div>
-            <h2 id="sec-t" className="mono" style={{ fontWeight: 500 }}>
+            <h2 id="sec-t" className="mono">
               {mount}
               {path}
             </h2>

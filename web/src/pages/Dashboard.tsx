@@ -8,6 +8,7 @@ import { age, ibytes, plural, vcpu } from '../lib/format';
 import { dashboardRoute } from '../router';
 import { Badge, EmptyState, ErrorState, Loading, useNow } from '../ui/kit';
 import { SpaLink } from '../ui/SpaLink';
+import { Select } from '../ui/Select';
 import { ClusterStatusBadge, PageHead } from '../ui/status';
 import { AddClusterDialog } from './AddClusterDialog';
 
@@ -180,9 +181,9 @@ export function DashboardPage() {
                 </div>
               </section>
 
-              <section className="row gap-sm">
-                <div className="card pad half">
-                  <h2 className="title" style={{ marginBottom: 16 }}>
+              <section className="cols-2">
+                <div className="card pad">
+                  <h2 className="title">
                     Version matrix
                   </h2>
                   {matrix.length === 0 ? (
@@ -216,8 +217,8 @@ export function DashboardPage() {
                   )}
                 </div>
 
-                <div className="card pad half">
-                  <h2 className="title" style={{ marginBottom: 16 }}>
+                <div className="card pad">
+                  <h2 className="title">
                     Where clusters run
                   </h2>
                   <div className="table-wrap">
@@ -254,28 +255,8 @@ export function DashboardPage() {
                         Filter: {search.filter === 'eol' ? 'end of life' : search.filter} ✕
                       </button>
                     )}
-                    <label className="sr-only" htmlFor="f-prov">
-                      Provider
-                    </label>
-                    <select id="f-prov" className="in" style={{ width: 'auto' }} value={prov} onChange={(e) => setSearch({ provider: e.target.value || undefined })}>
-                      <option value="">All providers</option>
-                      {providers.map(([p, l]) => (
-                        <option key={p} value={p}>
-                          {l}
-                        </option>
-                      ))}
-                    </select>
-                    <label className="sr-only" htmlFor="f-ver">
-                      Version
-                    </label>
-                    <select id="f-ver" className="in" style={{ width: 'auto' }} value={ver} onChange={(e) => setSearch({ version: e.target.value || undefined })}>
-                      <option value="">All versions</option>
-                      {versions.map((v) => (
-                        <option key={v} value={v}>
-                          v{v}
-                        </option>
-                      ))}
-                    </select>
+                    <Select id="f-prov" inline size="sm" aria-label="Provider" value={prov} onChange={(v) => setSearch({ provider: v || undefined })} options={[{ value: '', label: 'All providers' }, ...providers.map(([p, l]) => ({ value: p, label: l }))]} />
+                    <Select id="f-ver" inline size="sm" aria-label="Kubernetes version" value={ver} onChange={(v) => setSearch({ version: v || undefined })} options={[{ value: '', label: 'All versions' }, ...versions.map((v) => ({ value: v, label: `v${v}` }))]} />
                   </div>
                 </div>
                 <div className="table-wrap">

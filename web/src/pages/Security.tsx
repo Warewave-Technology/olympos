@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { api, errorMessage } from '../api/client';
+import { ApiError, api, errorMessage } from '../api/client';
 import type { Image, ImageDetail, ItemList, KyvernoPolicy, NetpolNamespace } from '../api/types';
 import { useCan } from '../auth/me';
 import { age, plural, shortDigest } from '../lib/format';
 import { securityRoute } from '../router';
-import { Badge, EmptyState, Modal, QueryView, Tabs, useToast } from '../ui/kit';
+import { Badge, EmptyState, Modal, QueryView, Tabs, sentence, useToast } from '../ui/kit';
 import { PageHead, SeverityBadge } from '../ui/status';
 
 type Tab = 'images' | 'kyverno' | 'netpol';
@@ -31,6 +31,7 @@ export function SecurityPage() {
   const { tab = 'images', digest } = securityRoute.useSearch();
   const navigate = useNavigate({ from: '/security' });
   const canOperate = useCan('operate');
+  const canAddCluster = useCan('admin_global');
   const qc = useQueryClient();
   const toast = useToast();
   const [q, setQ] = useState('');
@@ -39,13 +40,21 @@ export function SecurityPage() {
   const allImagesQ = useQuery({ queryKey: ['images', {}], queryFn: () => api.get<ItemList<Image>>('/images') });
   const kyQ = useQuery({ queryKey: ['kyverno'], queryFn: () => api.get<ItemList<KyvernoPolicy>>('/security/kyverno') });
   const npQ = useQuery({ queryKey: ['netpol'], queryFn: () => api.get<ItemList<NetpolNamespace>>('/security/netpol') });
+  const [scanWarning, setScanWarning] = useState<string | null>(null);
   const scan = useMutation({
     mutationFn: () => api.post('/images/scan'),
+    onMutate: () => setScanWarning(null),
     onSuccess: () => {
       toast('Scan queued for all running images.');
       setTimeout(() => void qc.invalidateQueries({ queryKey: ['images'] }), 2000);
     },
-    onError: (e) => toast(`Could not queue the scan: ${errorMessage(e)}`, 'crit'),
+    onError: (e) => {
+      // 409: nothing to scan yet (no cluster reports running images). Not a failure: say what to do.
+      if (e instanceof ApiError && e.status === 409) {
+        setScanWarning(sentence(e.message));
+        void qc.invalidateQueries({ queryKey: ['images'] });
+      } else toast(`Could not queue the scan: ${errorMessage(e)}`, 'crit');
+    },
   });
 
   const all = allImagesQ.data?.items ?? [];
@@ -56,6 +65,8 @@ export function SecurityPage() {
   const workloads = all.reduce((s, i) => s + i.workloads, 0);
   const kyFail = (kyQ.data?.items ?? []).reduce((s, p) => s + p.fail_count, 0);
   const noDeny = (npQ.data?.items ?? []).filter((n) => !n.default_deny && !n.excluded);
+  // Permission-independent state: nothing runs yet, so the button is disabled with the reason shown.
+  const nothingToScan = !!allImagesQ.data && all.length === 0;
 
   return (
     <>
@@ -64,12 +75,37 @@ export function SecurityPage() {
         sub={`Images are deduplicated by digest across clusters${lastScan ? ` · last scan ${age(lastScan)} ago` : ''}`}
         actions={
           canOperate && (
-            <button type="button" className="btn" onClick={() => scan.mutate()} disabled={scan.isPending}>
-              Scan now
-            </button>
+            <>
+              {nothingToScan && (
+                <span className="muted small" id="scan-why">
+                  No running images yet · add a cluster first
+                </span>
+              )}
+              <button type="button" className="btn" onClick={() => scan.mutate()} disabled={scan.isPending || nothingToScan} aria-describedby={nothingToScan ? 'scan-why' : undefined}>
+                {scan.isPending ? 'Queueing…' : 'Scan now'}
+              </button>
+            </>
           )
         }
       />
+      {scanWarning && (
+        <div className="note warn spread" role="alert">
+          <span>
+            <b>Nothing was scanned.</b> {scanWarning}
+            {canAddCluster && (
+              <>
+                {' '}
+                <Link to="/" search={{ add: true }}>
+                  Add a cluster
+                </Link>
+              </>
+            )}
+          </span>
+          <button type="button" className="btn sm" onClick={() => setScanWarning(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
       <section className="stats four" aria-label="Security totals">
         <div className="card stat">
           <div className="k">Unique images</div>
@@ -186,14 +222,14 @@ export function SecurityPage() {
               Registry credentials are server objects (<Link to="/settings/registries">Settings › Registries</Link>). The agent never reads imagePullSecrets.
             </div>
           </section>
-          <div className="row gap-sm">
-            <section className="card half" aria-labelledby="ky-top">
+          <div className="cols-2">
+            <section className="card" aria-labelledby="ky-top">
               <div className="card-head">
                 <h2 id="ky-top">Top Kyverno violations</h2>
               </div>
               <KyvernoTable q={kyQ} top />
             </section>
-            <section className="card half" aria-labelledby="np-top">
+            <section className="card" aria-labelledby="np-top">
               <div className="card-head">
                 <h2 id="np-top">Namespaces without default-deny</h2>
               </div>

@@ -193,17 +193,37 @@ export interface SecretSourceInput {
   ref?: string;
   value?: string;
 }
+export type DestinationKind = 'azure_blob' | 's3' | 'nfs';
+export type DestinationAuth = 'managed_identity' | 'sas_token' | 'access_key' | 'none';
+/**
+ * docs/openapi.yaml DestinationInput. Fields by kind:
+ * azure_blob: account, container, auth managed_identity|sas_token (+ sas), endpoint_override;
+ * s3: bucket, region, endpoint_override, path_style, auth access_key + access_key_id + secret_key;
+ * nfs: path (below a GET /destinations/mounts mount). PATCH is partial; kind cannot change.
+ */
 export interface DestinationInput {
-  name: string;
-  account: string;
-  container: string;
+  name?: string;
+  kind?: DestinationKind;
   prefix?: string;
-  auth: 'managed_identity' | 'sas_token';
-  sas?: SecretSourceInput;
   endpoint_override?: string;
+  account?: string;
+  container?: string;
+  auth?: DestinationAuth;
+  sas?: SecretSourceInput;
+  bucket?: string;
+  region?: string;
+  path_style?: boolean;
+  access_key_id?: string;
+  secret_key?: SecretSourceInput;
+  path?: string;
+}
+export interface DestinationMount {
+  name: string;
+  path: string;
+  writable: boolean;
 }
 export interface DestinationTestStep {
-  name: 'write' | 'read' | 'tag' | 'delete_refused' | 'sas_permissions' | 'sas_expiry';
+  name: 'write' | 'read' | 'tag' | 'delete_refused' | 'sas_permissions' | 'sas_expiry' | 'endpoint' | 'path';
   ok: boolean;
   detail: string;
 }
@@ -219,24 +239,43 @@ export interface DestinationTest {
     scope: 'container' | 'account' | 'service' | 'unknown';
   } | null;
   error?: string;
+  probe_path?: string;
+}
+export interface DestinationTestFailed {
+  error: string;
+  fields?: Record<string, string>;
+  test?: DestinationTest;
 }
 export interface Destination {
   id: string;
   name: string;
-  kind: 'azure_blob';
+  kind: DestinationKind;
+  prefix: string;
+  endpoint_override: string;
+  auth: DestinationAuth;
+  // azure_blob
   account: string;
   container: string;
-  prefix: string;
-  auth: 'managed_identity' | 'sas_token';
   sas_source: '' | SecretSource;
   sas_ref: string;
   sas_expires_at: string | null;
   sas_permissions: string;
-  endpoint_override: string;
+  // s3
+  bucket?: string;
+  region?: string;
+  path_style?: boolean;
+  access_key_id?: string;
+  secret_key_source?: '' | SecretSource;
+  secret_key_ref?: string;
+  // nfs
+  path?: string;
   last_test_at: string | null;
   last_test_ok: boolean | null;
   last_test?: DestinationTest | null;
   jobs: number;
+  created_at?: string;
+  /** Only on create/patch responses. */
+  warnings?: string[];
 }
 
 // ---------------------------------------------------- backups

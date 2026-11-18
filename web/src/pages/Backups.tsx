@@ -9,6 +9,7 @@ import { between, bytes, duration, engineLabel, money, relDateTime } from '../li
 import { backupsRoute } from '../router';
 import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
 import { PageHead, RunBadge, TlsBadge } from '../ui/status';
+import { Select } from '../ui/Select';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
 const ENGINES = [
@@ -87,16 +88,7 @@ function CandidatesTab({ candQ, jobsQ, engine, setEngine, canOperate }: { candQ:
         <h2 id="cand-t">Discovered by annotation</h2>
         <div className="inline">
           <span className="mono muted small">olympos.io/backup: postgresql | vault | clickhouse</span>
-          <label className="sr-only" htmlFor="cand-engine">
-            Engine
-          </label>
-          <select id="cand-engine" className="in" style={{ width: 'auto', minHeight: 32, padding: '5px 10px' }} value={engine} onChange={(e) => setEngine(e.target.value)}>
-            {ENGINES.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.label}
-              </option>
-            ))}
-          </select>
+          <Select id="cand-engine" inline size="sm" aria-label="Engine" value={engine} onChange={setEngine} options={ENGINES.map((e) => ({ value: e.id, label: e.label }))} />
         </div>
       </div>
       <QueryView

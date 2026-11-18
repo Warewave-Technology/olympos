@@ -44,4 +44,21 @@
   --radius-lg: 10px;
   --radius-xl: 12px;
   --sidebar-w: 232px;
+
+  /* layout scale: every page uses the same width, gaps and column sizes */
+  --page-max: 1600px;
+  --gap: 20px; /* between cards and sections */
+  --gap-sm: 12px; /* between related controls */
+  --gap-lg: 28px; /* page header to content */
+  --split-list: 340px; /* list column of list/detail pages */
+  --settings-nav: 220px;
+  --wizard-steps: 280px;
+  --form-max: 1320px; /* widest a form panel gets */
+
+  /* type scale */
+  --fs-h1: 28px;
+  --fs-h2: 16px;
+  --fs-h3: 14px;
+  --fs-body: 14px;
+  --fs-sub: 13.5px;
 }
