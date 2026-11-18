@@ -579,6 +579,11 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 ### 13.4 TLS findings
 - Target without TLS → `tls.missing` finding.
 
+### 13.5 Sensitive data in ConfigMaps
+- The **agent** scans ConfigMap values (informer transform on add/update, full re-scan every 6 h) with the gitleaks rules (library, embedded and versioned in the agent build) plus key-name heuristics (`password`, `passwd`, `secret`, `token`, `apikey`, `private_key`, `connection_string`, `dsn`, …). System namespaces (same list as NetworkPolicy, `sensitiveData.excludeNamespaces`) and `kube-root-ca.crt` are skipped. Values never leave the cluster and never enter the informer cache.
+- `SensitiveDataReport` carries namespace, ConfigMap, key, rule id/description, confidence (`high` = credential pattern, `medium` = key name only) and value length — **never the value, a prefix/suffix or a hash** (proto test).
+- Findings `source=sensitive-data`, `control_id=<rule id>`, severity high/medium; resolved when the key disappears or no longer matches. Event `sensitive_data.found` (new findings only, one per cluster per scan). UI: Security › *Sensitive data*. Olympos never edits or deletes ConfigMaps.
+
 ---
 
 ## 14. Notifications

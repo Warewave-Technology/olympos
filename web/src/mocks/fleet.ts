@@ -300,6 +300,8 @@ function securitySummary(c: Cluster): SecurityClusterSummary {
     kyverno_failures: ky.reduce((s, p) => s + p.fail_count, 0),
     namespaces: np.length,
     namespaces_without_default_deny: np.filter((n) => !n.default_deny && !n.excluded).length,
+    sensitive_data: db.findings.filter((f) => f.source === 'sensitive-data' && f.status === 'open' && f.cluster_id === c.id).length,
+    sensitive_data_high: db.findings.filter((f) => f.source === 'sensitive-data' && f.status === 'open' && f.cluster_id === c.id && f.severity === 'high').length,
   };
 }
 

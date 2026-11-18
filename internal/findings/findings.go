@@ -22,6 +22,8 @@ const (
 	SourceTLS        = "tls"
 	SourceVaultDrift = "vault-drift"
 	SourceTransfer   = "transfer"
+	// SourceSensitiveData: credentials in ConfigMaps, scanned on the agent (F2).
+	SourceSensitiveData = "sensitive-data"
 )
 
 // Finding is one open or resolved finding.

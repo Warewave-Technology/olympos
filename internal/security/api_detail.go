@@ -34,6 +34,9 @@ type ClusterSummary struct {
 	KyvernoFailures              int       `json:"kyverno_failures"`
 	Namespaces                   int       `json:"namespaces"`
 	NamespacesWithoutDefaultDeny int       `json:"namespaces_without_default_deny"`
+	// Open sensitive-data findings (F2): credential-like values in ConfigMaps.
+	SensitiveData     int `json:"sensitive_data"`
+	SensitiveDataHigh int `json:"sensitive_data_high"`
 }
 
 // clusterSummarySQL aggregates per cluster in one statement (one pass per
@@ -62,18 +65,22 @@ const clusterSummarySQL = `
 	np AS (
 	  SELECT cluster_id, count(*) AS namespaces,
 	         count(*) FILTER (WHERE NOT excluded AND NOT default_deny) AS without_deny
-	  FROM network_policy_status WHERE cluster_id = ANY($1) GROUP BY cluster_id)
+	  FROM network_policy_status WHERE cluster_id = ANY($1) GROUP BY cluster_id),
+	sd AS (
+	  SELECT cluster_id, count(*) AS n, count(*) FILTER (WHERE severity = 'high') AS high
+	  FROM findings WHERE source = 'sensitive-data' AND status = 'open' AND cluster_id = ANY($1) GROUP BY cluster_id)
 	SELECT c.id, c.name, c.provider, c.status,
 	       COALESCE(u.images, 0), COALESCE(u.workloads, 0), COALESCE(iv.critical, 0), COALESCE(iv.high, 0),
 	       COALESCE(ist.with_critical, 0), COALESCE(ist.not_scanned, 0),
 	       COALESCE(k.installed, false), COALESCE(k.policy_count, 0), COALESCE(k.fail_count, 0),
-	       COALESCE(np.namespaces, 0), COALESCE(np.without_deny, 0)
+	       COALESCE(np.namespaces, 0), COALESCE(np.without_deny, 0), COALESCE(sd.n, 0), COALESCE(sd.high, 0)
 	FROM c
 	LEFT JOIN u ON u.cluster_id = c.id
 	LEFT JOIN iv ON iv.cluster_id = c.id
 	LEFT JOIN ist ON ist.cluster_id = c.id
 	LEFT JOIN kyverno_status k ON k.cluster_id = c.id
 	LEFT JOIN np ON np.cluster_id = c.id
+	LEFT JOIN sd ON sd.cluster_id = c.id
 	ORDER BY c.name`
 
 func (a *API) listClusterSummaries(w http.ResponseWriter, r *http.Request) {
@@ -94,7 +101,7 @@ func (a *API) listClusterSummaries(w http.ResponseWriter, r *http.Request) {
 		var s ClusterSummary
 		if err := rows.Scan(&s.ClusterID, &s.ClusterName, &s.Provider, &s.Status, &s.Images, &s.Workloads, &s.Critical, &s.High,
 			&s.ImagesWithCritical, &s.NotScanned, &s.KyvernoInstalled, &s.KyvernoPolicies, &s.KyvernoFailures,
-			&s.Namespaces, &s.NamespacesWithoutDefaultDeny); err != nil {
+			&s.Namespaces, &s.NamespacesWithoutDefaultDeny, &s.SensitiveData, &s.SensitiveDataHigh); err != nil {
 			httpx.Internal(w, r, a.Log, err)
 			return
 		}

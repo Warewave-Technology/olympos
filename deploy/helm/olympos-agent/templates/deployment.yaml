@@ -36,6 +36,8 @@ spec:
         - {name: OLYMPOS_PROVIDER_OVERRIDE, value: {{ .Values.providerOverride | quote }}}
         - {name: OLYMPOS_MAX_TUNNELS, value: {{ .Values.maxTunnels | quote }}}
         - {name: OLYMPOS_BENCH_ENABLED, value: {{ .Values.bench.enabled | quote }}}
+        - {name: OLYMPOS_SENSITIVE_DATA, value: {{ .Values.sensitiveData.enabled | quote }}}
+        - {name: OLYMPOS_SENSITIVE_DATA_EXCLUDE, value: {{ join "," .Values.sensitiveData.excludeNamespaces | quote }}}
         - {name: OLYMPOS_BENCH_MAX_PARALLEL, value: {{ .Values.bench.maxParallel | quote }}}
         - {name: OLYMPOS_BENCH_NAMESPACE, value: {{ .Values.bench.namespace | quote }}}
         - name: POD_NAMESPACE

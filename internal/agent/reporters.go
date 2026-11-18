@@ -7,9 +7,11 @@ package agent
 //
 // RBAC: only get/list/watch on resources from SPEC §4.2 (pods, replicasets,
 // deployments, statefulsets, daemonsets, namespaces, networkpolicies,
-// kyverno.io, policies.kyverno.io, wgpolicyk8s.io). Secrets and ConfigMaps
-// are never read; imagePullSecrets and env never enter the cache: pods and
-// workloads are stripped to the fields we need first.
+// kyverno.io, policies.kyverno.io, wgpolicyk8s.io, read-only configmaps).
+// Secrets are never read; imagePullSecrets and env never enter the cache:
+// pods and workloads are stripped to the fields we need first. ConfigMap
+// values are scanned for credentials in the informer transform and dropped
+// (reporter_sensitive.go); only match metadata is reported.
 
 import (
 	"context"
@@ -39,12 +41,19 @@ const (
 )
 
 func init() {
-	registerExtender(func(a *Agent, _ Config, rc *rest.Config) {
+	registerExtender(func(a *Agent, cfg Config, rc *rest.Config) {
 		shared := newKubeInformers(a.kube)
 		a.Reporters = append(a.Reporters,
 			newNetpolReporter(shared, a.log),
 			newImageReporter(shared, a.log),
 		)
+		if cfg.SensitiveData {
+			if r, err := newSensitiveReporter(a.kube, cfg.SensitiveDataExclude, a.log); err != nil {
+				a.log.Error("sensitive data reporter disabled", "err", err)
+			} else {
+				a.Reporters = append(a.Reporters, r)
+			}
+		}
 		dyn, err := dynamic.NewForConfig(rc)
 		if err != nil {
 			a.log.Error("kyverno reporter disabled: dynamic client", "err", err)

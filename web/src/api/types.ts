@@ -713,6 +713,9 @@ export interface SecurityClusterSummary {
   kyverno_failures: number;
   namespaces: number;
   namespaces_without_default_deny: number;
+  /** Open sensitive-data findings (credential-like values in ConfigMaps). */
+  sensitive_data?: number;
+  sensitive_data_high?: number;
 }
 export interface AuditClusterRun {
   tool: AuditTool | string;

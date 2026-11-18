@@ -95,7 +95,7 @@ export const activityRoute = createRoute({
   component: ActivityPage,
 });
 
-export const SECURITY_TABS = ['images', 'kyverno', 'netpol'] as const;
+export const SECURITY_TABS = ['images', 'kyverno', 'netpol', 'sensitive'] as const;
 export const securityRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/security',

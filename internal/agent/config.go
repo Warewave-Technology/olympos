@@ -27,6 +27,10 @@ type Config struct {
 	BenchNamespace   string
 	MaxTunnels       int
 	HealthAddr       string
+	// SensitiveData scans ConfigMaps for credentials (F2); Exclude are
+	// namespace globs not scanned.
+	SensitiveData        bool
+	SensitiveDataExclude []string
 }
 
 // ConfigFromEnv reads OLYMPOS_* variables.
@@ -41,6 +45,15 @@ func ConfigFromEnv() (Config, error) {
 		BenchEnabled:     os.Getenv("OLYMPOS_BENCH_ENABLED") == "true",
 		BenchNamespace:   envOr("OLYMPOS_BENCH_NAMESPACE", "olympos-bench"),
 		HealthAddr:       envOr("OLYMPOS_HEALTH_ADDR", "127.0.0.1:8081"),
+		SensitiveData:    os.Getenv("OLYMPOS_SENSITIVE_DATA") != "false",
+	}
+	if v, ok := os.LookupEnv("OLYMPOS_SENSITIVE_DATA_EXCLUDE"); ok {
+		c.SensitiveDataExclude = []string{}
+		for _, p := range strings.Split(v, ",") {
+			if p = strings.TrimSpace(p); p != "" {
+				c.SensitiveDataExclude = append(c.SensitiveDataExclude, p)
+			}
+		}
 	}
 	var err error
 	if c.BenchMaxParallel, err = envInt("OLYMPOS_BENCH_MAX_PARALLEL", 3); err != nil {

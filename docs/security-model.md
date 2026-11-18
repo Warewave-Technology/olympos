@@ -82,6 +82,15 @@ The server is the only writer to Blob and has no delete permission (custom role 
 `blobs/delete`); retention is lifecycle rules on the `olympos-tier` tag; versions are immutable for the
 longest retention. *Test destination* verifies delete is refused and warns otherwise.
 
+## ConfigMaps and Secrets in clusters
+
+- **ConfigMaps** are readable by the agent (read-only, deviation #2). The agent scans their values for
+  credentials (gitleaks rules + key names) inside the informer transform and keeps only metadata; the
+  `SensitiveDataReport` it sends carries where a match is and which rule matched — never the value, a
+  part of it or a hash (enforced by a proto test, e2e canary checks of the server's database and logs).
+- **Secrets** are never read by default. The opt-in Secret inventory (`secretsInventory.enabled`, see
+  below) is metadata-only.
+
 ## Residual risks / accepted trade-offs
 
 - A compromised server can *write* Vault secrets (create/patch) but still cannot read them; drift

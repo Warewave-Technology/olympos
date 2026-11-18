@@ -14,7 +14,9 @@ import (
 // agent's own one-time enrollment secret and is the only allowed exception.
 func TestProtoHasNoCredentialFields(t *testing.T) {
 	banned := []string{"password", "secret", "token", "sas", "credential", "key", "dsn", "auth"}
-	allowed := map[string]bool{"olympos.v1.EnrollRequest.bootstrap_token": true}
+	allowed := map[string]bool{"olympos.v1.EnrollRequest.bootstrap_token": true,
+		// The name of a ConfigMap key (F2), never its value.
+		"olympos.v1.SensitiveDataItem.key": true}
 	fd := pb.File_olympos_v1_gateway_proto
 	msgs := fd.Messages()
 	var walk func(m protoreflect.MessageDescriptor)
@@ -41,5 +43,33 @@ func TestProtoHasNoCredentialFields(t *testing.T) {
 	}
 	for i := 0; i < msgs.Len(); i++ {
 		walk(msgs.Get(i))
+	}
+}
+
+// F2: the sensitive-data report can never carry value bytes: no bytes
+// fields and exactly these fields (a new field must be reviewed here).
+func TestSensitiveDataReportCarriesNoValues(t *testing.T) {
+	want := map[string][]string{
+		"SensitiveDataItem":   {"namespace", "config_map", "key", "rule_id", "rule_description", "confidence", "value_length"},
+		"SensitiveDataReport": {"rules_version", "config_maps_scanned", "items"},
+	}
+	for name, fields := range want {
+		m := pb.File_olympos_v1_gateway_proto.Messages().ByName(protoreflect.Name(name))
+		if m == nil {
+			t.Fatalf("%s missing", name)
+		}
+		fs := m.Fields()
+		if fs.Len() != len(fields) {
+			t.Fatalf("%s has %d fields, want %v", name, fs.Len(), fields)
+		}
+		for i, f := range fields {
+			fd := fs.Get(i)
+			if string(fd.Name()) != f {
+				t.Fatalf("%s field %d is %s, want %s", name, i, fd.Name(), f)
+			}
+			if fd.Kind() == protoreflect.BytesKind {
+				t.Fatalf("%s.%s is bytes", name, f)
+			}
+		}
 	}
 }

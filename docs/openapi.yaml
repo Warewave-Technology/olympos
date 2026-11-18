@@ -806,6 +806,8 @@ paths:
                         kyverno_failures: {type: integer}
                         namespaces: {type: integer}
                         namespaces_without_default_deny: {type: integer}
+                        sensitive_data: {type: integer, description: "Open sensitive-data findings (credential-like values in ConfigMaps, F2)"}
+                        sensitive_data_high: {type: integer, description: "Of which matched a credential pattern"}
   /security/kyverno/policy:
     get:
       tags: [security]

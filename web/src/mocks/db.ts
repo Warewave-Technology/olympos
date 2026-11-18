@@ -827,6 +827,17 @@ export const findings: Finding[] = [
   finding({ control_id: 'C-0034', title: 'Automount SA token', severity: 'medium', cluster_name: 'oke-fra-erp', resource_ref: 'erp/sts/report-gen' }),
   finding({ source: 'transfer', control_id: 'transfer.compressed_mode', title: 'Backups use compressed transfer mode (agent can see backup data)', severity: 'medium', cluster_name: 'eks-fra-data', resource_ref: 'cluster/eks-fra-data', first_seen_at: iso(20 * D) }),
   finding({ source: 'vault-drift', control_id: 'vault.unmanaged_write', title: 'Unmanaged change: kv/platform/ci v12', severity: 'high', cluster_name: 'prod-aks-weu-01', resource_ref: 'openbao/kv/platform/ci', first_seen_at: iso(9 * H) }),
+  ...(
+    [
+      ['prod-aks-weu-01', 'payments', 'payments-config', 'AWS_ACCESS_KEY_ID', 'aws-access-token', 'Identified a pattern that may indicate AWS credentials', 'high'],
+      ['prod-aks-weu-01', 'payments', 'payments-config', 'tls.key', 'private-key', 'Identified a Private Key', 'high'],
+      ['prod-aks-weu-01', 'billing', 'invoice-api-env', 'DB_PASSWORD', 'key-name:password', 'Key name suggests a password', 'medium'],
+      ['eks-fra-data', 'analytics', 'spark-defaults', 'spark.hadoop.fs.s3a.secret.key', 'generic-api-key', 'Detected a Generic API Key', 'high'],
+    ] as const
+  ).map(([cl, ns, cm, key, rule, desc, conf]) =>
+    finding({ source: 'sensitive-data', control_id: rule, title: `${desc} in ConfigMap ${ns}/${cm} (key ${key})`, severity: conf, cluster_name: cl, resource_ref: `${ns}/${cm}:${key}`,
+      details: { namespace: ns, config_map: cm, key, rule_id: rule, rule_description: desc, confidence: conf, value_length: 40, fix: 'Move this value to a Secret or Vault and remove it from the ConfigMap.' }, first_seen_at: iso(30 * H) }),
+  ),
 ];
 {
   const CONTROLS: [string, string, Finding['severity'], string][] = [

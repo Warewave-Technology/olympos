@@ -18,6 +18,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/Warewave-Technology/olympos/internal/findings"
+	"github.com/Warewave-Technology/olympos/internal/notify"
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -93,8 +94,81 @@ func (in *Ingester) Report(ctx context.Context, clusterID uuid.UUID, r *pb.Resou
 		return in.ingest(ctx, clusterID, "images", v.Images, func(tx pgx.Tx) (bool, error) {
 			return in.images(ctx, tx, clusterID, v.Images)
 		})
+	case *pb.ResourceReport_SensitiveData:
+		return in.ingest(ctx, clusterID, "sensitive-data", v.SensitiveData, func(tx pgx.Tx) (bool, error) {
+			return false, in.sensitiveData(ctx, tx, clusterID, v.SensitiveData)
+		})
 	}
 	return nil
+}
+
+// SensitiveFix is shown with every sensitive-data finding.
+const SensitiveFix = "Move this value to a Secret or Vault and remove it from the ConfigMap."
+
+// sensitiveData reconciles the sensitive-data findings of a cluster with a
+// full agent report (F2). The report has no values: only where and which
+// rule. Findings resolve when the key is gone or no longer matches.
+// Olympos never edits or deletes ConfigMaps.
+func (in *Ingester) sensitiveData(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, rep *pb.SensitiveDataReport) error {
+	var current []findings.Finding
+	for _, it := range rep.Items {
+		ns, name, key := clean(it.Namespace, 253), clean(it.ConfigMap, 253), clean(it.Key, 253)
+		if MatchesAny(in.SystemNamespaces, ns) {
+			continue
+		}
+		sev := "medium"
+		if it.Confidence == "high" {
+			sev = "high"
+		}
+		current = append(current, findings.Finding{
+			ControlID: clean(it.RuleId, 120), Severity: sev, ResourceRef: ns + "/" + name + ":" + key,
+			Title: fmt.Sprintf("%s in ConfigMap %s/%s (key %s)", clean(it.RuleDescription, 200), ns, name, key),
+			Details: map[string]any{"namespace": ns, "config_map": name, "key": key, "rule_id": clean(it.RuleId, 120),
+				"rule_description": clean(it.RuleDescription, 300), "confidence": it.Confidence, "value_length": it.ValueLength,
+				"rules_version": clean(rep.RulesVersion, 80), "fix": SensitiveFix},
+		})
+	}
+	newCount, _, err := findings.Reconcile(ctx, tx, findings.SourceSensitiveData, clusterID, current, nil)
+	if err != nil || newCount == 0 {
+		return err
+	}
+	return in.emitSensitiveFound(ctx, tx, clusterID, current, newCount)
+}
+
+// emitSensitiveFound sends one sensitive_data.found per cluster and scan
+// with counts and the top 5 (high first): grouped like F9.
+func (in *Ingester) emitSensitiveFound(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, current []findings.Finding, newCount int) error {
+	var name string
+	if err := tx.QueryRow(ctx, `SELECT name FROM clusters WHERE id = $1`, clusterID).Scan(&name); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `SELECT resource_ref, control_id, severity FROM findings WHERE source = $1 AND cluster_id = $2 AND status = 'open'
+		AND first_seen_at > now() - interval '1 minute' ORDER BY severity = 'high' DESC, resource_ref LIMIT 5`, findings.SourceSensitiveData, clusterID)
+	if err != nil {
+		return err
+	}
+	var top []string
+	for rows.Next() {
+		var ref, rule, sev string
+		if err := rows.Scan(&ref, &rule, &sev); err != nil {
+			rows.Close()
+			return err
+		}
+		top = append(top, fmt.Sprintf("%s (%s, %s)", ref, rule, sev))
+	}
+	rows.Close()
+	high := 0
+	for _, f := range current {
+		if f.Severity == "high" {
+			high++
+		}
+	}
+	return notify.Emit(ctx, tx, notify.Event{Type: notify.SensitiveDataFound,
+		Title: fmt.Sprintf("%d new credential-like values in ConfigMaps on %s", newCount, name),
+		Link:  "/security?cluster=" + clusterID.String() + "&tab=sensitive",
+		Fields: map[string]string{"cluster": name, "new": fmt.Sprint(newCount), "open": fmt.Sprint(len(current)),
+			"high": fmt.Sprint(high), "top": strings.Join(top, "; ")},
+		Payload: map[string]any{"cluster_id": clusterID.String(), "new": newCount}})
 }
 
 func (in *Ingester) ingest(ctx context.Context, clusterID uuid.UUID, kind string, m proto.Message, fn func(tx pgx.Tx) (bool, error)) error {

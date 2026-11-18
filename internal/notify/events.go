@@ -25,6 +25,7 @@ const (
 	VaultUnmanagedWrite = "vault.unmanaged_write"
 	AuditNewFindings    = "audit.new_findings"
 	VulnCritical        = "vuln.critical"
+	SensitiveDataFound  = "sensitive_data.found"
 	AgentOffline        = "agent.offline"
 	AgentOnline         = "agent.online"
 	AgentFlapping       = "agent.flapping"
@@ -37,7 +38,7 @@ const (
 // opt-in: it has no default route.
 var Catalog = []string{
 	BackupFailed, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
-	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
+	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
 }
 
 // Event is what modules emit. Payload MUST NOT contain secret values;

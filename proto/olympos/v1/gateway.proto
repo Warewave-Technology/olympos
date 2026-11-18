@@ -153,7 +153,29 @@ message ResourceReport {
     KyvernoReport kyverno = 1;
     NetworkPolicyReport network_policies = 2;
     ImageReport images = 3;
+    SensitiveDataReport sensitive_data = 4;
   }
+}
+
+// ---- sensitive data in ConfigMaps (F2) ----
+// Scanned on the agent; values never leave the cluster. These messages MUST
+// NOT carry a value, a prefix or suffix of one, or a hash of one: only
+// where it is and which rule matched (enforced by proto_test.go).
+
+message SensitiveDataItem {
+  string namespace = 1;
+  string config_map = 2;
+  string key = 3;
+  string rule_id = 4;          // gitleaks rule id, or key-name:<word>
+  string rule_description = 5;
+  string confidence = 6;       // high: matched a credential pattern | medium: key name only
+  int64 value_length = 7;      // bytes
+}
+
+message SensitiveDataReport {
+  string rules_version = 1;    // gitleaks version + Olympos key-name rules version
+  int32 config_maps_scanned = 2;
+  repeated SensitiveDataItem items = 3;
 }
 
 message KyvernoPolicy {

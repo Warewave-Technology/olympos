@@ -22,6 +22,14 @@ maxTunnels: 16
 # Label the release namespace PSA "restricted" (set true when Helm should own it).
 manageNamespace: false
 
+# Credentials in ConfigMaps (F2): values are scanned on the agent with the
+# gitleaks rules and never leave the cluster; only where a match is and the
+# rule are reported (Security › Sensitive data). Globs, same defaults as the
+# server's security.systemNamespaces.
+sensitiveData:
+  enabled: true
+  excludeNamespaces: [kube-system, kube-public, kube-node-lease, olympos-system, olympos-bench]
+
 bench:
   # kube-bench exception (SPEC §12.3). Renders the olympos-bench namespace,
   # its RBAC and the Kyverno PolicyException only when true.
