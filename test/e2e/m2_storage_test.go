@@ -93,9 +93,13 @@ func TestM2StorageS3AndNFS(t *testing.T) {
 		}
 	}
 	// The object really is in MinIO (listed with the writer user).
-	out := run(t, "kubectl", "-n", "olympos", "run", "mc-e2e-ls", "--rm", "-i", "--restart=Never",
+	_, _ = runOK(t, "kubectl", "-n", "olympos", "delete", "pod", "mc-e2e-ls", "--ignore-not-found", "--now")
+	run(t, "kubectl", "-n", "olympos", "run", "mc-e2e-ls", "--restart=Never",
 		"--image=cgr.dev/chainguard/minio-client:latest", "--image-pull-policy=IfNotPresent",
 		"--env=MC_HOST_u=http://olympos-backup:lab-backup-secret-key@minio.olympos.svc:9000", "--", "ls", "--recursive", "u/backups/olympos/")
+	defer func() { _, _ = runOK(t, "kubectl", "-n", "olympos", "delete", "pod", "mc-e2e-ls", "--now") }()
+	run(t, "kubectl", "-n", "olympos", "wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/mc-e2e-ls", "--timeout=90s")
+	out := run(t, "kubectl", "-n", "olympos", "logs", "mc-e2e-ls")
 	if !strings.Contains(out, ".manifest.json") || !strings.Contains(out, ".zip") {
 		t.Fatalf("objects not in MinIO:\n%s", out)
 	}

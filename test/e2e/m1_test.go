@@ -71,7 +71,7 @@ func TestM1EnrollInventoryDiscovery(t *testing.T) {
 	var targets struct {
 		Items []inventory.Target `json:"items"`
 	}
-	want := map[string]string{"orders-pg": "postgresql", "vault": "vault", "metrics-ch": "clickhouse", "openbao": ""}
+	want := map[string]string{"orders-pg": "postgresql", "vault": "vault", "metrics-ch": "clickhouse", "openbao": "vault"}
 	eventually(t, 2*time.Minute, "targets discovered", func() (bool, string) {
 		admin.must("GET", "/targets", nil, &targets, 200)
 		got := map[string]string{}

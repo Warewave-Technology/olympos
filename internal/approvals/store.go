@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -71,7 +72,8 @@ func LockVault(ctx context.Context, tx pgx.Tx, vaultID uuid.UUID) error {
 // VaultRef is the vault summary embedded in a change request.
 type VaultRef struct {
 	ID          uuid.UUID `json:"id"`
-	Name        string    `json:"name"`
+	Name        string    `json:"name"` // namespace/service
+	Namespace   string    `json:"namespace"`
 	ClusterName string    `json:"cluster_name"`
 	Provider    string    `json:"provider"`
 }
@@ -144,6 +146,7 @@ func scanCR(row pgx.Row) (*ChangeRequest, error) {
 		&cr.makerID, &cr.checkerID, &cr.Justification, &st, &cr.CreatedAt, &cr.ExpiresAt,
 		&cr.DecidedAt, &cr.DecisionComment, &cr.AppliedAt, &cr.Failure)
 	cr.Status = Status(st)
+	cr.Vault.Namespace, _, _ = strings.Cut(cr.Vault.Name, "/")
 	return cr, err
 }
 
