@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -461,7 +462,20 @@ func TestFindToolLayout(t *testing.T) {
 	if !strings.HasPrefix(tool.PgDump, dir) || tool.Major < 16 {
 		t.Fatalf("tool: %+v", tool)
 	}
+	// RHEL PGDG layout (/usr/pgsql-{major}/bin) in a ':' list.
+	rhel := t.TempDir()
+	m := strconv.Itoa(tool.Major)
+	if err := os.MkdirAll(filepath.Join(rhel, "pgsql-"+m, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range []string{"pg_dump", "pg_dumpall"} {
+		_ = os.Symlink(filepath.Join(pgBin, b), filepath.Join(rhel, "pgsql-"+m, "bin", b))
+	}
 	t.Setenv("PATH", "")
+	got, err := postgres.FindTool(context.Background(), "/nonexistent:"+filepath.Join(rhel, "pgsql-{major}", "bin"), 16)
+	if err != nil || !strings.HasPrefix(got.PgDump, rhel) {
+		t.Fatalf("{major} layout: %+v %v", got, err)
+	}
 	if _, err := postgres.FindTool(context.Background(), dir, 99); err == nil {
 		t.Fatal("expected no tool for major 99")
 	}

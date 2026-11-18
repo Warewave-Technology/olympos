@@ -1,0 +1,64 @@
+# .deb and .rpm of olympos-server (F16). Built by scripts/package.sh:
+#   VERSION=0.1.0 ARCH=amd64 nfpm pkg -f deploy/systemd/nfpm.yaml -p deb -t dist/
+name: olympos-server
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+release: "1"
+section: admin
+priority: optional
+maintainer: Warewave Technology <opensource@warewave.com.tr>
+description: |
+  Olympos server: backups, Vault change control, audits and security
+  inventory for Kubernetes clusters, run as a hardened systemd service.
+vendor: Warewave Technology
+homepage: https://github.com/Warewave-Technology/olympos
+license: Apache-2.0
+
+contents:
+  - src: dist/linux_${ARCH}/olympos-server
+    dst: /usr/bin/olympos-server
+    file_info: {mode: 0755}
+  - src: dist/tools/linux_${ARCH}/trivy
+    dst: /usr/lib/olympos/bin/trivy
+    file_info: {mode: 0755}
+  - src: dist/tools/linux_${ARCH}/kubescape
+    dst: /usr/lib/olympos/bin/kubescape
+    file_info: {mode: 0755}
+  - src: dist/tools/linux_${ARCH}/polaris
+    dst: /usr/lib/olympos/bin/polaris
+    file_info: {mode: 0755}
+  - src: deploy/systemd/olympos-server.service
+    dst: /usr/lib/systemd/system/olympos-server.service
+  - src: deploy/systemd/sysusers.conf
+    dst: /usr/lib/sysusers.d/olympos.conf
+  - src: deploy/systemd/tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/olympos.conf
+  - src: deploy/systemd/config.yaml
+    dst: /etc/olympos/config.yaml
+    type: config|noreplace
+    file_info: {mode: 0640}
+  - dst: /etc/olympos
+    type: dir
+    file_info: {mode: 0750}
+  - src: docs/install-systemd.md
+    dst: /usr/share/doc/olympos-server/install-systemd.md
+  - src: docs/restore-olympos.md
+    dst: /usr/share/doc/olympos-server/restore-olympos.md
+  - src: LICENSE
+    dst: /usr/share/doc/olympos-server/LICENSE
+
+scripts:
+  postinstall: deploy/systemd/scripts/postinstall.sh
+  preremove: deploy/systemd/scripts/preremove.sh
+  postremove: deploy/systemd/scripts/postremove.sh
+
+# Olympos' own database is a local PostgreSQL (docs/install-systemd.md §2);
+# pg_dump of a major >= every target's comes from the PGDG client packages.
+overrides:
+  deb:
+    depends: [systemd, ca-certificates]
+    recommends: ["postgresql-16 | postgresql", "postgresql-client-17 | postgresql-client-16"]
+  rpm:
+    depends: [systemd, ca-certificates]
+    recommends: [postgresql16-server, postgresql17]

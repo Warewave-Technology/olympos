@@ -49,23 +49,44 @@ func executable(p string) bool {
 }
 
 // FindTool selects the pg_dump whose major is >= serverMajor, preferring the
-// closest major under dir/<major>/bin/ (restores then need the oldest
-// possible pg_restore). Falls back to pg_dump on PATH when its major is high
-// enough.
+// closest major (restores then need the oldest possible pg_restore). dir is
+// a ':'-separated list of layouts: a directory holding <major>/bin/ (the
+// image, Debian PGDG /usr/lib/postgresql, /usr/lib/olympos/pg) or a pattern
+// with {major} (RHEL PGDG /usr/pgsql-{major}/bin). Falls back to pg_dump on
+// PATH when its major is high enough.
 func FindTool(ctx context.Context, dir string, serverMajor int) (*Tool, error) {
-	var majors []int
-	if entries, err := os.ReadDir(dir); err == nil {
+	type cand struct {
+		major int
+		bin   string
+	}
+	var cands []cand
+	for _, layout := range strings.Split(dir, ":") {
+		if layout == "" {
+			continue
+		}
+		if strings.Contains(layout, "{major}") {
+			for m := serverMajor; m <= serverMajor+20; m++ {
+				bin := strings.ReplaceAll(layout, "{major}", strconv.Itoa(m))
+				if executable(filepath.Join(bin, "pg_dump")) {
+					cands = append(cands, cand{m, bin})
+				}
+			}
+			continue
+		}
+		entries, err := os.ReadDir(layout)
+		if err != nil {
+			continue
+		}
 		for _, e := range entries {
 			if m, err := strconv.Atoi(e.Name()); err == nil && m >= serverMajor {
-				majors = append(majors, m)
+				cands = append(cands, cand{m, filepath.Join(layout, e.Name(), "bin")})
 			}
 		}
 	}
-	sort.Ints(majors)
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].major < cands[j].major })
 	var tried []string
-	for _, m := range majors {
-		bin := filepath.Join(dir, strconv.Itoa(m), "bin")
-		if t, err := toolIn(ctx, filepath.Join(bin, "pg_dump"), serverMajor); err == nil {
+	for _, c := range cands {
+		if t, err := toolIn(ctx, filepath.Join(c.bin, "pg_dump"), serverMajor); err == nil {
 			return t, nil
 		} else {
 			tried = append(tried, err.Error())
@@ -81,7 +102,7 @@ func FindTool(ctx context.Context, dir string, serverMajor int) (*Tool, error) {
 		}
 		tried = append(tried, err.Error())
 	}
-	msg := fmt.Sprintf("no pg_dump with major version >= %d found in %s/<major>/bin or PATH", serverMajor, dir)
+	msg := fmt.Sprintf("no pg_dump with major version >= %d found in %s (<major>/bin or {major} layouts) or PATH", serverMajor, dir)
 	if len(tried) > 0 {
 		msg += " (" + strings.Join(tried, "; ") + ")"
 	}

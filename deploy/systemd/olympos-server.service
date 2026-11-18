@@ -1,0 +1,63 @@
+# olympos-server as a hardened systemd service (F16). Installed by the
+# .deb/.rpm packages; see docs/install-systemd.md. Overrides belong in
+# `systemctl edit olympos-server` (e.g. MemoryMax=, or binding below 1024:
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE).
+[Unit]
+Description=Olympos server
+Documentation=https://github.com/Warewave-Technology/olympos/blob/main/docs/install-systemd.md
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+User=olympos
+Group=olympos
+ExecStart=/usr/bin/olympos-server -config /etc/olympos/config.yaml
+# Reloads TLS certificates (UI and gateway) without a restart.
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+# Optional KEY=value lines, e.g. AZURE_CLIENT_ID / AZURE_TENANT_ID /
+# AZURE_CLIENT_CERTIFICATE_PATH for Key Vault on non-Azure hosts.
+EnvironmentFile=-/etc/olympos/environment
+Environment=HOME=/var/lib/olympos TMPDIR=/var/lib/olympos/tmp
+WorkingDirectory=/var/lib/olympos
+StateDirectory=olympos
+StateDirectoryMode=0750
+UMask=0027
+MemoryMax=4G
+
+# Hardening (systemd-analyze security olympos-server ≤ 3.0, checked in CI).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+ReadWritePaths=/var/lib/olympos
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+KeyringMode=private
+
+[Install]
+WantedBy=multi-user.target

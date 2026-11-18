@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strings"
 	"sync"
@@ -78,6 +79,119 @@ type SelfDB struct {
 	DSN, Password string
 }
 
+// openDatabase resolves the DSN (dsnRef via Key Vault) and the password
+// file and connects, waiting up to wait for the database (bundled
+// PostgreSQL, a host booting).
+func (d *Deps) openDatabase(ctx context.Context, wait time.Duration) error {
+	cfg := d.Cfg
+	dsn := cfg.Database.DSN
+	if cfg.Database.DSNRef != "" {
+		b, err := secrets.Resolve(ctx, d.KV, cfg.Database.DSNRef)
+		if err != nil {
+			return fmt.Errorf("resolve database dsn: %w", err)
+		}
+		dsn = strings.TrimSpace(string(b))
+		secrets.Zero(b)
+	}
+	var dbPassword string
+	if cfg.Database.PasswordFile != "" {
+		b, err := os.ReadFile(cfg.Database.PasswordFile)
+		if err != nil {
+			return fmt.Errorf("read database.passwordFile: %w", err)
+		}
+		dbPassword = strings.TrimSpace(string(b))
+	}
+	deadline := time.Now().Add(wait)
+	var err error
+	for pause := time.Second; ; pause = min(2*pause, 10*time.Second) {
+		d.DB, err = store.OpenWithPassword(ctx, dsn, dbPassword)
+		if err == nil || ctx.Err() != nil || time.Now().Add(pause).After(deadline) {
+			break
+		}
+		d.Log.Warn("database not reachable yet, retrying", "err", err, "in", pause.String())
+		time.Sleep(pause)
+	}
+	// The self-backup (olympos-self) dumps this database with the same login.
+	d.SelfDB = SelfDB{DSN: dsn, Password: dbPassword}
+	return err
+}
+
+// Migrate applies pending migrations and exits (olympos-server migrate).
+// Downgrades are refused.
+func Migrate(cfgPath string) error {
+	log := NewLogger(slog.LevelInfo)
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	d := &Deps{Cfg: cfg, Log: log}
+	if err := d.initKeyVault(); err != nil {
+		return err
+	}
+	if err := d.openDatabase(ctx, 30*time.Second); err != nil {
+		return err
+	}
+	defer d.DB.Close()
+	if err := store.Migrate(ctx, d.DB); err != nil {
+		return err
+	}
+	v, err := store.SchemaVersion(ctx, d.DB)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("database schema at version %d\n", v)
+	return nil
+}
+
+// CheckConfig validates the configuration and the files it points to; with
+// db it also connects to the database (olympos-server check-config).
+func CheckConfig(cfgPath string, db bool) error {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		return err
+	}
+	var problems []string
+	for what, f := range map[string]string{"listen.tlsCertFile": cfg.Listen.TLSCertFile, "listen.tlsKeyFile": cfg.Listen.TLSKeyFile,
+		"gateway.tlsCertFile": cfg.Gateway.TLSCertFile, "gateway.tlsKeyFile": cfg.Gateway.TLSKeyFile,
+		"database.passwordFile": cfg.Database.PasswordFile, "targetTLS.caBundleFile": cfg.TargetTLS.CABundleFile} {
+		if f == "" {
+			continue
+		}
+		if _, err := os.Stat(f); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", what, err))
+		}
+	}
+	if cfg.Listen.TLSCertFile != "" && len(problems) == 0 {
+		if _, err := tls.LoadX509KeyPair(cfg.Listen.TLSCertFile, cfg.Listen.TLSKeyFile); err != nil {
+			problems = append(problems, "listen TLS key pair: "+err.Error())
+		}
+	}
+	for what, bin := range map[string]string{"audit.kubescapeBin": cfg.Audit.KubescapeBin, "audit.polarisBin": cfg.Audit.PolarisBin, "security.trivyBin": cfg.Security.TrivyBin} {
+		if _, err := exec.LookPath(bin); err != nil {
+			problems = append(problems, fmt.Sprintf("%s (%s): %v", what, bin, err))
+		}
+	}
+	if len(problems) > 0 {
+		return errors.New("config problems:\n  - " + strings.Join(problems, "\n  - "))
+	}
+	if db {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		d := &Deps{Cfg: cfg, Log: NewLogger(slog.LevelWarn)}
+		if err := d.initKeyVault(); err != nil {
+			return err
+		}
+		if err := d.openDatabase(ctx, 0); err != nil {
+			return err
+		}
+		d.DB.Close()
+	}
+	fmt.Println("config ok")
+	return nil
+}
+
 // Run starts the server and blocks until SIGTERM.
 func Run(cfgPath string) error {
 	started := time.Now()
@@ -96,37 +210,7 @@ func Run(cfgPath string) error {
 	if err := d.initKeyVault(); err != nil {
 		return err
 	}
-	dsn := cfg.Database.DSN
-	if cfg.Database.DSNRef != "" {
-		b, err := secrets.Resolve(ctx, d.KV, cfg.Database.DSNRef)
-		if err != nil {
-			return fmt.Errorf("resolve database dsn: %w", err)
-		}
-		dsn = strings.TrimSpace(string(b))
-		secrets.Zero(b)
-	}
-	var dbPassword string
-	if cfg.Database.PasswordFile != "" {
-		b, err := os.ReadFile(cfg.Database.PasswordFile)
-		if err != nil {
-			return fmt.Errorf("read database.passwordFile: %w", err)
-		}
-		dbPassword = strings.TrimSpace(string(b))
-	}
-	// The database may start after the server (bundled PostgreSQL, a host
-	// booting): wait for it for up to two minutes.
-	for wait := time.Second; ; wait = min(2*wait, 10*time.Second) {
-		d.DB, err = store.OpenWithPassword(ctx, dsn, dbPassword)
-		if err == nil || ctx.Err() != nil || time.Since(started) > 2*time.Minute {
-			break
-		}
-		log.Warn("database not reachable yet, retrying", "err", err, "in", wait.String())
-		time.Sleep(wait)
-	}
-	// The self-backup (olympos-self) dumps this database with the same login.
-	d.SelfDB = SelfDB{DSN: dsn, Password: dbPassword}
-	dsn, dbPassword = "", ""
-	if err != nil {
+	if err := d.openDatabase(ctx, 2*time.Minute-time.Since(started)); err != nil {
 		return err
 	}
 	defer d.DB.Close()
@@ -208,12 +292,42 @@ func Run(cfgPath string) error {
 		return guard.Ready()
 	}
 
-	// Gateway TLS.
-	gwCert, err := d.gatewayCert()
+	// Gateway TLS. Certificates from files (gateway and UI) are reloaded on
+	// SIGHUP; the internal-CA gateway certificate is issued at start.
+	gwTLS, reloadGW, err := d.gatewayTLS()
 	if err != nil {
 		return err
 	}
-	gs := d.Gateway.GRPCServer(d.Gateway.TLSConfig(gwCert))
+	gs := d.Gateway.GRPCServer(gwTLS)
+	var uiCert *certFile
+	if cfg.Listen.TLSCertFile != "" {
+		if uiCert, err = loadCertFile(cfg.Listen.TLSCertFile, cfg.Listen.TLSKeyFile); err != nil {
+			return err
+		}
+	}
+	go func() {
+		hup := make(chan os.Signal, 1)
+		signal.Notify(hup, syscall.SIGHUP)
+		defer signal.Stop(hup)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+			}
+			for _, c := range []*certFile{reloadGW, uiCert} {
+				if c == nil {
+					continue
+				}
+				if err := c.reload(); err != nil {
+					log.Error("SIGHUP: certificate not reloaded, keeping the current one", "err", err)
+				} else {
+					log.Info("SIGHUP: certificate reloaded", "file", c.certPath)
+				}
+			}
+			log.Info("SIGHUP: other configuration changes need a restart")
+		}
+	}()
 	gl, err := net.Listen("tcp", cfg.Listen.Gateway)
 	if err != nil {
 		return err
@@ -236,10 +350,19 @@ func Run(cfgPath string) error {
 	}
 
 	httpSrv := &http.Server{Addr: cfg.Listen.HTTP, Handler: srv.Handler(), ReadHeaderTimeout: 10 * time.Second}
+	if uiCert != nil {
+		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: uiCert.get}
+	}
 	opsSrv := &http.Server{Addr: cfg.Listen.Metrics, Handler: srv.OpsHandler(), ReadHeaderTimeout: 10 * time.Second}
 	errc := make(chan error, 3)
 	go func() { errc <- gs.Serve(gl) }()
-	go func() { errc <- httpSrv.ListenAndServe() }()
+	go func() {
+		if uiCert != nil {
+			errc <- httpSrv.ListenAndServeTLS("", "")
+			return
+		}
+		errc <- httpSrv.ListenAndServe()
+	}()
 	go func() { errc <- opsSrv.ListenAndServe() }()
 	log.Info("olympos server started", "http", cfg.Listen.HTTP, "gateway", cfg.Listen.Gateway, "metrics", cfg.Listen.Metrics)
 
@@ -314,18 +437,49 @@ func (d *Deps) initKeyVault() error {
 	return fmt.Errorf("unknown keyVault.provider %q", cfg.KeyVault.Provider)
 }
 
-func (d *Deps) gatewayCert() (tls.Certificate, error) {
+// gatewayTLS is the gateway's TLS config; the returned certFile (nil for
+// the internal-CA certificate) is reloaded on SIGHUP.
+func (d *Deps) gatewayTLS() (*tls.Config, *certFile, error) {
 	if d.Cfg.Gateway.TLSCertFile != "" {
-		return tls.LoadX509KeyPair(d.Cfg.Gateway.TLSCertFile, d.Cfg.Gateway.TLSKeyFile)
+		cf, err := loadCertFile(d.Cfg.Gateway.TLSCertFile, d.Cfg.Gateway.TLSKeyFile)
+		if err != nil {
+			return nil, nil, err
+		}
+		c := d.Gateway.TLSConfig(tls.Certificate{})
+		c.Certificates, c.GetCertificate = nil, cf.get
+		return c, cf, nil
 	}
+	// Internal CA: a 90-day certificate, re-issued when it has less than 30
+	// days left (a systemd service can run longer than that).
 	hosts := append([]string{d.Cfg.GatewayHost()}, d.Cfg.Gateway.ExtraSANs...)
-	der, key, err := d.CA.IssueServerCert(hosts, 90*24*time.Hour)
-	if err != nil {
-		return tls.Certificate{}, err
+	var mu sync.Mutex
+	var cur *tls.Certificate
+	issue := func() error {
+		der, key, err := d.CA.IssueServerCert(hosts, 90*24*time.Hour)
+		if err != nil {
+			return err
+		}
+		leaf, _ := x509.ParseCertificate(der)
+		cur = &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
+		d.Log.Info("issued gateway certificate from internal CA", "hosts", hosts, "not_after", leaf.NotAfter)
+		return nil
 	}
-	leaf, _ := x509.ParseCertificate(der)
-	d.Log.Info("issued gateway certificate from internal CA", "hosts", hosts)
-	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}, nil
+	if err := issue(); err != nil {
+		return nil, nil, err
+	}
+	c := d.Gateway.TLSConfig(tls.Certificate{})
+	c.Certificates = nil
+	c.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if time.Until(cur.Leaf.NotAfter) < 30*24*time.Hour {
+			if err := issue(); err != nil {
+				d.Log.Error("renew gateway certificate", "err", err)
+			}
+		}
+		return cur, nil
+	}
+	return c, nil, nil
 }
 
 func (d *Deps) principalSync(ctx context.Context, dir server.Directory) {

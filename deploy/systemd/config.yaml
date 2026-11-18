@@ -1,0 +1,44 @@
+# Olympos server configuration (systemd install). Reference:
+# docs/install-systemd.md and SPEC §2.1. After editing:
+#   sudo olympos-server check-config -db && sudo systemctl restart olympos-server
+# (certificate renewals only need: sudo systemctl reload olympos-server)
+olympos:
+  publicURL: https://olympos.example.internal          # CHANGE: URL users open
+  agentGatewayURL: olympos.example.internal:8443       # CHANGE: host:port agents dial
+  listen:
+    http: ":8080"
+    gateway: ":8443"
+    metrics: "127.0.0.1:9090"
+    # Serve the UI over HTTPS directly (otherwise put a reverse proxy in front):
+    # tlsCertFile: /etc/olympos/tls/ui.crt
+    # tlsKeyFile: /etc/olympos/tls/ui.key
+  # gateway:                                           # optional own gateway certificate
+  #   tlsCertFile: /etc/olympos/tls/gateway.crt
+  #   tlsKeyFile: /etc/olympos/tls/gateway.key
+  entra:
+    tenantID: ""                                       # CHANGE
+    clientID: ""                                       # CHANGE
+    clientSecretRef: ""                                # kv://<vault>/olympos-oidc-client-secret
+  bootstrapAdmins: []                                  # Entra object IDs, used only while no grants exist
+  keyVault:
+    provider: azure
+    name: ""                                           # CHANGE: Key Vault name
+    kekName: olympos-kek
+    hmacSecretName: olympos-hmac
+    managedIdentityClientID: ""                        # Azure VM user-assigned identity (IMDS)
+  # Olympos' own database: the local PostgreSQL over the Unix socket, peer
+  # auth, database and role "olympos" (docs/install-systemd.md §2).
+  database:
+    dsn: postgres:///olympos?host=/var/run/postgresql
+  backup:
+    # pg_dump layouts: shipped, Debian PGDG, RHEL PGDG.
+    pgDumpDir: /usr/lib/olympos/pg:/usr/lib/postgresql:/usr/pgsql-{major}/bin
+    nfsRoot: /var/lib/olympos/nfs                      # OS-managed mounts: /var/lib/olympos/nfs/<name>
+  audit:
+    kubescapeBin: /usr/lib/olympos/bin/kubescape
+    polarisBin: /usr/lib/olympos/bin/polaris
+  security:
+    trivyBin: /usr/lib/olympos/bin/trivy
+    trivyCacheDir: /var/lib/olympos/trivy-cache
+  # targetTLS:
+  #   caBundleFile: /etc/olympos/target-ca.crt         # private CAs of your databases

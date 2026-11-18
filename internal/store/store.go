@@ -89,6 +89,13 @@ func Migrate(ctx context.Context, pool *DB) error {
 	return nil
 }
 
+// SchemaVersion is the highest applied migration.
+func SchemaVersion(ctx context.Context, q Querier) (int64, error) {
+	var v int64
+	err := q.QueryRow(ctx, `SELECT COALESCE(max(version_id), 0) FROM goose_db_version WHERE is_applied`).Scan(&v)
+	return v, err
+}
+
 func isUndefinedTable(err error) bool {
 	var pg *pgconn.PgError
 	return errors.As(err, &pg) && pg.Code == "42P01"

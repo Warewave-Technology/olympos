@@ -33,6 +33,10 @@ type Server struct {
 		HTTP    string `yaml:"http"`    // user-facing, default :8080 (TLS terminated by ingress)
 		Gateway string `yaml:"gateway"` // agent gateway, default :8443
 		Metrics string `yaml:"metrics"` // /metrics, /healthz, /readyz; default :9090
+		// TLSCertFile/TLSKeyFile serve the UI over HTTPS directly (systemd
+		// install, no ingress). Reloaded on SIGHUP.
+		TLSCertFile string `yaml:"tlsCertFile"`
+		TLSKeyFile  string `yaml:"tlsKeyFile"`
 	} `yaml:"listen"`
 
 	Entra struct {
@@ -223,6 +227,12 @@ func (c *Server) defaults() {
 // Validate checks required settings.
 func (c *Server) Validate() error {
 	var errs []string
+	if (c.Listen.TLSCertFile == "") != (c.Listen.TLSKeyFile == "") {
+		errs = append(errs, "listen.tlsCertFile and listen.tlsKeyFile must be set together")
+	}
+	if (c.Gateway.TLSCertFile == "") != (c.Gateway.TLSKeyFile == "") {
+		errs = append(errs, "gateway.tlsCertFile and gateway.tlsKeyFile must be set together")
+	}
 	if c.DevMode && !devbuild.Enabled {
 		errs = append(errs, "devMode is only available in development builds (go build -tags dev); release binaries have no dev login and no local key vault")
 	}
