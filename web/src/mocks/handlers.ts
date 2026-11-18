@@ -3,6 +3,7 @@ import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard,
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
+import { fleetRoutes } from './fleet';
 
 export interface MockReq {
   method: string;
@@ -107,6 +108,7 @@ function runFor(id: string): BackupRun | undefined {
 }
 
 const routes: [string, string, Handler][] = [
+  ...fleetRoutes,
   ['GET', '/me', () => ok(db.me())],
   ['GET', '/dashboard', () => ok(dashboard())],
   ['GET', '/clusters', () => items(liveClusters())],
@@ -696,55 +698,11 @@ const routes: [string, string, Handler][] = [
     db.auditRuns.unshift(run);
     return ok({ items: [run] }, 202);
   }],
-  [
-    'GET',
-    '/audit/runs',
-    (r) => {
-      const tool = r.query.get('tool');
-      const sid = r.query.get('schedule_id');
-      return items(db.auditRuns.filter((x) => (!tool || x.tool === tool) && (!sid || x.schedule_id === sid)).slice(0, Number(r.query.get('limit') ?? 50)));
-    },
-  ],
   ['GET', '/audit/runs/:id', (_r, p) => {
     const x = db.auditRuns.find((y) => y.id === p.id);
     return x ? ok(x) : notFound();
   }],
-  [
-    'GET',
-    '/findings',
-    (r) => {
-      const src = r.query.get('source');
-      const st = r.query.get('status');
-      const runId = r.query.get('run_id');
-      return items(db.findings.filter((f) => (!src || f.source === src) && (!st || f.status === st) && (!runId || f.source === 'kubescape')));
-    },
-  ],
-
   // -------------------------------------------------------- security
-  [
-    'GET',
-    '/images',
-    (r) => {
-      const q = (r.query.get('q') ?? '').toLowerCase();
-      const sev = r.query.get('severity');
-      if (noImages()) return items([]);
-      return items(db.images.filter((i) => (!q || i.repo.toLowerCase().includes(q) || i.digest.includes(q)) && (!sev || (sev === 'critical' ? i.critical > 0 : i.high > 0))));
-    },
-  ],
-  [
-    'GET',
-    '/images/:digest',
-    (_r, p) => {
-      const i = db.images.find((x) => x.digest === decodeURIComponent(p.digest));
-      if (!i) return notFound();
-      return ok({
-        scan_error: '',
-        ...i,
-        usage: [{ cluster_id: db.clusters[0].id, cluster_name: db.clusters[0].name, namespace: 'erp', workload_kind: 'Deployment', workload_name: 'payments-api', container: 'api' }],
-        vulns: i.critical ? [{ cve_id: 'CVE-2026-31337', severity: 'critical', package: 'openssl', installed: '3.0.13', fixed_in: '3.0.15', title: 'Buffer overflow in X.509 name checks' }, { cve_id: 'CVE-2026-1021', severity: 'high', package: 'libexpat', installed: '2.5.0', fixed_in: '2.6.3', title: 'Integer overflow in XML parser' }] : [],
-      });
-    },
-  ],
   [
     'POST',
     '/images/scan',
@@ -770,8 +728,6 @@ const routes: [string, string, Handler][] = [
       return { status: 202 };
     },
   ],
-  ['GET', '/security/kyverno', () => items(db.kyverno)],
-  ['GET', '/security/netpol', () => items(db.netpol)],
   ['GET', '/registries', () => ok({ items: db.registries, unmatched: db.unmatched })],
   [
     'POST',

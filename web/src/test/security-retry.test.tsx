@@ -35,7 +35,7 @@ describe('scan status cell', () => {
 
 describe('Security › images', () => {
   it('keeps Kyverno/NetworkPolicy summaries out of the Images tab', async () => {
-    await renderApp('/security');
+    await renderApp('/security?cluster=all');
     await screen.findByRole('table', { name: 'Images' }, T);
     expect(screen.queryByText('Top Kyverno violations')).toBeNull();
     expect(screen.queryByText('Namespaces without default-deny')).toBeNull();
@@ -43,7 +43,7 @@ describe('Security › images', () => {
 
   it('offers Retry for failed/unavailable/missing-credential images and posts a rescan', async () => {
     const user = userEvent.setup();
-    await renderApp('/security');
+    await renderApp('/security?cluster=all');
     // spy on top of the mock API (installed by renderApp)
     const posts: string[] = [];
     const orig = window.fetch;
@@ -74,7 +74,7 @@ describe('Security › images', () => {
 
   it('hides Retry and Scan now for viewers', async () => {
     localStorage.setItem('olympos.mock.role', 'viewer');
-    await renderApp('/security');
+    await renderApp('/security?cluster=all');
     const table = await screen.findByRole('table', { name: 'Images' }, T);
     await waitFor(() => expect(within(table).getAllByRole('row').length).toBeGreaterThan(1));
     expect(within(table).queryByRole('button', { name: /^(Retry scan of|Scan) / })).toBeNull();

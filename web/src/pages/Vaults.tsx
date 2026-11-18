@@ -5,10 +5,11 @@ import { api } from '../api/client';
 import type { ItemList, SecretDetail, SecretSummary, Vault, VaultSearchHit } from '../api/types';
 import { useCan } from '../auth/me';
 import { ago, age, engineLabel, plural, shortDate } from '../lib/format';
+import { formatLabels } from '../lib/labels';
 import { vaultsRoute } from '../router';
 import { useDebounced } from '../ui/DataTable';
 import { IconChevronDown, IconSearch } from '../ui/icons';
-import { Badge, Chip, EmptyState, ErrorState, Loading, QueryView, SecretValue, Spinner, useToast } from '../ui/kit';
+import { Badge, EmptyState, ErrorState, Loading, QueryView, SecretValue, Spinner, useToast } from '../ui/kit';
 import { PageHead } from '../ui/status';
 import { Select } from '../ui/Select';
 import { VaultIdentity, VaultStatusBadge, providerName, vaultIdentityProps } from '../ui/vault';
@@ -105,22 +106,22 @@ export function VaultsPage() {
   const pathHits = (searchQ.data?.items ?? []).filter((h) => h.match === 'path');
   const serverVaultIds = new Set((searchQ.data?.items ?? []).filter((h) => h.match === 'vault').map((h) => h.vault_id));
 
-  const counts = useMemo(() => {
-    const c = { configured: 0, discovered: 0, error: 0 };
-    for (const v of vaults) if (v.status in c) c[v.status as keyof typeof c]++;
-    return c;
-  }, [vaults]);
   const q = term.trim();
-  const filtered = useMemo(() => vaults.filter((v) => (!status || v.status === status) && (!q || matchesVault(v, q) || serverVaultIds.has(v.id))), [vaults, status, q, searchQ.data]); // eslint-disable-line react-hooks/exhaustive-deps
+  const allGroups = useMemo(() => groupByCluster(vaults), [vaults]);
+  const clusterId = search.cluster && allGroups.some((g) => g.clusterId === search.cluster) ? search.cluster : '';
+  const filtered = useMemo(
+    () => vaults.filter((v) => (!clusterId || v.target.cluster_id === clusterId) && (!status || v.status === status) && (!q || matchesVault(v, q) || serverVaultIds.has(v.id))),
+    [vaults, clusterId, status, q, searchQ.data], // eslint-disable-line react-hooks/exhaustive-deps
+  );
   const groups = useMemo(() => groupByCluster(filtered), [filtered]);
-  const filtering = !!q || !!status;
+  const filtering = !!q || !!status || !!clusterId;
   // While filtering every group starts open; collapsing then only lasts until the filter changes.
   const [openF, setOpenF] = useState<Record<string, boolean>>({});
   const [allPaths, setAllPaths] = useState(false);
   useEffect(() => {
     setOpenF({});
     setAllPaths(false);
-  }, [q, status]);
+  }, [q, status, clusterId]);
   // Keep the selected vault visible in the (scrolling) list.
   const listRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -144,7 +145,7 @@ export function VaultsPage() {
   });
   const secret = secretQ.data;
 
-  const select = (patch: { vault?: string; mount?: string; path?: string }) => navigate({ search: (s) => ({ ...s, ...patch }), replace: true });
+  const select = (patch: { vault?: string; mount?: string; path?: string; cluster?: string }) => navigate({ search: (s) => ({ ...s, ...patch }), replace: true });
   useEffect(() => setAction(null), [vault?.id, path]);
 
   const qc = useQueryClient();
@@ -157,6 +158,11 @@ export function VaultsPage() {
     },
     onError: () => toast('Could not start an index refresh.', 'crit'),
   });
+
+  const chooseCluster = (c: string) => {
+    const first = allGroups.find((g) => g.clusterId === c)?.vaults[0];
+    select(c && vault && vault.target.cluster_id !== c && first ? { cluster: c, vault: first.id, mount: undefined, path: undefined } : { cluster: c || undefined });
+  };
 
   const choosePath = (h: VaultSearchHit) => {
     select({ vault: h.vault_id, mount: h.mount, path: h.path });
@@ -208,10 +214,16 @@ export function VaultsPage() {
                 />
                 <IconSearch className="ico-muted" style={{ position: 'absolute', left: 10, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }} />
               </div>
-              <div className="spread small">
-                <span className="muted" id="v-q-hint" aria-live="polite">
-                  {filtering ? `${plural(filtered.length, 'vault')} in ${plural(groups.length, 'cluster')}` : `${plural(vaults.length, 'vault')} in ${plural(groupByCluster(vaults).length, 'cluster')}`}
-                </span>
+              <div className="vfilters">
+                <Select<string>
+                  size="sm"
+                  searchable
+                  searchLabel="Find a cluster"
+                  aria-label="Cluster"
+                  value={clusterId}
+                  onChange={chooseCluster}
+                  options={[{ value: '', label: 'All clusters', text: 'All clusters' }, ...allGroups.map((g) => ({ value: g.clusterId, label: g.clusterName, text: `${g.clusterName} ${formatLabels(g.labels, ' ')}`, hint: formatLabels(g.labels, ' · ') || undefined }))]}
+                />
                 <Select<StatusFilter>
                   inline
                   size="sm"
@@ -220,18 +232,21 @@ export function VaultsPage() {
                   onChange={setStatus}
                   options={[
                     { value: '', label: 'All statuses' },
-                    { value: 'configured', label: `Configured · ${counts.configured}` },
-                    { value: 'discovered', label: `Discovered · ${counts.discovered}` },
-                    { value: 'error', label: `Error · ${counts.error}` },
+                    { value: 'configured', label: 'Configured' },
+                    { value: 'discovered', label: 'Discovered' },
+                    { value: 'error', label: 'Error' },
                   ]}
                 />
               </div>
+              <span className="muted small" id="v-q-hint" aria-live="polite">
+                {filtering ? `${plural(filtered.length, 'vault')} in ${plural(groups.length, 'cluster')}` : `${plural(vaults.length, 'vault')} in ${plural(allGroups.length, 'cluster')}`}
+              </span>
             </div>
 
             {q && <div className="eyebrow vres-title">Vaults · {filtered.length}</div>}
             {!q && <div className="eyebrow vres-title">Instances by cluster</div>}
             <div className="vlist" ref={listRef}>
-              {groups.length === 0 && <p className="muted small" style={{ padding: '4px 10px' }}>{q ? `No vault matches “${q}”.` : 'No vault has this status.'}</p>}
+              {groups.length === 0 && <p className="muted small" style={{ padding: '4px 10px' }}>{q ? `No vault matches “${q}”.` : clusterId && !status ? 'No vault in this cluster.' : 'No vault has this status.'}</p>}
               {groups.map((g) => {
                 const expanded = isOpen(g);
                 const gid = `vg-${g.clusterId}`;
@@ -246,15 +261,6 @@ export function VaultsPage() {
                         {g.vaults.length}
                       </span>
                     </button>
-                    {Object.keys(g.labels).length > 0 && (
-                      <div className="vgroup-labels" aria-label={`Labels of ${g.clusterName}`}>
-                        {Object.entries(g.labels).map(([k, v]) => (
-                          <Chip key={k}>
-                            {k}={v}
-                          </Chip>
-                        ))}
-                      </div>
-                    )}
                     {expanded && (
                       <div className="vgroup-items" id={gid}>
                         {g.vaults.map((v) => (

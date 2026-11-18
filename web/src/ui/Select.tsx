@@ -41,13 +41,48 @@ function nextEnabled(list: SelectOption[], from: number, dir: 1 | -1): number {
   return -1;
 }
 
-interface Pos {
+export interface PopoverPlacement {
   left: number;
-  minWidth: number;
-  maxWidth: number;
+  width: number;
   top?: number;
   bottom?: number;
   maxHeight: number;
+}
+
+/** Widest a popover grows to fit its option text; longer labels end in an ellipsis. */
+export const POPOVER_MAX_WIDTH = 440;
+const EDGE = 8;
+
+/**
+ * Where the listbox goes: at least as wide as the trigger, as wide as its longest option
+ * (`content`, measured without wrapping) up to POPOVER_MAX_WIDTH and the viewport, below the
+ * trigger unless there is clearly more room above, and shifted/right-aligned to stay on screen.
+ */
+export function placePopover(
+  trigger: { left: number; right: number; top: number; bottom: number; width: number },
+  viewport: { width: number; height: number },
+  content: { width: number },
+  opts: { searchable?: boolean } = {},
+): PopoverPlacement {
+  const vw = viewport.width;
+  const vh = viewport.height;
+  const room = Math.max(0, vw - 2 * EDGE);
+  const width = Math.min(room, Math.max(trigger.width, Math.min(Math.ceil(content.width), POPOVER_MAX_WIDTH)));
+  // left-align with the trigger; when that overflows, right-align with it; then clamp to the viewport
+  let left = trigger.left;
+  if (left + width > vw - EDGE) left = trigger.right - width;
+  left = Math.max(EDGE, Math.min(left, vw - EDGE - width));
+  const below = vh - trigger.bottom - 12;
+  const above = trigger.top - 12;
+  const want = opts.searchable ? 360 : 320;
+  const up = below < Math.min(want, 220) && above > below;
+  return {
+    left,
+    width,
+    top: up ? undefined : trigger.bottom + 4,
+    bottom: up ? vh - trigger.top + 4 : undefined,
+    maxHeight: Math.max(140, Math.min(want, up ? above : below)),
+  };
 }
 
 /**
@@ -67,7 +102,7 @@ export function Select<T extends string>(props: SelectProps<T>) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
   const [query, setQuery] = useState('');
-  const [pos, setPos] = useState<Pos | null>(null);
+  const [pos, setPos] = useState<PopoverPlacement | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const btnRef = useRef<HTMLButtonElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
@@ -81,25 +116,21 @@ export function Select<T extends string>(props: SelectProps<T>) {
   const selected = selectedIndex >= 0 ? options[selectedIndex] : undefined;
   const invalid = props.invalid || props['aria-invalid'] === true || props['aria-invalid'] === 'true';
 
+  const popRef = useRef<HTMLDivElement>(null);
+  /** Natural (unwrapped) width of the open popover, measured once per opening. */
+  const natural = useRef(0);
   const place = useCallback(() => {
     const b = btnRef.current;
     if (!b) return;
-    const r = b.getBoundingClientRect();
-    const vh = window.innerHeight || 800;
-    const vw = window.innerWidth || 1200;
-    const below = vh - r.bottom - 12;
-    const above = r.top - 12;
-    const want = searchable ? 360 : 320;
-    const up = below < Math.min(want, 220) && above > below;
-    const left = Math.max(8, Math.min(r.left, vw - Math.max(r.width, 220) - 8));
-    setPos({
-      left,
-      minWidth: r.width,
-      maxWidth: Math.max(r.width, Math.min(520, vw - left - 8)),
-      top: up ? undefined : r.bottom + 4,
-      bottom: up ? vh - r.top + 4 : undefined,
-      maxHeight: Math.max(140, Math.min(want, up ? above : below)),
-    });
+    const pop = popRef.current;
+    if (pop && !natural.current) {
+      // measure at max-content (labels never wrap), before an explicit width is set
+      const prev = pop.style.width;
+      pop.style.width = 'max-content';
+      natural.current = pop.getBoundingClientRect().width || pop.scrollWidth;
+      pop.style.width = prev;
+    }
+    setPos(placePopover(b.getBoundingClientRect(), { width: window.innerWidth || 1200, height: window.innerHeight || 800 }, { width: natural.current }, { searchable }));
   }, [searchable]);
 
   const openList = (at: 'selected' | 'first' | 'last' | number = 'selected', initialQuery = '') => {
@@ -260,7 +291,11 @@ export function Select<T extends string>(props: SelectProps<T>) {
 
   // Position while open; follow scroll and resize.
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!open) {
+      natural.current = 0;
+      setPos(null);
+      return;
+    }
     place();
     const on = () => place();
     window.addEventListener('resize', on);
@@ -281,9 +316,11 @@ export function Select<T extends string>(props: SelectProps<T>) {
     return () => document.removeEventListener('mousedown', onDown);
   }, [open, close]);
 
+  // focus the filter once the popover is placed (a hidden, unplaced popover cannot take focus)
+  const placed = !!pos;
   useEffect(() => {
-    if (open && searchable) searchRef.current?.focus();
-  }, [open, searchable]);
+    if (open && searchable && placed) searchRef.current?.focus();
+  }, [open, searchable, placed]);
 
   // Filtering resets the active option to the first match.
   useEffect(() => {
@@ -329,7 +366,7 @@ export function Select<T extends string>(props: SelectProps<T>) {
         <IconChevronDown className="select-chevron" />
       </button>
       {open && (
-        <div className="select-pop" style={pos ? { left: pos.left, top: pos.top, bottom: pos.bottom, minWidth: pos.minWidth, maxWidth: pos.maxWidth } : undefined}>
+        <div ref={popRef} className="select-pop" style={pos ? { left: pos.left, top: pos.top, bottom: pos.bottom, width: pos.width } : { visibility: 'hidden', left: 0, top: 0 }}>
           {searchable && (
             <div className="select-search">
               <IconSearch className="ico-muted" />
@@ -369,7 +406,9 @@ export function Select<T extends string>(props: SelectProps<T>) {
                     {sel && <IconCheck />}
                   </span>
                   <span className="select-opt-body">
-                    <span className="select-opt-label">{o.label}</span>
+                    <span className="select-opt-label" title={textOf(o)}>
+                      {o.label}
+                    </span>
                     {o.hint && <span className="select-opt-hint">{o.hint}</span>}
                   </span>
                 </li>

@@ -38,7 +38,7 @@ const GB = 1e9;
 const TENANT = '72f988bf-86f1-41af-91ab-2d7cd011db47';
 
 /** Deterministic pseudo-random numbers so generated fixtures look the same on every load. */
-function seeded(seed: number) {
+export function seeded(seed: number) {
   let x = seed >>> 0 || 1;
   return () => {
     x = (Math.imul(x, 1664525) + 1013904223) >>> 0;
@@ -102,9 +102,18 @@ export function me(): Me {
   };
 }
 
+/** Stable UUID-shaped id from a name, so ?cluster=<id> deep links survive a reload of the mock. */
+export function stableId(name: string): string {
+  const r = seeded([...name].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619) >>> 0, 2166136261));
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const v = Math.floor(r() * 16);
+    return (c === 'x' ? v : (v & 0x3) | 0x8).toString(16);
+  });
+}
+
 function cluster(p: Partial<Cluster> & Pick<Cluster, 'name'>): Cluster {
   return {
-    id: uuid(),
+    id: stableId(p.name),
     labels: {},
     provider: 'azure',
     provider_label: 'Azure',
@@ -697,29 +706,78 @@ const kbSched = uuid();
 function arun(p: Partial<AuditRun> & Pick<AuditRun, 'tool'>): AuditRun {
   return { id: uuid(), schedule_id: null, cluster_id: '', cluster_name: 'all clusters', status: 'succeeded', started_at: iso(H), finished_at: iso(H - 300_000), score: null, new_findings: 0, resolved_findings: 0, error: '', ...p };
 }
-export const auditRuns: AuditRun[] = [
-  arun({ tool: 'kubescape', schedule_id: ksSched, started_at: iso(10 * H), finished_at: iso(10 * H - 420_000), score: 78.4, new_findings: 3, resolved_findings: 1 }),
-  arun({ tool: 'kubescape', schedule_id: ksSched, started_at: iso(34 * H), finished_at: iso(34 * H - 400_000), score: 78.9, new_findings: 0, resolved_findings: 4 }),
-  arun({ tool: 'kubescape', schedule_id: ksSched, started_at: iso(58 * H), finished_at: iso(58 * H - 410_000), score: 77.2, new_findings: 1, resolved_findings: 0 }),
-  arun({ tool: 'kubescape', schedule_id: ksSched, started_at: iso(82 * H), finished_at: iso(82 * H - 405_000), score: 77.4, new_findings: 0, resolved_findings: 2 }),
-  arun({ tool: 'polaris', schedule_id: polSched, started_at: iso(2 * D), score: 91.0 }),
-  arun({
-    tool: 'kube-bench',
-    schedule_id: kbSched,
-    started_at: iso(3 * D),
-    resolved_findings: 2,
-    bench_nodes: [
-      { node_name: 'aks-sys-17402-vmss000000', cluster_name: 'prod-aks-weu-01', benchmark: 'aks-1.7', state: 'done', pass: 41, fail: 2, warn: 6, control_plane_na: true, message: '', duration_s: 38 },
-      { node_name: 'ip-10-20-4-17', cluster_name: 'eks-fra-data', benchmark: 'eks-1.5', state: 'done', pass: 39, fail: 1, warn: 7, control_plane_na: true, message: '', duration_s: 41 },
-      { node_name: 'factory-cp-1', cluster_name: 'onprem-factory-01', benchmark: 'cis-1.9 master', state: 'done', pass: 58, fail: 4, warn: 9, control_plane_na: false, message: '', duration_s: 52 },
-      { node_name: 'ist-lab-w1', cluster_name: 'onprem-ist-lab', benchmark: 'cis-1.9 node', state: 'skipped', pass: 0, fail: 0, warn: 0, control_plane_na: false, message: 'agent offline' },
-    ],
-  }),
-];
+
+/** Kubescape 4 output of a run whose schedule asked for a CIS framework the binary no longer ships. */
+export const KUBESCAPE_FAILED_LOG = [
+  `{"level":"info","ts":"${iso(10 * H)}","msg":"Kubescape scanner initializing...","version":"v4.0.2"}`,
+  `{"level":"info","ts":"${iso(10 * H - 1000)}","msg":"Loading kubeconfig","server":"https://127.0.0.1:43117","context":"olympos-proxy"}`,
+  `{"level":"info","ts":"${iso(10 * H - 2000)}","msg":"Downloading/Loading framework","framework":"nsa"}`,
+  `{"level":"info","ts":"${iso(10 * H - 3000)}","msg":"Downloading/Loading framework","framework":"mitre"}`,
+  `{"level":"warn","ts":"${iso(10 * H - 4000)}","msg":"failed to load framework from the local cache, trying the API","framework":"cis-v1.23-t1.0.1"}`,
+  `{"level":"error","ts":"${iso(10 * H - 6000)}","msg":"failed to download framework","framework":"cis-v1.23-t1.0.1","error":"framework 'cis-v1.23-t1.0.1' not found","attempt":3}`,
+  `{"level":"info","ts":"${iso(10 * H - 6100)}","msg":"available CIS frameworks","frameworks":"cis-aks-t1.8.0, cis-eks-t1.8.0, cis-v1.12.0"}`,
+  "Error: framework 'cis-v1.23-t1.0.1' not found",
+].join('\n');
+
+export const auditRuns: AuditRun[] = [];
+{
+  const live = clusters.filter((c) => c.status !== 'pending');
+  const failedIdx = live.findIndex((c) => c.name === 'onprem-factory-01');
+  live.forEach((c, ci) => {
+    const order = ci === failedIdx ? 0 : ci + 1;
+    for (let k = 0; k < 4; k++) {
+      const start = (10 + 24 * k) * H + order * 4 * MIN;
+      const failed = ci === failedIdx && k === 0;
+      const offline = c.status === 'offline' && k === 0;
+      // an older run stored before the server kept a short reason: the whole stderr ended up in `error`
+      const legacy = c.name === 'cce-ist-retail' && k === 1;
+      const score = 68 + ((ci * 7.3 + k * 1.7) % 26);
+      auditRuns.push(
+        arun({
+          tool: 'kubescape',
+          schedule_id: ksSched,
+          cluster_id: c.id,
+          cluster_name: c.name,
+          status: failed || offline || legacy ? 'failed' : 'succeeded',
+          started_at: iso(start),
+          finished_at: iso(start - (failed ? 7_000 : 400_000)),
+          score: failed || offline || legacy ? null : Math.round(score * 10) / 10,
+          new_findings: failed || offline || legacy ? 0 : (ci + k) % 4 === 0 ? 2 + (ci % 3) : 0,
+          resolved_findings: failed || offline || legacy ? 0 : (ci + k) % 5 === 1 ? 1 : 0,
+          error: failed ? "framework 'cis-v1.23-t1.0.1' not found" : offline ? 'agent_offline' : legacy ? `kubescape failed: exit status 1: ${KUBESCAPE_FAILED_LOG.split('\n').join(' ')}` : '',
+          log: failed || legacy ? KUBESCAPE_FAILED_LOG : offline ? 'agent onprem-ist-lab is offline (last seen 2 h ago): the read-only API proxy is not reachable, kubescape was not started.' : '',
+          details: { trigger: k === 0 && failed ? 'schedule' : 'schedule', frameworks: ['nsa', 'cis', 'mitre'] },
+        }),
+      );
+    }
+    if (c.labels.env === 'prod') {
+      auditRuns.push(arun({ tool: 'polaris', schedule_id: polSched, cluster_id: c.id, cluster_name: c.name, started_at: iso(2 * D + order * MIN), finished_at: iso(2 * D + order * MIN - 60_000), score: Math.round((84 + ((ci * 3.1) % 14)) * 10) / 10, new_findings: ci % 4 === 1 ? 3 : 0 }));
+    }
+    if (c.bench_enabled) {
+      const managed = c.provider !== 'onprem';
+      const bench = c.provider === 'azure' ? 'aks-1.7' : c.provider === 'aws' ? 'eks-1.5' : c.provider === 'gcp' ? 'gke-1.6' : 'cis-1.9';
+      const nodes = Array.from({ length: Math.min(3, c.nodes) }, (_, n) => ({
+        node_name: c.provider === 'azure' ? `aks-sys-${17402 + ci}-vmss00000${n}` : c.provider === 'aws' ? `ip-10-${20 + ci}-4-${17 + n}` : `${c.name.split('-').slice(-2).join('-')}-${n === 0 && !managed ? 'cp' : 'w'}${n + 1}`,
+        cluster_name: c.name,
+        benchmark: !managed ? (n === 0 ? `${bench} master` : `${bench} node`) : bench,
+        state: 'done',
+        pass: 39 + ((ci + n) % 5) * 4,
+        fail: (ci + n) % 3,
+        warn: 5 + ((ci + n) % 4),
+        control_plane_na: managed,
+        message: '',
+        duration_s: 36 + ((ci * 7 + n * 3) % 20),
+      }));
+      auditRuns.push(arun({ tool: 'kube-bench', schedule_id: kbSched, cluster_id: c.id, cluster_name: c.name, started_at: iso(3 * D + order * MIN), finished_at: iso(3 * D + order * MIN - 120_000), score: Math.round((nodes.reduce((s, x) => s + x.pass, 0) / nodes.reduce((s, x) => s + x.pass + x.fail, 0)) * 1000) / 10, resolved_findings: ci % 3 === 0 ? 2 : 0, bench_nodes: nodes }));
+    }
+  });
+  auditRuns.sort((x, y) => (y.started_at ?? '').localeCompare(x.started_at ?? ''));
+}
+const latest = (tool: string) => auditRuns.find((r) => r.tool === tool) ?? null;
 export const auditSchedules: AuditSchedule[] = [
-  { id: ksSched, tool: 'kubescape', frameworks: ['nsa', 'cis', 'mitre'], scope_selector: 'all', cron: '0 4 * * *', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(14 * H), clusters: 7, last_run: auditRuns[0] },
-  { id: polSched, tool: 'polaris', frameworks: [], scope_selector: 'env=prod', cron: '0 5 * * 1', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(5 * D), clusters: 5, last_run: auditRuns[4] },
-  { id: kbSched, tool: 'kube-bench', frameworks: [], scope_selector: 'all', cron: '0 3 * * 0', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(4 * D), clusters: 5, last_run: auditRuns[5] },
+  { id: ksSched, tool: 'kubescape', frameworks: ['nsa', 'cis', 'mitre'], scope_selector: 'all', cron: '0 4 * * *', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(14 * H), clusters: 11, last_run: latest('kubescape') },
+  { id: polSched, tool: 'polaris', frameworks: [], scope_selector: 'env=prod', cron: '0 5 * * 1', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(5 * D), clusters: 9, last_run: latest('polaris') },
+  { id: kbSched, tool: 'kube-bench', frameworks: [], scope_selector: 'all', cron: '0 3 * * 0', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(4 * D), clusters: 9, last_run: latest('kube-bench') },
 ];
 
 function finding(p: Partial<Finding> & Pick<Finding, 'control_id' | 'title' | 'cluster_name' | 'resource_ref' | 'severity'>): Finding {
@@ -732,6 +790,32 @@ export const findings: Finding[] = [
   finding({ source: 'transfer', control_id: 'transfer.compressed_mode', title: 'Backups use compressed transfer mode (agent can see backup data)', severity: 'medium', cluster_name: 'eks-fra-data', resource_ref: 'cluster/eks-fra-data', first_seen_at: iso(20 * D) }),
   finding({ source: 'vault-drift', control_id: 'vault.unmanaged_write', title: 'Unmanaged change: kv/platform/ci v12', severity: 'high', cluster_name: 'prod-aks-weu-01', resource_ref: 'openbao/kv/platform/ci', first_seen_at: iso(9 * H) }),
 ];
+{
+  const CONTROLS: [string, string, Finding['severity'], string][] = [
+    ['C-0016', 'Allow privilege escalation', 'high', 'kubescape'],
+    ['C-0013', 'Non-root containers', 'medium', 'kubescape'],
+    ['C-0270', 'Ensure CPU limits are set', 'high', 'kubescape'],
+    ['C-0030', 'Ingress and Egress blocked', 'medium', 'kubescape'],
+    ['C-0041', 'HostNetwork access', 'critical', 'kubescape'],
+    ['C-0046', 'Insecure capabilities', 'high', 'kubescape'],
+    ['C-0076', 'Label usage for resources', 'low', 'kubescape'],
+    ['runAsRootAllowed', 'Should not be allowed to run as root', 'medium', 'polaris'],
+    ['livenessProbeMissing', 'Liveness probe should be configured', 'low', 'polaris'],
+    ['cis-1.9:4.2.6', 'Ensure that the --protect-kernel-defaults argument is set to true', 'high', 'kube-bench'],
+  ];
+  const NS = ['apps', 'monitoring', 'jobs', 'default', 'ingress-nginx'];
+  const WL = ['deploy/api', 'deploy/web', 'sts/cache', 'ds/node-agent', 'cronjob/cleanup'];
+  clusters.forEach((c, ci) => {
+    if (c.status === 'pending') return;
+    const n = 2 + ((ci * 5) % 7);
+    for (let i = 0; i < n; i++) {
+      const [id, title, sev, src] = CONTROLS[(ci * 3 + i) % CONTROLS.length];
+      if (src === 'kube-bench' && !c.bench_enabled) continue;
+      if (src === 'polaris' && c.labels.env !== 'prod') continue;
+      findings.push(finding({ source: src, control_id: id, title, severity: sev, cluster_name: c.name, resource_ref: src === 'kube-bench' ? `node/${c.name}-w${i + 1}` : `${NS[(ci + i) % NS.length]}/${WL[(ci * 2 + i) % WL.length]}`, first_seen_at: iso((10 + 24 * (i % 3)) * H) }));
+    }
+  });
+}
 
 // ------------------------------------------------------------ security
 export const images: Image[] = [

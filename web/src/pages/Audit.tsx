@@ -1,12 +1,15 @@
-import { useState } from 'react';
-import { Link } from '@tanstack/react-router';
+import { useMemo, useState } from 'react';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
-import type { AuditRun, AuditSchedule, AuditScheduleInput, AuditTool, BenchNode, Channel, Cluster, Finding, ItemList } from '../api/types';
+import type { AuditClusterRun, AuditClusterSummary, AuditRun, AuditSchedule, AuditScheduleInput, AuditTool, BenchNode, Channel, Cluster, Finding, ItemList } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, validateCron } from '../lib/cron';
-import { dateTime, duration, plural } from '../lib/format';
+import { age, dateTime, duration, plural } from '../lib/format';
 import { matchesSelector } from '../lib/sas';
+import { auditRoute } from '../router';
+import { AuditRunDialog, FailedRunButton } from '../ui/AuditRunDialog';
+import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../ui/kit';
 import { PageHead, SeverityBadge } from '../ui/status';
 import { Select } from '../ui/Select';
@@ -15,9 +18,9 @@ import { DataTable, type Column } from '../ui/DataTable';
 
 const TOOL_LABEL: Record<string, string> = { kubescape: 'Kubescape', polaris: 'Polaris', 'kube-bench': 'kube-bench' };
 
-function lastResult(r: AuditRun | null) {
+function LastResult({ r, onOpen }: { r: Pick<AuditRun, 'id' | 'status' | 'error' | 'tool' | 'cluster_name' | 'new_findings' | 'resolved_findings'> | null | undefined; onOpen: (id: string) => void }) {
   if (!r) return <Badge tone="mute">Not run yet</Badge>;
-  if (r.status === 'failed') return <Badge tone="crit">Failed{r.error ? ` · ${r.error}` : ''}</Badge>;
+  if (r.status === 'failed') return <FailedRunButton run={r} onOpen={onOpen} />;
   if (r.status === 'running' || r.status === 'queued') return <Badge tone="info">{r.status === 'running' ? 'Running' : 'Queued'}</Badge>;
   if (r.new_findings > 0) return <Badge tone="warn">+{r.new_findings} new failed</Badge>;
   if (r.resolved_findings > 0) return <Badge tone="ok">−{r.resolved_findings} resolved</Badge>;
@@ -26,52 +29,51 @@ function lastResult(r: AuditRun | null) {
 
 const SEV_ORDER = ['critical', 'high', 'medium', 'low', 'info'];
 
-const KS_COLUMNS: Column<AuditRun>[] = [
-  {
-    id: 'run',
-    header: 'Run',
-    sortValue: (r) => r.started_at,
-    defaultDir: 'desc',
-    className: 'mono',
-    cell: (r) => (
-      <>
-        {dateTime(r.started_at)}
-        {r.status !== 'succeeded' && (
-          <>
-            {' '}
-            <Badge tone={r.status === 'failed' ? 'crit' : 'info'}>{r.status}</Badge>
-          </>
-        )}
-      </>
-    ),
-  },
-  { id: 'score', header: 'Score', align: 'num', sortValue: (r) => r.score, defaultDir: 'desc', cell: (r) => (r.score != null ? `${r.score.toFixed(1)}%` : '—') },
-  { id: 'new', header: 'New', align: 'num', sortValue: (r) => r.new_findings, defaultDir: 'desc', className: (r) => (r.new_findings > 0 ? 'up' : undefined), cell: (r) => (r.new_findings > 0 ? `+${r.new_findings}` : 0) },
-  { id: 'resolved', header: 'Resolved', align: 'num', sortValue: (r) => r.resolved_findings, defaultDir: 'desc', className: (r) => (r.resolved_findings > 0 ? 'down' : undefined), cell: (r) => (r.resolved_findings > 0 ? `−${r.resolved_findings}` : 0) },
-];
+function ksColumns(oneCluster: boolean, onOpen: (id: string) => void): Column<AuditRun>[] {
+  return [
+    {
+      id: 'run',
+      header: 'Run',
+      sortValue: (r) => r.started_at,
+      defaultDir: 'desc',
+      cell: (r) => (
+        <span className="inline-sm">
+          <span className="mono">{dateTime(r.started_at)}</span>
+          {r.status === 'failed' ? <FailedRunButton run={r} onOpen={onOpen} compact /> : r.status !== 'succeeded' ? <Badge tone="info">{r.status}</Badge> : null}
+        </span>
+      ),
+    },
+    { id: 'cluster', header: 'Cluster', hidden: oneCluster, sortValue: (r) => r.cluster_name, className: 'mono', cell: (r) => r.cluster_name },
+    { id: 'score', header: 'Score', align: 'num', sortValue: (r) => r.score, defaultDir: 'desc', cell: (r) => (r.score != null ? `${r.score.toFixed(1)}%` : '—') },
+    { id: 'new', header: 'New', align: 'num', sortValue: (r) => r.new_findings, defaultDir: 'desc', className: (r) => (r.new_findings > 0 ? 'up' : undefined), cell: (r) => (r.new_findings > 0 ? `+${r.new_findings}` : 0) },
+    { id: 'resolved', header: 'Resolved', align: 'num', sortValue: (r) => r.resolved_findings, defaultDir: 'desc', className: (r) => (r.resolved_findings > 0 ? 'down' : undefined), cell: (r) => (r.resolved_findings > 0 ? `−${r.resolved_findings}` : 0) },
+  ];
+}
 
-const FINDING_COLUMNS: Column<Finding>[] = [
-  {
-    id: 'control',
-    header: 'Control',
-    sortValue: (f) => f.control_id,
-    className: 'wrap',
-    cell: (f) => (
-      <>
-        <span className="mono">{f.control_id}</span> {f.title}
-      </>
-    ),
-  },
-  { id: 'sev', header: 'Severity', sortValue: (f) => SEV_ORDER.indexOf(f.severity), cell: (f) => <SeverityBadge s={f.severity} /> },
-  { id: 'cluster', header: 'Cluster', sortValue: (f) => f.cluster_name, className: 'mono', cell: (f) => f.cluster_name },
-  { id: 'res', header: 'Resource', sortValue: (f) => f.resource_ref, className: 'mono wrap break', cell: (f) => f.resource_ref },
-];
+function findingColumns(oneCluster: boolean): Column<Finding>[] {
+  return [
+    {
+      id: 'control',
+      header: 'Control',
+      sortValue: (f) => f.control_id,
+      className: 'wrap',
+      cell: (f) => (
+        <>
+          <span className="mono">{f.control_id}</span> {f.title}
+        </>
+      ),
+    },
+    { id: 'sev', header: 'Severity', sortValue: (f) => SEV_ORDER.indexOf(f.severity), cell: (f) => <SeverityBadge s={f.severity} /> },
+    { id: 'cluster', header: 'Cluster', hidden: oneCluster, sortValue: (f) => f.cluster_name, className: 'mono', cell: (f) => f.cluster_name },
+    { id: 'res', header: 'Resource', sortValue: (f) => f.resource_ref, className: 'mono wrap break', cell: (f) => f.resource_ref },
+  ];
+}
 
-function benchColumns(r: AuditRun): Column<BenchNode>[] {
+function benchColumns(r: AuditRun, oneCluster: boolean): Column<BenchNode>[] {
   const ran = (n: BenchNode) => n.state === 'done' || n.state === 'succeeded';
   return [
     { id: 'node', header: 'Node', sortValue: (n) => n.node_name, className: 'mono', cell: (n) => n.node_name },
-    { id: 'cluster', header: 'Cluster', sortValue: (n) => n.cluster_name ?? r.cluster_name, className: 'mono', cell: (n) => n.cluster_name ?? r.cluster_name },
+    { id: 'cluster', header: 'Cluster', hidden: oneCluster, sortValue: (n) => n.cluster_name ?? r.cluster_name, className: 'mono', cell: (n) => n.cluster_name ?? r.cluster_name },
     {
       id: 'bench',
       header: 'Benchmark',
@@ -108,145 +110,382 @@ function benchColumns(r: AuditRun): Column<BenchNode>[] {
   ];
 }
 
+/** Latest run of one tool in a cluster summary row. */
+function ToolCell({ run, onOpen, enabled = true, cluster = '' }: { run: AuditClusterRun | undefined; onOpen: (id: string) => void; enabled?: boolean; cluster?: string }) {
+  if (!enabled) return <Badge tone="mute">Not enabled</Badge>;
+  if (!run) return <span className="muted">Not run</span>;
+  if (run.status === 'failed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: cluster }} onOpen={onOpen} compact />;
+  if (run.status === 'running' || run.status === 'queued') return <Badge tone="info">{run.status === 'running' ? 'Running' : 'Queued'}</Badge>;
+  return (
+    <>
+      <span className="n">{run.score != null ? `${run.score.toFixed(1)}%` : 'Done'}</span>
+      <div className="muted small">
+        {run.new_findings > 0 ? <span className="ico-warn">+{run.new_findings} new</span> : 'no new'}
+        {run.finished_at ? ` · ${age(run.finished_at)} ago` : ''}
+      </div>
+    </>
+  );
+}
+
+function OpenFindings({ f }: { f: AuditClusterSummary['open_findings'] }) {
+  const parts = (['critical', 'high', 'medium', 'low'] as const).filter((s) => f[s] > 0);
+  if (!parts.length) return <Badge tone="ok">None open</Badge>;
+  return (
+    <span className="sev-chips">
+      {parts.map((s) => (
+        <Badge key={s} tone={s === 'critical' || s === 'high' ? 'crit' : s === 'medium' ? 'warn' : 'info'}>
+          {f[s]} {s}
+        </Badge>
+      ))}
+    </span>
+  );
+}
+
 export function AuditPage() {
-  const canOperate = useCan('operate');
+  const search = auditRoute.useSearch();
+  const navigate = useNavigate({ from: '/audit' });
+  const scope = resolveScope(search.cluster);
+  const { list: clusters, q: clustersQ } = useClusterList();
+  const openRun = (id: string) => navigate({ search: (s) => ({ ...s, run: id }) });
+  return (
+    <>
+      {scope.mode === 'overview' ? <AuditOverview clusters={clusters} clustersLoading={clustersQ.isPending} openRun={openRun} /> : <AuditDetail scope={scope} clusters={clusters} openRun={openRun} />}
+      {search.run && <AuditRunDialog id={search.run} onClose={() => navigate({ search: (s) => ({ ...s, run: undefined }) })} />}
+    </>
+  );
+}
+
+function useAuditBasics() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [creating, setCreating] = useState(false);
   const schedQ = useQuery({ queryKey: ['audit-schedules'], queryFn: () => api.get<ItemList<AuditSchedule>>('/audit/schedules') });
   const clustersQ = useQuery({ queryKey: ['clusters'], queryFn: () => api.get<ItemList<Cluster>>('/clusters') });
-  const ksRunsQ = useQuery({ queryKey: ['audit-runs', 'kubescape'], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { tool: 'kubescape', limit: 100 }) });
-  const benchRunsQ = useQuery({ queryKey: ['audit-runs', 'kube-bench'], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { tool: 'kube-bench', limit: 1 }) });
-  const benchId = benchRunsQ.data?.items[0]?.id;
-  const benchQ = useQuery({ queryKey: ['audit-runs', benchId], queryFn: () => api.get<AuditRun>(`/audit/runs/${benchId}`), enabled: !!benchId });
-  const lastKs = ksRunsQ.data?.items.find((r) => r.status === 'succeeded');
-  const newQ = useQuery({
-    queryKey: ['findings', { run_id: lastKs?.id }],
-    queryFn: () => api.get<ItemList<Finding>>('/findings', { run_id: lastKs!.id, status: 'open', limit: 200 }),
-    enabled: !!lastKs,
-  });
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
-
   const runNow = useMutation({
-    mutationFn: (s: AuditSchedule) => api.post<ItemList<AuditRun>>(`/audit/schedules/${s.id}/run`, {}),
-    onSuccess: (r, s) => {
+    mutationFn: ({ s, cluster }: { s: AuditSchedule; cluster?: string }) => api.post<ItemList<AuditRun>>(`/audit/schedules/${s.id}/run`, cluster ? { cluster_id: cluster } : {}),
+    onSuccess: (r, { s }) => {
       toast(`${TOOL_LABEL[s.tool]}: ${plural(r.items.length, 'run')} queued.`);
       void qc.invalidateQueries({ queryKey: ['audit-schedules'] });
       void qc.invalidateQueries({ queryKey: ['audit-runs'] });
+      void qc.invalidateQueries({ queryKey: ['audit-clusters'] });
     },
     onError: (e) => toast(`Could not start the run: ${errorMessage(e)}`, 'crit'),
   });
-
   const clusters = (clustersQ.data?.items ?? []).filter((c) => c.status !== 'revoked');
-  const benchOn = clusters.filter((c) => c.bench_enabled).length;
+  return { schedQ, clustersQ, chanQ, runNow, clusters };
+}
+
+function NewScheduleAction({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" className="btn pri" onClick={onClick}>
+      New schedule
+    </button>
+  );
+}
+
+function SchedulesCard({
+  schedQ,
+  clusters,
+  scoped,
+  lastRun,
+  canOperate,
+  onRun,
+  running,
+  onOpenRun,
+  onCreate,
+}: {
+  schedQ: ReturnType<typeof useQuery<ItemList<AuditSchedule>>>;
+  clusters: Cluster[];
+  /** One cluster: only schedules whose scope matches it. */
+  scoped?: Cluster;
+  lastRun: (s: AuditSchedule) => Pick<AuditRun, 'id' | 'status' | 'error' | 'tool' | 'cluster_name' | 'new_findings' | 'resolved_findings'> | null | undefined;
+  canOperate: boolean;
+  onRun: (s: AuditSchedule) => void;
+  running: boolean;
+  onOpenRun: (id: string) => void;
+  onCreate: () => void;
+}) {
+  const benchOn = clusters.filter((c) => c.bench_enabled);
   const scopeText = (s: AuditSchedule) => {
     const sel = s.scope_selector || 'all';
-    const n = s.tool === 'kube-bench' ? clusters.filter((c) => c.bench_enabled && matchesSelector(sel, c.labels)).length : s.clusters;
-    if (s.tool === 'kube-bench') return `${n} opted-in clusters · all nodes`;
-    return sel === 'all' ? `All ${plural(n, 'cluster')}` : (
+    if (scoped) return sel === 'all' ? 'Every cluster' : <span className="mono">{sel}</span>;
+    const n = s.tool === 'kube-bench' ? benchOn.filter((c) => matchesSelector(sel, c.labels)).length : s.clusters;
+    if (s.tool === 'kube-bench') return `${plural(n, 'opted-in cluster')} · all nodes`;
+    return sel === 'all' ? (
+      `All ${plural(n, 'cluster')}`
+    ) : (
       <>
         <span className="mono">{sel}</span> ({n})
       </>
     );
   };
+  const applies = (s: AuditSchedule) => !scoped || (matchesSelector(s.scope_selector || 'all', scoped.labels) && (s.tool !== 'kube-bench' || scoped.bench_enabled));
+  return (
+    <section className="card" aria-labelledby="sched-t">
+      <div className="card-head">
+        <div>
+          <h2 id="sched-t">Schedules</h2>
+          {scoped && <div className="desc">Schedules whose scope includes {scoped.name}; the last result is this cluster’s.</div>}
+        </div>
+      </div>
+      <QueryView
+        q={schedQ}
+        what="audit schedules"
+        isEmpty={(d) => d.items.filter(applies).length === 0}
+        empty={
+          <EmptyState title={scoped ? 'No schedule covers this cluster' : 'No audit schedules yet'} action={canOperate ? <button type="button" className="btn pri" onClick={onCreate}>New schedule</button> : undefined}>
+            {scoped ? 'Add a schedule whose scope matches its labels, or an "all clusters" schedule.' : 'Add a schedule for Kubescape (NSA, CIS, MITRE), Polaris or kube-bench. Kubescape and Polaris run on the server through the agent’s read-only API proxy.'}
+          </EmptyState>
+        }
+      >
+        {(d) => (
+          <div className="table-wrap">
+            <table className="t sched-t">
+              <thead>
+                <tr>
+                  <th>Check</th>
+                  <th>Framework</th>
+                  <th>Scope</th>
+                  <th>Schedule</th>
+                  <th>Runs how</th>
+                  <th>Last result</th>
+                  <th>
+                    <span className="sr-only">Actions</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {d.items.filter(applies).map((s) => (
+                  <tr key={s.id}>
+                    <td>
+                      {TOOL_LABEL[s.tool] ?? s.tool}
+                      {!s.enabled && (
+                        <>
+                          {' '}
+                          <Badge tone="mute">Paused</Badge>
+                        </>
+                      )}
+                    </td>
+                    <td className="mono">{s.tool === 'kubescape' ? (s.frameworks ?? []).map((f) => f.toUpperCase()).join(', ') || 'NSA' : s.tool === 'polaris' ? 'Best practices' : 'CIS (auto per provider)'}</td>
+                    <td>{scopeText(s)}</td>
+                    <td className="mono">{describeCron(s.cron ?? '')}</td>
+                    <td>{s.tool === 'kube-bench' ? <Badge tone="warn">Node Job · opt-in</Badge> : <Badge tone="ok">Remote via agent</Badge>}</td>
+                    <td className="last-cell">
+                      <LastResult r={lastRun(s)} onOpen={onOpenRun} />
+                    </td>
+                    <td className="actions">
+                      {canOperate && (
+                        <button type="button" className="btn sm" onClick={() => onRun(s)} disabled={running} aria-label={`Run ${TOOL_LABEL[s.tool]} now${scoped ? ` on ${scoped.name}` : ''}`}>
+                          Run now
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </QueryView>
+      <div className="card-foot">
+        kube-bench must read node files, so it is the one check that runs as a Job on each node. It is off until enabled per cluster with the agent Helm value <span className="mono">bench.enabled</span>.
+      </div>
+    </section>
+  );
+}
+
+function ActivityCard() {
+  return (
+    <section className="card pad spread">
+      <div>
+        <h2>Platform activity</h2>
+        <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
+          Logins, grants, change requests and drift findings, append-only.
+        </p>
+      </div>
+      <Link to="/activity" className="btn">
+        Open activity log
+      </Link>
+    </section>
+  );
+}
+
+// ------------------------------------------------------------ overview
+
+function AuditOverview({ clusters, clustersLoading, openRun }: { clusters: ClusterInfo[]; clustersLoading: boolean; openRun: (id: string) => void }) {
+  const navigate = useNavigate({ from: '/audit' });
+  const canOperate = useCan('operate');
+  const [creating, setCreating] = useState(false);
+  const { schedQ, chanQ, runNow, clusters: allClusters } = useAuditBasics();
+  const q = useQuery({ queryKey: ['audit-clusters'], queryFn: () => api.get<ItemList<AuditClusterSummary>>('/audit/clusters') });
+  const run = (r: AuditClusterSummary, tool: string) => r.last_runs.find((x) => x.tool === tool);
+  const columns: Column<OverviewRow<AuditClusterSummary>>[] = [
+    { id: 'kubescape', header: 'Kubescape', sortValue: (r) => run(r, 'kubescape')?.score ?? (run(r, 'kubescape')?.status === 'failed' ? -1 : null), cell: (r) => <ToolCell run={run(r, 'kubescape')} onOpen={openRun} cluster={r.cluster_name} /> },
+    { id: 'polaris', header: 'Polaris', sortValue: (r) => run(r, 'polaris')?.score ?? null, cell: (r) => <ToolCell run={run(r, 'polaris')} onOpen={openRun} cluster={r.cluster_name} /> },
+    { id: 'bench', header: 'kube-bench', sortValue: (r) => (r.bench_enabled ? (run(r, 'kube-bench')?.score ?? 0) : null), cell: (r) => <ToolCell run={run(r, 'kube-bench')} onOpen={openRun} enabled={r.bench_enabled} cluster={r.cluster_name} /> },
+    {
+      id: 'findings',
+      header: 'Open findings',
+      sortValue: (r) => r.open_findings.critical * 1e6 + r.open_findings.high * 1e4 + r.open_findings.medium * 100 + r.open_findings.low,
+      defaultDir: 'desc',
+      className: 'wrap',
+      cell: (r) => <OpenFindings f={r.open_findings} />,
+    },
+  ];
+  const failed = (q.data?.items ?? []).filter((r) => r.last_runs.some((x) => x.status === 'failed')).length;
+  return (
+    <>
+      <PageHead title="Audit" sub="Scheduled checks with full history, per cluster. What matters is what changed since the last run." actions={canOperate && <NewScheduleAction onClick={() => setCreating(true)} />} />
+      {failed > 0 && (
+        <div className="note crit" role="note">
+          <b>{plural(failed, 'cluster')} with a failed last run.</b> Open “Failed” to see the reason and the tool’s log.
+        </div>
+      )}
+      <ClusterOverview<AuditClusterSummary>
+        label="Audit by cluster"
+        what="audit-clusters"
+        rows={q.data?.items}
+        clusters={clusters}
+        loading={q.isPending || clustersLoading}
+        error={q.isError ? q.error : undefined}
+        onRetry={() => q.refetch()}
+        columns={columns}
+        onOpen={(id) => navigate({ search: { cluster: id } })}
+        onAll={() => navigate({ search: { cluster: 'all' } })}
+        initialSort={{ id: 'findings', dir: 'desc' }}
+        intro="Latest Kubescape, Polaris and kube-bench result per cluster, and its open findings."
+      />
+      <SchedulesCard
+        schedQ={schedQ}
+        clusters={allClusters}
+        lastRun={(s) => s.last_run}
+        canOperate={canOperate}
+        onRun={(s) => runNow.mutate({ s })}
+        running={runNow.isPending}
+        onOpenRun={openRun}
+        onCreate={() => setCreating(true)}
+      />
+      <ActivityCard />
+      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} />}
+    </>
+  );
+}
+
+// ------------------------------------------------------------ one cluster / all clusters
+
+function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mode: 'overview' }>; clusters: ClusterInfo[]; openRun: (id: string) => void }) {
+  const navigate = useNavigate({ from: '/audit' });
+  const canOperate = useCan('operate');
+  const [creating, setCreating] = useState(false);
+  const { schedQ, chanQ, runNow, clusters: allClusters } = useAuditBasics();
+  const one = scope.mode === 'cluster';
+  const info = one ? findCluster(clusters, scope.id) : undefined;
+  const full = one ? allClusters.find((c) => c.id === info?.id) : undefined;
+  const cid = info?.id ?? (one ? scope.id : undefined);
+  // every run of this cluster (all tools): history + latest per tool, with the short error
+  const runsQ = useQuery({ queryKey: ['audit-runs', { cluster: cid ?? 'all', tool: one ? '' : 'kubescape' }], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { cluster_id: cid, tool: one ? undefined : 'kubescape', limit: 100 }) });
+  const runs = runsQ.data?.items ?? [];
+  const ksRuns = useMemo(() => runs.filter((r) => r.tool === 'kubescape'), [runs]);
+  const latestOf = (tool: string) => runs.find((r) => r.tool === tool);
+  const benchRun = one ? latestOf('kube-bench') : undefined;
+  const benchQ = useQuery({ queryKey: ['audit-run', benchRun?.id], queryFn: () => api.get<AuditRun>(`/audit/runs/${benchRun!.id}`), enabled: !!benchRun });
+  const summaryQ = useQuery({ queryKey: ['audit-clusters'], queryFn: () => api.get<ItemList<AuditClusterSummary>>('/audit/clusters'), enabled: !one });
+  const lastKs = one ? ksRuns.find((r) => r.status === 'succeeded') : undefined;
+  const newQ = useQuery({
+    queryKey: ['findings', one ? { run_id: lastKs?.id, cluster: cid } : { source: 'kubescape', status: 'open' }],
+    queryFn: () => (one ? api.get<ItemList<Finding>>('/findings', { run_id: lastKs!.id, cluster: cid, status: 'open', limit: 200 }) : api.get<ItemList<Finding>>('/findings', { source: 'kubescape', status: 'open', limit: 500 })),
+    enabled: !one || !!lastKs,
+  });
   const channelName = (id: string | null | undefined) => chanQ.data?.items.find((c) => c.id === id)?.name;
+  const switchCluster = (c: string) => navigate({ search: (s) => ({ ...s, cluster: c }) });
+  const benchClusters = (summaryQ.data?.items ?? []).filter((r) => r.bench_enabled);
 
   return (
     <>
       <PageHead
-        title="Audit"
-        sub="Scheduled checks with full history. What matters is what changed since the last run."
+        crumbs={<ScopeCrumbs area="Audit" to="/audit" scope={scope} cluster={info} />}
+        title={one ? <span className="mono">{info?.name ?? scope.id}</span> : 'All clusters'}
+        sub={one ? `${info ? `${info.provider_label || info.provider} · ` : ''}Scheduled checks of this cluster with full history.` : 'Scheduled checks with full history. What matters is what changed since the last run.'}
         actions={
-          canOperate && (
-            <button type="button" className="btn pri" onClick={() => setCreating(true)}>
-              New schedule
-            </button>
-          )
+          <>
+            <ClusterSwitcher value={scopeParam(scope) ?? 'all'} clusters={clusters} onChange={switchCluster} />
+            {canOperate && <NewScheduleAction onClick={() => setCreating(true)} />}
+          </>
         }
       />
 
-      <section className="card" aria-labelledby="sched-t">
-        <div className="card-head">
-          <h2 id="sched-t">Schedules</h2>
-        </div>
-        <QueryView
-          q={schedQ}
-          what="audit schedules"
-          isEmpty={(d) => d.items.length === 0}
-          empty={
-            <EmptyState title="No audit schedules yet" action={canOperate ? <button type="button" className="btn pri" onClick={() => setCreating(true)}>New schedule</button> : undefined}>
-              Add a schedule for Kubescape (NSA, CIS, MITRE), Polaris or kube-bench. Kubescape and Polaris run on the server through the agent’s read-only API proxy.
-            </EmptyState>
-          }
-        >
-          {(d) => (
-            <div className="table-wrap">
-              <table className="t">
-                <thead>
-                  <tr>
-                    <th>Check</th>
-                    <th>Framework</th>
-                    <th>Scope</th>
-                    <th>Schedule</th>
-                    <th>Runs how</th>
-                    <th>Last result</th>
-                    <th>
-                      <span className="sr-only">Actions</span>
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {d.items.map((s) => (
-                    <tr key={s.id}>
-                      <td>
-                        {TOOL_LABEL[s.tool] ?? s.tool}
-                        {!s.enabled && (
-                          <>
-                            {' '}
-                            <Badge tone="mute">Paused</Badge>
-                          </>
-                        )}
-                      </td>
-                      <td className="mono wrap">{s.tool === 'kubescape' ? (s.frameworks ?? []).map((f) => f.toUpperCase()).join(', ') || 'NSA' : s.tool === 'polaris' ? 'Best practices' : 'CIS (auto per provider)'}</td>
-                      <td className="wrap">{scopeText(s)}</td>
-                      <td className="mono">{describeCron(s.cron ?? '')}</td>
-                      <td>{s.tool === 'kube-bench' ? <Badge tone="warn">Node Job · opt-in</Badge> : <Badge tone="ok">Remote via agent</Badge>}</td>
-                      <td>{lastResult(s.last_run)}</td>
-                      <td className="actions">
-                        {canOperate && (
-                          <button type="button" className="btn sm" onClick={() => runNow.mutate(s)} disabled={runNow.isPending} aria-label={`Run ${TOOL_LABEL[s.tool]} now`}>
-                            Run now
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </QueryView>
-        <div className="card-foot">
-          kube-bench must read node files, so it is the one check that runs as a Job on each node. It is off until enabled per cluster with the agent Helm value <span className="mono">bench.enabled</span>.
-        </div>
-      </section>
+      <SchedulesCard
+        schedQ={schedQ}
+        clusters={allClusters}
+        scoped={full}
+        lastRun={(s) => (one ? latestOf(s.tool) : s.last_run)}
+        canOperate={canOperate}
+        onRun={(s) => runNow.mutate({ s, cluster: one ? cid : undefined })}
+        running={runNow.isPending}
+        onOpenRun={openRun}
+        onCreate={() => setCreating(true)}
+      />
 
       <section className="card" aria-labelledby="kb-t">
         <div className="card-head">
           <div>
-            <h2 id="kb-t">kube-bench · last run per node</h2>
+            <h2 id="kb-t">{one ? 'kube-bench · last run per node' : 'kube-bench · last run per cluster'}</h2>
             <div className="desc">Short-lived Job per node, spec built into the agent, image pinned by digest, host paths read-only</div>
           </div>
-          {clustersQ.data && <Badge tone="warn">Exception · enabled on {benchOn} of {clusters.length} clusters</Badge>}
+          {!one && summaryQ.data && <Badge tone="warn">Exception · enabled on {benchClusters.length} of {summaryQ.data.items.length} clusters</Badge>}
+          {one && full && <Badge tone={full.bench_enabled ? 'warn' : 'mute'}>{full.bench_enabled ? 'Exception · enabled on this cluster' : 'Not enabled on this cluster'}</Badge>}
         </div>
-        {benchId ? (
-          <QueryView q={benchQ} what="kube-bench results" isEmpty={(r) => !r.bench_nodes?.length} empty={<EmptyState title="No node results in the last run">The run had no nodes in scope. Check that bench.enabled is set on at least one cluster.</EmptyState>}>
-            {(r) => <DataTable label="kube-bench nodes" what="node results" rows={r.bench_nodes!} rowKey={(n) => n.node_name + (n.cluster_name ?? '')} columns={benchColumns(r)} initialSort={{ id: 'fail', dir: 'desc' }} />}
-          </QueryView>
+        {one ? (
+          benchRun ? (
+            <QueryView q={benchQ} what="kube-bench results" isEmpty={(r) => !r.bench_nodes?.length} empty={<EmptyState title="No node results in the last run">The run had no nodes in scope.</EmptyState>}>
+              {(r) => (
+                <>
+                  {r.status === 'failed' && (
+                    <div className="note crit" style={{ margin: '0 14px 12px' }}>
+                      <FailedRunButton run={r} onOpen={openRun} />
+                    </div>
+                  )}
+                  <DataTable label="kube-bench nodes" what="node results" rows={r.bench_nodes!} rowKey={(n) => n.node_name + (n.cluster_name ?? '')} columns={benchColumns(r, true)} initialSort={{ id: 'fail', dir: 'desc' }} />
+                </>
+              )}
+            </QueryView>
+          ) : (
+            <QueryView q={runsQ} what="kube-bench runs" isEmpty={() => true} empty={<EmptyState title="kube-bench has not run on this cluster">{full && !full.bench_enabled ? <>Enable it with the agent Helm value <span className="mono">bench.enabled=true</span>, then add or run a kube-bench schedule.</> : 'Run the kube-bench schedule now, or wait for its next run.'}</EmptyState>}>
+              {() => null}
+            </QueryView>
+          )
         ) : (
-          <QueryView q={benchRunsQ} what="kube-bench runs" isEmpty={() => true} empty={<EmptyState title="kube-bench has not run yet">Enable it on a cluster (Helm value <span className="mono">bench.enabled=true</span>) and add a kube-bench schedule.</EmptyState>}>
-            {() => null}
-          </QueryView>
+          <DataTable<AuditClusterSummary>
+            label="kube-bench per cluster"
+            what="kube-bench results"
+            rows={summaryQ.data ? benchClusters : undefined}
+            loading={summaryQ.isPending}
+            error={summaryQ.isError ? summaryQ.error : undefined}
+            onRetry={() => summaryQ.refetch()}
+            rowKey={(r) => r.cluster_id}
+            onRowClick={(r) => navigate({ search: { cluster: r.cluster_id } })}
+            rowLabel={(r) => `Open kube-bench results of ${r.cluster_name}`}
+            pageSize={10}
+            pageSizes={[10, 25, 50]}
+            initialSort={{ id: 'score', dir: 'asc' }}
+            empty={<EmptyState title="kube-bench is not enabled on any cluster">Enable it on a cluster (Helm value <span className="mono">bench.enabled=true</span>) and add a kube-bench schedule.</EmptyState>}
+            columns={[
+              { id: 'cluster', header: 'Cluster', sortValue: (r) => r.cluster_name, className: 'mono', cell: (r) => r.cluster_name },
+              {
+                id: 'status',
+                header: 'Last run',
+                sortValue: (r) => r.last_runs.find((x) => x.tool === 'kube-bench')?.finished_at ?? null,
+                cell: (r) => {
+                  const run = r.last_runs.find((x) => x.tool === 'kube-bench');
+                  if (!run) return <span className="muted">Not run</span>;
+                  if (run.status === 'failed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: r.cluster_name }} onOpen={openRun} compact />;
+                  if (run.status !== 'succeeded') return <Badge tone="info">{run.status === 'running' ? 'Running' : 'Queued'}</Badge>;
+                  return <span className="muted">{run.finished_at ? `${age(run.finished_at)} ago` : 'Done'}</span>;
+                },
+              },
+              { id: 'score', header: 'Pass rate', align: 'num', sortValue: (r) => r.last_runs.find((x) => x.tool === 'kube-bench')?.score ?? null, cell: (r) => { const s = r.last_runs.find((x) => x.tool === 'kube-bench')?.score; return s != null ? `${s.toFixed(1)}%` : '—'; } },
+            ]}
+          />
         )}
         <div className="card-spacer" />
       </section>
@@ -256,48 +495,52 @@ export function AuditPage() {
           <div className="card-head">
             <h2 id="ksh-t">Kubescape run history</h2>
           </div>
-          <QueryView q={ksRunsQ} what="Kubescape runs" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No Kubescape runs yet">Runs appear after the first scheduled or manual run.</EmptyState>}>
-            {(d) => <DataTable label="Kubescape run history" what="Kubescape runs" rows={d.items} rowKey={(r) => r.id} columns={KS_COLUMNS} pageSize={10} pageSizes={[10, 25, 50]} initialSort={{ id: 'run', dir: 'desc' }} />}
-          </QueryView>
-          <div className="card-foot">Raw reports kept in Blob for 400 days</div>
+          <DataTable
+            label="Kubescape run history"
+            what="Kubescape runs"
+            rows={runsQ.data ? ksRuns : undefined}
+            loading={runsQ.isPending}
+            error={runsQ.isError ? runsQ.error : undefined}
+            onRetry={() => runsQ.refetch()}
+            rowKey={(r) => r.id}
+            columns={ksColumns(one, openRun)}
+            onRowClick={(r) => openRun(r.id)}
+            rowLabel={(r) => `${r.status === 'failed' ? 'Failed run' : 'Run'} of ${dateTime(r.started_at)}${one ? '' : ` on ${r.cluster_name}`}: show details`}
+            pageSize={10}
+            pageSizes={[10, 25, 50]}
+            initialSort={{ id: 'run', dir: 'desc' }}
+            empty={<EmptyState title="No Kubescape runs yet">Runs appear after the first scheduled or manual run.</EmptyState>}
+          />
+          <div className="card-foot">Raw reports kept in Blob for 400 days. Open a run for its log.</div>
         </section>
 
         <section className="card" aria-labelledby="new-t">
           <div className="card-head">
-            <h2 id="new-t">New since last run{lastKs ? ` · ${dateTime(lastKs.started_at).slice(0, 6)}` : ''}</h2>
+            <h2 id="new-t">{one ? `New since last run${lastKs ? ` · ${dateTime(lastKs.started_at).slice(0, 6)}` : ''}` : 'Open Kubescape findings'}</h2>
             {(() => {
               const sched = schedQ.data?.items.find((s) => s.tool === 'kubescape');
               const ch = channelName(sched?.notify_channel_id);
               return ch ? <span className="muted small">sent to {ch}</span> : null;
             })()}
           </div>
-          {lastKs ? (
-            <QueryView q={newQ} what="new findings" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No new findings">The last run found nothing that was not already open.</EmptyState>}>
-              {(d) => <DataTable label="New findings" what="new findings" rows={d.items} rowKey={(f) => f.id} columns={FINDING_COLUMNS} pageSize={10} pageSizes={[10, 25, 50]} initialSort={{ id: 'sev', dir: 'asc' }} />}
-            </QueryView>
+          {one && !lastKs ? (
+            <EmptyState title="Nothing to compare yet">New findings are listed after a successful Kubescape run.</EmptyState>
           ) : (
-            <EmptyState title="Nothing to compare yet">New findings are listed after the second Kubescape run.</EmptyState>
+            <QueryView q={newQ} what="findings" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title={one ? 'No new findings' : 'No open findings'}>{one ? 'The last run found nothing that was not already open.' : 'Kubescape found nothing open on any cluster.'}</EmptyState>}>
+              {(d) => <DataTable label={one ? 'New findings' : 'Open findings'} what="findings" rows={d.items} rowKey={(f) => f.id} columns={findingColumns(one)} pageSize={10} pageSizes={[10, 25, 50]} initialSort={{ id: 'sev', dir: 'asc' }} />}
+            </QueryView>
           )}
           <div className="card-spacer" />
         </section>
       </div>
 
-      <section className="card pad spread">
-        <div>
-          <h2>Platform activity</h2>
-          <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
-            Logins, grants, change requests and drift findings, append-only.
-          </p>
-        </div>
-        <Link to="/activity" className="btn">
-          Open activity log
-        </Link>
-      </section>
+      <ActivityCard />
 
-      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={clusters} />}
+      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} />}
     </>
   );
 }
+
 
 function NewScheduleDialog({ onClose, channels, clusters }: { onClose: () => void; channels: Channel[]; clusters: Cluster[] }) {
   const qc = useQueryClient();

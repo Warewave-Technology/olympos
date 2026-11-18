@@ -2,15 +2,16 @@ import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
-import type { BackupJob, BackupRun, ItemList, Target } from '../api/types';
+import type { BackupClusterSummary, BackupJob, BackupRun, ItemList, Target } from '../api/types';
 import { useCan } from '../auth/me';
 import { describeCron } from '../lib/cron';
-import { between, bytes, duration, engineLabel, money, relDateTime } from '../lib/format';
+import { age, between, bytes, duration, engineLabel, money, plural, relDateTime } from '../lib/format';
 import { backupsRoute } from '../router';
 import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
 import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { DataTable, type Column } from '../ui/DataTable';
+import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
 const ENGINES = [
@@ -32,33 +33,131 @@ function jobStatus(j: BackupJob) {
 }
 
 export function BackupsPage() {
+  const { tab, cluster } = backupsRoute.useSearch();
+  const scope = resolveScope(cluster, !!tab);
+  const { list: clusters, q: clustersQ } = useClusterList();
+  return scope.mode === 'overview' ? <BackupsOverview clusters={clusters} clustersLoading={clustersQ.isPending} /> : <BackupsDetail scope={scope} clusters={clusters} />;
+}
+
+function DestinationsLink() {
+  return (
+    <Link to="/settings/destinations" className="btn">
+      Destinations
+    </Link>
+  );
+}
+
+function BackupsOverview({ clusters, clustersLoading }: { clusters: ClusterInfo[]; clustersLoading: boolean }) {
+  const navigate = useNavigate({ from: '/backups' });
+  const q = useQuery({ queryKey: ['backup-clusters'], queryFn: () => api.get<ItemList<BackupClusterSummary>>('/backup/clusters') });
+  const rows = q.data?.items ?? [];
+  const failing = rows.filter((r) => r.last_24h.failed + r.last_24h.missed > 0).length;
+  const columns: Column<OverviewRow<BackupClusterSummary>>[] = [
+    {
+      id: 'jobs',
+      header: 'Jobs',
+      align: 'num',
+      sortValue: (r) => r.jobs,
+      defaultDir: 'desc',
+      cell: (r) => (
+        <>
+          <span className="n">{r.jobs}</span>
+          {r.jobs > 0 && r.jobs_enabled < r.jobs && <div className="muted small">{r.jobs - r.jobs_enabled} paused</div>}
+        </>
+      ),
+    },
+    { id: 'cand', header: 'Candidates', align: 'num', sortValue: (r) => r.candidates, defaultDir: 'desc', cell: (r) => (r.candidates ? <Badge tone="info">{r.candidates} new</Badge> : <span className="muted">0</span>) },
+    {
+      id: 'day',
+      header: 'Last 24 h',
+      sortValue: (r) => r.last_24h.failed * 1000 + r.last_24h.missed * 100 - r.last_24h.succeeded,
+      defaultDir: 'desc',
+      className: 'wrap',
+      cell: (r) =>
+        r.last_24h.succeeded + r.last_24h.failed + r.last_24h.missed === 0 ? (
+          <span className="muted">No runs</span>
+        ) : (
+          <span className="sev-chips">
+            {r.last_24h.succeeded > 0 && <Badge tone="ok">{r.last_24h.succeeded} succeeded</Badge>}
+            {r.last_24h.failed > 0 && <Badge tone="crit">{r.last_24h.failed} failed</Badge>}
+            {r.last_24h.missed > 0 && <Badge tone="crit">{r.last_24h.missed} missed</Badge>}
+          </span>
+        ),
+    },
+    { id: 'success', header: 'Last success', sortValue: (r) => r.last_success_at, defaultDir: 'desc', cell: (r) => (r.last_success_at ? <span title={relDateTime(r.last_success_at)}>{age(r.last_success_at)} ago</span> : <span className="muted">{r.jobs ? 'Never' : '—'}</span>) },
+    { id: 'bytes', header: 'Backed up · 30 d', align: 'num', sortValue: (r) => r.bytes_30d || null, defaultDir: 'desc', cell: (r) => (r.bytes_30d ? bytes(r.bytes_30d) : '—') },
+  ];
+  return (
+    <>
+      <PageHead title="Backups" sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster." actions={<DestinationsLink />} />
+      {failing > 0 && (
+        <div className="note crit" role="note">
+          <b>{plural(failing, 'cluster')} with failed or missed runs in the last 24 hours.</b> Open a cluster to see its runs.
+        </div>
+      )}
+      <ClusterOverview<BackupClusterSummary>
+        label="Backups by cluster"
+        what="backup-clusters"
+        rows={q.data?.items}
+        clusters={clusters}
+        loading={q.isPending || clustersLoading}
+        error={q.isError ? q.error : undefined}
+        onRetry={() => q.refetch()}
+        columns={columns}
+        onOpen={(id) => navigate({ search: { cluster: id } })}
+        onAll={() => navigate({ search: { cluster: 'all' } })}
+        initialSort={{ id: 'day', dir: 'desc' }}
+        intro="Backup jobs, new candidates and the last 24 hours of runs per cluster."
+      />
+      <section className="card" aria-labelledby="rr-t">
+        <div className="card-head">
+          <h2 id="rr-t">Recent runs · all clusters</h2>
+          <Link to="/backups" search={{ cluster: 'all', tab: 'runs' }} className="small">
+            All runs
+          </Link>
+        </div>
+        <RunsTable limit={8} compact showCluster />
+        <div className="card-spacer" />
+      </section>
+    </>
+  );
+}
+
+function BackupsDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'overview' }>; clusters: ClusterInfo[] }) {
   const { tab = 'candidates' } = backupsRoute.useSearch();
   const navigate = useNavigate({ from: '/backups' });
   const [engine, setEngine] = useState('');
   const canOperate = useCan('operate');
+  const one = scope.mode === 'cluster';
+  const info = one ? findCluster(clusters, scope.id) : undefined;
+  const cid = info?.id ?? (one ? scope.id : undefined);
+  const inCluster = (clusterId: string) => !one || clusterId === cid;
 
   const candQ = useQuery({
     queryKey: ['targets', { status: 'candidate', engine }],
     queryFn: () => api.get<ItemList<Target>>('/targets', { status: 'candidate', engine }),
   });
   const jobsQ = useQuery({ queryKey: ['backup-jobs'], queryFn: () => api.get<ItemList<BackupJob>>('/backup/jobs') });
-  const candidates = (candQ.data?.items ?? []).filter((t) => t.engine !== '');
+  const candidates = (candQ.data?.items ?? []).filter((t) => t.engine !== '' && inCluster(t.cluster_id));
+  const param = scopeParam(scope);
 
   return (
     <>
       <PageHead
-        title="Backups"
+        crumbs={<ScopeCrumbs area="Backups" to="/backups" scope={scope} cluster={info} />}
+        title={one ? <span className="mono">{info?.name ?? scope.id}</span> : 'All clusters'}
         sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster."
         actions={
-          <Link to="/settings/destinations" className="btn">
-            Destinations
-          </Link>
+          <>
+            <ClusterSwitcher value={param ?? 'all'} clusters={clusters} onChange={(c) => navigate({ search: (s) => ({ ...s, cluster: c }) })} />
+            <DestinationsLink />
+          </>
         }
       />
       <Tabs<Tab>
         label="Backup sections"
         value={tab}
-        onChange={(t) => navigate({ search: { tab: t === 'candidates' ? undefined : t }, replace: true })}
+        onChange={(t) => navigate({ search: { tab: t === 'candidates' ? undefined : t, cluster: param }, replace: true })}
         tabs={[
           {
             id: 'candidates',
@@ -72,17 +171,35 @@ export function BackupsPage() {
           { id: 'runs', label: 'Runs' },
         ]}
       />
-      {tab === 'candidates' && <CandidatesTab candQ={candQ} jobsQ={jobsQ} engine={engine} setEngine={setEngine} canOperate={canOperate} />}
-      {tab === 'jobs' && <JobsTab jobsQ={jobsQ} canOperate={canOperate} />}
-      {tab === 'runs' && <RunsTab />}
+      {tab === 'candidates' && <CandidatesTab candQ={candQ} jobsQ={jobsQ} engine={engine} setEngine={setEngine} canOperate={canOperate} inCluster={inCluster} clusterName={info?.name} scopeParam={param} />}
+      {tab === 'jobs' && <JobsTab jobsQ={jobsQ} canOperate={canOperate} inCluster={inCluster} />}
+      {tab === 'runs' && <RunsTab clusterName={one ? (info?.name ?? '\u0000') : undefined} />}
     </>
   );
 }
 
 type Q<T> = ReturnType<typeof useQuery<T>>;
 
-function CandidatesTab({ candQ, jobsQ, engine, setEngine, canOperate }: { candQ: Q<ItemList<Target>>; jobsQ: Q<ItemList<BackupJob>>; engine: string; setEngine: (e: string) => void; canOperate: boolean }) {
-  const jobs = (jobsQ.data?.items ?? []).filter((j) => !engine || j.engine === engine);
+function CandidatesTab({
+  candQ,
+  jobsQ,
+  engine,
+  setEngine,
+  canOperate,
+  inCluster,
+  clusterName,
+  scopeParam: param,
+}: {
+  candQ: Q<ItemList<Target>>;
+  jobsQ: Q<ItemList<BackupJob>>;
+  engine: string;
+  setEngine: (e: string) => void;
+  canOperate: boolean;
+  inCluster: (clusterId: string) => boolean;
+  clusterName?: string;
+  scopeParam?: string;
+}) {
+  const jobs = (jobsQ.data?.items ?? []).filter((j) => (!engine || j.engine === engine) && inCluster(j.target.cluster_id));
   return (
     <section className="card" aria-labelledby="cand-t">
       <div className="card-head">
@@ -95,9 +212,9 @@ function CandidatesTab({ candQ, jobsQ, engine, setEngine, canOperate }: { candQ:
       <QueryView
         q={candQ}
         what="backup candidates"
-        isEmpty={(d) => d.items.filter((t) => t.engine).length === 0 && jobs.length === 0}
+        isEmpty={(d) => d.items.filter((t) => t.engine && inCluster(t.cluster_id)).length === 0 && jobs.length === 0}
         empty={
-          <EmptyState title="No backup candidates yet">
+          <EmptyState title={clusterName ? `No backup candidates on ${clusterName} yet` : 'No backup candidates yet'}>
             Annotate the Service in front of a database with <span className="mono">olympos.io/backup: postgresql</span> (or <span className="mono">clickhouse</span>, <span className="mono">vault</span>). The agent reports it within a minute and it shows up here.
           </EmptyState>
         }
@@ -119,7 +236,7 @@ function CandidatesTab({ candQ, jobsQ, engine, setEngine, canOperate }: { candQ:
               </thead>
               <tbody>
                 {d.items
-                  .filter((t) => t.engine)
+                  .filter((t) => t.engine && inCluster(t.cluster_id))
                   .map((t) => (
                     <tr key={t.id}>
                       <td className="mono">{t.service}</td>
@@ -170,17 +287,18 @@ function CandidatesTab({ candQ, jobsQ, engine, setEngine, canOperate }: { candQ:
       </QueryView>
       <div className="card-head" style={{ paddingTop: 20, paddingBottom: 8 }}>
         <h2>Recent runs</h2>
-        <Link to="/backups" search={{ tab: 'runs' }} className="small">
+        <Link to="/backups" search={{ tab: 'runs', cluster: param }} className="small">
           All runs
         </Link>
       </div>
-      <RunsTable limit={5} compact />
+      <RunsTable limit={clusterName ? 500 : 5} show={5} compact clusterName={clusterName} />
       <div className="card-spacer" />
     </section>
   );
 }
 
-function JobsTab({ jobsQ, canOperate }: { jobsQ: Q<ItemList<BackupJob>>; canOperate: boolean }) {
+function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob>>; canOperate: boolean; inCluster: (clusterId: string) => boolean }) {
+  const jobs = jobsQ.data ? jobsQ.data.items.filter((j) => inCluster(j.target.cluster_id)) : undefined;
   const qc = useQueryClient();
   const toast = useToast();
   const runNow = useMutation({
@@ -252,8 +370,8 @@ function JobsTab({ jobsQ, canOperate }: { jobsQ: Q<ItemList<BackupJob>>; canOper
       ),
     },
   ];
-  const totalBytes = (jobsQ.data?.items ?? []).reduce((s, j) => s + (j.estimated_monthly_bytes || 0), 0);
-  const totalCost = (jobsQ.data?.items ?? []).reduce((s, j) => s + (j.estimated_monthly_cost ?? 0), 0);
+  const totalBytes = (jobs ?? []).reduce((s, j) => s + (j.estimated_monthly_bytes || 0), 0);
+  const totalCost = (jobs ?? []).reduce((s, j) => s + (j.estimated_monthly_cost ?? 0), 0);
   return (
     <section className="card" aria-labelledby="jobs-t">
       <div className="card-head">
@@ -276,7 +394,7 @@ function JobsTab({ jobsQ, canOperate }: { jobsQ: Q<ItemList<BackupJob>>; canOper
       <DataTable
         label="Backup jobs"
         what="backup jobs"
-        rows={jobsQ.data?.items}
+        rows={jobs}
         loading={jobsQ.isPending}
         error={jobsQ.isError ? jobsQ.error : undefined}
         onRetry={() => jobsQ.refetch()}
@@ -295,7 +413,7 @@ function JobsTab({ jobsQ, canOperate }: { jobsQ: Q<ItemList<BackupJob>>; canOper
   );
 }
 
-function RunsTab() {
+function RunsTab({ clusterName }: { clusterName?: string }) {
   const [status, setStatus] = useState('');
   return (
     <section className="card" aria-labelledby="runs-t">
@@ -309,13 +427,13 @@ function RunsTab() {
           ))}
         </div>
       </div>
-      <RunsTable limit={500} status={status} />
+      <RunsTable limit={500} status={status} clusterName={clusterName} showCluster={!clusterName} />
       <div className="card-foot">Runs are append-only. Backups are never deleted by Olympos; retention is enforced by Blob lifecycle rules.</div>
     </section>
   );
 }
 
-function RunsTable({ limit, status = '', compact }: { limit: number; status?: string; compact?: boolean }) {
+function RunsTable({ limit, status = '', compact, clusterName, show, showCluster }: { limit: number; status?: string; compact?: boolean; clusterName?: string; show?: number; showCluster?: boolean }) {
   const q = useQuery({
     queryKey: ['backup-runs', { limit, status }],
     queryFn: () => api.get<ItemList<BackupRun>>('/backup/runs', { limit, status }),
@@ -331,7 +449,7 @@ function RunsTable({ limit, status = '', compact }: { limit: number; status?: st
       cell: (r) => (
         <>
           <span className="mono">{r.target_service}</span>
-          {!compact && <span className="mono muted small"> {r.cluster_name}</span>}
+          {(showCluster ?? !compact) && <span className="mono muted small"> {r.cluster_name}</span>}
         </>
       ),
     },
@@ -357,7 +475,7 @@ function RunsTable({ limit, status = '', compact }: { limit: number; status?: st
     <DataTable
       label={compact ? 'Recent runs' : 'Backup runs'}
       what="backup runs"
-      rows={q.data?.items}
+      rows={q.data ? (clusterName ? q.data.items.filter((r) => r.cluster_name === clusterName) : q.data.items).slice(0, show ?? limit) : undefined}
       loading={q.isPending}
       error={q.isError ? q.error : undefined}
       onRetry={() => q.refetch()}

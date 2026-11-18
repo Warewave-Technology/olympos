@@ -10,6 +10,8 @@ import { ApprovalsPage } from './pages/Approvals';
 import { AuditPage } from './pages/Audit';
 import { ActivityPage } from './pages/Activity';
 import { SecurityPage } from './pages/Security';
+import { KyvernoPolicyPage } from './pages/KyvernoPolicy';
+import { NetpolNamespacePage } from './pages/NetpolNamespace';
 import { SettingsAccessPage } from './pages/settings/Access';
 import { SettingsNotificationsPage } from './pages/settings/Notifications';
 import { DestinationsPage } from './pages/settings/Destinations';
@@ -53,7 +55,7 @@ export const BACKUP_TABS = ['candidates', 'jobs', 'runs'] as const;
 export const backupsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/backups',
-  validateSearch: opt((s) => ({ tab: pick(s.tab, BACKUP_TABS) })),
+  validateSearch: opt((s) => ({ tab: pick(s.tab, BACKUP_TABS), cluster: str(s.cluster) })),
   component: BackupsPage,
 });
 
@@ -67,7 +69,7 @@ export const backupWizardRoute = createRoute({
 export const vaultsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/vaults',
-  validateSearch: opt((s) => ({ vault: str(s.vault), mount: str(s.mount), path: str(s.path) })),
+  validateSearch: opt((s) => ({ vault: str(s.vault), mount: str(s.mount), path: str(s.path), cluster: str(s.cluster) })),
   component: VaultsPage,
 });
 
@@ -79,7 +81,12 @@ export const approvalsRoute = createRoute({
   component: ApprovalsPage,
 });
 
-export const auditRoute = createRoute({ getParentRoute: () => appRoute, path: '/audit', component: AuditPage });
+export const auditRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/audit',
+  validateSearch: opt((s) => ({ cluster: str(s.cluster), run: str(s.run) })),
+  component: AuditPage,
+});
 
 export const activityRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -92,8 +99,22 @@ export const SECURITY_TABS = ['images', 'kyverno', 'netpol'] as const;
 export const securityRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/security',
-  validateSearch: opt((s) => ({ tab: pick(s.tab, SECURITY_TABS), digest: str(s.digest) })),
+  validateSearch: opt((s) => ({ tab: pick(s.tab, SECURITY_TABS), digest: str(s.digest), cluster: str(s.cluster) })),
   component: SecurityPage,
+});
+
+export const kyvernoPolicyRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/security/kyverno',
+  validateSearch: opt((s) => ({ cluster: str(s.cluster), kind: str(s.kind), namespace: str(s.namespace), name: str(s.name), from: str(s.from) })),
+  component: KyvernoPolicyPage,
+});
+
+export const netpolNamespaceRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/security/netpol',
+  validateSearch: opt((s) => ({ cluster: str(s.cluster), namespace: str(s.namespace), policy: str(s.policy), from: str(s.from) })),
+  component: NetpolNamespacePage,
 });
 
 export const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings', component: SettingsAccessPage });
@@ -123,6 +144,8 @@ export const routeTree = rootRoute.addChildren([
     auditRoute,
     activityRoute,
     securityRoute,
+    kyvernoPolicyRoute,
+    netpolNamespaceRoute,
     settingsRoute,
     notificationsRoute,
     destinationsRoute,
