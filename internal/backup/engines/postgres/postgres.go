@@ -4,6 +4,8 @@
 package postgres
 
 import (
+	"github.com/Warewave-Technology/olympos/internal/targettls"
+
 	"archive/zip"
 	"context"
 	"crypto/tls"
@@ -93,7 +95,7 @@ func (o Options) globals() bool { return o.Globals == nil || *o.Globals }
 
 func (o Options) rootCAs() (*x509.CertPool, error) {
 	if strings.TrimSpace(o.TLSCAPEM) == "" {
-		return nil, nil // system pool
+		return targettls.RootCAs(), nil // system pool + configured target CA bundle
 	}
 	p := x509.NewCertPool()
 	if !p.AppendCertsFromPEM([]byte(o.TLSCAPEM)) {
@@ -422,6 +424,21 @@ func (s *session) sslParams(tmp string, libpqMajor int) ([][2]string, error) {
 	if strings.TrimSpace(s.opts.TLSCAPEM) != "" {
 		root = filepath.Join(tmp, "root.crt")
 		if err := os.WriteFile(root, []byte(s.opts.TLSCAPEM), 0o600); err != nil {
+			return nil, err
+		}
+	} else if bundle := targettls.BundleFile(); bundle != "" {
+		// libpq takes one file: system roots (if any) + the configured bundle.
+		extra, err := os.ReadFile(bundle)
+		if err != nil {
+			return nil, fmt.Errorf("read target CA bundle: %w", err)
+		}
+		var all []byte
+		if sys := systemRootsFile(); sys != "" {
+			all, _ = os.ReadFile(sys)
+			all = append(all, '\n')
+		}
+		root = filepath.Join(tmp, "root.crt")
+		if err := os.WriteFile(root, append(all, extra...), 0o600); err != nil {
 			return nil, err
 		}
 	} else if libpqMajor < 16 {

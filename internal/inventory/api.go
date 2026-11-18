@@ -758,7 +758,7 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 	rows, err := a.DB.Query(ctx, `
 		SELECT DISTINCT ON (j.id) j.id, t.service, r.status, r.error
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
-		WHERE t.cluster_id = ANY($1) AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
+		WHERE t.cluster_id = ANY($1) AND j.deleted_at IS NULL AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
 		  AND r.status IN ('succeeded','failed','missed')
 		ORDER BY j.id, r.created_at DESC`, clusterIDs)
 	if err != nil {
