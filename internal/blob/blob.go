@@ -1,5 +1,7 @@
-// Package blob is the backup storage abstraction. The server is the only
-// writer; it never deletes (retention is Blob lifecycle rules by tag).
+// Package blob is the backup storage abstraction (Azure Blob, S3 and NFS
+// destinations, see NewResolver). The server is the only
+// writer; it never deletes (retention is storage lifecycle rules by tag, or
+// snapshots / WORM for NFS).
 package blob
 
 import (

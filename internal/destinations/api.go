@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -34,6 +35,10 @@ type API struct {
 	Env  *secrets.Envelope
 	Cred azcore.TokenCredential
 	Now  func() time.Time
+	// Storage: NFS root, S3 CA bundle and part size (config backup.*).
+	Storage blob.StorageOptions
+	// ProbeTimeout per storage operation of the destination test (0 = 30s).
+	ProbeTimeout time.Duration
 }
 
 func (a *API) now() time.Time {
@@ -43,7 +48,9 @@ func (a *API) now() time.Time {
 	return time.Now()
 }
 
-func (a *API) prober() *Prober { return &Prober{Cred: a.Cred, Now: a.Now} }
+func (a *API) prober() *Prober {
+	return &Prober{Cred: a.Cred, Now: a.Now, Storage: a.Storage, Timeout: a.ProbeTimeout}
+}
 
 // Routes mounts the module under /api/v1.
 func (a *API) Routes(r chi.Router) {
@@ -52,6 +59,7 @@ func (a *API) Routes(r chi.Router) {
 		r.Get("/", a.list)
 		r.Post("/", a.create)
 		r.Post("/test", a.testUnsaved)
+		r.Get("/mounts", a.mounts)
 		r.Get("/{id}", a.get)
 		r.Patch("/{id}", a.patch)
 		r.Delete("/{id}", a.delete)
@@ -68,29 +76,47 @@ type SecretSourceInput struct {
 
 // Input is the create/patch body (patch: absent fields keep their value).
 type Input struct {
-	Name             *string            `json:"name"`
-	Account          *string            `json:"account"`
-	Container        *string            `json:"container"`
-	Prefix           *string            `json:"prefix"`
-	Auth             *string            `json:"auth"`
-	SAS              *SecretSourceInput `json:"sas"`
-	EndpointOverride *string            `json:"endpoint_override"`
+	Name             *string `json:"name"`
+	Kind             *string `json:"kind"`
+	Prefix           *string `json:"prefix"`
+	EndpointOverride *string `json:"endpoint_override"`
+	Auth             *string `json:"auth"`
+	// azure_blob
+	Account   *string            `json:"account"`
+	Container *string            `json:"container"`
+	SAS       *SecretSourceInput `json:"sas"`
+	// s3
+	Bucket      *string            `json:"bucket"`
+	Region      *string            `json:"region"`
+	PathStyle   *bool              `json:"path_style"`
+	AccessKeyID *string            `json:"access_key_id"`
+	SecretKey   *SecretSourceInput `json:"secret_key"`
+	// nfs
+	Path *string `json:"path"`
 }
 
-// View is the API shape of a destination. It never contains the SAS value.
+// View is the API shape of a destination. It never contains the SAS or the
+// S3 secret key.
 type View struct {
 	ID               uuid.UUID  `json:"id"`
 	Name             string     `json:"name"`
 	Kind             string     `json:"kind"`
+	Prefix           string     `json:"prefix"`
+	EndpointOverride string     `json:"endpoint_override"`
+	Auth             string     `json:"auth"`
 	Account          string     `json:"account"`
 	Container        string     `json:"container"`
-	Prefix           string     `json:"prefix"`
-	Auth             string     `json:"auth"`
 	SASSource        string     `json:"sas_source"`
 	SASRef           string     `json:"sas_ref"`
 	SASExpiresAt     *time.Time `json:"sas_expires_at"`
 	SASPermissions   string     `json:"sas_permissions"`
-	EndpointOverride string     `json:"endpoint_override"`
+	Bucket           string     `json:"bucket"`
+	Region           string     `json:"region"`
+	PathStyle        bool       `json:"path_style"`
+	AccessKeyID      string     `json:"access_key_id"`
+	SecretKeySource  string     `json:"secret_key_source"`
+	SecretKeyRef     string     `json:"secret_key_ref"`
+	Path             string     `json:"path"`
 	LastTestAt       *time.Time `json:"last_test_at"`
 	LastTestOK       *bool      `json:"last_test_ok"`
 	LastTest         *Report    `json:"last_test"`
@@ -108,25 +134,33 @@ type TestFailed struct {
 	Test   *Report           `json:"test,omitempty"`
 }
 
-const viewSelect = `SELECT d.id, d.name, d.kind, d.account, d.container, d.prefix, d.auth,
-	COALESCE(c.kind, ''), COALESCE(c.keyvault_name, ''), COALESCE(c.secret_name, ''),
-	d.sas_expires_at, d.sas_permissions, d.endpoint_override, d.last_test_at, d.last_test_ok, d.last_test_report, d.created_at,
+const viewSelect = `SELECT d.id, d.name, d.kind, d.prefix, d.endpoint_override, d.auth, d.account, d.container,
+	COALESCE(c.kind, ''), COALESCE(c.keyvault_name, ''), COALESCE(c.secret_name, ''), d.sas_expires_at, d.sas_permissions,
+	d.bucket, d.region, d.path_style, d.access_key_id,
+	COALESCE(k.kind, ''), COALESCE(k.keyvault_name, ''), COALESCE(k.secret_name, ''), d.path,
+	d.last_test_at, d.last_test_ok, d.last_test_report, d.created_at,
 	(SELECT count(*) FROM backup_jobs j WHERE j.destination_id = d.id)
-	FROM destinations d LEFT JOIN credentials c ON c.id = d.sas_credential_id`
+	FROM destinations d LEFT JOIN credentials c ON c.id = d.sas_credential_id LEFT JOIN credentials k ON k.id = d.secret_credential_id`
 
 func scanViews(rows pgx.Rows) ([]View, error) {
 	defer rows.Close()
 	out := []View{}
 	for rows.Next() {
 		var v View
-		var kvName, secName string
+		var kvName, secName, kKV, kSec string
 		var report []byte
-		if err := rows.Scan(&v.ID, &v.Name, &v.Kind, &v.Account, &v.Container, &v.Prefix, &v.Auth, &v.SASSource, &kvName, &secName,
-			&v.SASExpiresAt, &v.SASPermissions, &v.EndpointOverride, &v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs); err != nil {
+		if err := rows.Scan(&v.ID, &v.Name, &v.Kind, &v.Prefix, &v.EndpointOverride, &v.Auth, &v.Account, &v.Container,
+			&v.SASSource, &kvName, &secName, &v.SASExpiresAt, &v.SASPermissions,
+			&v.Bucket, &v.Region, &v.PathStyle, &v.AccessKeyID,
+			&v.SecretKeySource, &kKV, &kSec, &v.Path,
+			&v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs); err != nil {
 			return nil, err
 		}
 		if v.SASSource == "keyvault_ref" {
 			v.SASRef = secrets.Ref{Vault: kvName, Secret: secName}.String()
+		}
+		if v.SecretKeySource == "keyvault_ref" {
+			v.SecretKeyRef = secrets.Ref{Vault: kKV, Secret: kSec}.String()
 		}
 		if len(report) > 0 && string(report) != "null" {
 			var rep Report
@@ -201,11 +235,24 @@ func (a *API) get(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, v)
 }
 
+// mounts lists the volumes below the NFS root (GET /destinations/mounts).
+func (a *API) mounts(w http.ResponseWriter, r *http.Request) {
+	ms, err := blob.ListMounts(a.Storage.NFSRoot)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": ms})
+}
+
 // ---------------------------------------------------------------- validation
 
 var (
-	accountRe = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
-	prefixRe  = regexp.MustCompile(`^[A-Za-z0-9._\-]+$`)
+	accountRe     = regexp.MustCompile(`^[a-z0-9]{3,24}$`)
+	prefixRe      = regexp.MustCompile(`^[A-Za-z0-9._\-]+$`)
+	bucketRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$`)
+	regionRe      = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,31}$`)
+	accessKeyIDRe = regexp.MustCompile(`^[\x21-\x7e]{1,128}$`)
 )
 
 func validContainer(s string) bool {
@@ -220,29 +267,66 @@ func validContainer(s string) bool {
 	return true
 }
 
-// spec is a normalized, validated destination (plus SAS source).
+// spec is a normalized, validated destination (plus new secret sources).
 type spec struct {
-	Name, Account, Container, Prefix, Auth, EndpointOverride string
-	SAS                                                      *SecretSourceInput
+	Name, Kind, Prefix, EndpointOverride, Auth string
+	Account, Container                         string
+	Bucket, Region, AccessKeyID                string
+	PathStyle                                  bool
+	Path                                       string
+	SAS                                        *SecretSourceInput
+	SecretKey                                  *SecretSourceInput
 }
 
-func (s *spec) validate() map[string]string {
+func defaultAuth(kind string) string {
+	switch kind {
+	case blob.KindS3:
+		return blob.AuthAccessKey
+	case blob.KindNFS:
+		return blob.AuthNone
+	}
+	return blob.AuthManagedIdentity
+}
+
+func validateSecretSource(f map[string]string, field string, in *SecretSourceInput) {
+	switch in.Source {
+	case "keyvault_ref":
+		if _, err := secrets.ParseRef(strings.TrimSpace(in.Ref)); err != nil {
+			f[field+".ref"] = err.Error()
+		}
+		if in.Value != "" {
+			f[field+".value"] = "do not send a value with a Key Vault reference"
+		}
+	case "stored":
+		if strings.TrimSpace(in.Value) == "" {
+			f[field+".value"] = "required"
+		}
+	default:
+		f[field+".source"] = "keyvault_ref or stored"
+	}
+}
+
+func hasSecret(in *SecretSourceInput) bool {
+	return in != nil && (in.Value != "" || in.Ref != "" || in.Source != "")
+}
+
+// validate normalizes s and returns field errors. nfsRoot is where mounts
+// live (NFS paths are resolved against the filesystem).
+func (s *spec) validate(nfsRoot string) map[string]string {
 	f := map[string]string{}
 	s.Name = strings.TrimSpace(s.Name)
-	s.Account = strings.TrimSpace(s.Account)
-	s.Container = strings.TrimSpace(s.Container)
 	s.Prefix = strings.Trim(strings.TrimSpace(s.Prefix), "/")
 	s.EndpointOverride = strings.TrimRight(strings.TrimSpace(s.EndpointOverride), "/")
+	s.Account = strings.TrimSpace(s.Account)
+	s.Container = strings.TrimSpace(s.Container)
+	s.Bucket = strings.TrimSpace(s.Bucket)
+	s.Region = strings.TrimSpace(s.Region)
+	s.AccessKeyID = strings.TrimSpace(s.AccessKeyID)
+	s.Path = strings.TrimSpace(s.Path)
 	if s.Name == "" {
 		f["name"] = "required"
 	} else if len(s.Name) > 80 {
 		f["name"] = "at most 80 characters"
-	}
-	if !accountRe.MatchString(s.Account) {
-		f["account"] = "3–24 lowercase letters and digits"
-	}
-	if !validContainer(s.Container) {
-		f["container"] = "3–63 lowercase letters, digits and single hyphens"
 	}
 	if s.Prefix != "" {
 		if len(s.Prefix) > 256 {
@@ -254,6 +338,62 @@ func (s *spec) validate() map[string]string {
 				break
 			}
 		}
+	}
+	if s.Auth == "" {
+		s.Auth = defaultAuth(s.Kind)
+	}
+	notFor := func(field string, set bool) {
+		if set {
+			f[field] = "not used with kind " + s.Kind
+		}
+	}
+	switch s.Kind {
+	case blob.KindAzureBlob:
+		notFor("bucket", s.Bucket != "")
+		notFor("region", s.Region != "")
+		notFor("path_style", s.PathStyle)
+		notFor("access_key_id", s.AccessKeyID != "")
+		notFor("secret_key", hasSecret(s.SecretKey))
+		notFor("path", s.Path != "")
+		s.validateAzure(f)
+	case blob.KindS3:
+		notFor("account", s.Account != "")
+		notFor("container", s.Container != "")
+		notFor("sas", hasSecret(s.SAS))
+		notFor("path", s.Path != "")
+		s.validateS3(f)
+	case blob.KindNFS:
+		notFor("account", s.Account != "")
+		notFor("container", s.Container != "")
+		notFor("sas", hasSecret(s.SAS))
+		notFor("bucket", s.Bucket != "")
+		notFor("region", s.Region != "")
+		notFor("path_style", s.PathStyle)
+		notFor("access_key_id", s.AccessKeyID != "")
+		notFor("secret_key", hasSecret(s.SecretKey))
+		notFor("endpoint_override", s.EndpointOverride != "")
+		if s.Auth != blob.AuthNone {
+			f["auth"] = "none (the server writes as its own user)"
+		}
+		if s.Path == "" {
+			f["path"] = "required"
+		} else if _, _, _, err := blob.ResolveFSPath(nfsRoot, s.Path); err != nil {
+			f["path"] = err.Error()
+		} else {
+			s.Path = filepath.Clean(s.Path)
+		}
+	default:
+		f["kind"] = "azure_blob, s3 or nfs"
+	}
+	return f
+}
+
+func (s *spec) validateAzure(f map[string]string) {
+	if !accountRe.MatchString(s.Account) {
+		f["account"] = "3–24 lowercase letters and digits"
+	}
+	if !validContainer(s.Container) {
+		f["container"] = "3–63 lowercase letters, digits and single hyphens"
 	}
 	if s.EndpointOverride != "" {
 		u, err := url.Parse(s.EndpointOverride)
@@ -269,60 +409,107 @@ func (s *spec) validate() map[string]string {
 		s.SAS = nil
 	case blob.AuthSAS:
 		if s.SAS != nil {
-			switch s.SAS.Source {
-			case "keyvault_ref":
-				if _, err := secrets.ParseRef(strings.TrimSpace(s.SAS.Ref)); err != nil {
-					f["sas.ref"] = err.Error()
-				}
-				if s.SAS.Value != "" {
-					f["sas.value"] = "do not send a value with a Key Vault reference"
-				}
-			case "stored":
-				if strings.TrimSpace(s.SAS.Value) == "" {
-					f["sas.value"] = "required"
-				}
-			default:
-				f["sas.source"] = "keyvault_ref or stored"
-			}
+			validateSecretSource(f, "sas", s.SAS)
 		}
 	default:
 		f["auth"] = "managed_identity or sas_token"
 	}
-	return f
 }
 
-// resolveSAS returns the plaintext SAS for a new source.
-func (a *API) resolveSAS(ctx context.Context, in *SecretSourceInput) (string, map[string]string) {
+func (s *spec) validateS3(f map[string]string) {
+	if !bucketRe.MatchString(s.Bucket) || strings.Contains(s.Bucket, "..") {
+		f["bucket"] = "3–63 lowercase letters, digits, '.' and '-'"
+	}
+	if s.Region == "" {
+		s.Region = blob.DefaultS3Region
+	} else if !regionRe.MatchString(s.Region) {
+		f["region"] = "e.g. eu-central-1"
+	}
+	if s.EndpointOverride != "" {
+		u, err := url.Parse(s.EndpointOverride)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.RawQuery != "" ||
+			u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+			f["endpoint_override"] = "http(s)://host[:port] without path, credentials or query, e.g. https://minio.example.internal:9000"
+		}
+	}
+	if s.Auth != blob.AuthAccessKey {
+		f["auth"] = "access_key"
+	}
+	if !accessKeyIDRe.MatchString(s.AccessKeyID) {
+		f["access_key_id"] = "required (printable characters, no spaces)"
+	}
+	if s.SecretKey != nil {
+		validateSecretSource(f, "secret_key", s.SecretKey)
+	}
+}
+
+// resolveSecret returns the plaintext of a new secret source.
+func (a *API) resolveSecret(ctx context.Context, field string, in *SecretSourceInput) (string, map[string]string) {
+	norm := strings.TrimSpace
+	if field == "sas" {
+		norm = blob.NormalizeSAS
+	}
 	switch in.Source {
 	case "stored":
-		return blob.NormalizeSAS(in.Value), nil
+		return norm(in.Value), nil
 	case "keyvault_ref":
 		b, err := secrets.Resolve(ctx, a.KV, strings.TrimSpace(in.Ref))
 		if err != nil {
 			if errors.Is(err, secrets.ErrSecretNotFound) {
-				return "", map[string]string{"sas.ref": "secret not found in Key Vault"}
+				return "", map[string]string{field + ".ref": "secret not found in Key Vault"}
 			}
-			a.Log.Warn("resolve SAS key vault reference", "ref", strings.TrimSpace(in.Ref), "err", err)
-			return "", map[string]string{"sas.ref": "could not read the secret from Key Vault"}
+			a.Log.Warn("resolve destination key vault reference", "field", field, "ref", strings.TrimSpace(in.Ref), "err", err)
+			return "", map[string]string{field + ".ref": "could not read the secret from Key Vault"}
 		}
-		v := blob.NormalizeSAS(string(b))
+		v := norm(string(b))
 		secrets.Zero(b)
 		return v, nil
 	}
-	return "", map[string]string{"sas.source": "keyvault_ref or stored"}
+	return "", map[string]string{field + ".source": "keyvault_ref or stored"}
 }
 
-func (s spec) target(sas string) blob.Target {
-	return blob.Target{Name: s.Name, Account: s.Account, Container: s.Container, Prefix: s.Prefix, Auth: s.Auth,
-		EndpointOverride: s.EndpointOverride, SAS: sas}
+// newSecret returns the field name and source of the secret s carries (the
+// SAS or the S3 secret key), if any.
+func (s spec) newSecret() (string, *SecretSourceInput) {
+	switch {
+	case s.Kind == blob.KindAzureBlob && s.SAS != nil:
+		return "sas", s.SAS
+	case s.Kind == blob.KindS3 && s.SecretKey != nil:
+		return "secret_key", s.SecretKey
+	}
+	return "", nil
+}
+
+// test runs the destination test for s with the plaintext secret (SAS or
+// S3 secret key).
+func (a *API) test(ctx context.Context, s spec, secret string) Report {
+	p := a.prober()
+	switch s.Kind {
+	case blob.KindS3:
+		return p.TestS3(ctx, blob.S3Target{Name: s.Name, Bucket: s.Bucket, Region: s.Region, Prefix: s.Prefix,
+			EndpointOverride: s.EndpointOverride, PathStyle: s.PathStyle, AccessKeyID: s.AccessKeyID, SecretKey: secret})
+	case blob.KindNFS:
+		return p.TestFS(ctx, blob.FSTarget{Name: s.Name, Path: s.Path, Prefix: s.Prefix})
+	}
+	return p.Test(ctx, blob.Target{Name: s.Name, Account: s.Account, Container: s.Container, Prefix: s.Prefix, Auth: s.Auth,
+		EndpointOverride: s.EndpointOverride, SAS: secret})
 }
 
 // warnings lists what the admin must see after a save.
-func warnings(rep Report, now time.Time) []string {
+func warnings(kind string, rep Report, now time.Time) []string {
 	var out []string
 	if rep.CanDelete {
-		out = append(out, "The credential can delete blobs. Olympos never deletes backups (retention is Blob lifecycle rules); "+
-			"remove the delete permission (SAS without d/x/y, or a custom role without blobs/delete) so a compromised server cannot delete either.")
+		switch kind {
+		case blob.KindS3:
+			out = append(out, "The credential can delete objects. Olympos never deletes backups (retention is bucket lifecycle rules); "+
+				"remove s3:DeleteObject and s3:DeleteObjectVersion from its policy (and use Object Lock) so a compromised server cannot delete either.")
+		case blob.KindNFS:
+			out = append(out, "Olympos can delete files on this export: a filesystem cannot refuse deletes to the server's own user. "+
+				"Olympos never deletes backups; protect them with storage snapshots / WORM (e.g. SnapLock) and do retention on the storage.")
+		default:
+			out = append(out, "The credential can delete blobs. Olympos never deletes backups (retention is Blob lifecycle rules); "+
+				"remove the delete permission (SAS without d/x/y, or a custom role without blobs/delete) so a compromised server cannot delete either.")
+		}
 	}
 	if rep.SAS != nil {
 		if rep.SAS.Scope == ScopeAccount {
@@ -343,6 +530,56 @@ func warnings(rep Report, now time.Time) []string {
 	return out
 }
 
+// details is the activity-log shape of a destination (never secrets).
+func (s spec) details() map[string]any {
+	d := map[string]any{"name": s.Name, "kind": s.Kind, "prefix": s.Prefix, "auth": s.Auth}
+	switch s.Kind {
+	case blob.KindAzureBlob:
+		d["account"], d["container"], d["endpoint_override"] = s.Account, s.Container, s.EndpointOverride
+		d["sas_source"] = sourceOf(s.SAS)
+	case blob.KindS3:
+		d["bucket"], d["region"], d["endpoint_override"], d["path_style"] = s.Bucket, s.Region, s.EndpointOverride, s.PathStyle
+		d["access_key_id"], d["secret_key_source"] = s.AccessKeyID, sourceOf(s.SecretKey)
+	case blob.KindNFS:
+		d["path"] = s.Path
+	}
+	return d
+}
+
+func sourceOf(in *SecretSourceInput) string {
+	if in == nil {
+		return ""
+	}
+	return in.Source
+}
+
+func specFromInput(in Input) spec {
+	s := spec{Name: deref(in.Name), Kind: deref(in.Kind), Prefix: deref(in.Prefix), EndpointOverride: deref(in.EndpointOverride),
+		Auth: deref(in.Auth), Account: deref(in.Account), Container: deref(in.Container), SAS: in.SAS,
+		Bucket: deref(in.Bucket), Region: deref(in.Region), AccessKeyID: deref(in.AccessKeyID), SecretKey: in.SecretKey, Path: deref(in.Path)}
+	if in.PathStyle != nil {
+		s.PathStyle = *in.PathStyle
+	}
+	if s.Kind == "" {
+		s.Kind = blob.KindAzureBlob
+	}
+	return s
+}
+
+// requireSecret adds a field error when the kind needs a secret and none is
+// given (or kept).
+func (s spec) requireSecret(f map[string]string, have bool) {
+	if have {
+		return
+	}
+	switch {
+	case s.Kind == blob.KindAzureBlob && s.Auth == blob.AuthSAS && s.SAS == nil:
+		f["sas"] = "required for auth sas_token"
+	case s.Kind == blob.KindS3 && s.SecretKey == nil:
+		f["secret_key"] = "required for kind s3"
+	}
+}
+
 // ---------------------------------------------------------------- create
 
 func (a *API) create(w http.ResponseWriter, r *http.Request) {
@@ -355,15 +592,9 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s := spec{Name: deref(in.Name), Account: deref(in.Account), Container: deref(in.Container), Prefix: deref(in.Prefix),
-		Auth: deref(in.Auth), EndpointOverride: deref(in.EndpointOverride), SAS: in.SAS}
-	if s.Auth == "" {
-		s.Auth = blob.AuthManagedIdentity
-	}
-	f := s.validate()
-	if s.Auth == blob.AuthSAS && s.SAS == nil {
-		f["sas"] = "required for auth sas_token"
-	}
+	s := specFromInput(in)
+	f := s.validate(a.Storage.NFSRoot)
+	s.requireSecret(f, false)
 	if len(f) > 0 {
 		httpx.FieldErrors(w, "invalid destination", f)
 		return
@@ -371,42 +602,51 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	if a.nameTaken(w, r, s.Name, uuid.Nil) {
 		return
 	}
-	var sas string
-	if s.SAS != nil {
+	var secret string
+	field, src := s.newSecret()
+	if src != nil {
 		var fe map[string]string
-		if sas, fe = a.resolveSAS(r.Context(), s.SAS); fe != nil {
+		if secret, fe = a.resolveSecret(r.Context(), field, src); fe != nil {
 			httpx.FieldErrors(w, "invalid destination", fe)
 			return
 		}
 	}
-	rep := a.prober().Test(r.Context(), s.target(sas))
+	rep := a.test(r.Context(), s, secret)
 	if !rep.OK {
 		httpx.JSON(w, http.StatusUnprocessableEntity, TestFailed{Error: "destination test failed: " + rep.Error, Test: &rep})
 		return
 	}
 	var out View
 	err := store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
-		credID, err := a.insertCredential(r.Context(), tx, s.SAS, sas)
+		credID, err := a.insertCredential(r.Context(), tx, src, secret)
 		if err != nil {
 			return err
 		}
+		var sasCred, secretCred *uuid.UUID
+		if s.Kind == blob.KindS3 {
+			secretCred = credID
+		} else {
+			sasCred = credID
+		}
 		repJSON, _ := json.Marshal(rep)
 		var id uuid.UUID
-		if err := tx.QueryRow(r.Context(), `INSERT INTO destinations (name, account, container, prefix, auth, sas_credential_id,
-			sas_expires_at, sas_permissions, endpoint_override, last_test_at, last_test_ok, last_test_report)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),$10,$11) RETURNING id`,
-			s.Name, s.Account, s.Container, s.Prefix, s.Auth, credID, sasExpiry(rep), sasPerms(rep), s.EndpointOverride, rep.OK, repJSON).Scan(&id); err != nil {
+		if err := tx.QueryRow(r.Context(), `INSERT INTO destinations (name, kind, account, container, prefix, auth, sas_credential_id,
+			sas_expires_at, sas_permissions, endpoint_override, bucket, region, path_style, access_key_id, secret_credential_id, path,
+			last_test_at, last_test_ok, last_test_report)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now(),$17,$18) RETURNING id`,
+			s.Name, s.Kind, s.Account, s.Container, s.Prefix, s.Auth, sasCred, sasExpiry(rep), sasPerms(rep), s.EndpointOverride,
+			s.Bucket, s.Region, s.PathStyle, s.AccessKeyID, secretCred, s.Path, rep.OK, repJSON).Scan(&id); err != nil {
 			return err
 		}
-		if err := httpx.Record(r, tx, "destination.created", "destination", id.String(), nil, map[string]any{
-			"name": s.Name, "account": s.Account, "container": s.Container, "prefix": s.Prefix, "auth": s.Auth,
-			"sas_source": sasSource(s.SAS), "endpoint_override": s.EndpointOverride, "can_delete": rep.CanDelete,
-		}); err != nil {
+		det := s.details()
+		det["can_delete"] = rep.CanDelete
+		if err := httpx.Record(r, tx, "destination.created", "destination", id.String(), nil, det); err != nil {
 			return err
 		}
 		out, err = loadView(r.Context(), tx, id)
 		return err
 	})
+	secret = ""
 	if store.IsUniqueViolation(err) {
 		httpx.JSON(w, http.StatusConflict, httpx.ErrorBody{Error: "a destination with this name already exists", Fields: map[string]string{"name": "already exists"}})
 		return
@@ -415,27 +655,28 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
-	out.Warnings = warnings(rep, a.now())
+	out.Warnings = warnings(s.Kind, rep, a.now())
 	if rep.CanDelete {
-		a.Log.Warn("destination saved with a credential that can delete blobs", "destination", out.ID.String(), "name", out.Name)
+		a.Log.Warn("destination saved with a credential that can delete backups", "destination", out.ID.String(), "name", out.Name, "kind", s.Kind)
 	}
 	httpx.JSON(w, http.StatusCreated, out)
 }
 
-// insertCredential stores a new SAS credential row and returns its ID (nil
-// for managed identity). Stored values are sealed with AAD credentials:<id>.
-func (a *API) insertCredential(ctx context.Context, tx pgx.Tx, in *SecretSourceInput, sas string) (*uuid.UUID, error) {
+// insertCredential stores a new secret credential row (SAS or S3 secret
+// key) and returns its ID (nil when there is none). Stored values are sealed
+// with AAD credentials:<id>.
+func (a *API) insertCredential(ctx context.Context, tx pgx.Tx, in *SecretSourceInput, value string) (*uuid.UUID, error) {
 	if in == nil {
 		return nil, nil
 	}
 	id := uuid.New()
 	switch in.Source {
 	case "stored":
-		b := []byte(sas)
+		b := []byte(value)
 		sealed, err := a.Env.Seal(ctx, b, []byte("credentials:"+id.String()))
 		secrets.Zero(b)
 		if err != nil {
-			return nil, fmt.Errorf("seal SAS: %w", err)
+			return nil, fmt.Errorf("seal secret: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO credentials (id, kind, ciphertext, wrapped_dek, kek_version) VALUES ($1, 'stored', $2, $3, $4)`,
 			id, sealed.Ciphertext, sealed.WrappedDEK, sealed.KEKVersion); err != nil {
@@ -451,7 +692,7 @@ func (a *API) insertCredential(ctx context.Context, tx pgx.Tx, in *SecretSourceI
 			return nil, err
 		}
 	default:
-		return nil, fmt.Errorf("unknown SAS source %q", in.Source)
+		return nil, fmt.Errorf("unknown secret source %q", in.Source)
 	}
 	return &id, nil
 }
@@ -470,27 +711,30 @@ func sasPerms(rep Report) string {
 	return rep.SAS.Permissions
 }
 
-func sasSource(in *SecretSourceInput) string {
-	if in == nil {
-		return ""
-	}
-	return in.Source
-}
-
 // ---------------------------------------------------------------- patch
 
 type row struct {
 	spec
-	credID *uuid.UUID
+	sasCred, secretCred *uuid.UUID
+}
+
+// credID is the credential the row's kind uses (SAS or S3 secret key).
+func (r row) credID() *uuid.UUID {
+	if r.Kind == blob.KindS3 {
+		return r.secretCred
+	}
+	return r.sasCred
 }
 
 func loadRow(ctx context.Context, q store.Querier, id uuid.UUID, lock bool) (row, error) {
 	var r row
-	sql := `SELECT name, account, container, prefix, auth, endpoint_override, sas_credential_id FROM destinations WHERE id = $1`
+	sql := `SELECT name, kind, account, container, prefix, auth, endpoint_override, sas_credential_id,
+		bucket, region, path_style, access_key_id, secret_credential_id, path FROM destinations WHERE id = $1`
 	if lock {
 		sql += ` FOR UPDATE`
 	}
-	err := q.QueryRow(ctx, sql, id).Scan(&r.Name, &r.Account, &r.Container, &r.Prefix, &r.Auth, &r.EndpointOverride, &r.credID)
+	err := q.QueryRow(ctx, sql, id).Scan(&r.Name, &r.Kind, &r.Account, &r.Container, &r.Prefix, &r.Auth, &r.EndpointOverride, &r.sasCred,
+		&r.Bucket, &r.Region, &r.PathStyle, &r.AccessKeyID, &r.secretCred, &r.Path)
 	return r, store.NotFound(err)
 }
 
@@ -524,17 +768,29 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	set(&s.Name, in.Name)
+	set(&s.Prefix, in.Prefix)
+	set(&s.EndpointOverride, in.EndpointOverride)
+	set(&s.Auth, in.Auth)
 	set(&s.Account, in.Account)
 	set(&s.Container, in.Container)
-	set(&s.Prefix, in.Prefix)
-	set(&s.Auth, in.Auth)
-	set(&s.EndpointOverride, in.EndpointOverride)
-	s.SAS = in.SAS
-	f := s.validate()
-	keepCred := s.Auth == blob.AuthSAS && s.SAS == nil && cur.credID != nil
-	if s.Auth == blob.AuthSAS && s.SAS == nil && cur.credID == nil {
-		f["sas"] = "required for auth sas_token"
+	set(&s.Bucket, in.Bucket)
+	set(&s.Region, in.Region)
+	set(&s.AccessKeyID, in.AccessKeyID)
+	set(&s.Path, in.Path)
+	if in.PathStyle != nil {
+		s.PathStyle = *in.PathStyle
 	}
+	s.SAS, s.SecretKey = in.SAS, in.SecretKey
+	f := s.validate(a.Storage.NFSRoot)
+	if in.Kind != nil && *in.Kind != cur.Kind {
+		f["kind"] = "cannot be changed; create a new destination"
+	}
+	field, src := s.newSecret()
+	// The current credential is kept when the kind still needs one and no
+	// new one is given.
+	needsCred := (s.Kind == blob.KindAzureBlob && s.Auth == blob.AuthSAS) || s.Kind == blob.KindS3
+	keepCred := needsCred && src == nil && cur.credID() != nil
+	s.requireSecret(f, keepCred)
 	if len(f) > 0 {
 		httpx.FieldErrors(w, "invalid destination", f)
 		return
@@ -542,25 +798,33 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 	if a.nameTaken(w, r, s.Name, id) {
 		return
 	}
-	var sas string
+	var secret string
 	switch {
-	case s.SAS != nil:
+	case src != nil:
 		var fe map[string]string
-		if sas, fe = a.resolveSAS(r.Context(), s.SAS); fe != nil {
+		if secret, fe = a.resolveSecret(r.Context(), field, src); fe != nil {
 			httpx.FieldErrors(w, "invalid destination", fe)
 			return
 		}
 	case keepCred:
-		b, err := blob.LoadSAS(r.Context(), a.DB, a.KV, a.Env, *cur.credID)
+		what, fld := "SAS", "sas"
+		if s.Kind == blob.KindS3 {
+			what, fld = "S3 secret key", "secret_key"
+		}
+		b, err := blob.LoadSecret(r.Context(), a.DB, a.KV, a.Env, *cur.credID(), what)
 		if err != nil {
-			a.Log.Warn("load destination SAS", "destination", id.String(), "err", err)
-			httpx.FieldErrors(w, "the stored SAS could not be loaded; provide a new one", map[string]string{"sas": "could not be loaded"})
+			a.Log.Warn("load destination secret", "destination", id.String(), "err", err)
+			httpx.FieldErrors(w, "the stored "+what+" could not be loaded; provide a new one", map[string]string{fld: "could not be loaded"})
 			return
 		}
-		sas = blob.NormalizeSAS(string(b))
+		if fld == "sas" {
+			secret = blob.NormalizeSAS(string(b))
+		} else {
+			secret = strings.TrimSpace(string(b))
+		}
 		secrets.Zero(b)
 	}
-	rep := a.prober().Test(r.Context(), s.target(sas))
+	rep := a.test(r.Context(), s, secret)
 	if !rep.OK {
 		httpx.JSON(w, http.StatusUnprocessableEntity, TestFailed{Error: "destination test failed: " + rep.Error, Test: &rep})
 		return
@@ -571,25 +835,33 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		credID := locked.credID
+		credID := locked.credID()
 		var oldCred *uuid.UUID
 		switch {
-		case s.Auth == blob.AuthManagedIdentity:
-			oldCred, credID = locked.credID, nil
-		case s.SAS != nil:
-			oldCred = locked.credID
-			if credID, err = a.insertCredential(r.Context(), tx, s.SAS, sas); err != nil {
+		case !needsCred:
+			oldCred, credID = locked.credID(), nil
+		case src != nil:
+			oldCred = locked.credID()
+			if credID, err = a.insertCredential(r.Context(), tx, src, secret); err != nil {
 				return err
 			}
 		}
+		var sasCred, secretCred *uuid.UUID
+		if s.Kind == blob.KindS3 {
+			secretCred = credID
+		} else {
+			sasCred = credID
+		}
 		repJSON, _ := json.Marshal(rep)
 		if _, err := tx.Exec(r.Context(), `UPDATE destinations SET name=$2, account=$3, container=$4, prefix=$5, auth=$6, sas_credential_id=$7,
-			sas_expires_at=$8, sas_permissions=$9, endpoint_override=$10, last_test_at=now(), last_test_ok=$11, last_test_report=$12 WHERE id=$1`,
-			id, s.Name, s.Account, s.Container, s.Prefix, s.Auth, credID, sasExpiry(rep), sasPerms(rep), s.EndpointOverride, rep.OK, repJSON); err != nil {
+			sas_expires_at=$8, sas_permissions=$9, endpoint_override=$10, bucket=$11, region=$12, path_style=$13, access_key_id=$14,
+			secret_credential_id=$15, path=$16, last_test_at=now(), last_test_ok=$17, last_test_report=$18, updated_at=now() WHERE id=$1`,
+			id, s.Name, s.Account, s.Container, s.Prefix, s.Auth, sasCred, sasExpiry(rep), sasPerms(rep), s.EndpointOverride,
+			s.Bucket, s.Region, s.PathStyle, s.AccessKeyID, secretCred, s.Path, rep.OK, repJSON); err != nil {
 			return err
 		}
 		if oldCred != nil {
-			// The replaced SAS must not linger (sealed or reference).
+			// The replaced secret must not linger (sealed or reference).
 			if _, err := tx.Exec(r.Context(), `DELETE FROM credentials WHERE id = $1`, *oldCred); err != nil {
 				return err
 			}
@@ -601,13 +873,20 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		diff("name", locked.Name, s.Name)
-		diff("account", locked.Account, s.Account)
-		diff("container", locked.Container, s.Container)
 		diff("prefix", locked.Prefix, s.Prefix)
 		diff("auth", locked.Auth, s.Auth)
 		diff("endpoint_override", locked.EndpointOverride, s.EndpointOverride)
-		if s.SAS != nil {
-			changes["sas"] = "replaced (" + s.SAS.Source + ")"
+		diff("account", locked.Account, s.Account)
+		diff("container", locked.Container, s.Container)
+		diff("bucket", locked.Bucket, s.Bucket)
+		diff("region", locked.Region, s.Region)
+		diff("access_key_id", locked.AccessKeyID, s.AccessKeyID)
+		diff("path", locked.Path, s.Path)
+		if locked.PathStyle != s.PathStyle {
+			changes["path_style"] = map[string]bool{"from": locked.PathStyle, "to": s.PathStyle}
+		}
+		if src != nil {
+			changes[field] = "replaced (" + src.Source + ")"
 		}
 		changes["can_delete"] = rep.CanDelete
 		if err := httpx.Record(r, tx, "destination.updated", "destination", id.String(), nil, changes); err != nil {
@@ -616,6 +895,7 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 		out, err = loadView(r.Context(), tx, id)
 		return err
 	})
+	secret = ""
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpx.NotFound(w)
@@ -624,7 +904,7 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.Internal(w, r, a.Log, err)
 	default:
-		out.Warnings = warnings(rep, a.now())
+		out.Warnings = warnings(s.Kind, rep, a.now())
 		httpx.JSON(w, http.StatusOK, out)
 	}
 }
@@ -656,13 +936,14 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(r.Context(), `DELETE FROM destinations WHERE id = $1`, id); err != nil {
 			return err
 		}
-		if cur.credID != nil {
-			if _, err := tx.Exec(r.Context(), `DELETE FROM credentials WHERE id = $1`, *cur.credID); err != nil {
-				return err
+		for _, c := range []*uuid.UUID{cur.sasCred, cur.secretCred} {
+			if c != nil {
+				if _, err := tx.Exec(r.Context(), `DELETE FROM credentials WHERE id = $1`, *c); err != nil {
+					return err
+				}
 			}
 		}
-		return httpx.Record(r, tx, "destination.deleted", "destination", id.String(), nil,
-			map[string]any{"name": cur.Name, "account": cur.Account, "container": cur.Container, "auth": cur.Auth})
+		return httpx.Record(r, tx, "destination.deleted", "destination", id.String(), nil, cur.spec.details())
 	})
 	var pg *pgconn.PgError
 	switch {
@@ -691,35 +972,30 @@ func (a *API) testUnsaved(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	s := spec{Name: deref(in.Name), Account: deref(in.Account), Container: deref(in.Container), Prefix: deref(in.Prefix),
-		Auth: deref(in.Auth), EndpointOverride: deref(in.EndpointOverride), SAS: in.SAS}
-	if s.Auth == "" {
-		s.Auth = blob.AuthManagedIdentity
-	}
-	if s.Name == "" {
+	s := specFromInput(in)
+	if strings.TrimSpace(s.Name) == "" {
 		s.Name = "unsaved"
 	}
-	f := s.validate()
-	if s.Auth == blob.AuthSAS && s.SAS == nil {
-		f["sas"] = "required for auth sas_token"
-	}
+	f := s.validate(a.Storage.NFSRoot)
+	s.requireSecret(f, false)
 	if len(f) > 0 {
 		httpx.FieldErrors(w, "invalid destination", f)
 		return
 	}
-	var sas string
-	if s.SAS != nil {
+	var secret string
+	if field, src := s.newSecret(); src != nil {
 		var fe map[string]string
-		if sas, fe = a.resolveSAS(r.Context(), s.SAS); fe != nil {
+		if secret, fe = a.resolveSecret(r.Context(), field, src); fe != nil {
 			httpx.FieldErrors(w, "invalid destination", fe)
 			return
 		}
 	}
-	rep := a.prober().Test(r.Context(), s.target(sas))
-	sas = ""
-	if err := httpx.Record(r, a.DB, "destination.tested", "destination", "", nil, map[string]any{
-		"account": s.Account, "container": s.Container, "prefix": s.Prefix, "auth": s.Auth, "ok": rep.OK, "can_delete": rep.CanDelete,
-	}); err != nil {
+	rep := a.test(r.Context(), s, secret)
+	secret = ""
+	det := s.details()
+	delete(det, "name")
+	det["ok"], det["can_delete"] = rep.OK, rep.CanDelete
+	if err := httpx.Record(r, a.DB, "destination.tested", "destination", "", nil, det); err != nil {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
@@ -735,23 +1011,15 @@ func (a *API) testSaved(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if _, err := loadRow(r.Context(), a.DB, id, false); errors.Is(err, store.ErrNotFound) {
+	cur, err := loadRow(r.Context(), a.DB, id, false)
+	if errors.Is(err, store.ErrNotFound) {
 		httpx.NotFound(w)
 		return
 	} else if err != nil {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
-	var rep Report
-	t, err := blob.LoadTarget(r.Context(), a.DB, a.KV, a.Env, id)
-	switch {
-	case err != nil:
-		a.Log.Warn("load destination for test", "destination", id.String(), "err", err)
-		rep = Report{Steps: []Step{}, Error: "could not load the destination credential: " + secrets.RedactString(err.Error())}
-	default:
-		rep = a.prober().Test(r.Context(), t)
-		t.SAS = ""
-	}
+	rep := a.testRow(r.Context(), id, cur.Kind)
 	repJSON, _ := json.Marshal(rep)
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
 		if rep.SAS != nil {
@@ -771,6 +1039,38 @@ func (a *API) testSaved(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, rep)
+}
+
+// testRow tests a saved destination with its stored credential.
+func (a *API) testRow(ctx context.Context, id uuid.UUID, kind string) Report {
+	loadErr := func(err error) Report {
+		a.Log.Warn("load destination for test", "destination", id.String(), "err", err)
+		return Report{Steps: []Step{}, Error: "could not load the destination credential: " + secrets.RedactString(err.Error())}
+	}
+	p := a.prober()
+	switch kind {
+	case blob.KindS3:
+		t, err := blob.LoadS3Target(ctx, a.DB, a.KV, a.Env, id)
+		if err != nil {
+			return loadErr(err)
+		}
+		rep := p.TestS3(ctx, t)
+		t.SecretKey = ""
+		return rep
+	case blob.KindNFS:
+		t, err := blob.LoadFSTarget(ctx, a.DB, id)
+		if err != nil {
+			return Report{Steps: []Step{}, Error: err.Error()}
+		}
+		return p.TestFS(ctx, t)
+	}
+	t, err := blob.LoadTarget(ctx, a.DB, a.KV, a.Env, id)
+	if err != nil {
+		return loadErr(err)
+	}
+	rep := p.Test(ctx, t)
+	t.SAS = ""
+	return rep
 }
 
 func deref(s *string) string {

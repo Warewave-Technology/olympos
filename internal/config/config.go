@@ -82,6 +82,18 @@ type Server struct {
 		GlobalConcurrency     int    `yaml:"globalConcurrency"`
 		PerClusterConcurrency int    `yaml:"perClusterConcurrency"`
 		PgDumpDir             string `yaml:"pgDumpDir"` // contains <major>/bin/pg_dump
+		// NFSRoot holds the volumes NFS destinations may write to: every
+		// first-level subdirectory is one mount (Helm mounts nfsMounts[].name
+		// at <nfsRoot>/<name>). Default /var/lib/olympos/nfs.
+		NFSRoot string `yaml:"nfsRoot"`
+		// StorageCABundleFile adds private CAs (PEM) to the system roots for
+		// S3 endpoints (e.g. MinIO / Ceph behind an internal CA). It is not
+		// the targetTLS bundle: storage and targets are trusted separately.
+		StorageCABundleFile string `yaml:"storageCABundleFile"`
+		// S3PartSizeMiB is the multipart part size for S3 uploads of unknown
+		// length (memory per running upload; max object = 10000 parts).
+		// Default 32 (≈ 312 GiB per backup object), 5–5120.
+		S3PartSizeMiB int `yaml:"s3PartSizeMiB"`
 	} `yaml:"backup"`
 
 	ChangeRequests struct {
@@ -154,6 +166,10 @@ func (c *Server) defaults() {
 	def(&c.KeyVault.HMACSecretName, "olympos-hmac")
 	def(&c.KeyVault.LocalDir, "/var/lib/olympos/localkv")
 	def(&c.Backup.PgDumpDir, "/usr/lib/postgresql")
+	def(&c.Backup.NFSRoot, "/var/lib/olympos/nfs")
+	if c.Backup.S3PartSizeMiB == 0 {
+		c.Backup.S3PartSizeMiB = 32
+	}
 	def(&c.Audit.KubescapeBin, "kubescape")
 	def(&c.Audit.PolarisBin, "polaris")
 	def(&c.Security.TrivyBin, "trivy")
@@ -195,6 +211,9 @@ func (c *Server) Validate() error {
 	}
 	if c.KeyVault.Provider == "azure" && c.KeyVault.Name == "" {
 		errs = append(errs, "keyVault.name is required")
+	}
+	if c.Backup.S3PartSizeMiB < 5 || c.Backup.S3PartSizeMiB > 5120 {
+		errs = append(errs, "backup.s3PartSizeMiB must be between 5 and 5120")
 	}
 	if c.Database.DSN == "" && c.Database.DSNRef == "" {
 		errs = append(errs, "database.dsnRef is required")

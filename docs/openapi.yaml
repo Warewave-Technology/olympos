@@ -226,6 +226,14 @@ paths:
         "201": {description: Created (check `warnings`), content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
         "409": {description: Name already used}
         "422": {description: Invalid input (fields) or destination test failed (test), content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTestFailed"}}}}
+  /destinations/mounts:
+    get:
+      tags: [backups]
+      summary: Volumes mounted into the server that NFS destinations may use.
+      responses:
+        "200":
+          description: Mounts
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/DestinationMount"}}}}}}
   /destinations/test:
     post:
       tags: [backups]
@@ -942,36 +950,70 @@ components:
         value: {type: string, writeOnly: true}
     DestinationInput:
       type: object
-      required: [name, account, container, auth]
+      description: |
+        One of three kinds (SPEC §10.3, extended — docs/spec-changes.md). `kind` defaults to azure_blob.
+        - **azure_blob**: account, container, prefix, auth managed_identity | sas_token (+ sas), endpoint_override
+          (Azurite, sovereign clouds, private DNS names; e.g. http://azurite.olympos.svc:10000/devstoreaccount1).
+        - **s3**: bucket, region, prefix, endpoint_override (any S3-compatible service: MinIO, Ceph RGW, Wasabi,
+          NetApp StorageGRID…; empty = AWS), path_style, auth access_key with access_key_id + secret_key.
+        - **nfs**: path — a directory below one of the server's mounted volumes (`GET /destinations/mounts`),
+          prefix. The server process can delete there; the test reports can_delete=true (use storage-side
+          snapshots / WORM for retention protection).
+        PATCH is partial: omitted fields are unchanged; `kind` cannot change.
+      required: [name]
       properties:
         name: {type: string}
+        kind: {type: string, enum: [azure_blob, s3, nfs], default: azure_blob}
+        prefix: {type: string}
+        endpoint_override: {type: string, description: "azure_blob and s3: custom endpoint URL (http or https)"}
+        # azure_blob
         account: {type: string, example: stolymposbackups}
         container: {type: string}
-        prefix: {type: string}
-        auth: {type: string, enum: [managed_identity, sas_token]}
+        auth: {type: string, enum: [managed_identity, sas_token, access_key, none], description: "azure_blob: managed_identity | sas_token; s3: access_key; nfs: none"}
         sas: {$ref: "#/components/schemas/SecretSourceInput"}
-        endpoint_override: {type: string, description: "Optional blob endpoint (Azurite / sovereign clouds)"}
+        # s3
+        bucket: {type: string}
+        region: {type: string, example: eu-central-1, description: "s3: default us-east-1"}
+        path_style: {type: boolean, description: "s3: path-style addressing (most S3-compatible services need it)"}
+        access_key_id: {type: string, description: "s3: not secret, shown in the UI"}
+        secret_key: {$ref: "#/components/schemas/SecretSourceInput"}
+        # nfs
+        path: {type: string, example: /var/lib/olympos/nfs/backup-nas/olympos}
     Destination:
       type: object
       properties:
         id: {type: string}
         name: {type: string}
-        kind: {type: string, enum: [azure_blob]}
+        kind: {type: string, enum: [azure_blob, s3, nfs]}
+        prefix: {type: string}
+        endpoint_override: {type: string}
         account: {type: string}
         container: {type: string}
-        prefix: {type: string}
-        auth: {type: string, enum: [managed_identity, sas_token]}
+        auth: {type: string, enum: [managed_identity, sas_token, access_key, none]}
         sas_source: {type: string, enum: ["", keyvault_ref, stored]}
         sas_ref: {type: string}
         sas_expires_at: {type: [string, "null"], format: date-time}
         sas_permissions: {type: string, example: rcwt}
-        endpoint_override: {type: string}
+        bucket: {type: string}
+        region: {type: string}
+        path_style: {type: boolean}
+        access_key_id: {type: string}
+        secret_key_source: {type: string, enum: ["", keyvault_ref, stored]}
+        secret_key_ref: {type: string}
+        path: {type: string}
         last_test_at: {type: [string, "null"], format: date-time}
         last_test_ok: {type: [boolean, "null"]}
         last_test: {$ref: "#/components/schemas/DestinationTest"}
         jobs: {type: integer}
         created_at: {type: string, format: date-time}
         warnings: {type: array, items: {type: string}, description: "Only on create/patch responses: things the admin must see (credential can delete, account SAS, expiry < 14 days)"}
+    DestinationMount:
+      type: object
+      description: A volume mounted into the server for NFS destinations (Helm value nfsMounts).
+      properties:
+        name: {type: string, example: backup-nas}
+        path: {type: string, example: /var/lib/olympos/nfs/backup-nas}
+        writable: {type: boolean}
     DestinationTest:
       type: object
       properties:
@@ -982,7 +1024,7 @@ components:
           items:
             type: object
             properties:
-              name: {type: string, enum: [write, read, tag, delete_refused, sas_permissions, sas_expiry]}
+              name: {type: string, enum: [write, read, tag, delete_refused, sas_permissions, sas_expiry, endpoint, path]}
               ok: {type: boolean}
               detail: {type: string}
         sas:
