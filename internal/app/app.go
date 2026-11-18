@@ -164,7 +164,7 @@ func Run(cfgPath string) error {
 	}
 	srv.SPA = sub
 	srv.Modules = append(srv.Modules, &inventory.API{DB: d.DB, Log: log.With("component", "inventory"), Gateway: d.Gateway, CA: d.CA,
-		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART")})
+		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART"), AgentSets: agentSets()})
 	for _, w := range wiring {
 		srv.Modules = append(srv.Modules, w.Modules...)
 	}
@@ -323,3 +323,15 @@ func (d *Deps) PublicLink(path string) string {
 type RoutesFunc func(r chi.Router)
 
 func (f RoutesFunc) Routes(r chi.Router) { f(r) }
+
+// agentSets parses OLYMPOS_AGENT_INSTALL_SETS ("k=v,k2=v2") into extra
+// --set lines for the generated agent install command.
+func agentSets() []string {
+	var out []string
+	for _, kv := range strings.Split(os.Getenv("OLYMPOS_AGENT_INSTALL_SETS"), ",") {
+		if kv = strings.TrimSpace(kv); strings.Contains(kv, "=") && !strings.ContainsAny(kv, " \t;|&$`'\"") {
+			out = append(out, kv)
+		}
+	}
+	return out
+}

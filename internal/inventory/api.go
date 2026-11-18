@@ -38,7 +38,10 @@ type API struct {
 	CA         *pki.CA
 	GatewayURL string
 	AgentChart string
-	Now        func() time.Time
+	// AgentSets are extra `--set k=v` lines for the install command, e.g. an
+	// image mirror for air-gapped installs (OLYMPOS_AGENT_INSTALL_SETS).
+	AgentSets []string
+	Now       func() time.Time
 }
 
 // Routes mounts the module under /api/v1.
@@ -347,6 +350,9 @@ func (a *API) installCommand(c *Cluster, token string) string {
 	}
 	if c.BenchEnabled {
 		lines = append(lines, "--set bench.enabled=true")
+	}
+	for _, kv := range a.AgentSets {
+		lines = append(lines, "--set "+kv)
 	}
 	return strings.Join(lines, " \\\n  ")
 }

@@ -1,0 +1,8 @@
+# Browsable lab: agents of every kind cluster dial the gateway NodePort on the
+# lab control-plane node (all kind nodes share the "kind" Docker network).
+olympos:
+  agentGatewayURL: olympos-lab-control-plane:30443
+gatewayService: {type: NodePort, nodePort: 30443, annotations: {}}
+extraEnv:
+- {name: OLYMPOS_AGENT_CHART, value: ./deploy/helm/olympos-agent}
+- {name: OLYMPOS_AGENT_INSTALL_SETS, value: "image.repository=olympos-agent,image.tag=e2e,image.pullPolicy=Never"}

@@ -114,6 +114,11 @@ for i in $(seq 1 30); do vexec env VAULT_TOKEN="$ROOT" vault secrets list >/dev/
 vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=secret kv-v2 >/dev/null 2>&1 || true
 vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=legacy -version=1 kv >/dev/null 2>&1 || true
 
+if [ -n "${SETUP_ONLY:-}" ]; then
+  log "lab ready (SETUP_ONLY: tests skipped)"
+  exit 0
+fi
+
 log "running e2e tests"
 OLYMPOS_E2E_KUBECONFIG=$KUBECONFIG OLYMPOS_E2E_URL=http://127.0.0.1:28080 \
   go test -tags e2e -count=1 -timeout 30m -v ./test/e2e/... 2>&1 | tee "$WORK/e2e.log"
