@@ -3,7 +3,6 @@ package clickhouse
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"github.com/ClickHouse/ch-go/proto"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/targettls"
 )
 
 const (
@@ -69,11 +69,24 @@ func connect(ctx context.Context, ec backup.EngineContext, opts Options) (*sessi
 		hctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
 		err := tc.HandshakeContext(hctx)
 		cancel()
-		if err != nil {
+		var rhe tls.RecordHeaderError
+		switch {
+		case err != nil && errors.As(err, &rhe):
+			// The target answered in plaintext: it has no TLS on this port.
+			// SPEC §7 allows the run; the result reports TLS=false so the
+			// worker opens the tls.missing finding. Certificate errors never
+			// fall back.
+			_ = raw.Close()
+			if raw, err = ec.Dial(ctx); err != nil {
+				return nil, fmt.Errorf("clickhouse: dial: %w", err)
+			}
+			conn, tlsCfg = raw, nil
+		case err != nil:
 			_ = raw.Close()
 			return nil, fmt.Errorf("clickhouse: tls handshake (server name %q): %w", tlsCfg.ServerName, err)
+		default:
+			conn = tc
 		}
-		conn = tc
 	}
 
 	user := cred.Username
@@ -117,10 +130,8 @@ func tlsConfig(ec backup.EngineContext, opts Options) (*tls.Config, error) {
 	if name == "" {
 		return nil, errors.New("clickhouse: TLS server name is required in e2e-tls mode")
 	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
+	// System roots plus the configured target CA bundle (targetTLS).
+	pool := targettls.RootCAs().Clone()
 	if strings.TrimSpace(opts.CAPEM) != "" && !pool.AppendCertsFromPEM([]byte(opts.CAPEM)) {
 		return nil, errors.New("clickhouse: ca_pem contains no valid certificate")
 	}

@@ -63,8 +63,12 @@ func (Engine) TestConnection(ctx context.Context, ec backup.EngineContext) (*bac
 		return ct, nil
 	}
 	defer s.close()
+	ct.TLS = s.tls
 
 	detail := "native protocol, zstd compression, plaintext (transfer mode compressed)"
+	if ec.UseTLS && !s.tls {
+		detail = "native protocol, zstd compression, plaintext: target has no TLS on this port"
+	}
 	if s.tls {
 		detail = "native protocol, zstd compression, TLS verified"
 	}
@@ -309,7 +313,8 @@ func (Engine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer) (*b
 	if len(warnings) > 0 {
 		details["warnings"] = warnings
 	}
-	return &backup.RunResult{ServerVersion: m.ServerVersion, ToolVersion: m.ToolVersion, Details: details}, nil
+	tlsUsed := s.tls
+	return &backup.RunResult{ServerVersion: m.ServerVersion, ToolVersion: m.ToolVersion, Details: details, TLS: &tlsUsed}, nil
 }
 
 // backupTable streams the data entries of one table.
