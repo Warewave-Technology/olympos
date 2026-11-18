@@ -776,7 +776,7 @@ func (a *API) testConnection(w http.ResponseWriter, r *http.Request) {
 	if ct.Databases == nil {
 		ct.Databases = []string{}
 	}
-	reached := ct.OK || ct.ServerVersion != "" || ct.TLS
+	reached := ct.OK || ct.ServerVersion != "" || ct.TLS || ct.Reached
 	err = store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
 		if reached {
 			if err := recordTargetTLS(ctx, tx, t, ct.ServerVersion, ct.TLS); err != nil {

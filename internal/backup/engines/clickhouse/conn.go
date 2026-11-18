@@ -25,6 +25,11 @@ const (
 	readTimeout = 5 * time.Minute
 )
 
+// ErrNoTLS: transfer mode e2e-tls and the target has no TLS on the port.
+var ErrNoTLS = errors.New("clickhouse: this target has no TLS on this port, and the native protocol would send the password in clear, " +
+	"so Olympos refuses it in transfer mode e2e-tls. Enable TLS on the target (tcp_port_secure) and point the target at that port, " +
+	"or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters")
+
 // session is one native-protocol connection to the target.
 type session struct {
 	client *ch.Client
@@ -73,14 +78,10 @@ func connect(ctx context.Context, ec backup.EngineContext, opts Options) (*sessi
 		switch {
 		case err != nil && errors.As(err, &rhe):
 			// The target answered in plaintext: it has no TLS on this port.
-			// SPEC §7 allows the run; the result reports TLS=false so the
-			// worker opens the tls.missing finding. Certificate errors never
-			// fall back.
+			// The native protocol sends the password in clear, so e2e-tls
+			// refuses (F1), like Vault. Certificate errors never fall back.
 			_ = raw.Close()
-			if raw, err = ec.Dial(ctx); err != nil {
-				return nil, fmt.Errorf("clickhouse: dial: %w", err)
-			}
-			conn, tlsCfg = raw, nil
+			return nil, ErrNoTLS
 		case err != nil:
 			_ = raw.Close()
 			return nil, fmt.Errorf("clickhouse: tls handshake (server name %q): %w", tlsCfg.ServerName, err)

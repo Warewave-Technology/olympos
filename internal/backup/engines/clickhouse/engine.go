@@ -58,6 +58,9 @@ func (Engine) TestConnection(ctx context.Context, ec backup.EngineContext) (*bac
 	ct := &backup.ConnectionTest{TLS: ec.UseTLS, Privileges: []backup.Privilege{}, Databases: []string{}}
 	s, err := connect(ctx, ec, opts)
 	if err != nil {
+		if errors.Is(err, ErrNoTLS) {
+			ct.TLS, ct.Reached = false, true
+		}
 		ct.Error = err.Error()
 		ct.Privileges = append(ct.Privileges, backup.Privilege{Name: "connect", OK: false, Detail: err.Error()})
 		return ct, nil
@@ -66,9 +69,6 @@ func (Engine) TestConnection(ctx context.Context, ec backup.EngineContext) (*bac
 	ct.TLS = s.tls
 
 	detail := "native protocol, zstd compression, plaintext (transfer mode compressed)"
-	if ec.UseTLS && !s.tls {
-		detail = "native protocol, zstd compression, plaintext: target has no TLS on this port"
-	}
 	if s.tls {
 		detail = "native protocol, zstd compression, TLS verified"
 	}
@@ -189,6 +189,10 @@ func (Engine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer) (*b
 	}
 	started := time.Now().UTC()
 	s, err := connect(ctx, ec, opts)
+	if errors.Is(err, ErrNoTLS) {
+		no := false
+		return &backup.RunResult{TLS: &no}, err
+	}
 	if err != nil {
 		return nil, err
 	}

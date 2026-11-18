@@ -39,8 +39,10 @@ type EngineContext struct {
 	Dial func(ctx context.Context) (net.Conn, error)
 	// UseTLS is true in transfer mode e2e-tls (default): the engine MUST
 	// speak verified TLS end-to-end with the target whenever the target
-	// supports it. A target without TLS is still backed up (SPEC §7) and the
-	// engine reports RunResult.TLS=false so the tls.missing finding opens.
+	// supports it. Without TLS on the target a password MUST NOT cross the
+	// connection: PostgreSQL only logs in with SCRAM-SHA-256, ClickHouse and
+	// Vault are refused. The engine reports RunResult.TLS=false (also with
+	// the error) so the tls.missing finding opens.
 	// False in "compressed" mode (plaintext inside the cluster).
 	UseTLS bool
 	// TLSServerName to verify; InsecureSkipVerify is never used. RootCAs is
@@ -78,6 +80,9 @@ type ConnectionTest struct {
 	Privileges    []Privilege `json:"privileges"`
 	Databases     []string    `json:"databases"`
 	Error         string      `json:"error,omitempty"`
+	// Reached: the target answered (TLS is known) even if the test failed,
+	// so the tls.missing finding is opened or resolved.
+	Reached bool `json:"-"`
 }
 
 // Engine is a backup engine.

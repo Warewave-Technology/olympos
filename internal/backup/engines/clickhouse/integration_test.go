@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -720,6 +721,48 @@ func testTLS(t *testing.T, env *chEnv) {
 	if ct, _ := (Engine{}).TestConnection(ctx, none); ct.OK || !strings.Contains(ct.Error, "server name") {
 		t.Fatalf("missing server name should fail: %+v", ct)
 	}
+	// F1: e2e-tls against the plain native port is refused before the
+	// password is sent (no fallback), both in the test and in a run; the
+	// run still reports TLS=false so tls.missing opens.
+	plain := env.ec(true, map[string]any{"databases": []string{"shop"}, "ca_pem": env.caPEM})
+	plainAddr := env.native
+	var sent bytes.Buffer
+	plain.Dial = func(ctx context.Context) (net.Conn, error) {
+		var d net.Dialer
+		c, err := d.DialContext(ctx, "tcp", plainAddr)
+		if err != nil {
+			return nil, err
+		}
+		return &recordConn{Conn: c, w: &sent}, nil
+	}
+	ct, _ = Engine{}.TestConnection(ctx, plain)
+	if ct.OK || ct.TLS || !ct.Reached || !strings.Contains(ct.Error, "no TLS on this port") ||
+		!strings.Contains(ct.Error, "compressed") {
+		t.Fatalf("plaintext target accepted in e2e-tls: %+v", ct)
+	}
+	rr, err := Engine{}.Run(ctx, plain, io.Discard)
+	if !errors.Is(err, ErrNoTLS) || rr == nil || rr.TLS == nil || *rr.TLS {
+		t.Fatalf("run: %+v %v", rr, err)
+	}
+	if bytes.Contains(sent.Bytes(), []byte(chPassword)) || bytes.Contains(sent.Bytes(), []byte(chUser)) {
+		t.Fatal("credentials reached a plaintext target")
+	}
+	// The same target in compressed mode works.
+	comp := env.ec(false, map[string]any{"databases": []string{"shop"}})
+	if ct, _ := (Engine{}).TestConnection(ctx, comp); !ct.OK || ct.TLS {
+		t.Fatalf("compressed mode: %+v", ct)
+	}
+}
+
+// recordConn records what the client writes.
+type recordConn struct {
+	net.Conn
+	w *bytes.Buffer
+}
+
+func (c *recordConn) Write(p []byte) (int, error) {
+	c.w.Write(p)
+	return c.Conn.Write(p)
 }
 
 // testCerts returns a CA and a server certificate for chTLSName.

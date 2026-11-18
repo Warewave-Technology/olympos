@@ -308,7 +308,7 @@ message TunnelFrame {
 
 Rules:
 - Server → `OpenTunnel{target_id}`. Agent looks up `target_id` in **its own** discovered set; unknown → `TunnelRejected`. Agent resolves Service → endpoint, opens TCP, then calls `Tunnel` RPC with `tunnel_id` and pipes bytes.
-- The agent never inspects or terminates TLS. The server speaks TLS **end-to-end** with the target. If the target has no TLS, the run is allowed but the target gets a `tls.missing` security finding (shown as "TLS: No" badge).
+- The agent never inspects or terminates TLS. The server speaks TLS **end-to-end** with the target. If the target has no TLS, the target gets a `tls.missing` security finding (shown as "TLS: No" badge) and, in `e2e-tls` mode, **no password crosses a non-TLS connection**: PostgreSQL is allowed only when the server asks for SCRAM-SHA-256 (checked before the password is sent; cleartext/MD5 are refused), ClickHouse and Vault/OpenBao are refused. The error names both ways out: enable TLS on the target, or switch the cluster to `compressed`.
 - **Transfer mode** (per cluster, set in Settings › Clusters & agents):
   - `e2e-tls` (**default**): server ↔ target TLS end-to-end, tunnel carries ciphertext. No tunnel compression (ciphertext does not compress).
   - `compressed` (opt-in): server connects to the target **without TLS**; agent ↔ target is plaintext inside the cluster; `TunnelFrame` payloads are zstd-compressed on the mTLS gRPC stream. Intended for clusters where egress is billed (e.g. AWS). Enabling it creates a `transfer.compressed_mode` finding on that cluster (agent can see backup data in this mode). UI shows the trade-off before enabling.

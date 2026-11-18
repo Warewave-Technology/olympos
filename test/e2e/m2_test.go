@@ -87,7 +87,8 @@ func waitRun(t *testing.T, c *client, jobID string, after time.Time, trigger str
 
 // TestM2BackupsPostgresAndClickHouse configures an Azurite destination with a
 // container SAS (r c w t, no delete), then backs up the TLS PostgreSQL and the
-// plaintext ClickHouse target through the real agent tunnel.
+// plaintext ClickHouse target (refused in e2e-tls, then in compressed mode)
+// through the real agent tunnel.
 func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	if labClusterID == "" {
 		t.Skip("needs TestM1EnrollInventoryDiscovery")
@@ -203,9 +204,17 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 		t.Fatalf("olympos-tier tag %q, run tier %q", tier, pgRun.Tier)
 	}
 
-	// --- ClickHouse (no TLS on the target: allowed, tls.missing finding) ---
+	// --- ClickHouse (no TLS on the target) ---
+	// e2e-tls refuses it before the password is sent (F1) and opens the
+	// tls.missing finding; compressed transfer mode backs it up.
 	ch := labTarget(t, admin, "metrics-ch")
 	chCred := map[string]any{"source": "stored", "username": "backup", "password": "CANARY-lab-ch-password"}
+	admin.must("POST", "/backup/test-connection", map[string]any{"target_id": ch.ID, "credential": chCred}, &ct, 200)
+	if ct.OK || ct.TLS || !strings.Contains(ct.Error, "no TLS on this port") || !strings.Contains(ct.Error, "compressed") {
+		t.Fatalf("plaintext ClickHouse accepted in e2e-tls: %+v", ct)
+	}
+	admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "compressed"}, nil, 200)
+	t.Cleanup(func() { admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "e2e-tls"}, nil, 200) })
 	runSQL(t, "metrics-ch", "CREATE DATABASE IF NOT EXISTS metrics")
 	runSQL(t, "metrics-ch", "CREATE TABLE IF NOT EXISTS metrics.events (d Date, v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY d")
 	runSQL(t, "metrics-ch", "INSERT INTO metrics.events SELECT toDate('2026-10-01') + number % 60, number FROM numbers(10000)")

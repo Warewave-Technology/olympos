@@ -133,10 +133,13 @@ func ProbeTLS(ctx context.Context, dial func(ctx context.Context) (net.Conn, err
 
 // session is the per-call TLS decision and connection settings.
 type session struct {
-	ec      backup.EngineContext
-	opts    Options
-	useTLS  bool // speak (verified) TLS with the target
-	tlsOK   bool // the target offers TLS
+	ec     backup.EngineContext
+	opts   Options
+	useTLS bool // speak (verified) TLS with the target
+	tlsOK  bool // the target offers TLS
+	// guard: e2e-tls mode but the target has no TLS. Every connection is
+	// wrapped in authGuard so only SCRAM-SHA-256 gets the password (F1).
+	guard   bool
 	rootCAs *x509.CertPool
 	cred    backup.Credential
 }
@@ -156,7 +159,17 @@ func (e *Engine) open(ctx context.Context, ec backup.EngineContext) (*session, e
 		return nil, err
 	}
 	s.useTLS = ec.UseTLS && s.tlsOK
+	s.guard = ec.UseTLS && !s.tlsOK
 	return s, nil
+}
+
+// dial opens a tunnel, guarded when the password must not travel in clear.
+func (s *session) dial(ctx context.Context) (net.Conn, error) {
+	c, err := s.ec.Dial(ctx)
+	if err != nil || !s.guard {
+		return c, err
+	}
+	return guardAuth(c), nil
 }
 
 func (s *session) serverName() string {
@@ -186,12 +199,21 @@ func (s *session) connect(ctx context.Context, db string) (*pgx.Conn, error) {
 	cfg.ConnectTimeout = 30 * time.Second
 	cfg.RuntimeParams = map[string]string{"application_name": "olympos"}
 	cfg.LookupFunc = func(ctx context.Context, host string) ([]string, error) { return []string{host}, nil }
-	cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) { return s.ec.Dial(ctx) }
+	var g *authGuard
+	cfg.DialFunc = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		c, err := s.dial(ctx)
+		g, _ = c.(*authGuard)
+		return c, err
+	}
 	cfg.TLSConfig = nil
 	if s.useTLS {
 		cfg.TLSConfig = &tls.Config{ServerName: s.serverName(), RootCAs: s.rootCAs, MinVersion: tls.VersionTLS12}
 	}
-	return pgx.ConnectConfig(ctx, cfg)
+	c, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil && g != nil && g.Err() != nil {
+		return nil, g.Err()
+	}
+	return c, err
 }
 
 // connectAny connects to the first database that accepts the login.
@@ -472,7 +494,7 @@ func render(kv [][2]string) string {
 // runTool runs one pg_dump/pg_dumpall process against a fresh local bridge
 // and streams its stdout to out.
 func (s *session) runTool(ctx context.Context, bin string, args []string, kv [][2]string, env []string, out io.Writer) error {
-	br, err := startBridge(ctx, s.ec.Dial)
+	br, err := startBridge(ctx, s.dial)
 	if err != nil {
 		return err
 	}
@@ -494,7 +516,10 @@ func (s *session) runTool(ctx context.Context, bin string, args []string, kv [][
 	}
 	if err != nil {
 		msg := stderr.String()
-		if bErr := br.Err(); bErr != nil {
+		br.Close() // waits for the pipes, so a guard refusal is recorded
+		if bErr := br.Err(); errors.Is(bErr, ErrPlaintextPassword) {
+			return bErr
+		} else if bErr != nil {
 			msg += " (tunnel: " + bErr.Error() + ")"
 		}
 		return fmt.Errorf("%s failed: %v: %s", filepath.Base(bin), err, msg)
@@ -587,6 +612,11 @@ func (b *bridge) accept() {
 			b.track(t)
 			defer t.Close()
 			pipe(c, t)
+			if g, ok := t.(*authGuard); ok && g.Err() != nil {
+				b.mu.Lock()
+				b.err = g.Err()
+				b.mu.Unlock()
+			}
 		}()
 	}
 	_ = b.l.Close()
@@ -639,8 +669,11 @@ func (e *Engine) TestConnection(ctx context.Context, ec backup.EngineContext) (*
 	}
 	s.cred = cred
 	ct.TLS = s.tlsOK
+	ct.Reached = true // the TLS probe got an answer
 	tlsLine := backup.Privilege{Name: "tls", OK: s.tlsOK}
 	switch {
+	case !s.tlsOK && s.guard:
+		tlsLine.Detail = "the target does not offer TLS: the password is only sent with SCRAM-SHA-256 (a tls.missing finding is opened)"
 	case !s.tlsOK:
 		tlsLine.Detail = "the target does not offer TLS (a tls.missing finding is opened)"
 	case s.useTLS:

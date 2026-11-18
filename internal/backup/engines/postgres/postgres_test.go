@@ -483,3 +483,59 @@ func contains(s []string, v string) bool {
 	}
 	return false
 }
+
+// noTLSConn hides the server's TLS support: it answers the SSLRequest with
+// 'N' itself, so the real server sees a plain startup.
+type noTLSConn struct {
+	net.Conn
+	pending []byte
+}
+
+func (c *noTLSConn) Write(p []byte) (int, error) {
+	if bytes.Equal(p, []byte{0, 0, 0, 8, 0x04, 0xd2, 0x16, 0x2f}) {
+		c.pending = []byte{'N'}
+		return len(p), nil
+	}
+	return c.Conn.Write(p)
+}
+
+func (c *noTLSConn) Read(p []byte) (int, error) {
+	if len(c.pending) > 0 {
+		n := copy(p, c.pending)
+		c.pending = c.pending[n:]
+		return n, nil
+	}
+	return c.Conn.Read(p)
+}
+
+// F1: e2e-tls mode, target without TLS, server asks for SCRAM-SHA-256: the
+// backup runs (the password never crosses the wire) and reports TLS=false so
+// the tls.missing finding opens.
+func TestRunNoTLSScramAllowed(t *testing.T) {
+	need(t)
+	e := &postgres.Engine{DumpDir: dumpDir(t)}
+	ectx, _ := engineContext(t, "backup", backupPW, true, map[string]any{"databases": []string{"shop"}}, false)
+	dial := ectx.Dial
+	ectx.Dial = func(ctx context.Context) (net.Conn, error) {
+		c, err := dial(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return &noTLSConn{Conn: c}, nil
+	}
+	var buf bytes.Buffer
+	res, err := e.Run(context.Background(), ectx, &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.TLS == nil || *res.TLS {
+		t.Fatalf("expected TLS=false: %+v", res)
+	}
+	if !strings.Contains(restoreList(t, readZip(t, buf.Bytes())["shop.dump"]), "TABLE DATA public orders") {
+		t.Fatal("no data in dump")
+	}
+	ct, err := e.TestConnection(context.Background(), ectx)
+	if err != nil || !ct.OK || ct.TLS {
+		t.Fatalf("connection test: %+v %v", ct, err)
+	}
+}
