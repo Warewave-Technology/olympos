@@ -16,13 +16,13 @@ var sensitiveKeys = []string{
 }
 
 var sensitivePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)([?&]sig=)[^&\s"]+`),                         // SAS signature
-	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9\-._~+/]+=*`),           // bearer tokens
-	regexp.MustCompile(`\b(hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9]{20,}`),        // Vault tokens
+	regexp.MustCompile(`(?i)([?&]sig=)[^&\s"]+`),                                     // SAS signature
+	regexp.MustCompile(`(?i)(bearer\s+)[A-Za-z0-9\-._~+/]+=*`),                       // bearer tokens
+	regexp.MustCompile(`\b(hvs|hvb|hvr|s|b|r)\.[A-Za-z0-9]{20,}`),                    // Vault tokens
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), // JWT
-	regexp.MustCompile(`(://[^:/\s]+:)[^@\s]+(@)`),                        // user:pass@ in URLs/DSNs
-	regexp.MustCompile(`(?i)(password=)[^\s&]+`),                          // key=value DSNs
-	regexp.MustCompile(`xox[abpr]-[A-Za-z0-9-]+`),                         // Slack tokens
+	regexp.MustCompile(`(://[^:/\s]+:)[^@\s]+(@)`),                                   // user:pass@ in URLs/DSNs
+	regexp.MustCompile(`(?i)(password=)[^\s&]+`),                                     // key=value DSNs
+	regexp.MustCompile(`xox[abpr]-[A-Za-z0-9-]+`),                                    // Slack tokens
 }
 
 // RedactString masks known secret shapes inside free text.

@@ -10,14 +10,14 @@ import (
 )
 
 type auditRun struct {
-	ID            string  `json:"id"`
-	Tool          string  `json:"tool"`
-	ClusterID     string  `json:"cluster_id"`
-	Status        string  `json:"status"`
-	Score         *float64 `json:"score"`
-	NewFindings   int     `json:"new_findings"`
-	Error         string  `json:"error"`
-	BenchNodes    []struct {
+	ID          string   `json:"id"`
+	Tool        string   `json:"tool"`
+	ClusterID   string   `json:"cluster_id"`
+	Status      string   `json:"status"`
+	Score       *float64 `json:"score"`
+	NewFindings int      `json:"new_findings"`
+	Error       string   `json:"error"`
+	BenchNodes  []struct {
 		NodeName       string `json:"node_name"`
 		Benchmark      string `json:"benchmark"`
 		State          string `json:"state"`
@@ -41,7 +41,9 @@ func auditSchedule(t *testing.T, c *client, tool string, frameworks []string) st
 			return x.ID
 		}
 	}
-	var created struct{ ID string `json:"id"` }
+	var created struct {
+		ID string `json:"id"`
+	}
 	body := map[string]any{"tool": tool, "scope_selector": "env=lab", "cron": "0 3 * * *", "timezone": "UTC", "enabled": true}
 	if frameworks != nil {
 		body["frameworks"] = frameworks

@@ -34,10 +34,10 @@ func newMockIdP(t *testing.T) *mockIdP {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/"+tenantA+"/v2.0/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"issuer":                 m.srv.URL + "/" + tenantA + "/v2.0",
-			"authorization_endpoint": m.srv.URL + "/authorize",
-			"token_endpoint":         m.srv.URL + "/token",
-			"jwks_uri":               m.srv.URL + "/keys",
+			"issuer":                                m.srv.URL + "/" + tenantA + "/v2.0",
+			"authorization_endpoint":                m.srv.URL + "/authorize",
+			"token_endpoint":                        m.srv.URL + "/token",
+			"jwks_uri":                              m.srv.URL + "/keys",
 			"id_token_signing_alg_values_supported": []string{"RS256"},
 		})
 	})
@@ -81,14 +81,14 @@ func TestVerifyIDToken(t *testing.T) {
 	}
 
 	cases := map[string]func(c map[string]any){
-		"foreign tid":     func(c map[string]any) { c["tid"] = tenantB },
-		"foreign iss":     func(c map[string]any) { c["iss"] = m.srv.URL + "/" + tenantB + "/v2.0" },
-		"common iss":      func(c map[string]any) { c["iss"] = m.srv.URL + "/common/v2.0" },
-		"wrong audience":  func(c map[string]any) { c["aud"] = "other-app" },
-		"expired":         func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() },
-		"not yet valid":   func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() },
-		"nonce mismatch":  func(c map[string]any) { c["nonce"] = "other" },
-		"missing oid":     func(c map[string]any) { delete(c, "oid") },
+		"foreign tid":    func(c map[string]any) { c["tid"] = tenantB },
+		"foreign iss":    func(c map[string]any) { c["iss"] = m.srv.URL + "/" + tenantB + "/v2.0" },
+		"common iss":     func(c map[string]any) { c["iss"] = m.srv.URL + "/common/v2.0" },
+		"wrong audience": func(c map[string]any) { c["aud"] = "other-app" },
+		"expired":        func(c map[string]any) { c["exp"] = time.Now().Add(-time.Hour).Unix() },
+		"not yet valid":  func(c map[string]any) { c["nbf"] = time.Now().Add(time.Hour).Unix() },
+		"nonce mismatch": func(c map[string]any) { c["nonce"] = "other" },
+		"missing oid":    func(c map[string]any) { delete(c, "oid") },
 	}
 	for name, mut := range cases {
 		c := baseClaims(m)

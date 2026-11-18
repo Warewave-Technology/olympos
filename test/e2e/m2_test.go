@@ -24,8 +24,8 @@ import (
 
 // Azurite's well-known development account.
 const (
-	azAccount = "devstoreaccount1"
-	azKey     = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
+	azAccount   = "devstoreaccount1"
+	azKey       = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw=="
 	azInCluster = "http://azurite.olympos.svc:10000/devstoreaccount1"
 )
 
@@ -284,4 +284,3 @@ func runSQL(t *testing.T, deploy, sql string) {
 	run(t, "kubectl", "-n", "lab", "exec", "deploy/"+deploy, "--", "clickhouse-client", "--user", "backup",
 		"--password", "CANARY-lab-ch-password", "--query", sql)
 }
-

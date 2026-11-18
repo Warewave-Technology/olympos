@@ -96,7 +96,9 @@ func TestGrantRules(t *testing.T) {
 		Items []struct {
 			ID        string `json:"id"`
 			Role      string `json:"role"`
-			Principal struct{ DisplayName string `json:"display_name"` } `json:"principal"`
+			Principal struct {
+				DisplayName string `json:"display_name"`
+			} `json:"principal"`
 		} `json:"items"`
 	}
 	admin.Do("GET", "/api/v1/grants", nil, &gs)

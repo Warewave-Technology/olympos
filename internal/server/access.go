@@ -43,13 +43,13 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	me.Permissions = map[string]any{
-		"read":                   subj.CanAny(authz.PermRead),
-		"operate":                subj.CanAny(authz.PermOperate),
-		"operate_global":         subj.CanGlobal(authz.PermOperate),
-		"vault_make":             subj.CanAny(authz.PermVaultMake),
-		"vault_approve":          subj.CanAny(authz.PermVaultApprove),
-		"admin":                  subj.CanAny(authz.PermAdmin),
-		"admin_global":           subj.CanGlobal(authz.PermAdmin),
+		"read":           subj.CanAny(authz.PermRead),
+		"operate":        subj.CanAny(authz.PermOperate),
+		"operate_global": subj.CanGlobal(authz.PermOperate),
+		"vault_make":     subj.CanAny(authz.PermVaultMake),
+		"vault_approve":  subj.CanAny(authz.PermVaultApprove),
+		"admin":          subj.CanAny(authz.PermAdmin),
+		"admin_global":   subj.CanGlobal(authz.PermAdmin),
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.DB.QueryRow(r.Context(), `SELECT csrf_token FROM sessions WHERE id = $1`, hashSession(c.Value)).Scan(&me.CSRFToken)
