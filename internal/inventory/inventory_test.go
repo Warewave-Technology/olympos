@@ -1,3 +1,5 @@
+//go:build dev
+
 package inventory_test
 
 import (

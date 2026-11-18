@@ -31,8 +31,13 @@ backend and the SPA — keep handlers and the SPA in sync with it (extend it in 
 
 ```bash
 make dev-db                   # Postgres 16 on 127.0.0.1:55432 (olympos/olympos)
-OLYMPOS_REQUIRE_DB=1 go test ./...
+OLYMPOS_REQUIRE_DB=1 go test -tags dev ./...
 ```
+
+Development builds use the `dev` build tag: only they contain the dev login (`/auth/dev-login`) and the local
+Key Vault, so tests, lab and e2e images are built with `-tags dev` (`--build-arg GO_TAGS=dev` for the server
+image). Release builds have neither and refuse `devMode: true` at startup. `make test-release` runs the
+untagged tests and `scripts/check-release-binary.sh` (symbol and string check).
 
 `internal/testutil.DB(t)` creates a fresh migrated database per test. `internal/apitest` starts the full HTTP
 API with dev login: `e := apitest.New(t, apitest.Options{Modules: ...}); c := e.Login(e.Principal("ada", "Member", "operator@env=prod"))`.

@@ -1,3 +1,5 @@
+//go:build dev
+
 // Package apitest spins up the HTTP API against a fresh database for
 // integration tests, with helpers to sign in as principals with grants.
 package apitest

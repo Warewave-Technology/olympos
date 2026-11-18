@@ -1,3 +1,5 @@
+//go:build dev
+
 package approvals_test
 
 import (

@@ -1,3 +1,5 @@
+//go:build dev
+
 package vaults_test
 
 // End-to-end tests against real HashiCorp Vault and OpenBao servers in

@@ -225,7 +225,11 @@ func (d *Deps) initKeyVault() error {
 	cfg := d.Cfg
 	switch cfg.KeyVault.Provider {
 	case "local":
-		d.KV = &secrets.LocalKeyVault{Dir: cfg.KeyVault.LocalDir}
+		kv, err := localKeyVault(cfg.KeyVault.LocalDir)
+		if err != nil {
+			return err
+		}
+		d.KV = kv
 		if cfg.KeyVault.Name == "" {
 			cfg.KeyVault.Name = "local"
 		}

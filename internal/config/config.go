@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Warewave-Technology/olympos/internal/devbuild"
 )
 
 // Server is the olympos-server configuration (SPEC §2.1).
@@ -18,7 +20,7 @@ type Server struct {
 	PublicURL       string `yaml:"publicURL"`
 	AgentGatewayURL string `yaml:"agentGatewayURL"`
 	// DevMode enables the local Key Vault, the dev login and plain HTTP
-	// cookies. Never set in production; the server logs a loud warning.
+	// cookies. Only development builds (-tags dev) accept it (F6).
 	DevMode bool `yaml:"devMode"`
 
 	Listen struct {
@@ -191,6 +193,9 @@ func (c *Server) defaults() {
 // Validate checks required settings.
 func (c *Server) Validate() error {
 	var errs []string
+	if c.DevMode && !devbuild.Enabled {
+		errs = append(errs, "devMode is only available in development builds (go build -tags dev); release binaries have no dev login and no local key vault")
+	}
 	if c.PublicURL == "" {
 		errs = append(errs, "publicURL is required")
 	} else if u, err := url.Parse(c.PublicURL); err != nil || u.Host == "" {

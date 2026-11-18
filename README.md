@@ -19,7 +19,7 @@ one agent per cluster; agents dial out, credentials never enter a cluster.
 | [docs/spec-changes.md](docs/spec-changes.md) | Approved changes to SPEC MUSTs |
 
 ```bash
-make dev-db && OLYMPOS_REQUIRE_DB=1 go test ./...   # unit + integration
+make dev-db && OLYMPOS_REQUIRE_DB=1 go test -tags dev ./...   # unit + integration
 cd web && pnpm install && pnpm test && pnpm build   # SPA
 ./test/e2e/run.sh                                   # kind lab e2e (M1–M6)
 go run ./cmd/olympos-server -config deploy/dev/config.yaml   # local dev server

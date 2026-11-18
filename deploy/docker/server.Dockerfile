@@ -13,12 +13,15 @@ RUN if [ -f package.json ]; then pnpm install --frozen-lockfile && pnpm build; e
 
 FROM --platform=$BUILDPLATFORM golang:1.27 AS build
 ARG TARGETOS TARGETARCH VERSION=dev
+# GO_TAGS=dev only for lab/e2e images: release images have no dev login and
+# no local key vault (F6).
+ARG GO_TAGS=""
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "$GO_TAGS" -ldflags "-s -w" \
     -o /out/olympos-server ./cmd/olympos-server && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
     -o /out/olympos-sh ./cmd/olympos-sh

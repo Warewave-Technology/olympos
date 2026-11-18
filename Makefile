@@ -1,7 +1,7 @@
 GO ?= go
 PROTO := proto/olympos/v1/gateway.proto
 
-.PHONY: proto build test lint web images e2e
+.PHONY: proto build test test-release lint web images e2e
 
 proto:
 	protoc -I proto --go_out=internal/gen --go_opt=paths=source_relative \
@@ -10,14 +10,20 @@ proto:
 build:
 	$(GO) build ./...
 
+# Tests use the dev build (dev login, local key vault); test-release checks
+# the release build has neither (F6).
 test:
+	$(GO) test -tags dev ./...
+
+test-release:
 	$(GO) test ./...
+	./scripts/check-release-binary.sh
 
 web:
 	cd web && pnpm install --frozen-lockfile && pnpm build
 
 images:
-	docker build -f deploy/docker/server.Dockerfile -t olympos-server:dev .
+	docker build -f deploy/docker/server.Dockerfile -t olympos-server:dev --build-arg GO_TAGS=dev .
 	docker build -f deploy/docker/agent.Dockerfile -t olympos-agent:dev .
 
 e2e:

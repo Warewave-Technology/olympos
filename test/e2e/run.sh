@@ -31,7 +31,7 @@ kubectl wait --for=condition=Ready nodes --all --timeout=180s >/dev/null
 if [ -z "${SKIP_BUILD:-}" ]; then
   log "building images"
   docker build -q -f deploy/docker/agent.Dockerfile -t olympos-agent:e2e . >/dev/null
-  docker build -q -f deploy/docker/server.Dockerfile -t olympos-server:e2e --build-arg PG_VERSIONS="16 17" . >/dev/null
+  docker build -q -f deploy/docker/server.Dockerfile -t olympos-server:e2e --build-arg PG_VERSIONS="16 17" --build-arg GO_TAGS=dev . >/dev/null
 fi
 log "loading images into kind"
 kind load docker-image olympos-agent:e2e olympos-server:e2e --name "$CLUSTER" >/dev/null

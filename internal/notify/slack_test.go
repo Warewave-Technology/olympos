@@ -1,3 +1,5 @@
+//go:build dev
+
 package notify_test
 
 import (

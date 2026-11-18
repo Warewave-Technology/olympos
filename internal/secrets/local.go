@@ -1,3 +1,5 @@
+//go:build dev
+
 package secrets
 
 import (
@@ -11,8 +13,8 @@ import (
 )
 
 // LocalKeyVault is a development stand-in for Azure Key Vault. The KEK and
-// secrets live on disk under Dir. It MUST NOT be used in production; the
-// server refuses to start with it unless devMode is set.
+// secrets live on disk under Dir. It MUST NOT be used in production: only
+// development builds (-tags dev) contain it, and they need devMode (F6).
 //
 // Layout: <Dir>/kek (32 random bytes), <Dir>/secrets/<vault>/<name>.
 type LocalKeyVault struct {

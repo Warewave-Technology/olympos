@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/Warewave-Technology/olympos/internal/httpx"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -48,9 +49,9 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/auth/login", s.handleLogin)
 	r.Get("/auth/callback", s.handleCallback)
 	r.Post("/auth/logout", s.handleLogout)
-	if s.DevMode {
-		r.Get("/auth/dev-login", s.handleDevLogin)
-	}
+	s.devRoutes(r)
+	// Unknown /auth paths are 404, never the SPA.
+	r.Handle("/auth/*", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { httpx.NotFound(w) }))
 
 	r.Route("/api/v1", func(api chi.Router) {
 		api.Use(s.authenticate)
