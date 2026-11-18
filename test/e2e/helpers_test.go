@@ -69,6 +69,16 @@ func runOK(t *testing.T, name string, args ...string) (string, error) {
 	return string(out), err
 }
 
+func runStdin(t *testing.T, stdin, name string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Env = append(os.Environ(), "KUBECONFIG="+kubeconfig(t))
+	cmd.Dir = root()
+	cmd.Stdin = strings.NewReader(stdin)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func eventually(t *testing.T, timeout time.Duration, what string, f func() (bool, string)) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

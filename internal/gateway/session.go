@@ -29,6 +29,10 @@ type session struct {
 	mu      sync.Mutex
 	pending map[string]*pendingTunnel
 	open    int
+
+	// Inventory generation of this session (dispatch goroutine only).
+	gen        uint64
+	resyncSent bool
 }
 
 type pendingTunnel struct {
@@ -188,15 +192,27 @@ func (g *Gateway) dispatch(ctx context.Context, s *session, m *pb.AgentMessage) 
 		if g.Hooks.Inventory != nil {
 			err = g.Hooks.Inventory(ctx, id, v.Inventory)
 		}
+		if err == nil {
+			s.gen, s.resyncSent = v.Inventory.Generation, false
+		}
 	case *pb.AgentMessage_InventoryDiff:
+		if !g.inOrder(s, v.InventoryDiff.Generation) {
+			return
+		}
 		if g.Hooks.InventoryDiff != nil {
 			err = g.Hooks.InventoryDiff(ctx, id, v.InventoryDiff)
 		}
 	case *pb.AgentMessage_TargetUpsert:
+		if !g.inOrder(s, v.TargetUpsert.Generation) {
+			return
+		}
 		if g.Hooks.TargetUpsert != nil && v.TargetUpsert.GetTarget() != nil {
 			err = g.Hooks.TargetUpsert(ctx, id, v.TargetUpsert.Target)
 		}
 	case *pb.AgentMessage_TargetDelete:
+		if !g.inOrder(s, v.TargetDelete.Generation) {
+			return
+		}
 		if g.Hooks.TargetDelete != nil {
 			err = g.Hooks.TargetDelete(ctx, id, v.TargetDelete.TargetId)
 		}
@@ -230,6 +246,27 @@ func (g *Gateway) dispatch(ctx context.Context, s *session, m *pb.AgentMessage) 
 	if err != nil {
 		g.Log.Error("agent message handling failed", "cluster_id", id, "err", err)
 	}
+}
+
+// inOrder applies the generation rule (F18): after a snapshot with
+// generation G, each diff/target message must carry the next generation.
+// Anything else (a gap, a message before the first snapshot of the session)
+// is dropped and the agent is asked once for a fresh snapshot. Generation 0
+// is an agent without generations: applied as before.
+func (g *Gateway) inOrder(s *session, gen uint64) bool {
+	if gen == 0 {
+		return true
+	}
+	if s.gen != 0 && gen == s.gen+1 {
+		s.gen = gen
+		return true
+	}
+	if !s.resyncSent {
+		s.resyncSent = true
+		g.Log.Warn("inventory message out of order; requesting a resync", "cluster_id", s.clusterID, "want", s.gen+1, "got", gen)
+		_ = s.send(&pb.ServerMessage{Msg: &pb.ServerMessage_Resync{Resync: &pb.RequestResync{}}})
+	}
+	return false
 }
 
 // Tunnel attaches an agent-opened tunnel stream to a pending Dial.

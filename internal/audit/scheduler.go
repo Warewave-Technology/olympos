@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Warewave-Technology/olympos/internal/authz"
+	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/schedule"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -82,7 +83,7 @@ func (s *Service) Tick(ctx context.Context) error {
 			for _, c := range clusters {
 				if _, err := tx.Exec(ctx, `INSERT INTO audit_runs (schedule_id, tool, cluster_id, status, scheduled_for, details)
 					VALUES ($1, $2, $3, 'queued', $4, jsonb_build_object('trigger', 'schedule', 'frameworks', $5::text[]))
-					ON CONFLICT (schedule_id, cluster_id, scheduled_for) WHERE scheduled_for IS NOT NULL DO NOTHING`,
+					ON CONFLICT (schedule_id, cluster_id, scheduled_for, attempt) WHERE scheduled_for IS NOT NULL DO NOTHING`,
 					x.id, x.tool, c, due, x.frameworks); err != nil {
 					return err
 				}
@@ -156,8 +157,9 @@ func (s *Service) Dispatch(ctx context.Context) error {
 		tool        string
 		online      bool
 		created     time.Time
+		retryUntil  *time.Time
 	}
-	rows, err := s.DB.Query(ctx, `SELECT r.id, r.cluster_id, r.tool, c.status = 'online', r.created_at
+	rows, err := s.DB.Query(ctx, `SELECT r.id, r.cluster_id, r.tool, c.status = 'online', r.created_at, r.retry_until
 		FROM audit_runs r JOIN clusters c ON c.id = r.cluster_id WHERE r.status = 'queued' ORDER BY r.created_at LIMIT 100`)
 	if err != nil {
 		return err
@@ -165,7 +167,7 @@ func (s *Service) Dispatch(ctx context.Context) error {
 	var list []queued
 	for rows.Next() {
 		var q queued
-		if err := rows.Scan(&q.id, &q.cluster, &q.tool, &q.online, &q.created); err != nil {
+		if err := rows.Scan(&q.id, &q.cluster, &q.tool, &q.online, &q.created, &q.retryUntil); err != nil {
 			rows.Close()
 			return err
 		}
@@ -175,12 +177,15 @@ func (s *Service) Dispatch(ctx context.Context) error {
 	now := s.now()
 	for _, q := range list {
 		if !s.Gateway.Connected(q.cluster) {
+			if q.retryUntil != nil && now.Before(*q.retryUntil) {
+				continue // F18: a retry waits for the reconnect
+			}
 			if !q.online || now.Sub(q.created) > s.QueueTimeout {
-				if err := s.failQueued(ctx, q.id, q.tool, reasonAgentOffline); err != nil {
+				if err := s.settleDisconnected(ctx, q.id, q.tool); err != nil {
 					return err
 				}
 			}
-			continue // connected to another replica: leave it to that one
+			continue
 		}
 		if !s.reserve(q.cluster) {
 			continue
@@ -203,6 +208,25 @@ func (s *Service) Dispatch(ctx context.Context) error {
 		}(q.id, q.cluster)
 	}
 	return nil
+}
+
+// settleDisconnected ends a queued run whose agent is not connected: a new
+// attempt waits for the reconnect, or the run is missed (F18).
+func (s *Service) settleDisconnected(ctx context.Context, id uuid.UUID, tool string) error {
+	var st string
+	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		var reason string
+		var err error
+		if st, reason, err = disconnectedStatus(ctx, tx, id, s.now()); err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE audit_runs SET status = $2, error = $3, finished_at = now() WHERE id = $1 AND status = 'queued'`, id, st, reason)
+		return err
+	})
+	if err == nil {
+		metrics.AuditRuns.WithLabelValues(tool, st).Inc()
+	}
+	return err
 }
 
 // reserve takes a global slot and the per-cluster slot (one run per cluster

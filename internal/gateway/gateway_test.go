@@ -9,9 +9,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -265,5 +268,90 @@ func TestHelloClusterMismatchRejected(t *testing.T) {
 	_ = ctl.Send(&pb.AgentMessage{Msg: &pb.AgentMessage_Hello{Hello: &pb.Hello{ClusterId: uuid.NewString()}}})
 	if _, err := ctl.Recv(); err == nil {
 		t.Fatal("hello with foreign cluster id accepted")
+	}
+}
+
+// F18: after a snapshot with generation G, only G+1, G+2, … are applied; a
+// gap (or a diff before any snapshot) is dropped and a resync is requested.
+func TestInventoryGenerations(t *testing.T) {
+	e := start(t)
+	var mu sync.Mutex
+	var applied []string
+	e.gw.Hooks.Inventory = func(_ context.Context, _ uuid.UUID, s *pb.InventorySnapshot) error {
+		mu.Lock()
+		applied = append(applied, fmt.Sprintf("snap:%d", s.Generation))
+		mu.Unlock()
+		return nil
+	}
+	e.gw.Hooks.InventoryDiff = func(_ context.Context, _ uuid.UUID, d *pb.InventoryDiff) error {
+		mu.Lock()
+		applied = append(applied, fmt.Sprintf("diff:%d", d.Generation))
+		mu.Unlock()
+		return nil
+	}
+	e.gw.Hooks.TargetDelete = func(_ context.Context, _ uuid.UUID, id string) error {
+		mu.Lock()
+		applied = append(applied, "del:"+id)
+		mu.Unlock()
+		return nil
+	}
+	id, token := e.newCluster(t)
+	cert, _, err := enroll(t, e.dial(t, nil), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctl, err := e.dial(t, cert).Control(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resyncs := make(chan struct{}, 4)
+	go func() {
+		for {
+			m, err := ctl.Recv()
+			if err != nil {
+				return
+			}
+			if m.GetResync() != nil {
+				resyncs <- struct{}{}
+			}
+		}
+	}()
+	send := func(m *pb.AgentMessage) {
+		t.Helper()
+		if err := ctl.Send(m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	diff := func(g uint64) *pb.AgentMessage {
+		return &pb.AgentMessage{Msg: &pb.AgentMessage_InventoryDiff{InventoryDiff: &pb.InventoryDiff{Generation: g}}}
+	}
+	send(&pb.AgentMessage{Msg: &pb.AgentMessage_Hello{Hello: &pb.Hello{ClusterId: id.String()}}})
+	send(diff(4)) // before any snapshot
+	send(&pb.AgentMessage{Msg: &pb.AgentMessage_Inventory{Inventory: &pb.InventorySnapshot{Generation: 10}}})
+	send(diff(11))
+	send(&pb.AgentMessage{Msg: &pb.AgentMessage_TargetDelete{TargetDelete: &pb.TargetDelete{TargetId: "t", Generation: 12}}})
+	send(diff(14)) // gap
+	send(diff(15)) // still out of order: dropped, no second resync
+	send(&pb.AgentMessage{Msg: &pb.AgentMessage_Inventory{Inventory: &pb.InventorySnapshot{Generation: 20}}})
+	send(diff(21))
+	send(diff(0)) // agent without generations
+	want := "snap:10,diff:11,del:t,snap:20,diff:21,diff:0"
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		got := strings.Join(applied, ",")
+		mu.Unlock()
+		if got == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("applied %s, want %s", got, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if n := len(resyncs); n != 2 {
+		t.Fatalf("resync requests: %d, want 2 (before the first snapshot, then the gap)", n)
 	}
 }

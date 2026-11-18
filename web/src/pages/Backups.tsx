@@ -12,7 +12,7 @@ import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { DataTable, type Column } from '../ui/DataTable';
 import { SelfBackupCard } from '../ui/SelfBackupCard';
-import { ClusterOverview, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
 const ENGINES = [
@@ -151,6 +151,7 @@ function BackupsDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ove
         sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster."
         actions={<DestinationsLink />}
       />
+      <ClusterOfflineNote cluster={one ? info : undefined} />
       <Tabs<Tab>
         label="Backup sections"
         value={tab}
@@ -459,6 +460,7 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         <>
           <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
           {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
+          {r.attempt && r.attempt > 1 ? <span className="chip" title="Retried after the agent reconnected">attempt {r.attempt}</span> : null}
         </>
       ),
     },

@@ -149,11 +149,12 @@ export function AuditRunDialog({ id, onClose }: { id: string; onClose: () => voi
 }
 
 /** "Failed · reason" as a button that opens the run's log; never the raw log text. */
-export function FailedRunButton({ run, onOpen, compact }: { run: Pick<AuditRun, 'id' | 'error' | 'tool' | 'cluster_name'>; onOpen: (id: string) => void; compact?: boolean }) {
+export function FailedRunButton({ run, onOpen, compact }: { run: Pick<AuditRun, 'id' | 'error' | 'tool' | 'cluster_name'> & { status?: string }; onOpen: (id: string) => void; compact?: boolean }) {
   const reason = shortReason(run.error, 80);
+  const word = run.status === 'missed' ? 'Missed' : 'Failed';
   return (
-    <button type="button" className="fail-btn" onClick={() => onOpen(run.id)} aria-label={`Failed${reason ? `: ${reason}` : ''}. Show the log of the ${toolLabel(run.tool)} run on ${run.cluster_name}`} title={reason || undefined}>
-      <Badge tone="crit">Failed</Badge>
+    <button type="button" className="fail-btn" onClick={() => onOpen(run.id)} aria-label={`${word}${reason ? `: ${reason}` : ''}. Show the log of the ${toolLabel(run.tool)} run on ${run.cluster_name}`} title={reason || undefined}>
+      <Badge tone="crit">{word}</Badge>
       {!compact && reason && <span className="fail-why">{reason}</span>}
     </button>
   );

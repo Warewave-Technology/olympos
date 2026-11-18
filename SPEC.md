@@ -219,6 +219,13 @@ rules:
 - Distroless static image, `runAsNonRoot`, `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
 - No listening ports except an optional localhost-only health endpoint.
 
+### 4.5 Reconnect semantics (owner decision: reliability and consistency first)
+- **State, not event replay.** On every (re)connect the agent sends a full snapshot (inventory, targets, reports) carrying a monotonically increasing `generation`; the server applies it per cluster in one transaction (mark-and-sweep). Diffs and target messages carry the next generation; anything out of order is dropped and the server sends `RequestResync`.
+- **No false resolutions.** While a cluster is offline nothing from it is marked resolved or gone; pages show "as of <last seen>". Findings resolve only from a fresh snapshot or a scan after the reconnect.
+- **Result-bearing work** (kube-bench status and result chunks) is kept in a bounded agent buffer (16 MiB, oldest dropped with a warning) and re-sent after the reconnect; the server ingests idempotently by `run_id` + node + `seq` and fails a node whose chunks have a gap.
+- **Tunnels** close on disconnect. Backup and audit runs that fail because the agent is gone end `agent_disconnected` and are retried after the reconnect while inside the job's window (half the interval to the next activation, at most 3 attempts), else `missed`. A retried attempt does not notify.
+- **Alert debounce.** `agent.offline` fires after 5 min offline (`agents.offlineAlertAfter`); `agent.flapping` when an agent disconnects more than 5 times in 30 min; exactly one `agent.online` when it comes back after an alert.
+
 ### 4.4 Enrollment & identity
 1. UI "Add cluster" → server creates cluster row (`pending`) + one-time bootstrap token (hashed in DB, TTL 1 h).
 2. Agent starts, generates an ECDSA P-256 key pair **in memory**, sends CSR + bootstrap token to `Enroll` RPC (server-TLS only).

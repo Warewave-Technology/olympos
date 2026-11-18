@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
@@ -28,12 +29,45 @@ type Service struct {
 	// OnTargetUpsert is called (inside the transaction) when a target is
 	// first seen or changes.
 	OnTargetUpsert []func(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, t *pb.Target) error
+
+	// Alert debounce (F18). Zero values use the defaults below.
+	OfflineAlertAfter   time.Duration
+	FlappingDisconnects int
+	FlappingWindow      time.Duration
 }
+
+// Alert debounce defaults (F18).
+const (
+	DefaultOfflineAlertAfter   = 5 * time.Minute
+	DefaultFlappingDisconnects = 5
+	DefaultFlappingWindow      = 30 * time.Minute
+)
+
+func (s *Service) alertAfter() time.Duration {
+	if s.OfflineAlertAfter > 0 {
+		return s.OfflineAlertAfter
+	}
+	return DefaultOfflineAlertAfter
+}
+
+func (s *Service) flapping() (int, time.Duration) {
+	n, w := s.FlappingDisconnects, s.FlappingWindow
+	if n <= 0 {
+		n = DefaultFlappingDisconnects
+	}
+	if w <= 0 {
+		w = DefaultFlappingWindow
+	}
+	return n, w
+}
+
+func interval(d time.Duration) string { return fmt.Sprintf("%d seconds", int(d.Seconds())) }
 
 // Hooks returns the gateway hooks implemented by inventory.
 func (s *Service) Hooks(h *gateway.Hooks) {
 	h.Connected = s.connected
 	h.Seen = s.seen
+	h.Disconnected = s.disconnected
 	h.Inventory = s.snapshot
 	h.InventoryDiff = s.diff
 	h.TargetUpsert = s.targetUpsert
@@ -42,34 +76,61 @@ func (s *Service) Hooks(h *gateway.Hooks) {
 
 func (s *Service) connected(ctx context.Context, clusterID uuid.UUID, h *pb.Hello) error {
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
-		var prev, name string
-		err := tx.QueryRow(ctx, `SELECT status, name FROM clusters WHERE id = $1 FOR UPDATE`, clusterID).Scan(&prev, &name)
+		var prev string
+		err := tx.QueryRow(ctx, `SELECT status FROM clusters WHERE id = $1 FOR UPDATE`, clusterID).Scan(&prev)
 		if err != nil {
 			return err
 		}
 		caps := h.GetCapabilities()
-		_, err = tx.Exec(ctx, `UPDATE clusters SET status = 'online', last_seen_at = now(), agent_version = $2,
+		_, err = tx.Exec(ctx, `UPDATE clusters SET last_seen_at = now(), agent_version = $2,
 			bench_enabled = $3, bench_max_parallel = $4,
 			provider_override = CASE WHEN provider_override = '' THEN $5 ELSE provider_override END
 			WHERE id = $1`, clusterID, h.AgentVersion, caps.GetBenchEnabled(), caps.GetBenchMaxParallel(), normalizeOverride(h.ProviderOverride))
 		if err != nil {
 			return err
 		}
-		switch prev {
-		case "offline":
-			if err := notify.Emit(ctx, tx, notify.Event{
-				Type: notify.AgentOnline, Title: fmt.Sprintf("Agent back online: %s", name), Link: "/settings/clusters",
-				Fields: map[string]string{"cluster": name},
-			}); err != nil {
+		if prev == "pending" {
+			if _, err := tx.Exec(ctx, `UPDATE clusters SET status = 'online' WHERE id = $1`, clusterID); err != nil {
 				return err
 			}
-			return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "agent.online", ObjectType: "cluster", ObjectID: clusterID.String(), ClusterID: &clusterID})
-		case "pending":
 			return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "agent.connected", ObjectType: "cluster", ObjectID: clusterID.String(), ClusterID: &clusterID,
 				Details: map[string]any{"agent_version": h.AgentVersion}})
 		}
-		return nil
+		return markOnline(ctx, tx, clusterID)
 	})
+}
+
+// markOnline moves an offline cluster back online (caller holds the row).
+// agent.online is emitted only when agent.offline was (F18: one message
+// pair per outage, none for a short blip).
+func markOnline(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID) error {
+	var name, prev string
+	var alerted bool
+	var since *time.Time
+	err := tx.QueryRow(ctx, `UPDATE clusters c SET status = 'online', offline_since = NULL, offline_alerted = false
+		FROM (SELECT id, status, offline_alerted, offline_since FROM clusters WHERE id = $1) o
+		WHERE c.id = o.id AND c.status IN ('online','offline')
+		RETURNING c.name, o.status, o.offline_alerted, o.offline_since`, clusterID).Scan(&name, &prev, &alerted, &since)
+	if errors.Is(err, pgx.ErrNoRows) || err == nil && prev != "offline" {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	details := map[string]any{}
+	if since != nil {
+		details["offline_for_s"] = int(time.Since(*since).Seconds())
+	}
+	if alerted {
+		if err := notify.Emit(ctx, tx, notify.Event{
+			Type: notify.AgentOnline, Title: fmt.Sprintf("Agent back online: %s", name), Link: "/settings/clusters",
+			Fields: map[string]string{"cluster": name},
+		}); err != nil {
+			return err
+		}
+	}
+	return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "agent.online", ObjectType: "cluster", ObjectID: clusterID.String(),
+		ClusterID: &clusterID, Details: details})
 }
 
 func normalizeOverride(s string) string {
@@ -83,14 +144,59 @@ func normalizeOverride(s string) string {
 }
 
 func (s *Service) seen(ctx context.Context, clusterID uuid.UUID) {
-	if _, err := s.DB.Exec(ctx, `UPDATE clusters SET last_seen_at = now(),
-		status = CASE WHEN status = 'offline' THEN 'online' ELSE status END WHERE id = $1 AND status <> 'revoked'`, clusterID); err != nil {
+	var st string
+	err := s.DB.QueryRow(ctx, `UPDATE clusters SET last_seen_at = now() WHERE id = $1 AND status <> 'revoked' RETURNING status`, clusterID).Scan(&st)
+	if err == nil && st == "offline" {
+		// Marked offline while the stream stayed open (silence > OfflineAfter).
+		err = store.Tx(ctx, s.DB, func(tx pgx.Tx) error { return markOnline(ctx, tx, clusterID) })
+	}
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.Log.Warn("update last_seen", "cluster_id", clusterID, "err", err)
 	}
 }
 
+// disconnected records the end of a control session and raises
+// agent.flapping once per window when an agent keeps disconnecting.
+func (s *Service) disconnected(clusterID uuid.UUID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	max, window := s.flapping()
+	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `INSERT INTO agent_disconnects (cluster_id) VALUES ($1)`, clusterID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `DELETE FROM agent_disconnects WHERE cluster_id = $1 AND at < now() - interval '1 day'`, clusterID); err != nil {
+			return err
+		}
+		var name string
+		var n int
+		err := tx.QueryRow(ctx, `UPDATE clusters SET flapping_alerted_at = now()
+			WHERE id = $1 AND (flapping_alerted_at IS NULL OR flapping_alerted_at < now() - $2::interval)
+			  AND (SELECT count(*) FROM agent_disconnects WHERE cluster_id = $1 AND at > now() - $2::interval) > $3
+			RETURNING name, (SELECT count(*) FROM agent_disconnects WHERE cluster_id = $1 AND at > now() - $2::interval)`,
+			clusterID, interval(window), max).Scan(&name, &n)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		s.Log.Warn("agent flapping", "cluster", name, "disconnects", n, "window", window.String())
+		if err := notify.Emit(ctx, tx, notify.Event{Type: notify.AgentFlapping, Title: "Agent flapping: " + name,
+			Link: "/settings/clusters", Fields: map[string]string{"cluster": name, "disconnects": fmt.Sprintf("%d in %s", n, window)}}); err != nil {
+			return err
+		}
+		return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "agent.flapping", ObjectType: "cluster", ObjectID: clusterID.String(),
+			ClusterID: &clusterID, Details: map[string]any{"disconnects": n, "window_s": int(window.Seconds())}})
+	})
+	if err != nil {
+		s.Log.Warn("record agent disconnect", "cluster_id", clusterID, "err", err)
+	}
+}
+
 // RunOfflineMonitor marks clusters offline after gateway.OfflineAfter
-// without traffic and emits agent.offline once per transition.
+// without traffic (no message: short blips are common) and raises
+// agent.offline once an outage lasts OfflineAlertAfter (F18).
 func (s *Service) RunOfflineMonitor(ctx context.Context) {
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
@@ -100,44 +206,65 @@ func (s *Service) RunOfflineMonitor(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
-			rows, err := tx.Query(ctx, `UPDATE clusters SET status = 'offline'
-				WHERE status = 'online' AND last_seen_at < now() - $1::interval RETURNING id, name`,
-				fmt.Sprintf("%d seconds", int(gateway.OfflineAfter.Seconds())))
-			if err != nil {
-				return err
-			}
-			type c struct {
-				id   uuid.UUID
-				name string
-			}
-			var gone []c
-			for rows.Next() {
-				var x c
-				if err := rows.Scan(&x.id, &x.name); err != nil {
-					rows.Close()
-					return err
-				}
-				gone = append(gone, x)
-			}
-			rows.Close()
-			for _, x := range gone {
-				if err := notify.Emit(ctx, tx, notify.Event{Type: notify.AgentOffline, Title: "Agent offline: " + x.name,
-					Link: "/settings/clusters", Fields: map[string]string{"cluster": x.name}}); err != nil {
-					return err
-				}
-				id := x.id
-				if err := activity.Record(ctx, tx, activity.Entry{Action: "agent.offline", ObjectType: "cluster", ObjectID: id.String(), ClusterID: &id}); err != nil {
-					return err
-				}
-				s.Log.Warn("agent offline", "cluster", x.name)
-			}
-			return nil
-		})
-		if err != nil && ctx.Err() == nil {
+		if err := s.CheckOffline(ctx); err != nil && ctx.Err() == nil {
 			s.Log.Error("offline monitor", "err", err)
 		}
 	}
+}
+
+// CheckOffline is one pass of the offline monitor.
+func (s *Service) CheckOffline(ctx context.Context) error {
+	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		type c struct {
+			id   uuid.UUID
+			name string
+		}
+		scan := func(rows pgx.Rows) ([]c, error) {
+			defer rows.Close()
+			var out []c
+			for rows.Next() {
+				var x c
+				if err := rows.Scan(&x.id, &x.name); err != nil {
+					return nil, err
+				}
+				out = append(out, x)
+			}
+			return out, rows.Err()
+		}
+		rows, err := tx.Query(ctx, `UPDATE clusters SET status = 'offline', offline_since = last_seen_at, offline_alerted = false
+			WHERE status = 'online' AND last_seen_at < now() - $1::interval RETURNING id, name`, interval(gateway.OfflineAfter))
+		if err != nil {
+			return err
+		}
+		gone, err := scan(rows)
+		if err != nil {
+			return err
+		}
+		for _, x := range gone {
+			id := x.id
+			if err := activity.Record(ctx, tx, activity.Entry{Action: "agent.offline", ObjectType: "cluster", ObjectID: id.String(), ClusterID: &id}); err != nil {
+				return err
+			}
+			s.Log.Warn("agent offline", "cluster", x.name)
+		}
+		rows, err = tx.Query(ctx, `UPDATE clusters SET offline_alerted = true
+			WHERE status = 'offline' AND NOT offline_alerted AND COALESCE(offline_since, last_seen_at) < now() - $1::interval
+			RETURNING id, name`, interval(s.alertAfter()))
+		if err != nil {
+			return err
+		}
+		alert, err := scan(rows)
+		if err != nil {
+			return err
+		}
+		for _, x := range alert {
+			if err := notify.Emit(ctx, tx, notify.Event{Type: notify.AgentOffline, Title: "Agent offline: " + x.name,
+				Link: "/settings/clusters", Fields: map[string]string{"cluster": x.name, "offline for": "more than " + s.alertAfter().String()}}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func upsertNode(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, n *pb.Node) error {

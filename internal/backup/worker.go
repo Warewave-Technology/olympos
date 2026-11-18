@@ -131,7 +131,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockClaim); err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status FROM backup_runs r
+		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until FROM backup_runs r
 			JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 			WHERE r.status = 'queued' ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`)
 		if err != nil {
@@ -140,11 +140,12 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		type cand struct {
 			id, cluster uuid.UUID
 			status      string
+			retryUntil  *time.Time
 		}
 		var cands []cand
 		for rows.Next() {
 			var c cand
-			if err := rows.Scan(&c.id, &c.cluster, &c.status); err != nil {
+			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil); err != nil {
 				rows.Close()
 				return err
 			}
@@ -157,7 +158,22 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		running := map[uuid.UUID]int{}
 		for _, c := range cands {
 			switch c.status {
-			case "offline", "revoked", "pending":
+			case "offline":
+				// F18: wait for the reconnect inside the retry window.
+				if c.retryUntil != nil && time.Now().Before(*c.retryUntil) {
+					continue
+				}
+				o, err := disconnectedOutcome(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline}, time.Now())
+				if err != nil {
+					return err
+				}
+				f, err := finishRunTx(ctx, tx, c.id, o)
+				if err != nil {
+					return err
+				}
+				failed = append(failed, f)
+				continue
+			case "revoked", "pending":
 				f, err := finishRunTx(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline})
 				if err != nil {
 					return err
@@ -237,8 +253,10 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 
 // outcome is how a run ended.
 type outcome struct {
-	status   string // succeeded | failed
-	err      string // already scrubbed
+	status string // succeeded | failed | missed
+	err    string // already scrubbed
+	// quiet: no notification (a failed attempt that is retried, F18).
+	quiet    bool
 	bytes    int64
 	wire     int64
 	blobPath string
@@ -294,14 +312,19 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	fields := map[string]string{"cluster": cluster, "target": ns + "/" + svc, "trigger": trigger}
 	ev := notify.Event{ChannelID: channel, Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
 		Payload: map[string]any{"job_id": jobID.String(), "run_id": runID.String()}}
-	if o.status == "succeeded" && !notifySuccess {
-		return f, nil // backup.succeeded is opt-in per job
+	if o.status == "succeeded" && !notifySuccess || o.quiet {
+		return f, nil // backup.succeeded is opt-in per job; retried attempts stay quiet
 	}
 	if o.status == "succeeded" {
 		ev.Type, ev.Key = notify.BackupSucceeded, "backup.succeeded:"+runID.String()
 		ev.Title = fmt.Sprintf("Backup succeeded: %s/%s", ns, svc)
 		fields["size"] = humanBytes(o.bytes)
 		fields["tier"] = o.tier
+	} else if o.status == "missed" {
+		ev.Type, ev.Key = notify.BackupMissed, "backup.missed:"+runID.String()
+		ev.Title = fmt.Sprintf("Backup missed: %s/%s", ns, svc)
+		fields["error"] = shortError(o.err)
+		ev.Payload["reason"] = shortError(o.err)
 	} else {
 		ev.Type, ev.Key = notify.BackupFailed, "backup.failed:"+runID.String()
 		ev.Title = fmt.Sprintf("Backup failed: %s/%s", ns, svc)
@@ -368,8 +391,17 @@ func (w *Worker) Execute(ctx context.Context, runID uuid.UUID) {
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	var f finished
+	// F18: a run that failed because the agent is gone is retried after
+	// the reconnect while inside the job's window, else it is missed.
+	disconnected := o.status == "failed" && job != nil && r.trigger != "test" &&
+		(o.err == errAgentOffline || w.Dialer != nil && !w.Dialer.Connected(job.Target.ClusterID))
 	err = store.Tx(fctx, w.DB, func(tx pgx.Tx) error {
 		var err error
+		if disconnected {
+			if o, err = disconnectedOutcome(fctx, tx, runID, o, time.Now()); err != nil {
+				return err
+			}
+		}
 		if f, err = finishRunTx(fctx, tx, runID, o); err != nil {
 			return err
 		}

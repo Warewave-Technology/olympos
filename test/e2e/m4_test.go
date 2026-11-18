@@ -23,6 +23,8 @@ type auditRun struct {
 		State          string `json:"state"`
 		Pass           int    `json:"pass"`
 		Fail           int    `json:"fail"`
+		Warn           int    `json:"warn"`
+		Info           int    `json:"info"`
 		ControlPlaneNA bool   `json:"control_plane_na"`
 		Checks         []struct {
 			ID          string `json:"id"`

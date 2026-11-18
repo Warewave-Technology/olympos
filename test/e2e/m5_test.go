@@ -5,6 +5,7 @@ package e2e
 import (
 	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -23,14 +24,17 @@ func TestM5Security(t *testing.T) {
 		eventually(t, 3*time.Minute, "postgres image inventoried", func() (bool, string) {
 			var is struct {
 				Items []struct {
-					Digest     string `json:"digest"`
-					Repo       string `json:"repo"`
-					ScanStatus string `json:"scan_status"`
+					Digest     string   `json:"digest"`
+					Repo       string   `json:"repo"`
+					Tags       []string `json:"tags"`
+					ScanStatus string   `json:"scan_status"`
 				} `json:"items"`
 			}
 			admin.must("GET", "/images?cluster="+labClusterID+"&q=postgres", nil, &is, 200)
 			for _, i := range is.Items {
-				if strings.HasSuffix(i.Repo, "postgres") && strings.HasPrefix(i.Digest, "sha256:") {
+				// orders-pg runs postgres:16-alpine (Olympos' own database
+				// runs another, digest-pinned postgres image).
+				if strings.HasSuffix(i.Repo, "postgres") && strings.HasPrefix(i.Digest, "sha256:") && slices.Contains(i.Tags, "16-alpine") {
 					digest = i.Digest
 					return true, ""
 				}

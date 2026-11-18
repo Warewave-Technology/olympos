@@ -12,6 +12,8 @@ olympos:
   bootstrapAdmins: ["00000000-0000-0000-0000-00000000ad01"]
   keyVault: {provider: local, name: lab}
   targetTLS: {caBundleFile: /etc/olympos/target-ca/ca.crt}
+  # F18 e2e (M7): agent.offline after 20 s instead of 5 min.
+  agents: {offlineAlertAfter: 20s}
 extraVolumes:
 - name: target-ca
   configMap: {name: target-ca}

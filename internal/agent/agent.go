@@ -59,6 +59,13 @@ type Agent struct {
 
 	tunnels   atomic.Int32
 	connected atomic.Bool
+
+	// life is the agent's lifetime context: work that outlives a control
+	// session (kube-bench Jobs) runs under it, and its results go through
+	// out, re-sent after a reconnect (F18).
+	life     context.Context
+	out      *outbox
+	sessions atomic.Uint64
 }
 
 // New builds an agent from in-cluster config.
@@ -78,6 +85,8 @@ func New(cfg Config, log *slog.Logger, rc *rest.Config) (*Agent, error) {
 	a := &Agent{cfg: cfg, log: log, kube: kube, rest: rc, caPool: pool,
 		ids: &identityStore{kube: kube, namespace: cfg.Namespace, name: cfg.IdentitySecret}}
 	a.disc = newDiscovery(a)
+	a.out = newOutbox(DefaultOutboxBytes, log)
+	a.life = context.Background()
 	return a, nil
 }
 
@@ -99,6 +108,7 @@ func (a *Agent) tlsConfig(withClient bool) *tls.Config {
 
 // Run blocks until ctx is cancelled, reconnecting with backoff.
 func (a *Agent) Run(ctx context.Context) error {
+	a.life = ctx
 	go a.serveHealth(ctx)
 	if err := a.disc.start(ctx); err != nil {
 		return err
@@ -165,8 +175,20 @@ func (a *Agent) session(ctx context.Context) error {
 		return err
 	}
 	a.connected.Store(true)
-	defer a.connected.Store(false)
+	sess := a.sessions.Add(1)
+	defer func() {
+		a.connected.Store(false)
+		a.out.disconnected(sess)
+		a.sendMu.Lock()
+		if a.control == stream {
+			a.control = nil
+		}
+		a.sendMu.Unlock()
+	}()
 	a.log.Info("connected to olympos", "server", a.cfg.Server)
+	if n := a.out.connected(sess, a.send); n > 0 {
+		a.log.Info("re-sent buffered results", "messages", n)
+	}
 
 	go a.renewLoop(ctx, client)
 	go a.disc.publish(ctx)
@@ -193,7 +215,9 @@ func (a *Agent) session(ctx context.Context) error {
 		case *pb.ServerMessage_OpenApiProxy:
 			go a.openAPIProxy(ctx, v.OpenApiProxy)
 		case *pb.ServerMessage_RunBench:
-			go a.runBench(ctx, v.RunBench)
+			// Not the session context: the Job keeps running through a
+			// disconnect and its results are re-sent afterwards.
+			go a.runBench(a.life, v.RunBench)
 		case *pb.ServerMessage_Resync:
 			a.disc.requestResync()
 		}
@@ -211,14 +235,17 @@ func (a *Agent) send(m *pb.AgentMessage) error {
 
 func (a *Agent) runBench(ctx context.Context, req *pb.RunBench) {
 	status := func(s *pb.BenchStatus) {
-		_ = a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchStatus{BenchStatus: s}})
+		a.out.deliver(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchStatus{BenchStatus: s}}, a.send)
 	}
 	if a.Bench == nil || !a.cfg.BenchEnabled {
 		status(&pb.BenchStatus{RunId: req.RunId, NodeName: req.NodeName, State: "rejected", Message: "kube-bench is not enabled on this agent"})
 		return
 	}
+	var seq uint32 // one Run is one run and node
 	a.Bench.Run(ctx, req, status, func(c *pb.BenchResultChunk) {
-		_ = a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchResult{BenchResult: c}})
+		seq++
+		c.Seq = seq
+		a.out.deliver(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchResult{BenchResult: c}}, a.send)
 	})
 }
 

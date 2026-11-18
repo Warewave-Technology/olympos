@@ -79,3 +79,24 @@ func TestBenchDeadline(t *testing.T) {
 		t.Fatalf("got %v", d)
 	}
 }
+
+// F18: chunks re-sent after a reconnect are not applied twice; a gap fails
+// the node.
+func TestBenchCollectorSeq(t *testing.T) {
+	c := newBenchCollector(uuid.New(), []string{"a", "b"})
+	c.status(&pb.BenchStatus{NodeName: "a", State: "succeeded"})
+	for _, seq := range []uint32{1, 2, 1, 2, 3} {
+		c.chunk(&pb.BenchResultChunk{NodeName: "a", Seq: seq, Data: []byte{byte('0' + seq)}, Last: seq == 3})
+	}
+	c.chunk(&pb.BenchResultChunk{NodeName: "a", Seq: 3, Data: []byte("x"), Last: true}) // after last: ignored
+	st := c.snapshot()["a"]
+	if got := st.Data.String(); got != "123" || !st.Last {
+		t.Fatalf("node a: %q last=%v", got, st.Last)
+	}
+	c.status(&pb.BenchStatus{NodeName: "b", State: "succeeded"})
+	c.chunk(&pb.BenchResultChunk{NodeName: "b", Seq: 1, Data: []byte("1")})
+	c.chunk(&pb.BenchResultChunk{NodeName: "b", Seq: 3, Data: []byte("3"), Last: true})
+	if st := c.snapshot()["b"]; st.State != "failed" || st.Data.Len() != 0 {
+		t.Fatalf("gap must fail the node: %+v", st)
+	}
+}

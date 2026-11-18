@@ -10,7 +10,7 @@ import { matchesSelector } from '../lib/sas';
 import { auditRoute } from '../router';
 import { AuditRunDialog, FailedRunButton } from '../ui/AuditRunDialog';
 import { BenchNodeDialog } from '../ui/BenchNodeDialog';
-import { CLUSTER_LABEL, ClusterOverview, ScopeCrumbs, findCluster, resolveScope, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { CLUSTER_LABEL, ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../ui/kit';
 import { PageHead, SeverityBadge } from '../ui/status';
 import { Select } from '../ui/Select';
@@ -21,7 +21,7 @@ const TOOL_LABEL: Record<string, string> = { kubescape: 'Kubescape', polaris: 'P
 
 function LastResult({ r, onOpen }: { r: Pick<AuditRun, 'id' | 'status' | 'error' | 'tool' | 'cluster_name' | 'new_findings' | 'resolved_findings'> | null | undefined; onOpen: (id: string) => void }) {
   if (!r) return <Badge tone="mute">Not run yet</Badge>;
-  if (r.status === 'failed') return <FailedRunButton run={r} onOpen={onOpen} />;
+  if (r.status === 'failed' || r.status === 'missed') return <FailedRunButton run={r} onOpen={onOpen} />;
   if (r.status === 'running' || r.status === 'queued') return <Badge tone="info">{r.status === 'running' ? 'Running' : 'Queued'}</Badge>;
   if (r.new_findings > 0) return <Badge tone="warn">+{r.new_findings} new failed</Badge>;
   if (r.resolved_findings > 0) return <Badge tone="ok">−{r.resolved_findings} resolved</Badge>;
@@ -40,7 +40,7 @@ function ksColumns(oneCluster: boolean, onOpen: (id: string) => void): Column<Au
       cell: (r) => (
         <span className="inline-sm">
           <span className="mono">{dateTime(r.started_at)}</span>
-          {r.status === 'failed' ? <FailedRunButton run={r} onOpen={onOpen} compact /> : r.status !== 'succeeded' ? <Badge tone="info">{r.status}</Badge> : null}
+          {r.status === 'failed' || r.status === 'missed' ? <FailedRunButton run={r} onOpen={onOpen} compact /> : r.status !== 'succeeded' ? <Badge tone="info">{r.status}</Badge> : null}
         </span>
       ),
     },
@@ -115,7 +115,7 @@ function benchColumns(r: AuditRun, oneCluster: boolean): Column<BenchNode>[] {
 function ToolCell({ run, onOpen, enabled = true, cluster = '' }: { run: AuditClusterRun | undefined; onOpen: (id: string) => void; enabled?: boolean; cluster?: string }) {
   if (!enabled) return <Badge tone="mute">Not enabled</Badge>;
   if (!run) return <span className="muted">Not run</span>;
-  if (run.status === 'failed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: cluster }} onOpen={onOpen} compact />;
+  if (run.status === 'failed' || run.status === 'missed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: cluster, status: run.status }} onOpen={onOpen} compact />;
   if (run.status === 'running' || run.status === 'queued') return <Badge tone="info">{run.status === 'running' ? 'Running' : 'Queued'}</Badge>;
   return (
     <>
@@ -449,6 +449,7 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
         sub={one ? `${info ? `${info.provider_label || info.provider} · ` : ''}Scheduled checks of this cluster with full history.` : 'Scheduled checks with full history. What matters is what changed since the last run.'}
         actions={canOperate && (!one || pinName) && <NewScheduleAction onClick={() => setCreating(true)} />}
       />
+      <ClusterOfflineNote cluster={one ? info : undefined} />
 
       <SchedulesCard
         schedQ={schedQ}
@@ -524,7 +525,7 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
                 cell: (r) => {
                   const run = r.last_runs.find((x) => x.tool === 'kube-bench');
                   if (!run) return <span className="muted">Not run</span>;
-                  if (run.status === 'failed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: r.cluster_name }} onOpen={openRun} compact />;
+                  if (run.status === 'failed' || run.status === 'missed') return <FailedRunButton run={{ id: run.run_id, error: '', tool: run.tool, cluster_name: r.cluster_name, status: run.status }} onOpen={openRun} compact />;
                   if (run.status !== 'succeeded') return <Badge tone="info">{run.status === 'running' ? 'Running' : 'Queued'}</Badge>;
                   return <span className="muted">{run.finished_at ? `${age(run.finished_at)} ago` : 'Done'}</span>;
                 },

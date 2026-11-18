@@ -853,12 +853,18 @@ func (x *Node) GetReady() bool {
 	return false
 }
 
+// Generations (F18): the agent numbers every inventory message with a
+// monotonically increasing generation. A snapshot replaces the cluster's
+// state (mark-and-sweep in one transaction) and sets the generation; each
+// later diff/target message must carry exactly the next one, otherwise the
+// server ignores it and sends RequestResync. 0 = agent without generations.
 type InventorySnapshot struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	ApiVersion    string                 `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"` // kube-apiserver gitVersion
 	Nodes         []*Node                `protobuf:"bytes,2,rep,name=nodes,proto3" json:"nodes,omitempty"`
 	Namespaces    []string               `protobuf:"bytes,3,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
 	Targets       []*Target              `protobuf:"bytes,4,rep,name=targets,proto3" json:"targets,omitempty"` // full set of discovered targets
+	Generation    uint64                 `protobuf:"varint,5,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -921,6 +927,13 @@ func (x *InventorySnapshot) GetTargets() []*Target {
 	return nil
 }
 
+func (x *InventorySnapshot) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
 type InventoryDiff struct {
 	state             protoimpl.MessageState `protogen:"open.v1"`
 	ApiVersion        string                 `protobuf:"bytes,1,opt,name=api_version,json=apiVersion,proto3" json:"api_version,omitempty"`
@@ -928,6 +941,7 @@ type InventoryDiff struct {
 	DeletedNodes      []string               `protobuf:"bytes,3,rep,name=deleted_nodes,json=deletedNodes,proto3" json:"deleted_nodes,omitempty"`
 	AddedNamespaces   []string               `protobuf:"bytes,4,rep,name=added_namespaces,json=addedNamespaces,proto3" json:"added_namespaces,omitempty"`
 	DeletedNamespaces []string               `protobuf:"bytes,5,rep,name=deleted_namespaces,json=deletedNamespaces,proto3" json:"deleted_namespaces,omitempty"`
+	Generation        uint64                 `protobuf:"varint,6,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -995,6 +1009,13 @@ func (x *InventoryDiff) GetDeletedNamespaces() []string {
 		return x.DeletedNamespaces
 	}
 	return nil
+}
+
+func (x *InventoryDiff) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
 }
 
 type Target struct {
@@ -1100,6 +1121,7 @@ func (x *Target) GetTlsServerName() string {
 type TargetUpsert struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Target        *Target                `protobuf:"bytes,1,opt,name=target,proto3" json:"target,omitempty"`
+	Generation    uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1141,9 +1163,17 @@ func (x *TargetUpsert) GetTarget() *Target {
 	return nil
 }
 
+func (x *TargetUpsert) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
+}
+
 type TargetDelete struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	TargetId      string                 `protobuf:"bytes,1,opt,name=target_id,json=targetId,proto3" json:"target_id,omitempty"`
+	Generation    uint64                 `protobuf:"varint,2,opt,name=generation,proto3" json:"generation,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1183,6 +1213,13 @@ func (x *TargetDelete) GetTargetId() string {
 		return x.TargetId
 	}
 	return ""
+}
+
+func (x *TargetDelete) GetGeneration() uint64 {
+	if x != nil {
+		return x.Generation
+	}
+	return 0
 }
 
 // ResourceReport is a full replacement of one resource kind as seen by the
@@ -2364,12 +2401,16 @@ func (x *BenchStatus) GetMessage() string {
 	return ""
 }
 
+// Result-bearing messages are buffered by the agent while disconnected and
+// re-sent after reconnect; seq (1-based per run and node) lets the server
+// drop duplicates and detect lost chunks. 0 = agent without seq.
 type BenchResultChunk struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	RunId         string                 `protobuf:"bytes,1,opt,name=run_id,json=runId,proto3" json:"run_id,omitempty"`
 	NodeName      string                 `protobuf:"bytes,2,opt,name=node_name,json=nodeName,proto3" json:"node_name,omitempty"`
 	Data          []byte                 `protobuf:"bytes,3,opt,name=data,proto3" json:"data,omitempty"`
 	Last          bool                   `protobuf:"varint,4,opt,name=last,proto3" json:"last,omitempty"`
+	Seq           uint32                 `protobuf:"varint,5,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2430,6 +2471,13 @@ func (x *BenchResultChunk) GetLast() bool {
 		return x.Last
 	}
 	return false
+}
+
+func (x *BenchResultChunk) GetSeq() uint32 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
 }
 
 type RequestResync struct {
@@ -2623,7 +2671,7 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\x15mem_allocatable_bytes\x18\n" +
 	" \x01(\x03R\x13memAllocatableBytes\x12\x14\n" +
 	"\x05roles\x18\v \x03(\tR\x05roles\x12\x14\n" +
-	"\x05ready\x18\f \x01(\bR\x05ready\"\xaa\x01\n" +
+	"\x05ready\x18\f \x01(\bR\x05ready\"\xca\x01\n" +
 	"\x11InventorySnapshot\x12\x1f\n" +
 	"\vapi_version\x18\x01 \x01(\tR\n" +
 	"apiVersion\x12&\n" +
@@ -2631,14 +2679,20 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"namespaces\x18\x03 \x03(\tR\n" +
 	"namespaces\x12,\n" +
-	"\atargets\x18\x04 \x03(\v2\x12.olympos.v1.TargetR\atargets\"\xe8\x01\n" +
+	"\atargets\x18\x04 \x03(\v2\x12.olympos.v1.TargetR\atargets\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x05 \x01(\x04R\n" +
+	"generation\"\x88\x02\n" +
 	"\rInventoryDiff\x12\x1f\n" +
 	"\vapi_version\x18\x01 \x01(\tR\n" +
 	"apiVersion\x127\n" +
 	"\x0eupserted_nodes\x18\x02 \x03(\v2\x10.olympos.v1.NodeR\rupsertedNodes\x12#\n" +
 	"\rdeleted_nodes\x18\x03 \x03(\tR\fdeletedNodes\x12)\n" +
 	"\x10added_namespaces\x18\x04 \x03(\tR\x0faddedNamespaces\x12-\n" +
-	"\x12deleted_namespaces\x18\x05 \x03(\tR\x11deletedNamespaces\"\xf5\x01\n" +
+	"\x12deleted_namespaces\x18\x05 \x03(\tR\x11deletedNamespaces\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x06 \x01(\x04R\n" +
+	"generation\"\xf5\x01\n" +
 	"\x06Target\x12\x1b\n" +
 	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1c\n" +
 	"\tnamespace\x18\x02 \x01(\tR\tnamespace\x12\x18\n" +
@@ -2647,11 +2701,17 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\tport_name\x18\x05 \x01(\tR\bportName\x12\x16\n" +
 	"\x06engine\x18\x06 \x01(\tR\x06engine\x12%\n" +
 	"\x0evault_provider\x18\a \x01(\tR\rvaultProvider\x12&\n" +
-	"\x0ftls_server_name\x18\b \x01(\tR\rtlsServerName\":\n" +
+	"\x0ftls_server_name\x18\b \x01(\tR\rtlsServerName\"Z\n" +
 	"\fTargetUpsert\x12*\n" +
-	"\x06target\x18\x01 \x01(\v2\x12.olympos.v1.TargetR\x06target\"+\n" +
+	"\x06target\x18\x01 \x01(\v2\x12.olympos.v1.TargetR\x06target\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\"K\n" +
 	"\fTargetDelete\x12\x1b\n" +
-	"\ttarget_id\x18\x01 \x01(\tR\btargetId\"\xd2\x01\n" +
+	"\ttarget_id\x18\x01 \x01(\tR\btargetId\x12\x1e\n" +
+	"\n" +
+	"generation\x18\x02 \x01(\x04R\n" +
+	"generation\"\xd2\x01\n" +
 	"\x0eResourceReport\x125\n" +
 	"\akyverno\x18\x01 \x01(\v2\x19.olympos.v1.KyvernoReportH\x00R\akyverno\x12L\n" +
 	"\x10network_policies\x18\x02 \x01(\v2\x1f.olympos.v1.NetworkPolicyReportH\x00R\x0fnetworkPolicies\x121\n" +
@@ -2745,12 +2805,13 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tnode_name\x18\x02 \x01(\tR\bnodeName\x12\x14\n" +
 	"\x05state\x18\x03 \x01(\tR\x05state\x12\x18\n" +
-	"\amessage\x18\x04 \x01(\tR\amessage\"n\n" +
+	"\amessage\x18\x04 \x01(\tR\amessage\"\x80\x01\n" +
 	"\x10BenchResultChunk\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x12\x1b\n" +
 	"\tnode_name\x18\x02 \x01(\tR\bnodeName\x12\x12\n" +
 	"\x04data\x18\x03 \x01(\fR\x04data\x12\x12\n" +
-	"\x04last\x18\x04 \x01(\bR\x04last\"\x0f\n" +
+	"\x04last\x18\x04 \x01(\bR\x04last\x12\x10\n" +
+	"\x03seq\x18\x05 \x01(\rR\x03seq\"\x0f\n" +
 	"\rRequestResync\"#\n" +
 	"\x04Ping\x12\x1b\n" +
 	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"#\n" +

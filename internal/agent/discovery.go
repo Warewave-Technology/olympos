@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -44,6 +45,10 @@ type discovery struct {
 	changed chan struct{}
 	resync  chan struct{}
 
+	// gen numbers inventory messages (F18). It starts at the process start
+	// time so it also grows across agent restarts.
+	gen atomic.Uint64
+
 	mu          sync.RWMutex
 	targets     map[string]*pb.Target // current discovered set (by target id)
 	sentNodes   map[string]*pb.Node
@@ -53,8 +58,14 @@ type discovery struct {
 }
 
 func newDiscovery(a *Agent) *discovery {
-	return &discovery{a: a, changed: make(chan struct{}, 1), resync: make(chan struct{}, 1), targets: map[string]*pb.Target{}}
+	d := &discovery{a: a, changed: make(chan struct{}, 1), resync: make(chan struct{}, 1), targets: map[string]*pb.Target{}}
+	d.gen.Store(uint64(time.Now().UnixNano()))
+	return d
 }
+
+// nextGen is the generation of the next inventory message. publish is the
+// only sender of inventory messages, so numbers go out in order.
+func (d *discovery) nextGen() uint64 { return d.gen.Add(1) }
 
 func (d *discovery) start(ctx context.Context) error {
 	d.factory = informers.NewSharedInformerFactory(d.a.kube, 10*time.Minute)
@@ -167,7 +178,7 @@ func (d *discovery) sendSnapshot(ctx context.Context) error {
 	nodes := d.currentNodes()
 	nss := d.currentNamespaces()
 	targets := d.computeTargets()
-	snap := &pb.InventorySnapshot{ApiVersion: ver}
+	snap := &pb.InventorySnapshot{ApiVersion: ver, Generation: d.nextGen()}
 	for _, n := range sortedNodes(nodes) {
 		snap.Nodes = append(snap.Nodes, n)
 	}
@@ -219,6 +230,7 @@ func (d *discovery) sendDiff(ctx context.Context) {
 	if !changed {
 		return
 	}
+	diff.Generation = d.nextGen()
 	if err := d.a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_InventoryDiff{InventoryDiff: diff}}); err != nil {
 		return
 	}
@@ -239,14 +251,14 @@ func (d *discovery) sendTargetChanges() {
 	}
 	for id, t := range cur {
 		if old, ok := prev[id]; !ok || !proto.Equal(old, t) {
-			if d.a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_TargetUpsert{TargetUpsert: &pb.TargetUpsert{Target: t}}}) == nil {
+			if d.a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_TargetUpsert{TargetUpsert: &pb.TargetUpsert{Target: t, Generation: d.nextGen()}}}) == nil {
 				sent[id] = t
 			}
 		}
 	}
 	for id := range prev {
 		if _, ok := cur[id]; !ok {
-			if d.a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_TargetDelete{TargetDelete: &pb.TargetDelete{TargetId: id}}}) == nil {
+			if d.a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_TargetDelete{TargetDelete: &pb.TargetDelete{TargetId: id, Generation: d.nextGen()}}}) == nil {
 				delete(sent, id)
 			}
 		}

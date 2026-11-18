@@ -154,7 +154,8 @@ func Run(cfgPath string) error {
 	}
 
 	d.Gateway = gateway.New(d.DB, d.CA, log.With("component", "gateway"))
-	d.Inventory = &inventory.Service{DB: d.DB, Log: log.With("component", "inventory")}
+	d.Inventory = &inventory.Service{DB: d.DB, Log: log.With("component", "inventory"),
+		OfflineAlertAfter: cfg.Agents.OfflineAlertAfter, FlappingDisconnects: cfg.Agents.FlappingDisconnects, FlappingWindow: cfg.Agents.FlappingWindow}
 
 	var wiring []Wiring
 	for _, f := range moduleFactories {

@@ -820,6 +820,7 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
 		WHERE t.cluster_id = ANY($1) AND j.deleted_at IS NULL AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
 		  AND r.status IN ('succeeded','failed','missed')
+		  AND NOT (r.status = 'failed' AND r.error LIKE 'agent_disconnected: retrying%')
 		ORDER BY j.id, r.created_at DESC`, clusterIDs)
 	if err != nil {
 		return nil, err

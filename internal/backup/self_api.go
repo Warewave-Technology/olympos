@@ -61,7 +61,7 @@ func LoadSelfView(ctx context.Context, q store.Querier) (*SelfView, error) {
 	}
 	v.Configured, v.Job = true, j
 	rows, err := q.Query(ctx, `SELECT id, job_id, trigger, status, scheduled_for, tier, started_at, finished_at, bytes, wire_bytes,
-		blob_path, sha256, error, created_at FROM backup_runs WHERE job_id = $1 ORDER BY created_at DESC LIMIT 20`, j.ID)
+		blob_path, sha256, error, created_at, attempt FROM backup_runs WHERE job_id = $1 ORDER BY created_at DESC LIMIT 20`, j.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +69,7 @@ func LoadSelfView(ctx context.Context, q store.Querier) (*SelfView, error) {
 	for rows.Next() {
 		run := &Run{TargetService: selfService, ClusterName: selfCluster, Engine: "postgresql"}
 		if err := rows.Scan(&run.ID, &run.JobID, &run.Trigger, &run.Status, &run.ScheduledFor, &run.Tier, &run.StartedAt, &run.FinishedAt,
-			&run.Bytes, &run.WireBytes, &run.BlobPath, &run.SHA256, &run.Error, &run.CreatedAt); err != nil {
+			&run.Bytes, &run.WireBytes, &run.BlobPath, &run.SHA256, &run.Error, &run.CreatedAt, &run.Attempt); err != nil {
 			return nil, err
 		}
 		v.Runs = append(v.Runs, run)

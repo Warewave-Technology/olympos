@@ -114,6 +114,17 @@ type Server struct {
 		TTL time.Duration `yaml:"ttl"`
 	} `yaml:"changeRequests"`
 
+	// Agents: alert debounce (F18).
+	Agents struct {
+		// OfflineAlertAfter: agent.offline fires after this long offline
+		// (default 5m). One agent.online follows when it comes back.
+		OfflineAlertAfter time.Duration `yaml:"offlineAlertAfter"`
+		// FlappingDisconnects within FlappingWindow fire agent.flapping
+		// (defaults 5 and 30m).
+		FlappingDisconnects int           `yaml:"flappingDisconnects"`
+		FlappingWindow      time.Duration `yaml:"flappingWindow"`
+	} `yaml:"agents"`
+
 	Audit struct {
 		KubescapeBin string `yaml:"kubescapeBin"`
 		PolarisBin   string `yaml:"polarisBin"`

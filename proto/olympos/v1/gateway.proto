@@ -101,11 +101,17 @@ message Node {
   bool ready = 12;
 }
 
+// Generations (F18): the agent numbers every inventory message with a
+// monotonically increasing generation. A snapshot replaces the cluster's
+// state (mark-and-sweep in one transaction) and sets the generation; each
+// later diff/target message must carry exactly the next one, otherwise the
+// server ignores it and sends RequestResync. 0 = agent without generations.
 message InventorySnapshot {
   string api_version = 1; // kube-apiserver gitVersion
   repeated Node nodes = 2;
   repeated string namespaces = 3;
   repeated Target targets = 4; // full set of discovered targets
+  uint64 generation = 5;
 }
 
 message InventoryDiff {
@@ -114,6 +120,7 @@ message InventoryDiff {
   repeated string deleted_nodes = 3;
   repeated string added_namespaces = 4;
   repeated string deleted_namespaces = 5;
+  uint64 generation = 6;
 }
 
 // ---- discovery ----
@@ -131,10 +138,12 @@ message Target {
 
 message TargetUpsert {
   Target target = 1;
+  uint64 generation = 2;
 }
 
 message TargetDelete {
   string target_id = 1;
+  uint64 generation = 2;
 }
 
 // ResourceReport is a full replacement of one resource kind as seen by the
@@ -275,11 +284,15 @@ message BenchStatus {
   string message = 4;
 }
 
+// Result-bearing messages are buffered by the agent while disconnected and
+// re-sent after reconnect; seq (1-based per run and node) lets the server
+// drop duplicates and detect lost chunks. 0 = agent without seq.
 message BenchResultChunk {
   string run_id = 1;
   string node_name = 2;
   bytes data = 3;
   bool last = 4;
+  uint32 seq = 5;
 }
 
 message RequestResync {}

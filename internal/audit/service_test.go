@@ -332,8 +332,22 @@ func TestToolRunAgentOffline(t *testing.T) {
 		t.Fatal(err)
 	}
 	run, _ := GetRun(context.Background(), db, r)
-	if run.Status != "failed" || run.Error != "agent_offline" {
+	if run.Status != "failed" || !strings.HasPrefix(run.Error, "agent_disconnected: retrying") {
 		t.Fatalf("run %+v", run)
+	}
+	// F18: a new attempt waits for the reconnect.
+	var attempt int
+	var until *time.Time
+	if err := db.QueryRow(context.Background(), `SELECT attempt, retry_until FROM audit_runs WHERE schedule_id = $1 AND status = 'queued'`, sched).Scan(&attempt, &until); err != nil || attempt != 2 || until == nil {
+		t.Fatalf("retry: %v attempt=%d until=%v", err, attempt, until)
+	}
+	if err := svc.Dispatch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var queued int
+	_ = db.QueryRow(context.Background(), `SELECT count(*) FROM audit_runs WHERE schedule_id = $1 AND status = 'queued'`, sched).Scan(&queued)
+	if queued != 1 {
+		t.Fatalf("the retry must keep waiting while offline: %d queued", queued)
 	}
 }
 
@@ -609,15 +623,15 @@ func TestDispatch(t *testing.T) {
 	if s, _ := status(rElse); s != "queued" {
 		t.Fatalf("elsewhere (connected to another replica) should stay queued: %s", s)
 	}
-	if s, e := status(rOff); s != "failed" || e != "agent_offline" {
+	if s, e := status(rOff); s != "failed" || !strings.HasPrefix(e, "agent_disconnected: retrying") {
 		t.Fatalf("offline: %s %s", s, e)
 	}
-	// Waited too long → agent_offline.
+	// Waited past the retry window → missed.
 	svc.Now = func() time.Time { return time.Now().Add(time.Hour) }
 	if err := svc.Dispatch(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if s, e := status(rElse); s != "failed" || e != "agent_offline" {
+	if s, e := status(rElse); s != "missed" || !strings.HasPrefix(e, "agent_disconnected") {
 		t.Fatalf("stale: %s %s", s, e)
 	}
 }

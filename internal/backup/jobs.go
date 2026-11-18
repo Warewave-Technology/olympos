@@ -130,19 +130,21 @@ type Run struct {
 	SHA256        string     `json:"sha256"`
 	Error         string     `json:"error"`
 	CreatedAt     time.Time  `json:"created_at"`
+	// Attempt > 1: a retry after the agent reconnected (F18).
+	Attempt int `json:"attempt"`
 
 	clusterID     uuid.UUID
 	clusterLabels map[string]string
 }
 
 const runSelect = `SELECT r.id, r.job_id, t.service, c.name, t.engine, r.trigger, r.status, r.scheduled_for, r.tier,
-	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, c.id, c.labels
+	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, r.attempt, c.id, c.labels
 	FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.JobID, &r.TargetService, &r.ClusterName, &r.Engine, &r.Trigger, &r.Status, &r.ScheduledFor, &r.Tier,
-		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.clusterID, &r.clusterLabels)
+		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.Attempt, &r.clusterID, &r.clusterLabels)
 	if err != nil {
 		return nil, err
 	}

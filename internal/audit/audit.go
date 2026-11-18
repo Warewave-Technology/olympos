@@ -583,7 +583,17 @@ func (s *Service) finish(ctx context.Context, rc runContext, out outcome) error 
 		}
 	}
 	var newCount, resolvedCount int
+	// F18: failed because the agent is gone → retried after the reconnect
+	// inside the window, else missed. Nothing is resolved meanwhile.
+	disconnected := out.status == "failed" && !s.Gateway.Connected(rc.ClusterID)
 	err := store.Tx(pctx, s.DB, func(tx pgx.Tx) error {
+		if disconnected {
+			st, reason, err := disconnectedStatus(pctx, tx, rc.ID, s.now())
+			if err != nil {
+				return err
+			}
+			out.status, out.err = st, reason
+		}
 		for _, n := range out.nodes {
 			checks := n.Checks
 			if checks == nil {

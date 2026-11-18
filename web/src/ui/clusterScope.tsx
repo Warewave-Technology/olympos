@@ -6,6 +6,7 @@ import { Link } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { Cluster, ItemList } from '../api/types';
+import { age, relDateTime } from '../lib/format';
 import { userLabels } from '../lib/labels';
 import { DataTable, type Column } from './DataTable';
 import { EmptyState } from './kit';
@@ -85,6 +86,16 @@ export function ScopeCrumbs({ area, to, scope, cluster, children }: { area: stri
         </span>
       )}
     </nav>
+  );
+}
+
+/** F18: an offline cluster shows its last known state; nothing is resolved or gone until it reconnects. */
+export function ClusterOfflineNote({ cluster }: { cluster?: ClusterInfo }) {
+  if (!cluster || cluster.status !== 'offline') return null;
+  return (
+    <div className="note warn" role="note">
+      <b>Agent offline{cluster.last_seen_at ? ` since ${relDateTime(cluster.last_seen_at)}` : ''}.</b> Data shown as of {cluster.last_seen_at ? `${age(cluster.last_seen_at)} ago` : 'the last report'}. Nothing on this cluster is marked resolved or gone until the agent reconnects and sends a fresh snapshot; runs due meanwhile are retried after the reconnect.
+    </div>
   );
 }
 

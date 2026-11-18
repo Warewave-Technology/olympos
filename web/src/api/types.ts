@@ -321,6 +321,8 @@ export interface BackupRun {
   blob_path: string;
   sha256: string;
   error: string;
+  /** > 1: retried after the agent reconnected. */
+  attempt?: number;
   /** Optional (openapi extension): destination name for run lists. */
   destination_name?: string;
   /** Optional (openapi extension): dry-run checklist steps. */
@@ -559,7 +561,7 @@ export interface AuditRun {
   tool: AuditTool | string;
   cluster_id: string;
   cluster_name: string;
-  status: 'queued' | 'running' | 'succeeded' | 'failed';
+  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'missed';
   started_at: string | null;
   finished_at: string | null;
   score: number | null;

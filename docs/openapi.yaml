@@ -1085,7 +1085,7 @@ components:
           items:
             type: object
             properties:
-              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, approvals, eol, critical_cves]}
+              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, kek_purgeable, kek_recovery_unknown]}
               severity: {type: string, enum: [crit, warn]}
               label: {type: string}
               detail: {type: string}
@@ -1344,7 +1344,8 @@ components:
         wire_bytes: {type: integer}
         blob_path: {type: string}
         sha256: {type: string}
-        error: {type: string, description: "Secrets scrubbed; agent_offline when the cluster's agent is offline"}
+        error: {type: string, description: "Secrets scrubbed; agent_disconnected: … when the agent was gone (retried after the reconnect, see attempt)"}
+        attempt: {type: integer, description: "1 = first attempt; > 1 = retried after the agent reconnected (F18, max 3, inside half the interval to the next activation)"}
         created_at: {type: string, format: date-time}
     ConnectionTest:
       type: object
@@ -1522,7 +1523,7 @@ components:
         tool: {type: string, enum: [kubescape, polaris, kube-bench]}
         cluster_id: {type: string}
         cluster_name: {type: string}
-        status: {type: string, enum: [queued, running, succeeded, failed]}
+        status: {type: string, enum: [queued, running, succeeded, failed, missed], description: "missed = the agent did not come back within the retry window (F18)"}
         scheduled_for: {type: [string, "null"], format: date-time, description: null for manual runs}
         started_at: {type: [string, "null"], format: date-time}
         finished_at: {type: [string, "null"], format: date-time}

@@ -163,7 +163,7 @@ func (s *Scheduler) scheduleJob(ctx context.Context, j schedJob, now time.Time) 
 					reason = "missed: superseded by a later activation"
 				}
 				tag, err := tx.Exec(ctx, `INSERT INTO backup_runs (job_id, trigger, status, scheduled_for, finished_at, error)
-					VALUES ($1, 'schedule', 'missed', $2, $3, $4) ON CONFLICT (job_id, scheduled_for) WHERE scheduled_for IS NOT NULL DO NOTHING`,
+					VALUES ($1, 'schedule', 'missed', $2, $3, $4) ON CONFLICT (job_id, scheduled_for, attempt) WHERE scheduled_for IS NOT NULL DO NOTHING`,
 					j.id, at, now, reason)
 				if err != nil {
 					return err
@@ -194,7 +194,7 @@ func (s *Scheduler) scheduleJob(ctx context.Context, j schedJob, now time.Time) 
 				return err
 			}
 			tag, err := tx.Exec(ctx, `INSERT INTO backup_runs (job_id, trigger, status, scheduled_for)
-				VALUES ($1, 'schedule', 'queued', $2) ON CONFLICT (job_id, scheduled_for) WHERE scheduled_for IS NOT NULL DO NOTHING`, j.id, at)
+				VALUES ($1, 'schedule', 'queued', $2) ON CONFLICT (job_id, scheduled_for, attempt) WHERE scheduled_for IS NOT NULL DO NOTHING`, j.id, at)
 			if err != nil {
 				return err
 			}

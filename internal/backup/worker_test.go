@@ -203,12 +203,16 @@ func TestWorkerFailureScrubsSecrets(t *testing.T) {
 	}
 }
 
+// F18: a run whose agent is offline fails quietly and a new attempt waits
+// for the reconnect inside the job's window; it runs once the agent is
+// back; past the window (or after MaxAttempts) it is missed.
 func TestWorkerAgentOffline(t *testing.T) {
 	db := testutil.DB(t)
 	ctx := context.Background()
 	off := seed(t, db, "offline-cluster", nil, "offline")
 	other := seed(t, db, "elsewhere", nil, "online") // connected to another replica
-	w := newWorker(t, db, newDialer(), newBlobs(""))
+	d := newDialer()
+	w := newWorker(t, db, d, newBlobs(""))
 	jOff := addJob(t, db, off, jobOpts{enabled: true})
 	jOther := addJob(t, db, other, jobOpts{enabled: true})
 	rOff := queue(t, db, jOff, "manual", nil)
@@ -217,15 +221,60 @@ func TestWorkerAgentOffline(t *testing.T) {
 	if err != nil || id != uuid.Nil {
 		t.Fatalf("claim: %v %v", id, err)
 	}
-	if r := loadRun(t, db, rOff); r.Status != "failed" || r.Error != "agent_offline" {
+	if r := loadRun(t, db, rOff); r.Status != "failed" || !strings.HasPrefix(r.Error, "agent_disconnected: retrying") {
 		t.Fatalf("offline run: %+v", r)
 	}
 	if r := loadRun(t, db, rOther); r.Status != "queued" {
 		t.Fatalf("run of a cluster connected elsewhere must stay queued: %+v", r)
 	}
-	ev := events(t, db, "backup.failed")
-	if len(ev) != 1 || ev[0].Payload["reason"] != "agent_offline" {
-		t.Fatalf("events: %+v", ev)
+	if ev := events(t, db, "backup.failed"); len(ev) != 0 {
+		t.Fatalf("a retried attempt must not notify: %+v", ev)
+	}
+	var retry uuid.UUID
+	var attempt int
+	if err := db.QueryRow(ctx, `SELECT id, attempt FROM backup_runs WHERE job_id = $1 AND status = 'queued'`, jOff).Scan(&retry, &attempt); err != nil || attempt != 2 {
+		t.Fatalf("retry: %v attempt %d", err, attempt)
+	}
+	// Still offline inside the window: the retry waits.
+	if id, _ := w.Claim(ctx); id != uuid.Nil || loadRun(t, db, retry).Status != "queued" {
+		t.Fatal("the retry must wait for the reconnect")
+	}
+	// The agent reconnects: the retry runs.
+	if _, err := db.Exec(ctx, `UPDATE clusters SET status = 'online' WHERE id = $1`, off.ClusterID); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.connected[off.ClusterID] = true
+	d.mu.Unlock()
+	claimAndRun(t, w, retry)
+	if r := loadRun(t, db, retry); r.Status != "succeeded" {
+		t.Fatalf("retry after reconnect: %+v", r)
+	}
+
+	// Past the window: missed (backup.missed), no further attempt.
+	if _, err := db.Exec(ctx, `UPDATE clusters SET status = 'offline' WHERE id = $1`, off.ClusterID); err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	d.connected[off.ClusterID] = false
+	d.mu.Unlock()
+	late := queue(t, db, jOff, "manual", nil)
+	if _, err := db.Exec(ctx, `UPDATE backup_runs SET attempt = 2, retry_until = now() - interval '1 minute' WHERE id = $1`, late); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Claim(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := loadRun(t, db, late); r.Status != "missed" || !strings.HasPrefix(r.Error, "agent_disconnected") {
+		t.Fatalf("late run: %+v", r)
+	}
+	if ev := events(t, db, "backup.missed"); len(ev) != 1 {
+		t.Fatalf("backup.missed events: %+v", ev)
+	}
+	var queued int
+	_ = db.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND status = 'queued'`, jOff).Scan(&queued)
+	if queued != 0 {
+		t.Fatalf("no attempt after the window: %d queued", queued)
 	}
 }
 

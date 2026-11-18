@@ -6,7 +6,7 @@ import type { Image, ImageDetail, ItemList, KyvernoPolicy, NetpolNamespace, Scan
 import { useCan } from '../auth/me';
 import { age, clockTime, plural, shortDigest, shortText } from '../lib/format';
 import { securityRoute } from '../router';
-import { ClusterOverview, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { DataTable, type Column } from '../ui/DataTable';
 import { Badge, EmptyState, Modal, QueryView, Tabs, sentence, useToast } from '../ui/kit';
 import { Select } from '../ui/Select';
@@ -358,6 +358,7 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
         sub={`Images are deduplicated by digest${one ? '' : ' across clusters'}${lastScan ? ` · last scan ${age(lastScan)} ago` : ''}`}
         actions={canOperate && <ScanActions scanAll={scanAll} nothingToScan={nothingToScan} />}
       />
+      <ClusterOfflineNote cluster={one ? cluster : undefined} />
       <ScanWarning scanAll={scanAll} />
       <section className="stats four" aria-label="Security totals">
         <button

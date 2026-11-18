@@ -77,6 +77,7 @@ type benchNodeState struct {
 	Message string
 	Data    bytes.Buffer
 	Last    bool
+	seq     uint32 // last chunk applied (agents re-send after a reconnect)
 }
 
 func (n *benchNodeState) done() bool {
@@ -132,6 +133,21 @@ func (c *benchCollector) chunk(ch *pb.BenchResultChunk) {
 	n, ok := c.nodes[ch.NodeName]
 	if !ok || n.Last || n.State == "rejected" || n.State == "failed" {
 		return
+	}
+	// F18: chunks are idempotent by (run, node, seq). A re-sent chunk is
+	// dropped; a gap means the agent's buffer overflowed while disconnected:
+	// the node fails rather than storing a partial result.
+	if ch.Seq != 0 {
+		switch {
+		case ch.Seq <= n.seq:
+			return
+		case ch.Seq != n.seq+1:
+			n.State, n.Message = "failed", "kube-bench result chunks were lost while the agent was disconnected"
+			n.Data.Reset()
+			c.signal()
+			return
+		}
+		n.seq = ch.Seq
 	}
 	if n.Data.Len()+len(ch.Data) > maxBenchBytes {
 		n.State, n.Message = "failed", "kube-bench result too large"
