@@ -370,6 +370,34 @@ paths:
         "200":
           description: Discovered and configured vaults in scope
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Vault"}}}}}}
+  /vaults/search:
+    get:
+      tags: [vaults]
+      summary: Find vaults and secret paths across every vault the caller can read (name, cluster, namespace, provider, indexed paths).
+      parameters: [{name: q, in: query, required: true, schema: {type: string, minLength: 2}}]
+      responses:
+        "200":
+          description: Matches, vault matches first, max 50
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        match: {type: string, enum: [vault, path]}
+                        vault_id: {type: string}
+                        vault_name: {type: string}
+                        provider: {type: string}
+                        cluster_id: {type: string}
+                        cluster_name: {type: string}
+                        namespace: {type: string}
+                        mount: {type: string, description: "path matches only"}
+                        path: {type: string, description: "path matches only"}
+                        keys: {type: integer}
   /vaults/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -1074,6 +1102,7 @@ components:
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}
+        notify_on_success: {type: boolean, description: "Send backup.succeeded for this job (default false; routed like other events, job channel overrides)"}
         enabled: {type: boolean}
         notify_channel_id: {type: [string, "null"]}
         notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3)."}
@@ -1141,6 +1170,7 @@ components:
       properties:
         id: {type: string}
         target: {$ref: "#/components/schemas/Target"}
+        cluster_labels: {type: object, additionalProperties: {type: string}, description: Olympos labels of the vault's cluster (filtering)}
         provider: {type: string, enum: [hashicorp, openbao]}
         version: {type: string}
         status: {type: string, enum: [discovered, configured, error, gone]}
@@ -1356,7 +1386,10 @@ components:
         medium: {type: integer}
         low: {type: integer}
         fixable: {type: integer, description: critical/high CVEs with a fixed version}
-        scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, failed]}
+        scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, unavailable, failed], description: "unavailable = the digest is not in the registry (locally built or retagged, e.g. kind node images); failed = transient error, retried automatically (scan_attempts, next_retry_at)"}
+        scan_error: {type: string, description: "Why the last scan did not succeed (also on list items)"}
+        scan_attempts: {type: integer}
+        next_retry_at: {type: [string, "null"], format: date-time}
         last_scanned_at: {type: [string, "null"], format: date-time}
         registry: {type: string, description: "Matching registry host_pattern, \"public\" (anonymous pull), or \"\" (no credential)"}
     ImageDetail:
