@@ -39,7 +39,8 @@ subjects:
 - kind: ServiceAccount
   name: olympos-agent
   namespace: {{ .Release.Namespace }}
-{{- if .Values.bench.kyverno.legacyException }}
+{{- /* dig: tolerate values from older releases (helm upgrade --reuse-values) */}}
+{{- if dig "kyverno" "legacyException" false .Values.bench }}
 ---
 apiVersion: kyverno.io/v2
 kind: PolicyException
@@ -64,7 +65,7 @@ spec:
       operator: AllIn
       value: [{{ .Values.bench.imagePattern | quote }}]
 {{- end }}
-{{- with .Values.bench.kyverno.policyRefs }}
+{{- with (dig "kyverno" "policyRefs" list .Values.bench) }}
 ---
 apiVersion: policies.kyverno.io/v1
 kind: PolicyException

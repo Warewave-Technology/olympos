@@ -177,3 +177,8 @@ func TestBenchKyvernoExceptionsOptIn(t *testing.T) {
 		t.Fatal("policies.kyverno.io/v1 PolicyException missing")
 	}
 }
+
+// Values from an older release (helm upgrade --reuse-values) lack newer keys.
+func TestBenchToleratesOldValues(t *testing.T) {
+	render(t, "--set", "bench.enabled=true", "--set", "bench.kyverno=null")
+}
