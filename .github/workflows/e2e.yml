@@ -1,0 +1,49 @@
+name: e2e
+
+# kind e2e (SPEC §19, M1–M7) and the systemd smoke (F16) on main and
+# nightly. The systemd job installs the .deb on the runner (a VM with
+# systemd), with the local PostgreSQL, and connects a kind agent.
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kind:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with: {install_only: true}
+      - run: ./test/e2e/run.sh
+      - name: Server logs
+        if: failure()
+        run: KUBECONFIG=test/e2e/.work/kubeconfig kubectl -n olympos logs deploy/olympos --tail=500 || true
+
+  systemd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with: {install_only: true}
+      - name: "Build the .deb (dev build: local key vault for CI, no Azure)"
+        run: |
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
+          GO_TAGS=dev ./scripts/package.sh 0.0.0-ci amd64
+      - run: sudo ./test/systemd/smoke.sh dist/olympos-server_0.0.0-ci_amd64.deb
+      - name: Journal
+        if: failure()
+        run: sudo journalctl -u olympos-server --no-pager -n 300 || true

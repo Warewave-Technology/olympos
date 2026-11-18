@@ -109,6 +109,36 @@ connected to, so more replicas would work only sometimes: the chart refuses `rep
 `/readyz` not ready until the older one is gone. `experimental.multiReplica: true` lifts both checks and
 is unsupported.
 
+## Verifying releases
+
+Every release (tag `v*`) is built by `.github/workflows/release.yml` and signed keyless with cosign through
+GitHub's OIDC identity: images, binaries, tarballs, `.deb`/`.rpm` and both Helm charts. Each artifact has an
+SBOM (SPDX and CycloneDX) and SLSA provenance. Verify before installing (`v0.1.0` as an example):
+
+```bash
+ID='^https://github.com/Warewave-Technology/olympos/.github/workflows/release.yml@refs/tags/v'
+ISSUER=https://token.actions.githubusercontent.com
+
+# Images (signature, SBOM attestation)
+cosign verify ghcr.io/warewave-technology/olympos-server:0.1.0 --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+cosign verify-attestation --type spdxjson ghcr.io/warewave-technology/olympos-server:0.1.0 \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" >/dev/null && echo sbom ok
+
+# Helm charts (OCI)
+cosign verify ghcr.io/warewave-technology/charts/olympos-server:0.1.0 --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+helm install olympos oci://ghcr.io/warewave-technology/charts/olympos-server --version 0.1.0 -n olympos --create-namespace -f values.yaml
+
+# Packages and tarballs (bundle next to each file)
+cosign verify-blob olympos-server_0.1.0_amd64.deb --bundle olympos-server_0.1.0_amd64.deb.sigstore.json \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+sha256sum -c SHA256SUMS-amd64 --ignore-missing
+
+# Build provenance (GitHub attestation)
+gh attestation verify olympos-server_0.1.0_amd64.deb --repo Warewave-Technology/olympos
+```
+
+Pin images by digest in production (`image.digest` in the chart values).
+
 ## 3. Agents
 
 In the UI: **Dashboard › Add cluster** → name, labels, kube-bench opt-in → copy the generated Helm

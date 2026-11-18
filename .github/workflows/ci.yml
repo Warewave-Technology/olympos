@@ -1,17 +1,23 @@
 name: ci
 
+# Pull requests and main: lint, unit + integration (service containers),
+# release-build checks, web, secret hygiene. kind e2e and the systemd smoke
+# run in e2e.yml (main + nightly); releases in release.yml (tags v*).
 on:
   push:
     branches: [main]
-    tags: ["v*"]
   pull_request:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   go:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     services:
       postgres:
         image: postgres:16-alpine
@@ -21,28 +27,56 @@ jobs:
           --health-cmd "pg_isready -U olympos" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
       - uses: actions/setup-go@v5
         with: {go-version-file: go.mod}
       - uses: azure/setup-helm@v4
-      - name: Install pg_dump
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: pg_dump 16/17 (PGDG)
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17 protobuf-compiler
+      - name: gofmt
+        run: test -z "$(gofmt -l internal cmd deploy test)" || { gofmt -l internal cmd deploy test; exit 1; }
       - name: Generated code is up to date
         run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
-          sudo apt-get install -y protobuf-compiler
-          make proto && git diff --exit-code internal/gen
-      - run: go vet ./...
-      - name: Unit + integration tests (incl. SPEC §18 security checks)
-        env: {OLYMPOS_REQUIRE_DB: "1"}
-        run: go test -race -count=1 ./...
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          make proto && git diff --exit-code -I '^// .*(protoc|protoc-gen-go)' internal/gen
+      - run: go vet -tags dev ./... && go vet ./... && go vet -tags e2e ./test/...
+      - name: Unit + integration tests (dev build; incl. SPEC §18 security checks)
+        env: {OLYMPOS_REQUIRE_DB: "1", OLYMPOS_REQUIRE_DOCKER: "1", OLYMPOS_PG_BIN: /usr/lib/postgresql/17/bin}
+        run: go test -tags dev -race -count=1 ./...
+      - name: Release build (no dev login, no local key vault)
+        run: |
+          go test -count=1 ./...
+          ./scripts/check-release-binary.sh
+      - name: Pinned tools in sync (image and packages)
+        run: ./scripts/check-tool-versions.sh
+      - name: Migration ordering
+        if: github.event_name == 'pull_request'
+        run: ./scripts/check-migrations.sh origin/${{ github.base_ref }}
+      - name: systemd unit hardening (exposure ≤ 3.0)
+        run: systemd-analyze security --offline=yes --threshold=30 deploy/systemd/olympos-server.service
       - name: Secret canary scan of test logs
         run: ./scripts/check-no-secrets.sh
       - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...
+
+  hygiene:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - name: Lab state is never tracked
+        run: ./scripts/check-untracked-work.sh
+      - name: gitleaks (full history)
+        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --redact --no-banner --exit-code 1 .
 
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     defaults: {run: {working-directory: web}}
     steps:
       - uses: actions/checkout@v4
@@ -56,54 +90,13 @@ jobs:
       - run: pnpm build
 
   images:
+    # Build only (no push) to catch Dockerfile breakage; release.yml publishes.
     needs: [go, web]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-      id-token: write   # cosign keyless
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
-        if: github.event_name != 'pull_request'
-        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
-      - uses: sigstore/cosign-installer@v3
-      - uses: anchore/sbom-action/download-syft@v0
-      - name: Build and push
-        id: build
-        env:
-          PUSH: ${{ github.event_name != 'pull_request' }}
-          VERSION: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
+      - run: |
           for c in server agent; do
-            img=ghcr.io/warewave-technology/olympos-$c:${GITHUB_SHA::12}
-            docker buildx build --platform linux/amd64,linux/arm64 -f deploy/docker/$c.Dockerfile \
-              --build-arg VERSION=$VERSION --provenance=true --sbom=true \
-              -t $img $( [ "$PUSH" = true ] && echo --push ) .
-            if [ "$PUSH" = true ]; then
-              digest=$(docker buildx imagetools inspect $img --format '{{json .Manifest}}' | jq -r .digest)
-              syft ghcr.io/warewave-technology/olympos-$c@$digest -o spdx-json > sbom-$c.spdx.json
-              cosign sign --yes ghcr.io/warewave-technology/olympos-$c@$digest
-              cosign attest --yes --type spdxjson --predicate sbom-$c.spdx.json ghcr.io/warewave-technology/olympos-$c@$digest
-            fi
+            docker buildx build --platform linux/amd64 -f deploy/docker/$c.Dockerfile -t olympos-$c:ci .
           done
-      - name: Scan images
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          image-ref: ghcr.io/warewave-technology/olympos-agent:${{ github.sha }}
-          severity: CRITICAL,HIGH
-          exit-code: "0"
-
-  e2e:
-    needs: [go]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: {go-version-file: go.mod}
-      - uses: azure/setup-helm@v4
-      - uses: helm/kind-action@v1
-        with: {install_only: true}
-      - run: ./test/e2e/run.sh
