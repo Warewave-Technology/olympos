@@ -167,6 +167,8 @@ type BenchNodeResult struct {
 	Info           int    `json:"info"`
 	ControlPlaneNA bool   `json:"control_plane_na"`
 	Message        string `json:"message"`
+	// Checks is every kube-bench check of the node (run detail only).
+	Checks []BenchCheck `json:"checks"`
 }
 
 // Run is an audit run.
@@ -242,7 +244,7 @@ func GetRun(ctx context.Context, q store.Querier, id uuid.UUID) (Run, error) {
 }
 
 func benchNodes(ctx context.Context, q store.Querier, runID uuid.UUID) ([]BenchNodeResult, error) {
-	rows, err := q.Query(ctx, `SELECT node_name, benchmark, state, pass, fail, warn, info, control_plane_na, message
+	rows, err := q.Query(ctx, `SELECT node_name, benchmark, state, pass, fail, warn, info, control_plane_na, message, checks
 		FROM bench_node_results WHERE run_id = $1 ORDER BY node_name`, runID)
 	if err != nil {
 		return nil, err
@@ -251,8 +253,12 @@ func benchNodes(ctx context.Context, q store.Querier, runID uuid.UUID) ([]BenchN
 	out := []BenchNodeResult{}
 	for rows.Next() {
 		var b BenchNodeResult
-		if err := rows.Scan(&b.NodeName, &b.Benchmark, &b.State, &b.Pass, &b.Fail, &b.Warn, &b.Info, &b.ControlPlaneNA, &b.Message); err != nil {
+		var cj []byte
+		if err := rows.Scan(&b.NodeName, &b.Benchmark, &b.State, &b.Pass, &b.Fail, &b.Warn, &b.Info, &b.ControlPlaneNA, &b.Message, &cj); err != nil {
 			return nil, err
+		}
+		if err := json.Unmarshal(cj, &b.Checks); err != nil || b.Checks == nil {
+			b.Checks = []BenchCheck{}
 		}
 		out = append(out, b)
 	}
@@ -485,6 +491,7 @@ func (s *Service) execBench(ctx context.Context, rc runContext) outcome {
 			}
 			res.State = "succeeded"
 			res.Pass, res.Fail, res.Warn, res.Info = bn.Pass, bn.Fail, bn.Warn, bn.Info
+			res.Checks = bn.Checks
 			pass += bn.Pass
 			fail += bn.Fail
 			out.current = append(out.current, bn.Findings...)
@@ -578,9 +585,14 @@ func (s *Service) finish(ctx context.Context, rc runContext, out outcome) error 
 	var newCount, resolvedCount int
 	err := store.Tx(pctx, s.DB, func(tx pgx.Tx) error {
 		for _, n := range out.nodes {
+			checks := n.Checks
+			if checks == nil {
+				checks = []BenchCheck{}
+			}
+			cj, _ := json.Marshal(checks)
 			if _, err := tx.Exec(pctx, `UPDATE bench_node_results SET state = $3, pass = $4, fail = $5, warn = $6, info = $7,
-				control_plane_na = $8, message = $9, updated_at = now() WHERE run_id = $1 AND node_name = $2`,
-				rc.ID, n.NodeName, n.State, n.Pass, n.Fail, n.Warn, n.Info, n.ControlPlaneNA, truncate(n.Message, 500)); err != nil {
+				control_plane_na = $8, message = $9, checks = $10, updated_at = now() WHERE run_id = $1 AND node_name = $2`,
+				rc.ID, n.NodeName, n.State, n.Pass, n.Fail, n.Warn, n.Info, n.ControlPlaneNA, truncate(n.Message, 500), cj); err != nil {
 				return err
 			}
 		}

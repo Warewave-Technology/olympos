@@ -264,11 +264,29 @@ func NormalizePolaris(raw []byte) (Normalized, error) {
 // ---------------------------------------------------------------- kube-bench
 
 type kbResult struct {
-	TestNumber string `json:"test_number"`
-	TestDesc   string `json:"test_desc"`
-	Status     string `json:"status"`
-	Scored     bool   `json:"scored"`
-	Remedy     string `json:"remediation"`
+	TestNumber     string `json:"test_number"`
+	TestDesc       string `json:"test_desc"`
+	Status         string `json:"status"`
+	Scored         bool   `json:"scored"`
+	Remedy         string `json:"remediation"`
+	ActualValue    string `json:"actual_value"`
+	ExpectedResult string `json:"expected_result"`
+	Reason         string `json:"reason"`
+}
+
+// BenchCheck is one kube-bench check on one node (node detail view).
+type BenchCheck struct {
+	ID          string `json:"id"`
+	Section     string `json:"section"`
+	SectionText string `json:"section_text"`
+	NodeType    string `json:"node_type"`
+	Description string `json:"description"`
+	Status      string `json:"status"` // PASS | FAIL | WARN | INFO
+	Scored      bool   `json:"scored"`
+	Remediation string `json:"remediation"`
+	Actual      string `json:"actual_value,omitempty"`
+	Expected    string `json:"expected_result,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 type kbControls struct {
@@ -290,6 +308,7 @@ type BenchNode struct {
 	// "Control plane N/A · managed", never counted as failed or missing.
 	ControlPlaneNA bool
 	Findings       []findings.Finding
+	Checks         []BenchCheck
 }
 
 // controlPlaneTypes are kube-bench node_type values for control plane
@@ -324,6 +343,10 @@ func NormalizeKubeBench(raw []byte, nodeName, benchmark string, managed bool) (B
 		}
 		for _, t := range c.Tests {
 			for _, r := range t.Results {
+				out.Checks = append(out.Checks, BenchCheck{ID: r.TestNumber, Section: t.Section, SectionText: t.Desc,
+					NodeType: c.NodeType, Description: r.TestDesc, Status: strings.ToUpper(r.Status), Scored: r.Scored,
+					Remediation: truncate(r.Remedy, 2000), Actual: truncate(r.ActualValue, 500),
+					Expected: truncate(r.ExpectedResult, 500), Reason: truncate(r.Reason, 500)})
 				switch strings.ToUpper(r.Status) {
 				case "PASS":
 					out.Pass++

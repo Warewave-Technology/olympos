@@ -106,6 +106,19 @@ func TestNormalizeKubeBenchManaged(t *testing.T) {
 		bn.Findings[0].Severity != "high" {
 		t.Fatalf("findings = %+v", bn.Findings)
 	}
+	// Every counted result is kept as a check for the node detail view.
+	if len(bn.Checks) != bn.Pass+bn.Fail+bn.Warn+bn.Info {
+		t.Fatalf("checks = %d", len(bn.Checks))
+	}
+	var fail *BenchCheck
+	for i := range bn.Checks {
+		if bn.Checks[i].Status == "FAIL" {
+			fail = &bn.Checks[i]
+		}
+	}
+	if fail == nil || fail.ID != "3.1.3" || fail.Description == "" || fail.Section == "" || fail.NodeType == "" {
+		t.Fatalf("fail check = %+v", fail)
+	}
 }
 
 func TestNormalizeKubeBenchOnPremMaster(t *testing.T) {

@@ -198,9 +198,34 @@ func (a *API) getCluster(w http.ResponseWriter, r *http.Request) {
 
 var clusterNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 
+// ClusterNameLabel is the reserved, read-only label every cluster carries
+// (olympos.io/cluster=<name>) so scopes can target exactly one cluster.
+const ClusterNameLabel = "olympos.io/cluster"
+
+// reservedLabel reports keys users cannot set (olympos.io/ prefix).
+func reservedLabel(k string) bool { return strings.HasPrefix(k, "olympos.io/") }
+
+// withClusterLabel returns user labels plus the reserved cluster label.
+func withClusterLabel(name string, l map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range l {
+		if !reservedLabel(k) {
+			out[k] = v
+		}
+	}
+	out[ClusterNameLabel] = name
+	return out
+}
+
 // ValidateLabels checks Kubernetes-style label keys/values.
 func ValidateLabels(l map[string]string) error {
 	for k, v := range l {
+		if k == ClusterNameLabel {
+			continue // ignored on input, always set from the cluster name
+		}
+		if reservedLabel(k) {
+			return fmt.Errorf("label keys under olympos.io/ are reserved (olympos.io/cluster is set automatically)")
+		}
 		if errs := validation.IsQualifiedName(k); len(errs) > 0 {
 			return fmt.Errorf("label key %q: %s", k, strings.Join(errs, "; "))
 		}
@@ -252,7 +277,7 @@ func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
 	var exp time.Time
 	err := store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
 		err := tx.QueryRow(r.Context(), `INSERT INTO clusters (name, labels, bench_enabled, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
-			req.Name, req.Labels, req.BenchEnabled, httpx.ActorID(r)).Scan(&id)
+			req.Name, withClusterLabel(req.Name, req.Labels), req.BenchEnabled, httpx.ActorID(r)).Scan(&id)
 		if err != nil {
 			return err
 		}
@@ -411,7 +436,9 @@ func (a *API) patchCluster(w http.ResponseWriter, r *http.Request) {
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
 		details := map[string]any{}
 		if req.Labels != nil {
-			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET labels = $2 WHERE id = $1`, id, *req.Labels); err != nil {
+			// The reserved label is re-added; users cannot change or remove it.
+			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET labels = $2::jsonb || jsonb_build_object('olympos.io/cluster', name) WHERE id = $1`,
+				id, withClusterLabel("", *req.Labels)); err != nil {
 				return err
 			}
 			details["labels"] = *req.Labels

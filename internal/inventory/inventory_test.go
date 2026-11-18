@@ -148,3 +148,32 @@ func TestIngestAndDashboardScope(t *testing.T) {
 		t.Fatalf("agent.offline events: %d", n)
 	}
 }
+
+func TestReservedClusterLabel(t *testing.T) {
+	e := apitest.New(t, apitest.Options{})
+	admin := e.Login(e.Principal("admin", "Member", "admin"))
+	var created inventory.InstallResponse
+	if code := admin.Do("POST", "/api/v1/clusters", map[string]any{"name": "edge-1",
+		"labels": map[string]string{"env": "dev", inventory.ClusterNameLabel: "spoofed"}}, &created); code != 201 {
+		t.Fatal(code)
+	}
+	if l := created.Cluster.Labels; l[inventory.ClusterNameLabel] != "edge-1" || l["env"] != "dev" {
+		t.Fatalf("labels on create: %v", l)
+	}
+	id := created.Cluster.ID.String()
+	// Other olympos.io/ keys are refused.
+	if code := admin.Do("PATCH", "/api/v1/clusters/"+id, map[string]any{"labels": map[string]string{"olympos.io/tier": "x"}}, nil); code != http.StatusUnprocessableEntity {
+		t.Fatalf("reserved prefix accepted: %d", code)
+	}
+	// Removing or changing the cluster label is ignored.
+	if code := admin.Do("PATCH", "/api/v1/clusters/"+id, map[string]any{"labels": map[string]string{"team": "a"}}, nil); code != 200 {
+		t.Fatal(code)
+	}
+	var got struct {
+		Labels map[string]string `json:"labels"`
+	}
+	admin.Do("GET", "/api/v1/clusters/"+id, nil, &got)
+	if got.Labels[inventory.ClusterNameLabel] != "edge-1" || got.Labels["team"] != "a" || got.Labels["env"] != "" {
+		t.Fatalf("labels after patch: %v", got.Labels)
+	}
+}

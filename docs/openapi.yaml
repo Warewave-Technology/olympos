@@ -972,7 +972,7 @@ components:
       properties:
         id: {type: string}
         name: {type: string}
-        labels: {type: object, additionalProperties: {type: string}}
+        labels: {type: object, additionalProperties: {type: string}, description: "Always includes the reserved, read-only olympos.io/cluster=<name>. Other olympos.io/ keys are refused (422)."}
         provider: {type: string, enum: ["", azure, aws, gcp, oracle, huawei, onprem]}
         provider_label: {type: string, example: Azure}
         provider_override: {type: string}
@@ -1503,6 +1503,23 @@ components:
               message: {type: string}
               cluster_name: {type: string, description: "Optional. Set when one run covers several clusters."}
               duration_s: {type: number, description: "Optional. Job duration."}
+              checks:
+                type: array
+                description: Every kube-bench result for the node (control plane sections are omitted on managed clusters)
+                items:
+                  type: object
+                  properties:
+                    id: {type: string, example: "4.2.1"}
+                    section: {type: string, example: "4.2"}
+                    section_text: {type: string, example: Kubelet}
+                    node_type: {type: string, example: node}
+                    description: {type: string}
+                    status: {type: string, enum: [PASS, FAIL, WARN, INFO]}
+                    scored: {type: boolean}
+                    remediation: {type: string}
+                    actual_value: {type: string}
+                    expected_result: {type: string}
+                    reason: {type: string}
     Finding:
       type: object
       properties:
