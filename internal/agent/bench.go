@@ -236,11 +236,27 @@ func (b *benchRunner) result(ctx context.Context, job string) ([]byte, error) {
 	if len(data) > benchMaxLog {
 		return nil, fmt.Errorf("kube-bench output too large")
 	}
-	data = bytes.TrimSpace(data)
-	if !json.Valid(data) {
+	data = extractJSON(data)
+	if data == nil {
 		return nil, fmt.Errorf("kube-bench output is not JSON")
 	}
 	return data, nil
+}
+
+// extractJSON returns the kube-bench JSON document from a pod log. The log
+// mixes stdout and stderr, so warnings may surround the document; the first
+// line that parses as a JSON object wins.
+func extractJSON(log []byte) []byte {
+	if t := bytes.TrimSpace(log); json.Valid(t) {
+		return t
+	}
+	for _, line := range bytes.Split(log, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) > 0 && line[0] == '{' && json.Valid(line) {
+			return line
+		}
+	}
+	return nil
 }
 
 func jobFinished(j *batchv1.Job) (done, failed bool) {

@@ -150,7 +150,10 @@ func (t *TrivyCLI) Scan(ctx context.Context, ref string, auth *Auth) ([]byte, er
 		env = append(env, "TRIVY_USERNAME="+auth.Username, "TRIVY_PASSWORD="+pw)
 	}
 	out, stderr, err := t.run(ctx, env, "image", "--format", "json", "--quiet", "--skip-db-update", "--skip-java-db-update",
-		"--scanners", "vuln", "--image-src", "remote", "--timeout", t.timeout().String(), "--cache-dir", t.CacheDir, "--", ref)
+		"--scanners", "vuln", "--image-src", "remote", "--timeout", t.timeout().String(), "--cache-dir", t.CacheDir,
+		// Concurrent scans share the DB read-only; the per-scan layer cache
+		// stays in memory (the fs cache is a single locked bolt file).
+		"--cache-backend", "memory", "--", ref)
 	if err != nil {
 		msg := lastLines(stderr, 4)
 		if pw != "" {

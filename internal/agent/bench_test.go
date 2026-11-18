@@ -343,3 +343,13 @@ func TestBenchExtenderOnlyWhenEnabled(t *testing.T) {
 		t.Fatal("bench runner not installed")
 	}
 }
+
+func TestExtractJSONFromMixedLog(t *testing.T) {
+	log := []byte("W1118 15:22:40 util.go:93] Unable to find binary etcd\n{\"Controls\":[],\"Totals\":{}}\nI1118 done\n")
+	if got := extractJSON(log); string(got) != `{"Controls":[],"Totals":{}}` {
+		t.Fatalf("got %q", got)
+	}
+	if extractJSON([]byte("not json\n")) != nil {
+		t.Fatal("garbage accepted")
+	}
+}

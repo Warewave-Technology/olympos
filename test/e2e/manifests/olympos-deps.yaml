@@ -40,7 +40,7 @@ spec:
     spec:
       containers:
       - name: azurite
-        image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+        image: mcr.microsoft.com/azure-storage/azurite:3.37.0
         args: [azurite-blob, --blobHost, 0.0.0.0, --loose, --skipApiVersionCheck]
         ports: [{containerPort: 10000}]
 ---

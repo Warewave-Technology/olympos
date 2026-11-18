@@ -70,6 +70,7 @@ rules:
 - apiGroups:
   - ""
   resources:
+  - configmaps
   - serviceaccounts
   - limitranges
   - resourcequotas

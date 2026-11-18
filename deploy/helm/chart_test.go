@@ -86,7 +86,7 @@ func TestAgentClusterRoleGolden(t *testing.T) {
 	}
 	for _, r := range rules(t, cr) {
 		for _, res := range r.Resources {
-			if res == "secrets" || res == "configmaps" || strings.Contains(res, "/exec") || strings.Contains(res, "/attach") || strings.Contains(res, "/portforward") {
+			if res == "secrets" || strings.Contains(res, "/exec") || strings.Contains(res, "/attach") || strings.Contains(res, "/portforward") {
 				t.Errorf("forbidden resource %q in ClusterRole", res)
 			}
 		}

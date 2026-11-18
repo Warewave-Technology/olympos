@@ -28,8 +28,9 @@ rules:
   resources: [roles, rolebindings, clusterroles, clusterrolebindings]
   verbs: [get, list, watch]
 # Read-only extras for kubescape/polaris and workload ownership (§4.2 note).
+# ConfigMaps are read-only (polaris lists them; §4.2 forbids only writes).
 - apiGroups: [""]
-  resources: [serviceaccounts, limitranges, resourcequotas, persistentvolumes, persistentvolumeclaims, replicationcontrollers]
+  resources: [configmaps, serviceaccounts, limitranges, resourcequotas, persistentvolumes, persistentvolumeclaims, replicationcontrollers]
   verbs: [get, list, watch]
 - apiGroups: ["batch"]
   resources: [jobs, cronjobs]
