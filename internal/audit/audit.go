@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -170,23 +171,26 @@ type BenchNodeResult struct {
 
 // Run is an audit run.
 type Run struct {
-	ID               uuid.UUID         `json:"id"`
-	ScheduleID       *uuid.UUID        `json:"schedule_id"`
-	Tool             string            `json:"tool"`
-	ClusterID        uuid.UUID         `json:"cluster_id"`
-	ClusterName      string            `json:"cluster_name"`
-	Status           string            `json:"status"`
-	ScheduledFor     *time.Time        `json:"scheduled_for,omitempty"`
-	StartedAt        *time.Time        `json:"started_at"`
-	FinishedAt       *time.Time        `json:"finished_at"`
-	Score            *float64          `json:"score"`
-	NewFindings      int               `json:"new_findings"`
-	ResolvedFindings int               `json:"resolved_findings"`
-	RawBlobPath      string            `json:"raw_blob_path,omitempty"`
-	Error            string            `json:"error"`
-	Details          map[string]any    `json:"details,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	BenchNodes       []BenchNodeResult `json:"bench_nodes,omitempty"`
+	ID               uuid.UUID  `json:"id"`
+	ScheduleID       *uuid.UUID `json:"schedule_id"`
+	Tool             string     `json:"tool"`
+	ClusterID        uuid.UUID  `json:"cluster_id"`
+	ClusterName      string     `json:"cluster_name"`
+	Status           string     `json:"status"`
+	ScheduledFor     *time.Time `json:"scheduled_for,omitempty"`
+	StartedAt        *time.Time `json:"started_at"`
+	FinishedAt       *time.Time `json:"finished_at"`
+	Score            *float64   `json:"score"`
+	NewFindings      int        `json:"new_findings"`
+	ResolvedFindings int        `json:"resolved_findings"`
+	RawBlobPath      string     `json:"raw_blob_path,omitempty"`
+	Error            string     `json:"error"`
+	// Log is the captured console output of a failed kubescape/polaris run
+	// (redacted, last MaxLogBytes). Set by GetRun only (run detail).
+	Log        *string           `json:"log,omitempty"`
+	Details    map[string]any    `json:"details,omitempty"`
+	CreatedAt  time.Time         `json:"created_at"`
+	BenchNodes []BenchNodeResult `json:"bench_nodes,omitempty"`
 }
 
 const runSelect = `
@@ -224,6 +228,11 @@ func GetRun(ctx context.Context, q store.Querier, id uuid.UUID) (Run, error) {
 		return Run{}, store.ErrNotFound
 	}
 	r := runs[0]
+	var log string
+	if err := q.QueryRow(ctx, `SELECT log FROM audit_runs WHERE id = $1`, id).Scan(&log); err != nil {
+		return Run{}, store.NotFound(err)
+	}
+	r.Log = &log
 	if r.Tool == ToolKubeBench {
 		if r.BenchNodes, err = benchNodes(ctx, q, id); err != nil {
 			return Run{}, err
@@ -293,7 +302,8 @@ func (s *Service) loadRunContext(ctx context.Context, id uuid.UUID) (runContext,
 // outcome is a finished tool run, ready to be persisted.
 type outcome struct {
 	status   string // succeeded | failed
-	err      string
+	err      string // short reason
+	log      string // captured tool output (failed kubescape/polaris runs)
 	score    *float64
 	current  []findings.Finding
 	keepRefs []string // resource_refs whose open findings must not be resolved (partial runs)
@@ -350,6 +360,12 @@ func (s *Service) execTool(ctx context.Context, rc runContext) outcome {
 	raw, err := s.Exec(tctx, inv, proxy.Dir())
 	proxy.Close()
 	if err != nil {
+		var te *ToolError
+		if errors.As(err, &te) {
+			out := failed(Redact(te.Reason))
+			out.log = RedactLog(te.Log)
+			return out
+		}
 		return failed(Redact(err.Error()))
 	}
 	var n Normalized
@@ -585,8 +601,8 @@ func (s *Service) finish(ctx context.Context, rc runContext, out outcome) error 
 		}
 		d, _ := json.Marshal(out.details)
 		if _, err := tx.Exec(pctx, `UPDATE audit_runs SET status = $2, finished_at = now(), started_at = COALESCE(started_at, now()),
-			score = $3, new_findings = $4, resolved_findings = $5, raw_blob_path = $6, error = $7, details = $8 WHERE id = $1`,
-			rc.ID, out.status, out.score, newCount, resolvedCount, out.rawPath, truncate(out.err, 2000), d); err != nil {
+			score = $3, new_findings = $4, resolved_findings = $5, raw_blob_path = $6, error = $7, details = $8, log = $9 WHERE id = $1`,
+			rc.ID, out.status, out.score, newCount, resolvedCount, out.rawPath, truncate(out.err, 2000), d, out.log); err != nil {
 			return err
 		}
 		if newCount > 0 {

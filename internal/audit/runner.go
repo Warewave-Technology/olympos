@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -215,11 +216,27 @@ func PolarisInvocation(bin, kubeconfig, workDir string) Invocation {
 }
 
 // Exec runs an invocation and returns the JSON output. It is a variable so
-// tests can stub it.
+// tests can stub it. A failure should be a *ToolError so the run keeps a
+// short reason and the captured output apart.
 type Exec func(ctx context.Context, inv Invocation, workDir string) ([]byte, error)
 
-// ExecTool runs inv with a timeout, captures stderr (redacted, truncated) for
-// error messages and reads the output file.
+// MaxLogBytes caps the captured console output of a tool run (the tail is
+// kept: errors come last).
+const MaxLogBytes = 256 << 10
+
+// ToolError is a failed kubescape/polaris run. Reason is short and human
+// (audit_runs.error, e.g. "kubescape failed: framework 'x' not found"); Log
+// is the captured console output (audit_runs.log, run detail only). Both
+// are redacted by the caller before they are stored.
+type ToolError struct {
+	Reason string
+	Log    string
+}
+
+func (e *ToolError) Error() string { return e.Reason }
+
+// ExecTool runs inv with a timeout, captures the console output (stderr,
+// plus stdout when the report goes to a file) and reads the output file.
 func ExecTool(ctx context.Context, inv Invocation, workDir string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, inv.Bin, inv.Args...)
 	cmd.Dir = workDir
@@ -237,13 +254,18 @@ func ExecTool(ctx context.Context, inv Invocation, workDir string) ([]byte, erro
 	}
 	cmd.Env = append(env, inv.Env...)
 	var stdout bytes.Buffer
-	stderr := &tailBuffer{max: 16 << 10}
+	console := &tailBuffer{max: MaxLogBytes}
 	cmd.Stdout = &limitWriter{w: &stdout, n: maxRawBytes}
-	cmd.Stderr = stderr
+	if inv.OutputFile != "" {
+		// The report goes to a file: stdout is console output too.
+		cmd.Stdout = console
+	}
+	cmd.Stderr = console
 	cmd.WaitDelay = 10 * time.Second
 	err := cmd.Run()
+	tool := filepath.Base(inv.Bin)
 	if ctx.Err() != nil {
-		return nil, fmt.Errorf("%s timed out or was cancelled: %w", filepath.Base(inv.Bin), ctx.Err())
+		return nil, &ToolError{Reason: fmt.Sprintf("%s timed out or was cancelled: %v", tool, ctx.Err()), Log: console.String()}
 	}
 	var raw []byte
 	if inv.OutputFile != "" {
@@ -261,12 +283,130 @@ func ExecTool(ctx context.Context, inv Invocation, workDir string) ([]byte, erro
 		if errors.As(err, &ee) && len(bytes.TrimSpace(raw)) > 0 {
 			return raw, nil
 		}
-		return nil, fmt.Errorf("%s failed: %v: %s", filepath.Base(inv.Bin), err, Redact(stderr.String()))
+		reason := ShortReason(console.String())
+		if reason == "" {
+			reason = err.Error()
+		}
+		return nil, &ToolError{Reason: tool + " failed: " + reason, Log: console.String()}
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return nil, fmt.Errorf("%s produced no output: %s", filepath.Base(inv.Bin), Redact(stderr.String()))
+		reason := "produced no output"
+		if r := ShortReason(console.String()); r != "" {
+			reason += ": " + r
+		}
+		return nil, &ToolError{Reason: tool + " " + reason, Log: console.String()}
 	}
 	return raw, nil
+}
+
+// maxReasonRunes bounds the short reason stored in audit_runs.error.
+const maxReasonRunes = 300
+
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+
+var logfmtLevelRe = regexp.MustCompile(`(?i)\blevel=(error|fatal|panic)\b`)
+var logfmtMsgRe = regexp.MustCompile(`\bmsg=("(?:[^"\\]|\\.)*"|\S+)`)
+
+// ShortReason picks a one-line human reason from a tool's console output:
+// the last "Error: …" line (cobra, e.g. kubescape's "Error: framework 'x'
+// not found"), else the message of the last error-level log line (JSON as
+// kubescape writes with --logger json, or logrus/logfmt as polaris writes),
+// else the last non-empty line. "" when the output is empty.
+func ShortReason(console string) string {
+	lines := strings.Split(ansiRe.ReplaceAllString(console, ""), "\n")
+	pick := func() string {
+		for i := len(lines) - 1; i >= 0; i-- {
+			l := strings.TrimSpace(lines[i])
+			if rest, ok := strings.CutPrefix(l, "Error: "); ok && strings.TrimSpace(rest) != "" {
+				return strings.TrimSpace(rest)
+			}
+		}
+		for i := len(lines) - 1; i >= 0; i-- {
+			if m := errorLogMessage(strings.TrimSpace(lines[i])); m != "" {
+				return m
+			}
+		}
+		for i := len(lines) - 1; i >= 0; i-- {
+			if l := strings.TrimSpace(lines[i]); l != "" {
+				if m := jsonLogMessage(l); m != "" {
+					return m
+				}
+				return l
+			}
+		}
+		return ""
+	}
+	r := Redact(pick())
+	if rs := []rune(r); len(rs) > maxReasonRunes {
+		r = string(rs[:maxReasonRunes-1]) + "…"
+	}
+	return r
+}
+
+// errorLogMessage returns the message of an error-level JSON or logfmt log
+// line ("" for other lines).
+func errorLogMessage(l string) string {
+	if strings.HasPrefix(l, "{") {
+		var m map[string]any
+		if json.Unmarshal([]byte(l), &m) != nil {
+			return ""
+		}
+		level := strings.ToLower(firstString(m, "level", "lvl", "severity"))
+		if level != "error" && level != "fatal" && level != "panic" && level != "dpanic" {
+			return ""
+		}
+		return jsonLogMessage(l)
+	}
+	if logfmtLevelRe.MatchString(l) {
+		if mm := logfmtMsgRe.FindStringSubmatch(l); mm != nil {
+			msg := mm[1]
+			if uq, err := strconv.Unquote(msg); err == nil {
+				msg = uq
+			}
+			return strings.TrimSpace(msg)
+		}
+		return l
+	}
+	return ""
+}
+
+// jsonLogMessage returns "msg: error" of a JSON log line ("" if not JSON).
+func jsonLogMessage(l string) string {
+	if !strings.HasPrefix(l, "{") {
+		return ""
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(l), &m) != nil {
+		return ""
+	}
+	msg := firstString(m, "msg", "message")
+	if e := firstString(m, "error", "err"); e != "" && !strings.Contains(msg, e) {
+		if msg == "" {
+			return e
+		}
+		msg += ": " + e
+	}
+	return strings.TrimSpace(msg)
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := m[k].(string); ok && s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// RedactLog prepares captured console output for storage: token-like
+// values redacted, NUL bytes and invalid UTF-8 removed (Postgres text),
+// capped to the last MaxLogBytes.
+func RedactLog(s string) string {
+	s = redactAll(strings.ToValidUTF8(strings.ReplaceAll(s, "\x00", ""), ""))
+	if len(s) > MaxLogBytes {
+		s = strings.ToValidUTF8(s[len(s)-MaxLogBytes:], "")
+	}
+	return s
 }
 
 func readCapped(path string) ([]byte, error) {
@@ -291,9 +431,7 @@ var redactPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`), // JWT
 }
 
-// Redact removes token-like values from tool output before it is stored or
-// logged, and truncates it.
-func Redact(s string) string {
+func redactAll(s string) string {
 	for _, re := range redactPatterns {
 		if re.NumSubexp() > 0 {
 			s = re.ReplaceAllString(s, "${1}[REDACTED]")
@@ -301,7 +439,13 @@ func Redact(s string) string {
 			s = re.ReplaceAllString(s, "[REDACTED]")
 		}
 	}
-	s = strings.TrimSpace(s)
+	return s
+}
+
+// Redact removes token-like values from tool output before it is stored or
+// logged, and truncates it.
+func Redact(s string) string {
+	s = strings.TrimSpace(redactAll(s))
 	if len(s) > 2000 {
 		s = "…" + s[len(s)-2000:]
 	}

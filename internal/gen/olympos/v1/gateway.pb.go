@@ -1295,7 +1295,14 @@ type KyvernoPolicy struct {
 	// ClusterPolicy | Policy (kyverno.io/v1, legacy) or ValidatingPolicy |
 	// NamespacedValidatingPolicy | ImageValidatingPolicy |
 	// NamespacedImageValidatingPolicy (policies.kyverno.io/v1, Kyverno ≥ 1.17).
-	Kind          string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
+	Kind string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
+	// The policy object as JSON: apiVersion, kind, metadata (name, namespace
+	// and policies.kyverno.io/* annotations only) and spec. No status,
+	// managedFields or other annotations. Empty when spec_omitted.
+	ObjectJson []byte `protobuf:"bytes,7,opt,name=object_json,json=objectJson,proto3" json:"object_json,omitempty"`
+	// The object was larger than the agent's per-policy cap (or the report's
+	// total budget) and was not sent.
+	SpecOmitted   bool `protobuf:"varint,8,opt,name=spec_omitted,json=specOmitted,proto3" json:"spec_omitted,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1370,6 +1377,20 @@ func (x *KyvernoPolicy) GetKind() string {
 		return x.Kind
 	}
 	return ""
+}
+
+func (x *KyvernoPolicy) GetObjectJson() []byte {
+	if x != nil {
+		return x.ObjectJson
+	}
+	return nil
+}
+
+func (x *KyvernoPolicy) GetSpecOmitted() bool {
+	if x != nil {
+		return x.SpecOmitted
+	}
+	return false
 }
 
 type KyvernoResult struct {
@@ -1540,8 +1561,11 @@ type NetworkPolicy struct {
 	PolicyTypes    []string               `protobuf:"bytes,4,rep,name=policy_types,json=policyTypes,proto3" json:"policy_types,omitempty"`
 	IngressRules   int32                  `protobuf:"varint,5,opt,name=ingress_rules,json=ingressRules,proto3" json:"ingress_rules,omitempty"`
 	EgressRules    int32                  `protobuf:"varint,6,opt,name=egress_rules,json=egressRules,proto3" json:"egress_rules,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// networking.k8s.io/v1 NetworkPolicySpec as JSON (empty when larger than
+	// the agent's cap).
+	SpecJson      []byte `protobuf:"bytes,7,opt,name=spec_json,json=specJson,proto3" json:"spec_json,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NetworkPolicy) Reset() {
@@ -1616,17 +1640,159 @@ func (x *NetworkPolicy) GetEgressRules() int32 {
 	return 0
 }
 
-type NetworkPolicyReport struct {
+func (x *NetworkPolicy) GetSpecJson() []byte {
+	if x != nil {
+		return x.SpecJson
+	}
+	return nil
+}
+
+// NamespaceLabels are a namespace's labels (namespaceSelector examples).
+type NamespaceLabels struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespaces    []string               `protobuf:"bytes,1,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
-	Policies      []*NetworkPolicy       `protobuf:"bytes,2,rep,name=policies,proto3" json:"policies,omitempty"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Labels        map[string]string      `protobuf:"bytes,2,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NamespaceLabels) Reset() {
+	*x = NamespaceLabels{}
+	mi := &file_olympos_v1_gateway_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NamespaceLabels) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NamespaceLabels) ProtoMessage() {}
+
+func (x *NamespaceLabels) ProtoReflect() protoreflect.Message {
+	mi := &file_olympos_v1_gateway_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NamespaceLabels.ProtoReflect.Descriptor instead.
+func (*NamespaceLabels) Descriptor() ([]byte, []int) {
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *NamespaceLabels) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *NamespaceLabels) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+// Workload is a Deployment, StatefulSet or DaemonSet with its pod template
+// labels and container ports (podSelector examples). Nothing else from the
+// workload spec is sent.
+type Workload struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"`
+	Kind          string                 `protobuf:"bytes,2,opt,name=kind,proto3" json:"kind,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	Labels        map[string]string      `protobuf:"bytes,4,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Ports         []int32                `protobuf:"varint,5,rep,packed,name=ports,proto3" json:"ports,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Workload) Reset() {
+	*x = Workload{}
+	mi := &file_olympos_v1_gateway_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Workload) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Workload) ProtoMessage() {}
+
+func (x *Workload) ProtoReflect() protoreflect.Message {
+	mi := &file_olympos_v1_gateway_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Workload.ProtoReflect.Descriptor instead.
+func (*Workload) Descriptor() ([]byte, []int) {
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *Workload) GetNamespace() string {
+	if x != nil {
+		return x.Namespace
+	}
+	return ""
+}
+
+func (x *Workload) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+func (x *Workload) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *Workload) GetLabels() map[string]string {
+	if x != nil {
+		return x.Labels
+	}
+	return nil
+}
+
+func (x *Workload) GetPorts() []int32 {
+	if x != nil {
+		return x.Ports
+	}
+	return nil
+}
+
+type NetworkPolicyReport struct {
+	state           protoimpl.MessageState `protogen:"open.v1"`
+	Namespaces      []string               `protobuf:"bytes,1,rep,name=namespaces,proto3" json:"namespaces,omitempty"`
+	Policies        []*NetworkPolicy       `protobuf:"bytes,2,rep,name=policies,proto3" json:"policies,omitempty"`
+	NamespaceLabels []*NamespaceLabels     `protobuf:"bytes,3,rep,name=namespace_labels,json=namespaceLabels,proto3" json:"namespace_labels,omitempty"`
+	// At most ~50 per namespace.
+	Workloads     []*Workload `protobuf:"bytes,4,rep,name=workloads,proto3" json:"workloads,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NetworkPolicyReport) Reset() {
 	*x = NetworkPolicyReport{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[19]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1638,7 +1804,7 @@ func (x *NetworkPolicyReport) String() string {
 func (*NetworkPolicyReport) ProtoMessage() {}
 
 func (x *NetworkPolicyReport) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[19]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1651,7 +1817,7 @@ func (x *NetworkPolicyReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NetworkPolicyReport.ProtoReflect.Descriptor instead.
 func (*NetworkPolicyReport) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{19}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *NetworkPolicyReport) GetNamespaces() []string {
@@ -1664,6 +1830,20 @@ func (x *NetworkPolicyReport) GetNamespaces() []string {
 func (x *NetworkPolicyReport) GetPolicies() []*NetworkPolicy {
 	if x != nil {
 		return x.Policies
+	}
+	return nil
+}
+
+func (x *NetworkPolicyReport) GetNamespaceLabels() []*NamespaceLabels {
+	if x != nil {
+		return x.NamespaceLabels
+	}
+	return nil
+}
+
+func (x *NetworkPolicyReport) GetWorkloads() []*Workload {
+	if x != nil {
+		return x.Workloads
 	}
 	return nil
 }
@@ -1682,7 +1862,7 @@ type ImageUse struct {
 
 func (x *ImageUse) Reset() {
 	*x = ImageUse{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[20]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1694,7 +1874,7 @@ func (x *ImageUse) String() string {
 func (*ImageUse) ProtoMessage() {}
 
 func (x *ImageUse) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[20]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1707,7 +1887,7 @@ func (x *ImageUse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageUse.ProtoReflect.Descriptor instead.
 func (*ImageUse) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{20}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ImageUse) GetImage() string {
@@ -1761,7 +1941,7 @@ type ImageReport struct {
 
 func (x *ImageReport) Reset() {
 	*x = ImageReport{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[21]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1773,7 +1953,7 @@ func (x *ImageReport) String() string {
 func (*ImageReport) ProtoMessage() {}
 
 func (x *ImageReport) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[21]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1786,7 +1966,7 @@ func (x *ImageReport) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImageReport.ProtoReflect.Descriptor instead.
 func (*ImageReport) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{21}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ImageReport) GetUses() []*ImageUse {
@@ -1807,7 +1987,7 @@ type OpenTunnel struct {
 
 func (x *OpenTunnel) Reset() {
 	*x = OpenTunnel{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[22]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1819,7 +1999,7 @@ func (x *OpenTunnel) String() string {
 func (*OpenTunnel) ProtoMessage() {}
 
 func (x *OpenTunnel) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[22]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1832,7 +2012,7 @@ func (x *OpenTunnel) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenTunnel.ProtoReflect.Descriptor instead.
 func (*OpenTunnel) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{22}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *OpenTunnel) GetTunnelId() string {
@@ -1865,7 +2045,7 @@ type OpenAPIProxy struct {
 
 func (x *OpenAPIProxy) Reset() {
 	*x = OpenAPIProxy{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[23]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1877,7 +2057,7 @@ func (x *OpenAPIProxy) String() string {
 func (*OpenAPIProxy) ProtoMessage() {}
 
 func (x *OpenAPIProxy) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[23]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1890,7 +2070,7 @@ func (x *OpenAPIProxy) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OpenAPIProxy.ProtoReflect.Descriptor instead.
 func (*OpenAPIProxy) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{23}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *OpenAPIProxy) GetTunnelId() string {
@@ -1909,7 +2089,7 @@ type TunnelAccepted struct {
 
 func (x *TunnelAccepted) Reset() {
 	*x = TunnelAccepted{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[24]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1921,7 +2101,7 @@ func (x *TunnelAccepted) String() string {
 func (*TunnelAccepted) ProtoMessage() {}
 
 func (x *TunnelAccepted) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[24]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1934,7 +2114,7 @@ func (x *TunnelAccepted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelAccepted.ProtoReflect.Descriptor instead.
 func (*TunnelAccepted) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{24}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *TunnelAccepted) GetTunnelId() string {
@@ -1954,7 +2134,7 @@ type TunnelRejected struct {
 
 func (x *TunnelRejected) Reset() {
 	*x = TunnelRejected{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[25]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1966,7 +2146,7 @@ func (x *TunnelRejected) String() string {
 func (*TunnelRejected) ProtoMessage() {}
 
 func (x *TunnelRejected) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[25]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1979,7 +2159,7 @@ func (x *TunnelRejected) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelRejected.ProtoReflect.Descriptor instead.
 func (*TunnelRejected) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{25}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *TunnelRejected) GetTunnelId() string {
@@ -2007,7 +2187,7 @@ type TunnelFrame struct {
 
 func (x *TunnelFrame) Reset() {
 	*x = TunnelFrame{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[26]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2019,7 +2199,7 @@ func (x *TunnelFrame) String() string {
 func (*TunnelFrame) ProtoMessage() {}
 
 func (x *TunnelFrame) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[26]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2032,7 +2212,7 @@ func (x *TunnelFrame) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TunnelFrame.ProtoReflect.Descriptor instead.
 func (*TunnelFrame) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{26}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *TunnelFrame) GetTunnelId() string {
@@ -2067,7 +2247,7 @@ type RunBench struct {
 
 func (x *RunBench) Reset() {
 	*x = RunBench{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[27]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2079,7 +2259,7 @@ func (x *RunBench) String() string {
 func (*RunBench) ProtoMessage() {}
 
 func (x *RunBench) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[27]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2092,7 +2272,7 @@ func (x *RunBench) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RunBench.ProtoReflect.Descriptor instead.
 func (*RunBench) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{27}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *RunBench) GetRunId() string {
@@ -2128,7 +2308,7 @@ type BenchStatus struct {
 
 func (x *BenchStatus) Reset() {
 	*x = BenchStatus{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[28]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2140,7 +2320,7 @@ func (x *BenchStatus) String() string {
 func (*BenchStatus) ProtoMessage() {}
 
 func (x *BenchStatus) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[28]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2153,7 +2333,7 @@ func (x *BenchStatus) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchStatus.ProtoReflect.Descriptor instead.
 func (*BenchStatus) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{28}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *BenchStatus) GetRunId() string {
@@ -2196,7 +2376,7 @@ type BenchResultChunk struct {
 
 func (x *BenchResultChunk) Reset() {
 	*x = BenchResultChunk{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[29]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2208,7 +2388,7 @@ func (x *BenchResultChunk) String() string {
 func (*BenchResultChunk) ProtoMessage() {}
 
 func (x *BenchResultChunk) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[29]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2221,7 +2401,7 @@ func (x *BenchResultChunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BenchResultChunk.ProtoReflect.Descriptor instead.
 func (*BenchResultChunk) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{29}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *BenchResultChunk) GetRunId() string {
@@ -2260,7 +2440,7 @@ type RequestResync struct {
 
 func (x *RequestResync) Reset() {
 	*x = RequestResync{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[30]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2272,7 +2452,7 @@ func (x *RequestResync) String() string {
 func (*RequestResync) ProtoMessage() {}
 
 func (x *RequestResync) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[30]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2285,7 +2465,7 @@ func (x *RequestResync) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RequestResync.ProtoReflect.Descriptor instead.
 func (*RequestResync) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{30}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{32}
 }
 
 type Ping struct {
@@ -2297,7 +2477,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[31]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2309,7 +2489,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[31]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2322,7 +2502,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{31}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Ping) GetUnixNano() int64 {
@@ -2341,7 +2521,7 @@ type Pong struct {
 
 func (x *Pong) Reset() {
 	*x = Pong{}
-	mi := &file_olympos_v1_gateway_proto_msgTypes[32]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2353,7 +2533,7 @@ func (x *Pong) String() string {
 func (*Pong) ProtoMessage() {}
 
 func (x *Pong) ProtoReflect() protoreflect.Message {
-	mi := &file_olympos_v1_gateway_proto_msgTypes[32]
+	mi := &file_olympos_v1_gateway_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2366,7 +2546,7 @@ func (x *Pong) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pong.ProtoReflect.Descriptor instead.
 func (*Pong) Descriptor() ([]byte, []int) {
-	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{32}
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *Pong) GetUnixNano() int64 {
@@ -2476,14 +2656,17 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\akyverno\x18\x01 \x01(\v2\x19.olympos.v1.KyvernoReportH\x00R\akyverno\x12L\n" +
 	"\x10network_policies\x18\x02 \x01(\v2\x1f.olympos.v1.NetworkPolicyReportH\x00R\x0fnetworkPolicies\x121\n" +
 	"\x06images\x18\x03 \x01(\v2\x17.olympos.v1.ImageReportH\x00R\x06imagesB\b\n" +
-	"\x06report\"\x95\x01\n" +
+	"\x06report\"\xd9\x01\n" +
 	"\rKyvernoPolicy\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
 	"\x04mode\x18\x03 \x01(\tR\x04mode\x12\x14\n" +
 	"\x05rules\x18\x04 \x03(\tR\x05rules\x12\x14\n" +
 	"\x05ready\x18\x05 \x01(\bR\x05ready\x12\x12\n" +
-	"\x04kind\x18\x06 \x01(\tR\x04kind\"\x82\x02\n" +
+	"\x04kind\x18\x06 \x01(\tR\x04kind\x12\x1f\n" +
+	"\vobject_json\x18\a \x01(\fR\n" +
+	"objectJson\x12!\n" +
+	"\fspec_omitted\x18\b \x01(\bR\vspecOmitted\"\x82\x02\n" +
 	"\rKyvernoResult\x12\x16\n" +
 	"\x06policy\x18\x01 \x01(\tR\x06policy\x12\x12\n" +
 	"\x04rule\x18\x02 \x01(\tR\x04rule\x12\x16\n" +
@@ -2496,19 +2679,37 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\rKyvernoReport\x12\x1c\n" +
 	"\tinstalled\x18\x01 \x01(\bR\tinstalled\x125\n" +
 	"\bpolicies\x18\x02 \x03(\v2\x19.olympos.v1.KyvernoPolicyR\bpolicies\x123\n" +
-	"\aresults\x18\x03 \x03(\v2\x19.olympos.v1.KyvernoResultR\aresults\"\xd6\x01\n" +
+	"\aresults\x18\x03 \x03(\v2\x19.olympos.v1.KyvernoResultR\aresults\"\xf3\x01\n" +
 	"\rNetworkPolicy\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12(\n" +
 	"\x10selects_all_pods\x18\x03 \x01(\bR\x0eselectsAllPods\x12!\n" +
 	"\fpolicy_types\x18\x04 \x03(\tR\vpolicyTypes\x12#\n" +
 	"\ringress_rules\x18\x05 \x01(\x05R\fingressRules\x12!\n" +
-	"\fegress_rules\x18\x06 \x01(\x05R\vegressRules\"l\n" +
+	"\fegress_rules\x18\x06 \x01(\x05R\vegressRules\x12\x1b\n" +
+	"\tspec_json\x18\a \x01(\fR\bspecJson\"\xa1\x01\n" +
+	"\x0fNamespaceLabels\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12?\n" +
+	"\x06labels\x18\x02 \x03(\v2'.olympos.v1.NamespaceLabels.LabelsEntryR\x06labels\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xdb\x01\n" +
+	"\bWorkload\x12\x1c\n" +
+	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
+	"\x04kind\x18\x02 \x01(\tR\x04kind\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name\x128\n" +
+	"\x06labels\x18\x04 \x03(\v2 .olympos.v1.Workload.LabelsEntryR\x06labels\x12\x14\n" +
+	"\x05ports\x18\x05 \x03(\x05R\x05ports\x1a9\n" +
+	"\vLabelsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xe8\x01\n" +
 	"\x13NetworkPolicyReport\x12\x1e\n" +
 	"\n" +
 	"namespaces\x18\x01 \x03(\tR\n" +
 	"namespaces\x125\n" +
-	"\bpolicies\x18\x02 \x03(\v2\x19.olympos.v1.NetworkPolicyR\bpolicies\"\xbe\x01\n" +
+	"\bpolicies\x18\x02 \x03(\v2\x19.olympos.v1.NetworkPolicyR\bpolicies\x12F\n" +
+	"\x10namespace_labels\x18\x03 \x03(\v2\x1b.olympos.v1.NamespaceLabelsR\x0fnamespaceLabels\x122\n" +
+	"\tworkloads\x18\x04 \x03(\v2\x14.olympos.v1.WorkloadR\tworkloads\"\xbe\x01\n" +
 	"\bImageUse\x12\x14\n" +
 	"\x05image\x18\x01 \x01(\tR\x05image\x12\x16\n" +
 	"\x06digest\x18\x02 \x01(\tR\x06digest\x12\x1c\n" +
@@ -2573,7 +2774,7 @@ func file_olympos_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_olympos_v1_gateway_proto_rawDescData
 }
 
-var file_olympos_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_olympos_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 37)
 var file_olympos_v1_gateway_proto_goTypes = []any{
 	(*EnrollRequest)(nil),       // 0: olympos.v1.EnrollRequest
 	(*EnrollResponse)(nil),      // 1: olympos.v1.EnrollResponse
@@ -2594,20 +2795,24 @@ var file_olympos_v1_gateway_proto_goTypes = []any{
 	(*KyvernoResult)(nil),       // 16: olympos.v1.KyvernoResult
 	(*KyvernoReport)(nil),       // 17: olympos.v1.KyvernoReport
 	(*NetworkPolicy)(nil),       // 18: olympos.v1.NetworkPolicy
-	(*NetworkPolicyReport)(nil), // 19: olympos.v1.NetworkPolicyReport
-	(*ImageUse)(nil),            // 20: olympos.v1.ImageUse
-	(*ImageReport)(nil),         // 21: olympos.v1.ImageReport
-	(*OpenTunnel)(nil),          // 22: olympos.v1.OpenTunnel
-	(*OpenAPIProxy)(nil),        // 23: olympos.v1.OpenAPIProxy
-	(*TunnelAccepted)(nil),      // 24: olympos.v1.TunnelAccepted
-	(*TunnelRejected)(nil),      // 25: olympos.v1.TunnelRejected
-	(*TunnelFrame)(nil),         // 26: olympos.v1.TunnelFrame
-	(*RunBench)(nil),            // 27: olympos.v1.RunBench
-	(*BenchStatus)(nil),         // 28: olympos.v1.BenchStatus
-	(*BenchResultChunk)(nil),    // 29: olympos.v1.BenchResultChunk
-	(*RequestResync)(nil),       // 30: olympos.v1.RequestResync
-	(*Ping)(nil),                // 31: olympos.v1.Ping
-	(*Pong)(nil),                // 32: olympos.v1.Pong
+	(*NamespaceLabels)(nil),     // 19: olympos.v1.NamespaceLabels
+	(*Workload)(nil),            // 20: olympos.v1.Workload
+	(*NetworkPolicyReport)(nil), // 21: olympos.v1.NetworkPolicyReport
+	(*ImageUse)(nil),            // 22: olympos.v1.ImageUse
+	(*ImageReport)(nil),         // 23: olympos.v1.ImageReport
+	(*OpenTunnel)(nil),          // 24: olympos.v1.OpenTunnel
+	(*OpenAPIProxy)(nil),        // 25: olympos.v1.OpenAPIProxy
+	(*TunnelAccepted)(nil),      // 26: olympos.v1.TunnelAccepted
+	(*TunnelRejected)(nil),      // 27: olympos.v1.TunnelRejected
+	(*TunnelFrame)(nil),         // 28: olympos.v1.TunnelFrame
+	(*RunBench)(nil),            // 29: olympos.v1.RunBench
+	(*BenchStatus)(nil),         // 30: olympos.v1.BenchStatus
+	(*BenchResultChunk)(nil),    // 31: olympos.v1.BenchResultChunk
+	(*RequestResync)(nil),       // 32: olympos.v1.RequestResync
+	(*Ping)(nil),                // 33: olympos.v1.Ping
+	(*Pong)(nil),                // 34: olympos.v1.Pong
+	nil,                         // 35: olympos.v1.NamespaceLabels.LabelsEntry
+	nil,                         // 36: olympos.v1.Workload.LabelsEntry
 }
 var file_olympos_v1_gateway_proto_depIdxs = []int32{
 	6,  // 0: olympos.v1.AgentMessage.hello:type_name -> olympos.v1.Hello
@@ -2616,41 +2821,45 @@ var file_olympos_v1_gateway_proto_depIdxs = []int32{
 	12, // 3: olympos.v1.AgentMessage.target_upsert:type_name -> olympos.v1.TargetUpsert
 	13, // 4: olympos.v1.AgentMessage.target_delete:type_name -> olympos.v1.TargetDelete
 	14, // 5: olympos.v1.AgentMessage.report:type_name -> olympos.v1.ResourceReport
-	24, // 6: olympos.v1.AgentMessage.tunnel_accepted:type_name -> olympos.v1.TunnelAccepted
-	25, // 7: olympos.v1.AgentMessage.tunnel_rejected:type_name -> olympos.v1.TunnelRejected
-	28, // 8: olympos.v1.AgentMessage.bench_status:type_name -> olympos.v1.BenchStatus
-	29, // 9: olympos.v1.AgentMessage.bench_result:type_name -> olympos.v1.BenchResultChunk
-	32, // 10: olympos.v1.AgentMessage.pong:type_name -> olympos.v1.Pong
-	22, // 11: olympos.v1.ServerMessage.open_tunnel:type_name -> olympos.v1.OpenTunnel
-	23, // 12: olympos.v1.ServerMessage.open_api_proxy:type_name -> olympos.v1.OpenAPIProxy
-	27, // 13: olympos.v1.ServerMessage.run_bench:type_name -> olympos.v1.RunBench
-	30, // 14: olympos.v1.ServerMessage.resync:type_name -> olympos.v1.RequestResync
-	31, // 15: olympos.v1.ServerMessage.ping:type_name -> olympos.v1.Ping
+	26, // 6: olympos.v1.AgentMessage.tunnel_accepted:type_name -> olympos.v1.TunnelAccepted
+	27, // 7: olympos.v1.AgentMessage.tunnel_rejected:type_name -> olympos.v1.TunnelRejected
+	30, // 8: olympos.v1.AgentMessage.bench_status:type_name -> olympos.v1.BenchStatus
+	31, // 9: olympos.v1.AgentMessage.bench_result:type_name -> olympos.v1.BenchResultChunk
+	34, // 10: olympos.v1.AgentMessage.pong:type_name -> olympos.v1.Pong
+	24, // 11: olympos.v1.ServerMessage.open_tunnel:type_name -> olympos.v1.OpenTunnel
+	25, // 12: olympos.v1.ServerMessage.open_api_proxy:type_name -> olympos.v1.OpenAPIProxy
+	29, // 13: olympos.v1.ServerMessage.run_bench:type_name -> olympos.v1.RunBench
+	32, // 14: olympos.v1.ServerMessage.resync:type_name -> olympos.v1.RequestResync
+	33, // 15: olympos.v1.ServerMessage.ping:type_name -> olympos.v1.Ping
 	7,  // 16: olympos.v1.Hello.capabilities:type_name -> olympos.v1.Capabilities
 	8,  // 17: olympos.v1.InventorySnapshot.nodes:type_name -> olympos.v1.Node
 	11, // 18: olympos.v1.InventorySnapshot.targets:type_name -> olympos.v1.Target
 	8,  // 19: olympos.v1.InventoryDiff.upserted_nodes:type_name -> olympos.v1.Node
 	11, // 20: olympos.v1.TargetUpsert.target:type_name -> olympos.v1.Target
 	17, // 21: olympos.v1.ResourceReport.kyverno:type_name -> olympos.v1.KyvernoReport
-	19, // 22: olympos.v1.ResourceReport.network_policies:type_name -> olympos.v1.NetworkPolicyReport
-	21, // 23: olympos.v1.ResourceReport.images:type_name -> olympos.v1.ImageReport
+	21, // 22: olympos.v1.ResourceReport.network_policies:type_name -> olympos.v1.NetworkPolicyReport
+	23, // 23: olympos.v1.ResourceReport.images:type_name -> olympos.v1.ImageReport
 	15, // 24: olympos.v1.KyvernoReport.policies:type_name -> olympos.v1.KyvernoPolicy
 	16, // 25: olympos.v1.KyvernoReport.results:type_name -> olympos.v1.KyvernoResult
-	18, // 26: olympos.v1.NetworkPolicyReport.policies:type_name -> olympos.v1.NetworkPolicy
-	20, // 27: olympos.v1.ImageReport.uses:type_name -> olympos.v1.ImageUse
-	0,  // 28: olympos.v1.AgentGateway.Enroll:input_type -> olympos.v1.EnrollRequest
-	4,  // 29: olympos.v1.AgentGateway.Control:input_type -> olympos.v1.AgentMessage
-	26, // 30: olympos.v1.AgentGateway.Tunnel:input_type -> olympos.v1.TunnelFrame
-	2,  // 31: olympos.v1.AgentGateway.RenewCert:input_type -> olympos.v1.RenewCertRequest
-	1,  // 32: olympos.v1.AgentGateway.Enroll:output_type -> olympos.v1.EnrollResponse
-	5,  // 33: olympos.v1.AgentGateway.Control:output_type -> olympos.v1.ServerMessage
-	26, // 34: olympos.v1.AgentGateway.Tunnel:output_type -> olympos.v1.TunnelFrame
-	3,  // 35: olympos.v1.AgentGateway.RenewCert:output_type -> olympos.v1.RenewCertResponse
-	32, // [32:36] is the sub-list for method output_type
-	28, // [28:32] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	35, // 26: olympos.v1.NamespaceLabels.labels:type_name -> olympos.v1.NamespaceLabels.LabelsEntry
+	36, // 27: olympos.v1.Workload.labels:type_name -> olympos.v1.Workload.LabelsEntry
+	18, // 28: olympos.v1.NetworkPolicyReport.policies:type_name -> olympos.v1.NetworkPolicy
+	19, // 29: olympos.v1.NetworkPolicyReport.namespace_labels:type_name -> olympos.v1.NamespaceLabels
+	20, // 30: olympos.v1.NetworkPolicyReport.workloads:type_name -> olympos.v1.Workload
+	22, // 31: olympos.v1.ImageReport.uses:type_name -> olympos.v1.ImageUse
+	0,  // 32: olympos.v1.AgentGateway.Enroll:input_type -> olympos.v1.EnrollRequest
+	4,  // 33: olympos.v1.AgentGateway.Control:input_type -> olympos.v1.AgentMessage
+	28, // 34: olympos.v1.AgentGateway.Tunnel:input_type -> olympos.v1.TunnelFrame
+	2,  // 35: olympos.v1.AgentGateway.RenewCert:input_type -> olympos.v1.RenewCertRequest
+	1,  // 36: olympos.v1.AgentGateway.Enroll:output_type -> olympos.v1.EnrollResponse
+	5,  // 37: olympos.v1.AgentGateway.Control:output_type -> olympos.v1.ServerMessage
+	28, // 38: olympos.v1.AgentGateway.Tunnel:output_type -> olympos.v1.TunnelFrame
+	3,  // 39: olympos.v1.AgentGateway.RenewCert:output_type -> olympos.v1.RenewCertResponse
+	36, // [36:40] is the sub-list for method output_type
+	32, // [32:36] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_olympos_v1_gateway_proto_init() }
@@ -2689,7 +2898,7 @@ func file_olympos_v1_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_olympos_v1_gateway_proto_rawDesc), len(file_olympos_v1_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   33,
+			NumMessages:   37,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

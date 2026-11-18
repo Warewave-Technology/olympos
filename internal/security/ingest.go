@@ -1,8 +1,10 @@
 package security
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -164,14 +166,99 @@ func policyKind(p *pb.KyvernoPolicy) string {
 	return ""
 }
 
-// policyMatches reports whether a report result belongs to a policy. Kyverno
-// writes the bare name for ClusterPolicies and either "ns/name" or the bare
-// name (in the resource's namespace) for namespaced Policies.
-func policyMatches(p *pb.KyvernoPolicy, x *pb.KyvernoResult) bool {
+// policyResults returns the results (indexed by policy string) that belong
+// to a policy. Kyverno writes the bare name for cluster-scoped policies and
+// either "ns/name" or the bare name (in the resource's namespace) for
+// namespaced ones.
+func policyResults(p *pb.KyvernoPolicy, byPolicy map[string][]*pb.KyvernoResult) []*pb.KyvernoResult {
 	if p.Namespace == "" {
-		return x.Policy == p.Name
+		return byPolicy[p.Name]
 	}
-	return x.Policy == p.Namespace+"/"+p.Name || (x.Policy == p.Name && x.ResourceNamespace == p.Namespace)
+	out := append([]*pb.KyvernoResult{}, byPolicy[p.Namespace+"/"+p.Name]...)
+	for _, x := range byPolicy[p.Name] {
+		if x.ResourceNamespace == p.Namespace {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// Server-side caps on stored specs (the agent caps first; it is trusted only
+// for its own cluster).
+const (
+	maxPolicyObjectBytes = 128 << 10
+	maxNetpolSpecBytes   = 64 << 10
+)
+
+type policyObject struct {
+	apiVersion  string
+	annotations map[string]string
+	spec        []byte // JSON, nil when absent
+	invalid     bool   // sent but unusable (too large, not JSON)
+}
+
+// parsePolicyObject extracts apiVersion, the policies.kyverno.io/*
+// annotations and spec from the agent's trimmed policy object.
+func parsePolicyObject(b []byte) policyObject {
+	out := policyObject{annotations: map[string]string{}}
+	if len(b) == 0 {
+		return out
+	}
+	obj, ok := cleanJSON(b, maxPolicyObjectBytes)
+	m, isObj := obj.(map[string]any)
+	if !ok || !isObj {
+		out.invalid = true
+		return out
+	}
+	out.apiVersion, _ = m["apiVersion"].(string)
+	out.apiVersion = clean(out.apiVersion, 128)
+	if meta, ok := m["metadata"].(map[string]any); ok {
+		if ann, ok := meta["annotations"].(map[string]any); ok {
+			for k, v := range ann {
+				if s, ok := v.(string); ok && strings.HasPrefix(k, "policies.kyverno.io/") && len(out.annotations) < 32 {
+					out.annotations[clean(k, 253)] = clean(s, 4096)
+				}
+			}
+		}
+	}
+	if spec, ok := m["spec"]; ok && spec != nil {
+		out.spec, _ = json.Marshal(spec)
+	}
+	return out
+}
+
+// cleanJSON decodes JSON of at most max bytes and strips NUL characters from
+// keys and strings (jsonb rejects \u0000). Numbers keep their precision.
+func cleanJSON(b []byte, max int) (any, bool) {
+	if len(b) == 0 || len(b) > max {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		return nil, false
+	}
+	return stripNUL(v), true
+}
+
+func stripNUL(v any) any {
+	switch x := v.(type) {
+	case string:
+		return strings.ReplaceAll(x, "\x00", "")
+	case []any:
+		for i := range x {
+			x[i] = stripNUL(x[i])
+		}
+		return x
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, e := range x {
+			out[strings.ReplaceAll(k, "\x00", "")] = stripNUL(e)
+		}
+		return out
+	}
+	return v
 }
 
 func (in *Ingester) kyverno(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, rep *pb.KyvernoReport) error {
@@ -197,12 +284,25 @@ func (in *Ingester) kyverno(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID,
 			fails[k] = x
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM kyverno_policies WHERE cluster_id = $1`, clusterID); err != nil {
-		return err
+	// Non-passing results by the policy string Kyverno wrote.
+	byPolicy := map[string][]*pb.KyvernoResult{}
+	for _, x := range results {
+		switch strings.ToLower(x.Result) {
+		case "fail", "warn", "error":
+			if x.Policy != "" {
+				byPolicy[x.Policy] = append(byPolicy[x.Policy], x)
+			}
+		}
+	}
+	for _, q := range []string{`DELETE FROM kyverno_policies WHERE cluster_id = $1`, `DELETE FROM kyverno_violations WHERE cluster_id = $1`} {
+		if _, err := tx.Exec(ctx, q, clusterID); err != nil {
+			return err
+		}
 	}
 	seen := map[[3]string]bool{}
 	b := &pgx.Batch{}
 	total := 0
+	var violations [][]any
 	for _, p := range policies {
 		kind := policyKind(p)
 		if p.Name == "" || kind == "" || seen[[3]string{kind, p.Namespace, p.Name}] {
@@ -213,22 +313,45 @@ func (in *Ingester) kyverno(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID,
 		if mode != "Enforce" {
 			mode = "Audit"
 		}
-		n := 0
-		for _, x := range fails {
-			if policyMatches(p, x) {
-				n++
+		ns, name := clean(p.Namespace, 253), clean(p.Name, 253)
+		type vkey struct{ rule, result, ref, msg string }
+		vseen := map[vkey]bool{}
+		failed := map[fkey]bool{} // distinct failures (rule, resource) of this policy
+		for _, x := range policyResults(p, byPolicy) {
+			ref := kyvernoResourceRef(x)
+			if strings.ToLower(x.Result) == "fail" {
+				failed[fkey{x.Policy, x.Rule, ref}] = true
 			}
+			k := vkey{x.Rule, strings.ToLower(x.Result), ref, x.Message}
+			if vseen[k] || len(violations) >= maxResults {
+				continue
+			}
+			vseen[k] = true
+			violations = append(violations, []any{clusterID, kind, ns, name, clean(x.Rule, 253), clean(strings.ToLower(x.Result), 16),
+				clean(strings.ToLower(x.Severity), 16), clean(x.Message, 1024), clean(x.ResourceKind, 63),
+				clean(x.ResourceNamespace, 253), clean(x.ResourceName, 253)})
 		}
+		n := len(failed)
 		total += n
 		rules := make([]string, 0, len(p.Rules))
 		for _, r := range p.Rules {
 			rules = append(rules, clean(r, 253))
 		}
-		b.Queue(`INSERT INTO kyverno_policies (cluster_id, kind, namespace, name, mode, rules, ready, fail_count, seen_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`, clusterID, kind, clean(p.Namespace, 253), clean(p.Name, 253), mode, rules, p.Ready, n)
+		obj := parsePolicyObject(p.ObjectJson)
+		b.Queue(`INSERT INTO kyverno_policies (cluster_id, kind, namespace, name, mode, rules, ready, fail_count, seen_at,
+				api_version, annotations, spec, spec_omitted)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9, $10, $11, $12)`, clusterID, kind, ns, name, mode, rules, p.Ready, n,
+			obj.apiVersion, obj.annotations, obj.spec, p.SpecOmitted || obj.invalid)
 	}
 	if b.Len() > 0 {
 		if err := tx.SendBatch(ctx, b).Close(); err != nil {
+			return err
+		}
+	}
+	if len(violations) > 0 {
+		if _, err := tx.CopyFrom(ctx, pgx.Identifier{"kyverno_violations"},
+			[]string{"cluster_id", "kind", "namespace", "name", "rule", "result", "severity", "message",
+				"resource_kind", "resource_namespace", "resource_name"}, pgx.CopyFromRows(violations)); err != nil {
 			return err
 		}
 	}
@@ -281,11 +404,12 @@ func IsDefaultDeny(p *pb.NetworkPolicy) bool {
 	return false
 }
 
+type nsState struct {
+	count int
+	deny  bool
+}
+
 func (in *Ingester) netpol(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, rep *pb.NetworkPolicyReport) error {
-	type nsState struct {
-		count int
-		deny  bool
-	}
 	nss := map[string]*nsState{}
 	for i, ns := range rep.Namespaces {
 		if i >= maxNamespaces {
@@ -313,8 +437,17 @@ func (in *Ingester) netpol(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, 
 			st.deny = true
 		}
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM network_policy_status WHERE cluster_id = $1`, clusterID); err != nil {
-		return err
+	nsLabels := map[string]map[string]string{}
+	for _, nl := range rep.NamespaceLabels {
+		if ns := clean(nl.Name, 253); nss[ns] != nil {
+			nsLabels[ns] = cleanLabels(nl.Labels)
+		}
+	}
+	for _, q := range []string{`DELETE FROM network_policy_status WHERE cluster_id = $1`,
+		`DELETE FROM network_policies WHERE cluster_id = $1`, `DELETE FROM namespace_workloads WHERE cluster_id = $1`} {
+		if _, err := tx.Exec(ctx, q, clusterID); err != nil {
+			return err
+		}
 	}
 	names := make([]string, 0, len(nss))
 	for ns := range nss {
@@ -326,8 +459,12 @@ func (in *Ingester) netpol(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, 
 	for _, ns := range names {
 		st := nss[ns]
 		excluded := MatchesAny(in.SystemNamespaces, ns)
-		b.Queue(`INSERT INTO network_policy_status (cluster_id, namespace, policy_count, default_deny, excluded, seen_at)
-			VALUES ($1, $2, $3, $4, $5, now())`, clusterID, ns, st.count, st.deny, excluded)
+		labels := nsLabels[ns]
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		b.Queue(`INSERT INTO network_policy_status (cluster_id, namespace, policy_count, default_deny, excluded, labels, seen_at)
+			VALUES ($1, $2, $3, $4, $5, $6, now())`, clusterID, ns, st.count, st.deny, excluded, labels)
 		if !excluded && !st.deny {
 			title := "Namespace " + ns + " has no default-deny ingress NetworkPolicy"
 			cur = append(cur, findings.Finding{ControlID: ControlNoDefaultDeny, ResourceRef: ns, Severity: "medium", Title: title,
@@ -339,8 +476,88 @@ func (in *Ingester) netpol(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, 
 			return err
 		}
 	}
+	if err := in.netpolDetails(ctx, tx, clusterID, rep, nss); err != nil {
+		return err
+	}
 	_, _, err := findings.Reconcile(ctx, tx, findings.SourceNetpol, clusterID, cur, nil)
 	return err
+}
+
+// Limits on the simulator data stored per report.
+const (
+	maxWorkloadsPerNS = 50
+	maxWorkloads      = 50000
+	maxLabels         = 64
+	maxPorts          = 32
+)
+
+// netpolDetails stores the policies with their specs and the workloads of
+// known namespaces (replaced per report).
+func (in *Ingester) netpolDetails(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, rep *pb.NetworkPolicyReport, nss map[string]*nsState) error {
+	b := &pgx.Batch{}
+	seen := map[[2]string]bool{}
+	for _, p := range rep.Policies {
+		ns, name := clean(p.Namespace, 253), clean(p.Name, 253)
+		if ns == "" || name == "" || nss[ns] == nil || seen[[2]string{ns, name}] {
+			continue
+		}
+		seen[[2]string{ns, name}] = true
+		var spec []byte
+		if v, ok := cleanJSON(p.SpecJson, maxNetpolSpecBytes); ok {
+			if _, isObj := v.(map[string]any); isObj {
+				spec, _ = json.Marshal(v)
+			}
+		}
+		b.Queue(`INSERT INTO network_policies (cluster_id, namespace, name, spec) VALUES ($1, $2, $3, $4)`, clusterID, ns, name, spec)
+	}
+	perNS := map[string]int{}
+	wseen := map[[3]string]bool{}
+	n := 0
+	for _, w := range rep.Workloads {
+		ns, name := clean(w.Namespace, 253), clean(w.Name, 253)
+		kind := w.Kind
+		if kind != "Deployment" && kind != "StatefulSet" && kind != "DaemonSet" {
+			continue
+		}
+		k := [3]string{ns, kind, name}
+		if name == "" || nss[ns] == nil || wseen[k] || perNS[ns] >= maxWorkloadsPerNS || n >= maxWorkloads {
+			continue
+		}
+		wseen[k] = true
+		perNS[ns]++
+		n++
+		ports := []int32{}
+		for _, p := range w.Ports {
+			if p > 0 && p <= 65535 && len(ports) < maxPorts {
+				ports = append(ports, p)
+			}
+		}
+		b.Queue(`INSERT INTO namespace_workloads (cluster_id, namespace, kind, name, labels, ports) VALUES ($1, $2, $3, $4, $5, $6)`,
+			clusterID, ns, kind, name, cleanLabels(w.Labels), ports)
+	}
+	if b.Len() == 0 {
+		return nil
+	}
+	return tx.SendBatch(ctx, b).Close()
+}
+
+// cleanLabels bounds a label map (count, key and value length).
+func cleanLabels(l map[string]string) map[string]string {
+	keys := make([]string, 0, len(l))
+	for k := range l {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := map[string]string{}
+	for _, k := range keys {
+		if len(out) >= maxLabels {
+			break
+		}
+		if ck := clean(k, 317); ck != "" {
+			out[ck] = clean(l[k], 256)
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------- images

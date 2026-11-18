@@ -6,9 +6,10 @@ package agent
 // (debounced) and every resendInterval as a safety net.
 //
 // RBAC: only get/list/watch on resources from SPEC §4.2 (pods, replicasets,
-// namespaces, networkpolicies, kyverno.io, wgpolicyk8s.io). imagePullSecrets
-// and Secrets are never read: pods are stripped to the fields we need before
-// they enter the informer cache.
+// deployments, statefulsets, daemonsets, namespaces, networkpolicies,
+// kyverno.io, policies.kyverno.io, wgpolicyk8s.io). Secrets and ConfigMaps
+// are never read; imagePullSecrets and env never enter the cache: pods and
+// workloads are stripped to the fields we need first.
 
 import (
 	"context"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"google.golang.org/protobuf/proto"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/dynamic"
@@ -62,6 +64,11 @@ type kubeInformers struct {
 	rs      cache.SharedIndexInformer
 	nss     cache.SharedIndexInformer
 	netpols cache.SharedIndexInformer
+	// Workloads for the NetworkPolicy simulator (pod template labels and
+	// container ports only, see stripWorkload).
+	deploys cache.SharedIndexInformer
+	sts     cache.SharedIndexInformer
+	ds      cache.SharedIndexInformer
 
 	once   sync.Once
 	synced chan struct{}
@@ -77,14 +84,51 @@ func newKubeInformers(kube kubernetes.Interface) *kubeInformers {
 		rs:      f.Apps().V1().ReplicaSets().Informer(),
 		nss:     f.Core().V1().Namespaces().Informer(),
 		netpols: f.Networking().V1().NetworkPolicies().Informer(),
+		deploys: f.Apps().V1().Deployments().Informer(),
+		sts:     f.Apps().V1().StatefulSets().Informer(),
+		ds:      f.Apps().V1().DaemonSets().Informer(),
 		synced:  make(chan struct{}),
 	}
-	// Keep only what the image reporter needs: no env, volumes, or
+	// Keep only what the reporters need: no env, volumes, or
 	// imagePullSecrets ever sit in agent memory.
 	_ = k.pods.SetTransform(stripPod)
 	_ = k.rs.SetTransform(stripMeta)
 	_ = k.nss.SetTransform(stripMeta)
+	_ = k.netpols.SetTransform(stripMeta)
+	for _, inf := range []cache.SharedIndexInformer{k.deploys, k.sts, k.ds} {
+		_ = inf.SetTransform(stripWorkload)
+	}
 	return k
+}
+
+// stripWorkload reduces a Deployment, StatefulSet or DaemonSet to its name,
+// pod template labels and container names/ports. Env, volumes, secret and
+// ConfigMap references, images and everything else are dropped before the
+// object enters the cache.
+func stripWorkload(obj any) (any, error) {
+	meta := func(m metav1.ObjectMeta) metav1.ObjectMeta {
+		return metav1.ObjectMeta{Name: m.Name, Namespace: m.Namespace, UID: m.UID, ResourceVersion: m.ResourceVersion}
+	}
+	tmpl := func(t corev1.PodTemplateSpec) corev1.PodTemplateSpec {
+		out := corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: t.Labels}}
+		for _, c := range t.Spec.Containers {
+			cc := corev1.Container{Name: c.Name}
+			for _, p := range c.Ports {
+				cc.Ports = append(cc.Ports, corev1.ContainerPort{Name: p.Name, ContainerPort: p.ContainerPort, Protocol: p.Protocol})
+			}
+			out.Spec.Containers = append(out.Spec.Containers, cc)
+		}
+		return out
+	}
+	switch w := obj.(type) {
+	case *appsv1.Deployment:
+		return &appsv1.Deployment{TypeMeta: w.TypeMeta, ObjectMeta: meta(w.ObjectMeta), Spec: appsv1.DeploymentSpec{Template: tmpl(w.Spec.Template)}}, nil
+	case *appsv1.StatefulSet:
+		return &appsv1.StatefulSet{TypeMeta: w.TypeMeta, ObjectMeta: meta(w.ObjectMeta), Spec: appsv1.StatefulSetSpec{Template: tmpl(w.Spec.Template)}}, nil
+	case *appsv1.DaemonSet:
+		return &appsv1.DaemonSet{TypeMeta: w.TypeMeta, ObjectMeta: meta(w.ObjectMeta), Spec: appsv1.DaemonSetSpec{Template: tmpl(w.Spec.Template)}}, nil
+	}
+	return obj, nil
 }
 
 // start starts the informers once and waits (bounded by ctx) for the caches.

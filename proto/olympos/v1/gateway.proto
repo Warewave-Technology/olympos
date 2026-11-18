@@ -157,6 +157,13 @@ message KyvernoPolicy {
   // NamespacedValidatingPolicy | ImageValidatingPolicy |
   // NamespacedImageValidatingPolicy (policies.kyverno.io/v1, Kyverno ≥ 1.17).
   string kind = 6;
+  // The policy object as JSON: apiVersion, kind, metadata (name, namespace
+  // and policies.kyverno.io/* annotations only) and spec. No status,
+  // managedFields or other annotations. Empty when spec_omitted.
+  bytes object_json = 7;
+  // The object was larger than the agent's per-policy cap (or the report's
+  // total budget) and was not sent.
+  bool spec_omitted = 8;
 }
 
 message KyvernoResult {
@@ -183,11 +190,34 @@ message NetworkPolicy {
   repeated string policy_types = 4;
   int32 ingress_rules = 5;
   int32 egress_rules = 6;
+  // networking.k8s.io/v1 NetworkPolicySpec as JSON (empty when larger than
+  // the agent's cap).
+  bytes spec_json = 7;
+}
+
+// NamespaceLabels are a namespace's labels (namespaceSelector examples).
+message NamespaceLabels {
+  string name = 1;
+  map<string, string> labels = 2;
+}
+
+// Workload is a Deployment, StatefulSet or DaemonSet with its pod template
+// labels and container ports (podSelector examples). Nothing else from the
+// workload spec is sent.
+message Workload {
+  string namespace = 1;
+  string kind = 2;
+  string name = 3;
+  map<string, string> labels = 4;
+  repeated int32 ports = 5;
 }
 
 message NetworkPolicyReport {
   repeated string namespaces = 1;
   repeated NetworkPolicy policies = 2;
+  repeated NamespaceLabels namespace_labels = 3;
+  // At most ~50 per namespace.
+  repeated Workload workloads = 4;
 }
 
 message ImageUse {

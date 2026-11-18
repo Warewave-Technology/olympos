@@ -35,8 +35,11 @@ func (a *API) Routes(r chi.Router) {
 	r.Post("/images/scan", a.scanAll)
 	r.Get("/images/{digest}", a.getImage)
 	r.Post("/images/{digest}/scan", a.scanImage)
+	r.Get("/security/clusters", a.listClusterSummaries)
 	r.Get("/security/kyverno", a.listKyverno)
+	r.Get("/security/kyverno/policy", a.getKyvernoPolicy)
 	r.Get("/security/netpol", a.listNetpol)
+	r.Get("/security/netpol/namespace", a.getNetpolNamespace)
 	r.Get("/registries", a.listRegistries)
 	r.Post("/registries", a.createRegistry)
 	r.Post("/registries/test", a.testRegistry)
@@ -96,6 +99,11 @@ type Image struct {
 	ScanError     string     `json:"scan_error"`
 	ScanAttempts  int        `json:"scan_attempts"`
 	NextRetryAt   *time.Time `json:"next_retry_at"`
+	// ScannedBy is how the stored results were obtained: "digest", "tag"
+	// (the digest is not in the registry; the same tag was scanned) or "".
+	ScannedBy string `json:"scanned_by"`
+	// ScanNote explains a tag scan.
+	ScanNote string `json:"scan_note"`
 }
 
 // Usage is where an image runs.
@@ -118,7 +126,7 @@ type ImageDetail struct {
 
 const imageSelect = `
 	SELECT i.digest, i.repo, i.tags, i.critical, i.high, i.medium, i.low, i.scan_status, i.last_scanned_at,
-	       i.scan_error, i.scan_attempts, i.next_retry_at,
+	       i.scan_error, i.scan_attempts, i.next_retry_at, i.scanned_by, i.scan_note,
 	       count(DISTINCT u.cluster_id),
 	       count(DISTINCT (u.cluster_id, u.namespace, u.workload_kind, u.workload_name)),
 	       (SELECT count(DISTINCT v.cve_id) FROM image_vulns v
@@ -146,7 +154,8 @@ func (a *API) scanImages(rows pgx.Rows, regs []RegistryRef) ([]Image, error) {
 	for rows.Next() {
 		var im Image
 		if err := rows.Scan(&im.Digest, &im.Repo, &im.Tags, &im.Critical, &im.High, &im.Medium, &im.Low, &im.ScanStatus,
-			&im.LastScannedAt, &im.ScanError, &im.ScanAttempts, &im.NextRetryAt, &im.Clusters, &im.Workloads, &im.Fixable); err != nil {
+			&im.LastScannedAt, &im.ScanError, &im.ScanAttempts, &im.NextRetryAt, &im.ScannedBy, &im.ScanNote,
+			&im.Clusters, &im.Workloads, &im.Fixable); err != nil {
 			return nil, err
 		}
 		if im.Tags == nil {

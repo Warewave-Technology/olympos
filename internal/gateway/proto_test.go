@@ -24,6 +24,11 @@ func TestProtoHasNoCredentialFields(t *testing.T) {
 			f := fs.Get(i)
 			full := string(f.FullName())
 			name := strings.ToLower(string(f.Name()))
+			if m.IsMapEntry() && f.Number() == 1 {
+				// The synthetic "key" of a map entry (e.g. label keys);
+				// the map field's own name is checked on its parent.
+				continue
+			}
 			for _, b := range banned {
 				if strings.Contains(name, b) && !allowed[full] {
 					t.Errorf("field %s looks like a credential (%q)", full, b)

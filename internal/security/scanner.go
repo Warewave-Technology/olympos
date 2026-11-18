@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -203,7 +204,7 @@ func (s *Scanner) Drain(ctx context.Context) error {
 		go func() {
 			defer wg.Done()
 			for ctx.Err() == nil {
-				digest, repo, ok, err := s.claim(ctx)
+				digest, repo, tags, ok, err := s.claim(ctx)
 				if err != nil {
 					errc <- err
 					return
@@ -211,7 +212,7 @@ func (s *Scanner) Drain(ctx context.Context) error {
 				if !ok {
 					return
 				}
-				if err := s.scanOne(ctx, regs, digest, repo); err != nil && ctx.Err() == nil {
+				if err := s.scanOne(ctx, regs, digest, repo, tags); err != nil && ctx.Err() == nil {
 					s.Log.Error("image scan", "digest", digest, "err", err)
 				}
 			}
@@ -224,7 +225,7 @@ func (s *Scanner) Drain(ctx context.Context) error {
 
 // claim takes one pending in-use image (SKIP LOCKED, so concurrent workers
 // never pick the same digest).
-func (s *Scanner) claim(ctx context.Context) (digest, repo string, ok bool, err error) {
+func (s *Scanner) claim(ctx context.Context) (digest, repo string, tags []string, ok bool, err error) {
 	err = s.DB.QueryRow(ctx, `
 		UPDATE images SET scan_status = 'scanning'
 		WHERE digest = (
@@ -232,11 +233,39 @@ func (s *Scanner) claim(ctx context.Context) (digest, repo string, ok bool, err 
 			WHERE i.scan_status = 'pending' AND EXISTS (SELECT 1 FROM image_usage u WHERE u.digest = i.digest)
 			ORDER BY i.last_scanned_at NULLS FIRST, i.created_at
 			LIMIT 1 FOR UPDATE SKIP LOCKED)
-		RETURNING digest, repo`).Scan(&digest, &repo)
+		RETURNING digest, repo, tags`).Scan(&digest, &repo, &tags)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", false, nil
+		return "", "", nil, false, nil
 	}
-	return digest, repo, err == nil, err
+	return digest, repo, tags, err == nil, err
+}
+
+// tagRe is a valid OCI tag.
+var tagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
+
+// fallbackTag picks the tag to scan when the digest is not in the registry:
+// the first valid tag in sort order, preferring any tag over "latest" (a
+// moving tag is the least likely to match what runs). "" when none.
+func fallbackTag(tags []string) string {
+	sorted := append([]string{}, tags...)
+	sort.Strings(sorted)
+	pick := ""
+	for _, t := range sorted {
+		if !tagRe.MatchString(t) {
+			continue
+		}
+		if t != "latest" {
+			return t
+		}
+		pick = t
+	}
+	return pick
+}
+
+// TagScanNote is stored in images.scan_note for results obtained by tag.
+func TagScanNote(tag string) string {
+	return fmt.Sprintf("Scanned by tag %s — the running digest is not in the registry (built or retagged locally), "+
+		"so results are for the registry's image with that tag.", tag)
 }
 
 func (s *Scanner) setStatus(ctx context.Context, digest, status, msg string) error {
@@ -280,7 +309,7 @@ func (s *Scanner) requeueRetries(ctx context.Context) error {
 	return err
 }
 
-func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo string) error {
+func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo string, tags []string) error {
 	if !DigestRe.MatchString(digest) || !ValidRepo(repo) {
 		return s.setStatus(ctx, digest, "failed", "Invalid image reference.")
 	}
@@ -298,32 +327,59 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 		}
 		auth = a
 	}
+	defer auth.Zero()
+	authMsg := func() string {
+		if auth != nil {
+			return fmt.Sprintf("Registry %s rejected the stored credential.", reg.HostPattern)
+		}
+		return fmt.Sprintf("%s denied anonymous access: the image is private, or it does not exist there. Add a credential in Settings › Registries.", host)
+	}
+	requeue := func() error {
+		_, _ = s.DB.Exec(context.WithoutCancel(ctx), `UPDATE images SET scan_status = 'pending' WHERE digest = $1`, digest)
+		return ctx.Err()
+	}
+	scannedBy, note := "digest", ""
 	out, err := s.Runner.Scan(ctx, repo+"@"+digest, auth)
-	auth.Zero()
 	if err != nil {
 		if ctx.Err() != nil {
-			_, _ = s.DB.Exec(context.WithoutCancel(ctx), `UPDATE images SET scan_status = 'pending' WHERE digest = $1`, digest)
-			return ctx.Err()
+			return requeue()
 		}
 		var se *ScanError
 		if errors.As(err, &se) && se.Auth {
-			msg := fmt.Sprintf("%s denied anonymous access: the image is private, or it does not exist there. Add a credential in Settings › Registries.", host)
-			if auth != nil {
-				msg = fmt.Sprintf("Registry %s rejected the stored credential.", reg.HostPattern)
-			}
-			return s.setStatus(ctx, digest, "missing_credential", msg)
+			return s.setStatus(ctx, digest, "missing_credential", authMsg())
 		}
-		if errors.As(err, &se) && se.NotFound {
+		if !errors.As(err, &se) || !se.NotFound {
+			return s.fail(ctx, digest, "trivy: "+err.Error())
+		}
+		// The digest is not in the registry (built or retagged locally,
+		// e.g. kind node images). Public images are still worth scanning:
+		// scan the registry's image with the same tag, clearly marked.
+		tag := fallbackTag(tags)
+		if tag == "" {
 			return s.setStatus(ctx, digest, "unavailable", fmt.Sprintf(
-				"This digest is not in %s: the image was built or retagged locally (e.g. kind node images). Olympos scans by digest so results match what runs.", host))
+				"This digest is not in %s: the image was built or retagged locally (e.g. kind node images), and it has no tag to scan instead.", host))
 		}
-		return s.fail(ctx, digest, "trivy: "+err.Error())
+		out, err = s.Runner.Scan(ctx, repo+":"+tag, auth)
+		if err != nil {
+			if ctx.Err() != nil {
+				return requeue()
+			}
+			switch {
+			case errors.As(err, &se) && se.Auth:
+				return s.setStatus(ctx, digest, "missing_credential", authMsg())
+			case errors.As(err, &se) && se.NotFound:
+				return s.setStatus(ctx, digest, "unavailable", fmt.Sprintf(
+					"This digest is not in %s (built or retagged locally, e.g. kind node images), and tag %s is not there either.", host, tag))
+			}
+			return s.fail(ctx, digest, fmt.Sprintf("This digest is not in %s; scanning tag %s instead failed: trivy: %s", host, tag, err.Error()))
+		}
+		scannedBy, note = "tag", TagScanNote(tag)
 	}
 	vulns, err := ParseTrivy(bytes.NewReader(out))
 	if err != nil {
 		return s.fail(ctx, digest, err.Error())
 	}
-	if err := s.saveResults(ctx, digest, repo, vulns); err != nil {
+	if err := s.saveResults(ctx, digest, repo, vulns, scannedBy, note); err != nil {
 		return err
 	}
 	metrics.ImageScans.WithLabelValues("scanned").Inc()
@@ -333,7 +389,12 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 // saveResults replaces an image's vulnerabilities, keeping first_seen_at of
 // those already known, updates the counts and emits vuln.critical for
 // critical CVEs this digest did not have before (when it is running).
-func (s *Scanner) saveResults(ctx context.Context, digest, repo string, vulns []Vuln) error {
+//
+// scannedBy is "digest" or "tag". vuln.critical is emitted for digest scans
+// only: a tag scan describes the registry's image with that tag, not what
+// runs, so it must not page anyone as "critical CVE in a running image". Its
+// results are still stored and shown (scanned_by=tag, scan_note).
+func (s *Scanner) saveResults(ctx context.Context, digest, repo string, vulns []Vuln, scannedBy, note string) error {
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		var tags []string
 		if err := tx.QueryRow(ctx, `SELECT tags FROM images WHERE digest = $1 FOR UPDATE`, digest).Scan(&tags); err != nil {
@@ -385,11 +446,11 @@ func (s *Scanner) saveResults(ctx context.Context, digest, repo string, vulns []
 			}
 		}
 		if _, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'scanned', scan_error = '', last_scanned_at = now(), scan_attempts = 0, next_retry_at = NULL,
-			critical = $2, high = $3, medium = $4, low = $5 WHERE digest = $1`,
-			digest, len(counts["critical"]), len(counts["high"]), len(counts["medium"]), len(counts["low"])); err != nil {
+			critical = $2, high = $3, medium = $4, low = $5, scanned_by = $6, scan_note = $7 WHERE digest = $1`,
+			digest, len(counts["critical"]), len(counts["high"]), len(counts["medium"]), len(counts["low"]), scannedBy, truncateStr(note, 600)); err != nil {
 			return err
 		}
-		if len(newCrit) == 0 {
+		if len(newCrit) == 0 || scannedBy != "digest" {
 			return nil
 		}
 		return s.emitCritical(ctx, tx, digest, repo, tags, newCrit)

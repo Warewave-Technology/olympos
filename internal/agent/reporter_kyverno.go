@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -198,16 +199,62 @@ func (r *kyvernoReporter) ensure(ctx context.Context) error {
 func stripUnstructured(obj any) (any, error) {
 	if u, ok := obj.(*unstructured.Unstructured); ok {
 		u.SetManagedFields(nil)
-		ann := u.GetAnnotations()
-		// Keep only the annotations we read (severity); drop the rest
-		// (last-applied-configuration can be large).
-		if sev, ok := ann["policies.kyverno.io/severity"]; ok {
-			u.SetAnnotations(map[string]string{"policies.kyverno.io/severity": sev})
-		} else {
-			u.SetAnnotations(nil)
+		// Keep only Kyverno's own policy annotations (title, category,
+		// severity, description); drop the rest (last-applied-configuration
+		// can be large and is not ours to forward).
+		var keep map[string]string
+		for k, v := range u.GetAnnotations() {
+			if strings.HasPrefix(k, kyvernoAnnotationPrefix) {
+				if keep == nil {
+					keep = map[string]string{}
+				}
+				keep[k] = v
+			}
 		}
+		u.SetAnnotations(keep)
 	}
 	return obj, nil
+}
+
+const kyvernoAnnotationPrefix = "policies.kyverno.io/"
+
+// Caps on policy objects sent upstream: one policy, and all policies of a
+// report together (the gRPC message limit is 32 MiB; results need room too).
+var (
+	maxPolicyObjectBytes = 64 << 10
+	maxPolicyObjectTotal = 8 << 20
+)
+
+// PolicyObjectJSON returns the trimmed policy object sent to the server:
+// apiVersion, kind, metadata.name/namespace, the policies.kyverno.io/*
+// annotations and spec. status, managedFields, labels, other annotations
+// and everything else in metadata are dropped.
+func PolicyObjectJSON(u *unstructured.Unstructured) ([]byte, error) {
+	meta := map[string]any{"name": u.GetName()}
+	if ns := u.GetNamespace(); ns != "" {
+		meta["namespace"] = ns
+	}
+	ann := map[string]any{}
+	for k, v := range u.GetAnnotations() {
+		if strings.HasPrefix(k, kyvernoAnnotationPrefix) {
+			ann[k] = v
+		}
+	}
+	if len(ann) > 0 {
+		meta["annotations"] = ann
+	}
+	obj := map[string]any{"apiVersion": u.GetAPIVersion(), "kind": u.GetKind(), "metadata": meta}
+	if spec, ok := u.Object["spec"]; ok {
+		obj["spec"] = spec
+	}
+	return json.Marshal(obj)
+}
+
+func policyAPIVersion(kind string) string {
+	if kind == "ClusterPolicy" || kind == "Policy" {
+		return "kyverno.io/v1"
+	}
+	return "policies.kyverno.io/v1"
 }
 
 func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
@@ -241,6 +288,7 @@ func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 		}
 		return out
 	}
+	objs := map[*pb.KyvernoPolicy]*unstructured.Unstructured{}
 	for _, g := range policyGVRs {
 		for _, u := range list(g) {
 			var p *pb.KyvernoPolicy
@@ -251,6 +299,7 @@ func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 			}
 			p.Kind = policyKinds[g]
 			rep.Policies = append(rep.Policies, p)
+			objs[p] = u
 		}
 	}
 	for _, g := range []schema.GroupVersionResource{gvrClusterPolicyReport, gvrPolicyReport} {
@@ -268,6 +317,33 @@ func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 		}
 		return a.Name < b.Name
 	})
+	// Objects in sorted order, so the total budget cuts deterministically.
+	// The informer cache is shared: copy before defaulting apiVersion/kind.
+	budget, omitted := maxPolicyObjectTotal, 0
+	for _, p := range rep.Policies {
+		u := objs[p]
+		if u.GetAPIVersion() == "" || u.GetKind() == "" {
+			u = u.DeepCopy()
+			if u.GetAPIVersion() == "" {
+				u.SetAPIVersion(policyAPIVersion(p.Kind))
+			}
+			if u.GetKind() == "" {
+				u.SetKind(p.Kind)
+			}
+		}
+		b, err := PolicyObjectJSON(u)
+		if err != nil || len(b) > maxPolicyObjectBytes || len(b) > budget {
+			p.SpecOmitted = true
+			omitted++
+			continue
+		}
+		budget -= len(b)
+		p.ObjectJson = b
+	}
+	if omitted > 0 {
+		r.log.Warn("kyverno policy specs omitted (too large)", "omitted", omitted,
+			"per_policy_cap", maxPolicyObjectBytes, "total_cap", maxPolicyObjectTotal)
+	}
 	sort.Slice(rep.Results, func(i, j int) bool { return resultKey(rep.Results[i]) < resultKey(rep.Results[j]) })
 	if len(rep.Results) > maxKyvernoResults {
 		r.log.Warn("kyverno results truncated", "total", len(rep.Results), "sent", maxKyvernoResults)

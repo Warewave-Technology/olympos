@@ -665,7 +665,7 @@ paths:
     get:
       tags: [audit]
       responses:
-        "200": {description: Run incl. kube-bench node results, content: {application/json: {schema: {$ref: "#/components/schemas/AuditRun"}}}}
+        "200": {description: "Run incl. kube-bench node results and `log`", content: {application/json: {schema: {$ref: "#/components/schemas/AuditRun"}}}}
         "404": {description: Unknown run or cluster outside the caller's scope}
   /findings:
     get:
@@ -793,11 +793,14 @@ paths:
                   - $ref: "#/components/schemas/KyvernoPolicy"
                   - type: object
                     properties:
-                      spec: {type: object, description: "The policy spec as stored in the cluster (metadata trimmed)"}
-                      yaml: {type: string, description: "The whole object as YAML (apiVersion, kind, name, spec)"}
+                      spec: {type: [object, "null"], description: "The policy spec as stored in the cluster (metadata trimmed). null when the agent did not send it (older agent, or spec_omitted)"}
+                      yaml: {type: string, description: "The whole object as YAML (apiVersion, kind, name, namespace, policies.kyverno.io/* annotations, spec); empty when spec is null"}
+                      spec_omitted: {type: boolean, description: "The policy object exceeded the agent's size cap (64 KiB per policy, 8 MiB per report) and was not sent"}
                       violations:
                         type: array
+                        description: "Non-passing results (fail, error, warn) in the current policy reports, fails first, at most 2000"
                         items: {type: object, properties: {rule: {type: string}, result: {type: string}, severity: {type: string}, message: {type: string}, resource_kind: {type: string}, resource_namespace: {type: string}, resource_name: {type: string}}}
+        "404": {description: "Unknown policy or kind, missing parameter, or cluster outside the caller's read scope"}
   /security/netpol/namespace:
     get:
       tags: [security]
@@ -825,16 +828,17 @@ paths:
                       type: object
                       properties:
                         name: {type: string}
-                        spec: {type: object, description: "networking.k8s.io/v1 NetworkPolicySpec as in the cluster"}
-                        yaml: {type: string}
+                        spec: {type: [object, "null"], description: "networking.k8s.io/v1 NetworkPolicySpec as in the cluster; null when the agent did not send it (older agent, or larger than 32 KiB)"}
+                        yaml: {type: string, description: "The whole NetworkPolicy as YAML; empty when spec is null"}
                   workloads:
                     type: array
                     description: "Workloads in the namespace with their pod template labels (example data for the simulator)"
-                    items: {type: object, properties: {kind: {type: string}, name: {type: string}, labels: {type: object, additionalProperties: {type: string}}, ports: {type: array, items: {type: integer}}}}
+                    items: {type: object, properties: {kind: {type: string, enum: [Deployment, StatefulSet, DaemonSet]}, name: {type: string}, labels: {type: object, additionalProperties: {type: string}}, ports: {type: array, items: {type: integer}, description: container ports}}}
                   other_namespaces:
                     type: array
                     description: "Other namespaces of the cluster with labels (namespaceSelector examples)"
                     items: {type: object, properties: {name: {type: string}, labels: {type: object, additionalProperties: {type: string}}}}
+        "404": {description: "Unknown namespace, missing parameter, or cluster outside the caller's read scope"}
   /registries:
     get:
       tags: [security]
@@ -1474,7 +1478,8 @@ components:
         new_findings: {type: integer}
         resolved_findings: {type: integer}
         raw_blob_path: {type: string, description: "Blob path of the raw JSON report ({prefix}/audit/{cluster}/{tool}/{run_id}.json); empty when not stored"}
-        error: {type: string, description: 'e.g. "agent_offline"'}
+        error: {type: string, description: 'Short reason, e.g. "agent_offline" or "kubescape failed: framework ''cis-v1.23-t1.0.1'' not found"'}
+        log: {type: string, description: "Run detail (GET /audit/runs/{id}) only: captured console output of a failed kubescape/polaris run (redacted, last 256 KiB); empty otherwise. Absent in lists."}
         details:
           type: object
           description: >-
@@ -1533,7 +1538,8 @@ components:
         scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, unavailable, failed], description: "unavailable = the digest is not in the registry (locally built or retagged, e.g. kind node images); failed = transient error, retried automatically (scan_attempts, next_retry_at)"}
         scan_error: {type: string, description: "Why the last scan did not succeed (also on list items)"}
         scan_attempts: {type: integer}
-        scanned_by: {type: string, enum: ["", digest, tag], description: "tag = the running digest is not in the registry; the registry's image with the same tag was scanned instead (results may differ from what runs)"}
+        scanned_by: {type: string, enum: ["", digest, tag], description: "tag = the running digest is not in the registry; the registry's image with the same tag was scanned instead (results may differ from what runs). vuln.critical events are emitted for digest scans only."}
+        scan_note: {type: string, description: "Set with scanned_by=tag, e.g. \"Scanned by tag v1.37.0 — the running digest is not in the registry (built or retagged locally), so results are for the registry's image with that tag.\""}
         next_retry_at: {type: [string, "null"], format: date-time}
         last_scanned_at: {type: [string, "null"], format: date-time}
         registry: {type: string, description: "Matching registry host_pattern, \"public\" (anonymous pull), or \"\" (no credential)"}

@@ -37,6 +37,7 @@ func (a *API) Routes(r chi.Router) {
 		r.Patch("/audit/schedules/{id}", a.patchSchedule)
 		r.Delete("/audit/schedules/{id}", a.deleteSchedule)
 		r.Post("/audit/schedules/{id}/run", a.runSchedule)
+		r.Get("/audit/clusters", a.listClusterSummaries)
 		r.Get("/audit/runs", a.listRuns)
 		r.Get("/audit/runs/{id}", a.getRun)
 		r.Get("/findings", a.listFindings)

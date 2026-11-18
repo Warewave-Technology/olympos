@@ -1,0 +1,7 @@
+{"level":"info","ts":"2026-11-18T19:20:01Z","msg":"Kubescape scanner initializing..."}
+{"level":"info","ts":"2026-11-18T19:20:01Z","msg":"Initialized scanner","kubeconfig":"/tmp/olympos-audit-1/kubeconfig"}
+{"level":"warn","ts":"2026-11-18T19:20:02Z","msg":"failed to get cloud provider metadata","error":"no metadata server"}
+{"level":"debug","ts":"2026-11-18T19:20:02Z","msg":"request headers","authorization":"Bearer eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJsb2ctY2FuYXJ5In0.c2lnbmF0dXJlc2ln"}
+{"level":"info","ts":"2026-11-18T19:20:02Z","msg":"Downloading/Loading framework","framework":"cis-v1.23-t1.0.1"}
+{"level":"error","ts":"2026-11-18T19:20:03Z","msg":"failed to download framework","framework":"cis-v1.23-t1.0.1","error":"framework 'cis-v1.23-t1.0.1' not found"}
+Error: framework 'cis-v1.23-t1.0.1' not found
