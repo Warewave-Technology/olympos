@@ -1,0 +1,10 @@
+{{- /* olympos-system stays PSA "restricted". Created by --create-namespace; labels applied here when Helm owns it. */ -}}
+{{- if .Values.manageNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted
+{{- end }}

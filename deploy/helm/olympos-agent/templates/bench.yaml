@@ -1,0 +1,67 @@
+{{- if .Values.bench.enabled }}
+# kube-bench exception (SPEC §12.3). Rendered only when bench.enabled=true.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.bench.namespace }}
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: olympos-agent-bench
+  namespace: {{ .Values.bench.namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+rules:
+- apiGroups: ["batch"]
+  resources: [jobs]
+  verbs: [create, get, list, delete]
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list]
+- apiGroups: [""]
+  resources: [pods/log]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: olympos-agent-bench
+  namespace: {{ .Values.bench.namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: olympos-agent-bench
+subjects:
+- kind: ServiceAccount
+  name: olympos-agent
+  namespace: {{ .Release.Namespace }}
+{{- if .Capabilities.APIVersions.Has "kyverno.io/v2/PolicyException" }}
+---
+apiVersion: kyverno.io/v2
+kind: PolicyException
+metadata:
+  name: olympos-kube-bench
+  namespace: {{ .Values.bench.namespace }}
+spec:
+  exceptions:
+  - policyName: "*"
+    ruleNames: ["*"]
+  match:
+    any:
+    - resources:
+        kinds: [Pod, Job]
+        namespaces: [{{ .Values.bench.namespace }}]
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: olympos-kube-bench
+  conditions:
+    all:
+    - key: "{{`{{ request.object.spec.containers[].image }}`}}"
+      operator: AllIn
+      value: [{{ .Values.bench.imagePattern | quote }}]
+{{- end }}
+{{- end }}

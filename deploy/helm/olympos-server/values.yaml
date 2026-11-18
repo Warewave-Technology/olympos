@@ -1,0 +1,85 @@
+image:
+  repository: ghcr.io/warewave-technology/olympos-server
+  tag: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicas: 1
+
+# Rendered verbatim into config.yaml under `olympos:` (SPEC §2.1).
+olympos:
+  publicURL: https://olympos.contoso.internal
+  agentGatewayURL: olympos-gw.contoso.internal:8443
+  devMode: false
+  entra:
+    tenantID: ""
+    clientID: ""
+    clientSecretRef: ""        # kv://<vault>/<secret>
+  bootstrapAdmins: []          # Entra object IDs; used only while the grants table is empty
+  keyVault:
+    provider: azure
+    name: ""
+    kekName: olympos-kek
+    hmacSecretName: olympos-hmac
+    managedIdentityClientID: ""
+  database:
+    dsnRef: ""                 # kv://<vault>/olympos-db-dsn
+  slack:
+    botTokenRef: ""
+  deadMansSwitch:
+    url: ""
+  backup:
+    globalConcurrency: 4
+    perClusterConcurrency: 2
+  changeRequests:
+    ttl: 72h
+
+# Azure Workload Identity: annotate the ServiceAccount with the MI client ID.
+workloadIdentity:
+  enabled: true
+  clientID: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  nodePort: null
+gatewayService:
+  # Agents dial this endpoint (mTLS). Usually an internal LoadBalancer.
+  type: LoadBalancer
+  port: 8443
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+  nodePort: null
+ingress:
+  enabled: false
+  className: ""
+  host: olympos.contoso.internal
+  tlsSecretName: ""
+  annotations: {}
+
+# Optional externally issued gateway certificate (kubernetes.io/tls Secret).
+gatewayTLSSecret: ""
+
+# Dev/lab only: persistent directory for keyVault.provider=local.
+localKeyVault:
+  persistence:
+    enabled: false
+    size: 64Mi
+    storageClass: ""
+
+trivyCache:
+  size: 2Gi
+  storageClass: ""
+  persistent: false
+
+resources:
+  requests: {cpu: 200m, memory: 256Mi}
+  limits: {memory: 1Gi}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podAnnotations: {}
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []

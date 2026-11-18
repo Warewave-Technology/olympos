@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels: {{- include "olympos-server.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "olympos-server.selector" . | nindent 8 }}
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/config.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      automountServiceAccountToken: {{ .Values.workloadIdentity.enabled }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: server
+        image: {{ include "olympos-server.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        args: ["-config", "/etc/olympos/config/config.yaml"]
+        env:
+        - {name: TMPDIR, value: /tmp}
+        - {name: HOME, value: /tmp}
+        {{- with .Values.extraEnv }}{{ toYaml . | nindent 8 }}{{ end }}
+        ports:
+        - {name: http, containerPort: 8080}
+        - {name: gateway, containerPort: 8443}
+        - {name: metrics, containerPort: 9090}
+        readinessProbe:
+          httpGet: {path: /readyz, port: metrics}
+          periodSeconds: 10
+        livenessProbe:
+          httpGet: {path: /healthz, port: metrics}
+          initialDelaySeconds: 20
+          periodSeconds: 20
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        resources: {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - {name: config, mountPath: /etc/olympos/config, readOnly: true}
+        - {name: tmp, mountPath: /tmp}
+        - {name: trivy-cache, mountPath: /var/cache/trivy}
+        {{- if .Values.gatewayTLSSecret }}
+        - {name: gateway-tls, mountPath: /etc/olympos/gateway-tls, readOnly: true}
+        {{- end }}
+        {{- if eq .Values.olympos.keyVault.provider "local" }}
+        - {name: localkv, mountPath: /var/lib/olympos/localkv}
+        {{- end }}
+        {{- with .Values.extraVolumeMounts }}{{ toYaml . | nindent 8 }}{{ end }}
+      volumes:
+      - name: config
+        configMap: {name: {{ .Release.Name }}-config}
+      - name: tmp
+        emptyDir: {sizeLimit: 4Gi}
+      - name: trivy-cache
+        {{- if .Values.trivyCache.persistent }}
+        persistentVolumeClaim: {claimName: {{ .Release.Name }}-trivy-cache}
+        {{- else }}
+        emptyDir: {sizeLimit: {{ .Values.trivyCache.size }}}
+        {{- end }}
+      {{- if .Values.gatewayTLSSecret }}
+      - name: gateway-tls
+        secret: {secretName: {{ .Values.gatewayTLSSecret }}}
+      {{- end }}
+      {{- if eq .Values.olympos.keyVault.provider "local" }}
+      - name: localkv
+        {{- if .Values.localKeyVault.persistence.enabled }}
+        persistentVolumeClaim: {claimName: {{ .Release.Name }}-localkv}
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.extraVolumes }}{{ toYaml . | nindent 6 }}{{ end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: olympos-agent
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{- include "olympos-agent.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "olympos-agent.selector" . | nindent 8 }}
+      annotations:
+        checksum/ca: {{ .Values.serverCA | sha256sum }}
+        {{- with .Values.podAnnotations }}{{ toYaml . | nindent 8 }}{{ end }}
+    spec:
+      serviceAccountName: olympos-agent
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: agent
+        image: {{ include "olympos-agent.image" . }}
+        imagePullPolicy: {{ .Values.image.pullPolicy }}
+        env:
+        - {name: OLYMPOS_SERVER, value: {{ required "server is required" .Values.server | quote }}}
+        - {name: OLYMPOS_SERVER_NAME, value: {{ .Values.serverName | quote }}}
+        - {name: OLYMPOS_SERVER_CA_FILE, value: /etc/olympos/ca.crt}
+        - {name: OLYMPOS_PROVIDER_OVERRIDE, value: {{ .Values.providerOverride | quote }}}
+        - {name: OLYMPOS_MAX_TUNNELS, value: {{ .Values.maxTunnels | quote }}}
+        - {name: OLYMPOS_BENCH_ENABLED, value: {{ .Values.bench.enabled | quote }}}
+        - {name: OLYMPOS_BENCH_MAX_PARALLEL, value: {{ .Values.bench.maxParallel | quote }}}
+        - {name: OLYMPOS_BENCH_NAMESPACE, value: {{ .Values.bench.namespace | quote }}}
+        - name: POD_NAMESPACE
+          valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        # No ports: the agent only dials out. Health is localhost-only and
+        # probed by exec'ing the binary (distroless has no shell).
+        livenessProbe:
+          exec: {command: [/olympos-agent, health]}
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        resources: {{- toYaml .Values.resources | nindent 10 }}
+        volumeMounts:
+        - {name: ca, mountPath: /etc/olympos, readOnly: true}
+      volumes:
+      - name: ca
+        configMap: {name: olympos-agent-ca}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

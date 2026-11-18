@@ -1,0 +1,6 @@
+apiVersion: v2
+name: olympos-agent
+description: Olympos agent — discovery, inventory and a constrained tunnel. Dials out only.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

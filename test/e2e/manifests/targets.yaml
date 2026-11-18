@@ -1,0 +1,164 @@
+# Workloads Olympos should discover in the lab cluster (SPEC §5 annotations).
+apiVersion: v1
+kind: Namespace
+metadata: {name: lab}
+---
+# PostgreSQL with TLS from the lab CA (secret pg-tls is created by run.sh).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: orders-pg, namespace: lab}
+spec:
+  serviceName: orders-pg
+  selector: {matchLabels: {app: orders-pg}}
+  template:
+    metadata: {labels: {app: orders-pg}}
+    spec:
+      initContainers:
+      - name: certs
+        image: busybox:1.36
+        command: [sh, -c, "cp /tls/tls.crt /tls/tls.key /certs/ && chown 70:70 /certs/* && chmod 0600 /certs/tls.key"]
+        volumeMounts: [{name: tls, mountPath: /tls}, {name: certs, mountPath: /certs}]
+      containers:
+      - name: pg
+        image: postgres:16-alpine
+        args: [-c, ssl=on, -c, ssl_cert_file=/certs/tls.crt, -c, ssl_key_file=/certs/tls.key]
+        env:
+        - {name: POSTGRES_USER, value: backup}
+        - {name: POSTGRES_PASSWORD, value: CANARY-lab-pg-password}
+        - {name: POSTGRES_DB, value: orders}
+        ports: [{containerPort: 5432, name: pg}]
+        readinessProbe: {exec: {command: [pg_isready, -U, backup]}, periodSeconds: 3}
+        volumeMounts: [{name: certs, mountPath: /certs}]
+      volumes:
+      - {name: tls, secret: {secretName: pg-tls}}
+      - {name: certs, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: orders-pg
+  namespace: lab
+  annotations:
+    olympos.io/backup: postgresql
+    olympos.io/tls-server-name: orders-pg.lab.svc
+spec:
+  selector: {app: orders-pg}
+  ports: [{name: pg, port: 5432}]
+---
+# Vault dev server (in-memory, http). Raft snapshots need integrated storage;
+# the M3 e2e runs Vault with a raft config instead (see vault-raft below).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: vault, namespace: lab}
+spec:
+  selector: {matchLabels: {app: vault}}
+  template:
+    metadata: {labels: {app: vault}}
+    spec:
+      containers:
+      - name: vault
+        image: hashicorp/vault:1.20
+        args: [server, -config=/vault/config/raft.hcl]
+        env:
+        - {name: VAULT_ADDR, value: "http://127.0.0.1:8200"}
+        - {name: SKIP_SETCAP, value: "true"}
+        ports: [{containerPort: 8200}]
+        volumeMounts:
+        - {name: config, mountPath: /vault/config}
+        - {name: data, mountPath: /vault/data}
+      volumes:
+      - name: config
+        configMap: {name: vault-raft}
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: vault-raft, namespace: lab}
+data:
+  raft.hcl: |
+    storage "raft" {
+      path    = "/vault/data"
+      node_id = "vault-0"
+    }
+    listener "tcp" {
+      address     = "0.0.0.0:8200"
+      tls_disable = true
+    }
+    api_addr     = "http://vault.lab.svc:8200"
+    cluster_addr = "http://vault.lab.svc:8201"
+    disable_mlock = true
+    ui = false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vault
+  namespace: lab
+  annotations:
+    olympos.io/vault: hashicorp
+    olympos.io/backup: vault
+spec:
+  selector: {app: vault}
+  ports: [{name: http, port: 8200}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: openbao, namespace: lab}
+spec:
+  selector: {matchLabels: {app: openbao}}
+  template:
+    metadata: {labels: {app: openbao}}
+    spec:
+      containers:
+      - name: bao
+        image: openbao/openbao:2.4.1
+        args: [server, -dev, -dev-root-token-id=CANARY-lab-bao-root, -dev-listen-address=0.0.0.0:8200]
+        ports: [{containerPort: 8200}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: openbao
+  namespace: lab
+  annotations:
+    olympos.io/vault: openbao
+spec:
+  selector: {app: openbao}
+  ports: [{name: http, port: 8200}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: metrics-ch, namespace: lab}
+spec:
+  selector: {matchLabels: {app: metrics-ch}}
+  template:
+    metadata: {labels: {app: metrics-ch}}
+    spec:
+      containers:
+      - name: ch
+        image: clickhouse/clickhouse-server:24.8
+        env:
+        - {name: CLICKHOUSE_USER, value: backup}
+        - {name: CLICKHOUSE_PASSWORD, value: CANARY-lab-ch-password}
+        - {name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT, value: "1"}
+        ports: [{containerPort: 9000, name: native}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: metrics-ch
+  namespace: lab
+  annotations:
+    olympos.io/backup: clickhouse
+    olympos.io/port: native
+spec:
+  selector: {app: metrics-ch}
+  ports: [{name: native, port: 9000}, {name: http, port: 8123}]
+---
+# Not annotated: must NOT be discovered.
+apiVersion: v1
+kind: Service
+metadata: {name: not-a-target, namespace: lab}
+spec:
+  selector: {app: orders-pg}
+  ports: [{port: 5432}]

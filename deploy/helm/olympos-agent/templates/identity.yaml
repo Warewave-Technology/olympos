@@ -1,0 +1,55 @@
+# The one Secret the agent may read/write (SPEC §4.4): its own identity.
+# Existing data (enrolled cert/key) is preserved across upgrades.
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "olympos-agent-identity" }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: olympos-agent-identity
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+{{- if and $existing $existing.data (hasKey $existing.data "tls.crt") }}
+data: {{- toYaml $existing.data | nindent 2 }}
+{{- else }}
+stringData:
+  bootstrap-token: {{ required "bootstrapToken is required on first install" .Values.bootstrapToken | quote }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: olympos-agent-identity
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+rules:
+- apiGroups: [""]
+  resources: [secrets]
+  resourceNames: [olympos-agent-identity]
+  verbs: [get, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: olympos-agent-identity
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: olympos-agent-identity
+subjects:
+- kind: ServiceAccount
+  name: olympos-agent
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: olympos-agent-ca
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-agent.labels" . | nindent 4 }}
+data:
+  ca.crt: |
+{{ required "serverCA is required" .Values.serverCA | b64dec | indent 4 }}

@@ -34,6 +34,7 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/secrets"
 	"github.com/Warewave-Technology/olympos/internal/server"
 	"github.com/Warewave-Technology/olympos/internal/store"
+	"github.com/Warewave-Technology/olympos/internal/targettls"
 	"github.com/Warewave-Technology/olympos/web"
 )
 
@@ -104,6 +105,9 @@ func Run(cfgPath string) error {
 	}
 	defer d.DB.Close()
 	if err := store.Migrate(ctx, d.DB); err != nil {
+		return err
+	}
+	if err := targettls.SetCABundleFile(cfg.TargetTLS.CABundleFile); err != nil {
 		return err
 	}
 	d.Envelope = &secrets.Envelope{KV: d.KV}

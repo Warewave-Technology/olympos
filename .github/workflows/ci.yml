@@ -1,0 +1,109 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: olympos, POSTGRES_PASSWORD: olympos}
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U olympos" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v4
+      - name: Install pg_dump
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Generated code is up to date
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+          sudo apt-get install -y protobuf-compiler
+          make proto && git diff --exit-code internal/gen
+      - run: go vet ./...
+      - name: Unit + integration tests (incl. SPEC §18 security checks)
+        env: {OLYMPOS_REQUIRE_DB: "1"}
+        run: go test -race -count=1 ./...
+      - name: Secret canary scan of test logs
+        run: ./scripts/check-no-secrets.sh
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults: {run: {working-directory: web}}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: {version: 9}
+      - uses: actions/setup-node@v4
+        with: {node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml}
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm test
+      - run: pnpm build
+
+  images:
+    needs: [go, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write   # cosign keyless
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
+        with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
+      - uses: sigstore/cosign-installer@v3
+      - uses: anchore/sbom-action/download-syft@v0
+      - name: Build and push
+        id: build
+        env:
+          PUSH: ${{ github.event_name != 'pull_request' }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for c in server agent; do
+            img=ghcr.io/warewave-technology/olympos-$c:${GITHUB_SHA::12}
+            docker buildx build --platform linux/amd64,linux/arm64 -f deploy/docker/$c.Dockerfile \
+              --build-arg VERSION=$VERSION --provenance=true --sbom=true \
+              -t $img $( [ "$PUSH" = true ] && echo --push ) .
+            if [ "$PUSH" = true ]; then
+              digest=$(docker buildx imagetools inspect $img --format '{{json .Manifest}}' | jq -r .digest)
+              syft ghcr.io/warewave-technology/olympos-$c@$digest -o spdx-json > sbom-$c.spdx.json
+              cosign sign --yes ghcr.io/warewave-technology/olympos-$c@$digest
+              cosign attest --yes --type spdxjson --predicate sbom-$c.spdx.json ghcr.io/warewave-technology/olympos-$c@$digest
+            fi
+          done
+      - name: Scan images
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ghcr.io/warewave-technology/olympos-agent:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: "0"
+
+  e2e:
+    needs: [go]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with: {install_only: true}
+      - run: ./test/e2e/run.sh

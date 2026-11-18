@@ -8,3 +8,4 @@ coverage.out
 .env
 /tmp/
 test/e2e/.work/
+.claude/

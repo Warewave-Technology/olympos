@@ -1,0 +1,52 @@
+# Olympos's own dependencies in the lab: its PostgreSQL and Azurite (Blob fake).
+apiVersion: v1
+kind: Namespace
+metadata: {name: olympos}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: olympos-db, namespace: olympos}
+spec:
+  serviceName: olympos-db
+  replicas: 1
+  selector: {matchLabels: {app: olympos-db}}
+  template:
+    metadata: {labels: {app: olympos-db}}
+    spec:
+      containers:
+      - name: pg
+        image: postgres:16-alpine
+        env:
+        - {name: POSTGRES_USER, value: olympos}
+        - {name: POSTGRES_PASSWORD, value: lab-db-password}
+        - {name: POSTGRES_DB, value: olympos}
+        ports: [{containerPort: 5432}]
+        readinessProbe: {exec: {command: [pg_isready, -U, olympos]}, periodSeconds: 3}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: olympos-db, namespace: olympos}
+spec:
+  selector: {app: olympos-db}
+  ports: [{port: 5432}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: azurite, namespace: olympos}
+spec:
+  selector: {matchLabels: {app: azurite}}
+  template:
+    metadata: {labels: {app: azurite}}
+    spec:
+      containers:
+      - name: azurite
+        image: mcr.microsoft.com/azure-storage/azurite:3.35.0
+        args: [azurite-blob, --blobHost, 0.0.0.0, --loose, --skipApiVersionCheck]
+        ports: [{containerPort: 10000}]
+---
+apiVersion: v1
+kind: Service
+metadata: {name: azurite, namespace: olympos}
+spec:
+  selector: {app: azurite}
+  ports: [{port: 10000}]

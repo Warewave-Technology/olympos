@@ -1,0 +1,18 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-config
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    olympos:
+{{ toYaml .Values.olympos | indent 6 }}
+      listen:
+        http: ":8080"
+        gateway: ":8443"
+        metrics: ":9090"
+      {{- if .Values.gatewayTLSSecret }}
+      gateway:
+        tlsCertFile: /etc/olympos/gateway-tls/tls.crt
+        tlsKeyFile: /etc/olympos/gateway-tls/tls.key
+      {{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: olympos-server
+description: Olympos server — web UI, REST API, agent gateway, schedulers and workers.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

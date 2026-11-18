@@ -1,0 +1,27 @@
+{{- if and (eq .Values.olympos.keyVault.provider "local") .Values.localKeyVault.persistence.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-localkv
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.localKeyVault.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.localKeyVault.persistence.size }}}}
+{{- end }}
+{{- if .Values.trivyCache.persistent }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Release.Name }}-trivy-cache
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]
+  {{- with .Values.trivyCache.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources: {requests: {storage: {{ .Values.trivyCache.size }}}}
+{{- end }}

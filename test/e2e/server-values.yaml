@@ -1,0 +1,19 @@
+image: {repository: olympos-server, tag: e2e, pullPolicy: Never}
+workloadIdentity: {enabled: false}
+service: {type: NodePort, port: 80, nodePort: 30080}
+gatewayService: {type: ClusterIP, annotations: {}}
+localKeyVault: {persistence: {enabled: true}}
+olympos:
+  devMode: true
+  publicURL: http://127.0.0.1:28080
+  agentGatewayURL: olympos-gateway.olympos.svc:8443
+  bootstrapAdmins: ["00000000-0000-0000-0000-00000000ad01"]
+  keyVault: {provider: local, name: lab}
+  database:
+    dsn: postgres://olympos:lab-db-password@olympos-db.olympos.svc:5432/olympos?sslmode=disable
+  targetTLS: {caBundleFile: /etc/olympos/target-ca/ca.crt}
+extraVolumes:
+- name: target-ca
+  configMap: {name: target-ca}
+extraVolumeMounts:
+- {name: target-ca, mountPath: /etc/olympos/target-ca, readOnly: true}

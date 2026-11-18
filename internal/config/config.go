@@ -62,6 +62,13 @@ type Server struct {
 		ExtraSANs   []string `yaml:"extraSANs"`
 	} `yaml:"gateway"`
 
+	// TargetTLS configures how the server verifies targets' TLS certificates
+	// (end-to-end through the tunnel). The system pool is always trusted;
+	// CABundleFile adds private CAs (PEM).
+	TargetTLS struct {
+		CABundleFile string `yaml:"caBundleFile"`
+	} `yaml:"targetTLS"`
+
 	Slack struct {
 		BotTokenRef string `yaml:"botTokenRef"`
 		APIURL      string `yaml:"apiURL"` // tests only
