@@ -7,6 +7,8 @@ data:
   config.yaml: |
     olympos:
 {{ toYaml .Values.olympos | indent 6 }}
+      experimental:
+        multiReplica: {{ .Values.experimental.multiReplica }}
       listen:
         http: ":8080"
         gateway: ":8443"

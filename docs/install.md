@@ -77,9 +77,13 @@ issued by Olympos's internal CA for the host of `agentGatewayURL` (agents pin th
 `gatewayTLSSecret` to use your own. **Do not terminate TLS for `:8443` in a proxy** — mTLS must reach
 the server.
 
-Run more than one replica if you like: the backup and audit schedulers hold a Postgres advisory lock
-(one active scheduler), and workers claim runs with `SKIP LOCKED`. A tunnel can only be opened on the
-replica the agent is connected to, so workers only pick runs for agents connected to themselves.
+**v0.1 runs as a single replica.** Availability comes from Kubernetes restarting the pod; agents reconnect
+automatically. Multi-replica is planned for v0.2. A tunnel can only be opened on the replica the agent is
+connected to, so more replicas would work only sometimes: the chart refuses `replicas > 1` and uses the
+`Recreate` strategy. Every server instance registers in the database; if a second live instance appears
+(two hosts pointed at the same database, a stuck old pod), the newer one logs an error and reports
+`/readyz` not ready until the older one is gone. `experimental.multiReplica: true` lifts both checks and
+is unsupported.
 
 ## 3. Agents
 

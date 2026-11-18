@@ -5,7 +5,13 @@ image:
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
+# v0.1 runs as a single replica: tunnels open only on the replica an agent
+# is connected to. Availability comes from Kubernetes restarting the pod;
+# agents reconnect automatically. Values > 1 fail unless
+# experimental.multiReplica is true (not supported, planned for v0.2).
 replicas: 1
+experimental:
+  multiReplica: false
 
 # Rendered verbatim into config.yaml under `olympos:` (SPEC §2.1).
 olympos:

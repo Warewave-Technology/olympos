@@ -5,6 +5,7 @@ package helm
 import (
 	"bytes"
 	"encoding/base64"
+	"errors"
 	"flag"
 	"os"
 	"os/exec"
@@ -181,4 +182,59 @@ func TestBenchKyvernoExceptionsOptIn(t *testing.T) {
 // Values from an older release (helm upgrade --reuse-values) lack newer keys.
 func TestBenchToleratesOldValues(t *testing.T) {
 	render(t, "--set", "bench.enabled=true", "--set", "bench.kyverno=null")
+}
+
+func renderServer(t *testing.T, extra ...string) ([]map[string]any, error) {
+	t.Helper()
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	cmd := exec.Command("helm", append([]string{"template", "o", "olympos-server", "--namespace", "olympos"}, extra...)...)
+	var out, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, errors.New(stderr.String())
+	}
+	var docs []map[string]any
+	dec := utilyaml.NewYAMLOrJSONDecoder(&out, 4096)
+	for {
+		var m map[string]any
+		if err := dec.Decode(&m); err != nil {
+			break
+		}
+		if m != nil {
+			docs = append(docs, m)
+		}
+	}
+	return docs, nil
+}
+
+// F5: single replica by default, a second one only when explicitly enabled.
+func TestServerSingleReplica(t *testing.T) {
+	docs, err := renderServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dep := find(docs, "Deployment", "o")
+	spec, _ := dep["spec"].(map[string]any)
+	if spec["replicas"] != float64(1) && spec["replicas"] != int64(1) && spec["replicas"] != 1 {
+		t.Fatalf("replicas: %v", spec["replicas"])
+	}
+	if st, _ := spec["strategy"].(map[string]any); st["type"] != "Recreate" {
+		t.Fatalf("strategy: %v", spec["strategy"])
+	}
+	cm := find(docs, "ConfigMap", "o-config")
+	if data, _ := cm["data"].(map[string]any); !strings.Contains(data["config.yaml"].(string), "multiReplica: false") {
+		t.Fatalf("config: %v", data["config.yaml"])
+	}
+	if _, err := renderServer(t, "--set", "replicas=2"); err == nil || !strings.Contains(err.Error(), "single replica") {
+		t.Fatalf("replicas=2 must fail: %v", err)
+	}
+	docs, err = renderServer(t, "--set", "replicas=2", "--set", "experimental.multiReplica=true")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec, _ := find(docs, "Deployment", "o")["spec"].(map[string]any); spec["strategy"] != nil {
+		t.Fatalf("multiReplica keeps the rolling update: %v", spec["strategy"])
+	}
 }

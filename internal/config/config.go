@@ -23,6 +23,12 @@ type Server struct {
 	// cookies. Only development builds (-tags dev) accept it (F6).
 	DevMode bool `yaml:"devMode"`
 
+	// Experimental features. MultiReplica allows more than one server
+	// instance on the same database (v0.1 supports one, F5).
+	Experimental struct {
+		MultiReplica bool `yaml:"multiReplica"`
+	} `yaml:"experimental"`
+
 	Listen struct {
 		HTTP    string `yaml:"http"`    // user-facing, default :8080 (TLS terminated by ingress)
 		Gateway string `yaml:"gateway"` // agent gateway, default :8443

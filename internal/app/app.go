@@ -168,7 +168,16 @@ func Run(cfgPath string) error {
 	for _, w := range wiring {
 		srv.Modules = append(srv.Modules, w.Modules...)
 	}
-	srv.Ready = func(ctx context.Context) error { return d.DB.Ping(ctx) }
+	guard, err := newInstanceGuard(ctx, d.DB, log.With("component", "instances"), cfg.Experimental.MultiReplica)
+	if err != nil {
+		return fmt.Errorf("register server instance: %w", err)
+	}
+	srv.Ready = func(ctx context.Context) error {
+		if err := d.DB.Ping(ctx); err != nil {
+			return err
+		}
+		return guard.Ready()
+	}
 
 	// Gateway TLS.
 	gwCert, err := d.gatewayCert()
@@ -186,6 +195,7 @@ func Run(cfgPath string) error {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
+	start(guard.run)
 	start(d.Inventory.RunOfflineMonitor)
 	start(srv.CleanupSessions)
 	start(func(ctx context.Context) { d.principalSync(ctx, srv.Directory) })

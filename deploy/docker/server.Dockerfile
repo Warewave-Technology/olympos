@@ -21,7 +21,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web /web/dist ./web/dist
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "$GO_TAGS" -ldflags "-s -w" \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -tags "$GO_TAGS" -ldflags "-s -w -X github.com/Warewave-Technology/olympos/internal/version.Version=${VERSION}" \
     -o /out/olympos-server ./cmd/olympos-server && \
     CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
     -o /out/olympos-sh ./cmd/olympos-sh

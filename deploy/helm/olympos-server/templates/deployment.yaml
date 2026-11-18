@@ -1,3 +1,6 @@
+{{- if and (gt (int .Values.replicas) 1) (not .Values.experimental.multiReplica) }}
+{{- fail "olympos-server v0.1 runs as a single replica (replicas: 1). Tunnels only open on the replica an agent is connected to, so more replicas would work only sometimes. See docs/install.md; experimental.multiReplica=true overrides this, unsupported." }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +8,11 @@ metadata:
   labels: {{- include "olympos-server.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicas }}
+  {{- if not .Values.experimental.multiReplica }}
+  # The old pod stops before the new one starts: a second live instance on
+  # the same database is not ready by design (F5).
+  strategy: {type: Recreate}
+  {{- end }}
   selector:
     matchLabels: {{- include "olympos-server.selector" . | nindent 6 }}
   template:
