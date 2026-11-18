@@ -116,7 +116,8 @@ func TestM5Security(t *testing.T) {
 	t.Run("kyverno", func(t *testing.T) {
 		// Kyverno 1.20 runs only CEL policies; the lab applies a ValidatingPolicy
 		// always and the legacy ClusterPolicy only with Kyverno <= 1.19.
-		legacy := strings.TrimSpace(run(t, "kubectl", "get", "clusterpolicies.kyverno.io", "-o", "name", "--ignore-not-found")) != ""
+		// stdout and stderr are combined; kubectl prints a deprecation warning.
+		legacy := strings.Contains(run(t, "kubectl", "get", "clusterpolicies.kyverno.io", "-o", "name", "--ignore-not-found"), "clusterpolicy.kyverno.io/")
 		// Existing pods are only evaluated by background scans; touch one so
 		// admission reports are produced quickly.
 		run(t, "kubectl", "-n", "lab", "annotate", "pod", "orders-pg-0", "olympos.io/e2e-touch="+fmt.Sprint(time.Now().Unix()), "--overwrite")

@@ -16,6 +16,7 @@ one agent per cluster; agents dial out, credentials never enter a cluster.
 | [docs/openapi.yaml](docs/openapi.yaml) | REST API |
 | [docs/development.md](docs/development.md) | Conventions, tests |
 | [test/e2e/README.md](test/e2e/README.md) | kind lab |
+| [docs/spec-changes.md](docs/spec-changes.md) | Approved changes to SPEC MUSTs |
 
 ```bash
 make dev-db && OLYMPOS_REQUIRE_DB=1 go test ./...   # unit + integration

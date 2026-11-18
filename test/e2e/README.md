@@ -19,6 +19,9 @@ target IDs (it must refuse anything it did not discover).
 
 Dev sign-in: http://127.0.0.1:28080/auth/dev-login?oid=00000000-0000-0000-0000-00000000ad01&name=Lab%20Admin
 
+Kyverno 1.20 is installed by default (CEL `ValidatingPolicy` only). `KYVERNO_CHART=3.9.2` installs 1.19,
+where the legacy `ClusterPolicy` runs as well, so both agent code paths are exercised.
+
 ```bash
 SKIP_BUILD=1 ./test/e2e/run.sh   # reuse images
 ./test/e2e/run.sh down           # delete the cluster
