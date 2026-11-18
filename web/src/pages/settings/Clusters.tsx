@@ -232,8 +232,8 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
       ) : (
         <form onSubmit={submit} className="stack" noValidate>
           <div className="grid-2">
-            <Field label="Labels" htmlFor="cs-labels" error={labelErr ?? fieldError(save.error, 'labels')} hint="Type key=value and press Enter; Backspace removes the last one.">
-              <TagInput {...aria('cs-labels', labelErr ?? fieldError(save.error, 'labels'), true)} value={labels} onChange={setLabels} onDraftError={setLabelDraftErr} />
+            <Field label="Labels" htmlFor="cs-labels" error={labelErr ?? fieldError(save.error, 'labels')} hint="Type key=value and press Enter; Backspace removes the last one. olympos.io/cluster is set by Olympos.">
+              <TagInput {...aria('cs-labels', labelErr ?? fieldError(save.error, 'labels'), true)} value={labels} onChange={setLabels} onDraftError={setLabelDraftErr} lockedPrefix="olympos.io/" />
             </Field>
             <Field label="Provider" htmlFor="cs-prov" error={fieldError(save.error, 'provider_override')}>
               <Select

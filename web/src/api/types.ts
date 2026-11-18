@@ -499,6 +499,20 @@ export interface AuditScheduleInput {
   enabled?: boolean;
   notify_channel_id?: string | null;
 }
+/** One kube-bench result on a node. */
+export interface BenchCheck {
+  id: string;
+  section: string;
+  section_text: string;
+  node_type: string;
+  description: string;
+  status: 'PASS' | 'FAIL' | 'WARN' | 'INFO';
+  scored: boolean;
+  remediation: string;
+  actual_value?: string;
+  expected_result?: string;
+  reason?: string;
+}
 export interface BenchNode {
   node_name: string;
   benchmark: string;
@@ -511,6 +525,8 @@ export interface BenchNode {
   /** Optional: cluster name, when runs are listed across clusters. */
   cluster_name?: string;
   duration_s?: number;
+  /** Every result (run detail only; empty for runs stored before checks were kept). */
+  checks?: BenchCheck[];
 }
 export interface AuditRun {
   id: string;

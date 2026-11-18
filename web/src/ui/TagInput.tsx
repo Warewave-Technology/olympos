@@ -23,6 +23,8 @@ export interface TagInputLabelsProps extends TagInputCommon {
   mode?: 'labels';
   value: Record<string, string>;
   onChange: (value: Record<string, string>) => void;
+  /** Keys with this prefix are shown as locked chips: they cannot be removed, changed or added. */
+  lockedPrefix?: string;
 }
 /** Plain values (database names, …): one chip per value, duplicates ignored. */
 export interface TagInputValuesProps extends TagInputCommon {
@@ -71,7 +73,11 @@ export function TagInput(props: TagInputProps) {
   const [error, setErrorState] = useState<string | null>(null);
   const [announce, setAnnounce] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-  const items: { key: string; label: string }[] = props.mode === 'values' ? props.value.map((v) => ({ key: v, label: v })) : Object.entries(props.value).map(([k, v]) => ({ key: k, label: `${k}=${v}` }));
+  const lockedPrefix = props.mode === 'values' ? undefined : props.lockedPrefix;
+  const isLocked = (k: string) => !!lockedPrefix && k.startsWith(lockedPrefix);
+  const items: { key: string; label: string; locked?: boolean }[] =
+    props.mode === 'values' ? props.value.map((v) => ({ key: v, label: v })) : Object.entries(props.value).map(([k, v]) => ({ key: k, label: `${k}=${v}`, locked: isLocked(k) }));
+  const removable = items.filter((i) => !i.locked);
   const errId = `${id}-tagerr`;
 
   const setError = (e: string | null) => {
@@ -114,6 +120,11 @@ export function TagInput(props: TagInputProps) {
         if (!t.ok) {
           restTerms.push(raw);
           err ??= t.error;
+          continue;
+        }
+        if (isLocked(t.key)) {
+          restTerms.push(raw);
+          err ??= `Keys under ${lockedPrefix} are reserved and set by Olympos.`;
           continue;
         }
         if (t.key in next && next[t.key] !== t.value) {
@@ -169,9 +180,9 @@ export function TagInput(props: TagInputProps) {
       commit(text); // focus moves on as usual
       return;
     }
-    if (e.key === 'Backspace' && text === '' && items.length > 0) {
+    if (e.key === 'Backspace' && text === '' && removable.length > 0) {
       e.preventDefault();
-      remove(items[items.length - 1].key);
+      remove(removable[removable.length - 1].key);
     }
   };
 
@@ -199,9 +210,10 @@ export function TagInput(props: TagInputProps) {
         {items.length > 0 ? (
           <ul className="tags" aria-label={listLabel} id={readOnly ? id : undefined}>
             {items.map((it) => (
-              <li key={it.key} className="tag">
+              <li key={it.key} className={`tag${it.locked ? ' locked' : ''}`} title={it.locked ? 'Set by Olympos, read-only' : undefined}>
                 <span className="mono">{it.label}</span>
-                {!readOnly && !disabled && (
+                {it.locked && <span className="sr-only"> (read-only)</span>}
+                {!readOnly && !disabled && !it.locked && (
                   <button type="button" className="tag-x" aria-label={`Remove ${it.label}`} onClick={() => remove(it.key)}>
                     <IconClose width={12} height={12} />
                   </button>
@@ -267,6 +279,7 @@ export function ScopeInput({
   error,
   hintId,
   onDraftError,
+  locked,
 }: {
   id: string;
   /** Label selector; "" or "all" means all clusters. */
@@ -276,6 +289,8 @@ export function ScopeInput({
   error?: string;
   hintId?: string;
   onDraftError?: (error: string | null) => void;
+  /** Fixed scope (e.g. pinned to one cluster): shown as disabled chips, not editable. */
+  locked?: ReactNode;
 }) {
   const [advanced, setAdvanced] = useState(() => equalityTerms(value) === null);
   const chips = equalityTerms(value) ?? {};
@@ -286,6 +301,17 @@ export function ScopeInput({
   const countId = `${id}-count`;
   const selErr = advanced && parsed.error ? parsed.error : undefined;
   const describedBy = [hintId, countId].filter(Boolean).join(' ');
+
+  if (locked) {
+    return (
+      <div className="stack-sm" style={{ gap: 8 }}>
+        <TagInput id={id} value={chips} onChange={() => {}} listLabel="Required labels" disabled readOnly aria-describedby={describedBy} />
+        <span className="muted small" id={countId}>
+          {locked}
+        </span>
+      </div>
+    );
+  }
 
   return (
     <div className="stack-sm" style={{ gap: 8 }}>

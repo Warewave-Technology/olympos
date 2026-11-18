@@ -120,7 +120,7 @@ const routes: [string, string, Handler][] = [
       const name = String(r.body?.name ?? '');
       if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(name)) return invalid('invalid cluster', { name: 'Use lowercase letters, digits and dashes.' });
       if (db.clusters.some((c) => c.name === name)) return invalid('invalid cluster', { name: 'A cluster with this name already exists.' });
-      const c: Cluster = { ...db.clusters[0], id: db.uuid(), name, labels: r.body.labels ?? {}, bench_enabled: !!r.body.bench_enabled, status: 'pending', last_seen_at: null, api_version: '', min_kubelet: '', nodes: 0, nodes_ready: 0, cpu_milli: 0, mem_bytes: 0, provider: '', provider_label: '', region: '', zones: [], instance_types: [], agent_version: '', inventory_at: null, created_at: new Date().toISOString(), eol: false, version_skew: false };
+      const c: Cluster = { ...db.clusters[0], id: db.uuid(), name, labels: { ...(r.body.labels ?? {}), 'olympos.io/cluster': name }, bench_enabled: !!r.body.bench_enabled, status: 'pending', last_seen_at: null, api_version: '', min_kubelet: '', nodes: 0, nodes_ready: 0, cpu_milli: 0, mem_bytes: 0, provider: '', provider_label: '', region: '', zones: [], instance_types: [], agent_version: '', inventory_at: null, created_at: new Date().toISOString(), eol: false, version_skew: false };
       db.clusters.push(c);
       db.enrolling.set(c.id, Date.now());
       db.record('cluster.created', 'cluster', name, 'install command issued');
@@ -146,7 +146,7 @@ const routes: [string, string, Handler][] = [
       const c = db.clusters.find((x) => x.id === p.id);
       if (!c) return notFound();
       const b = r.body ?? {};
-      if (b.labels) c.labels = b.labels;
+      if (b.labels) c.labels = { ...b.labels, 'olympos.io/cluster': c.name };
       if (b.provider_override !== undefined) {
         c.provider_override = b.provider_override;
         if (b.provider_override) {

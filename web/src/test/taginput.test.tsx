@@ -38,12 +38,12 @@ describe('label syntax', () => {
   });
 });
 
-function Harness({ initial = {} as Record<string, string> }) {
+function Harness({ initial = {} as Record<string, string>, lockedPrefix }: { initial?: Record<string, string>; lockedPrefix?: string }) {
   const [v, setV] = useState(initial);
   return (
     <>
       <Field label="Labels" htmlFor="lbl">
-        <TagInput id="lbl" value={v} onChange={setV} />
+        <TagInput id="lbl" value={v} onChange={setV} lockedPrefix={lockedPrefix} />
       </Field>
       <output data-testid="value">{JSON.stringify(v)}</output>
     </>
@@ -98,6 +98,19 @@ describe('TagInput', () => {
     expect(value()).toEqual({ team: 'data' });
     expect(input).toHaveFocus();
     expect(screen.getByText('Removed env=prod')).toBeInTheDocument(); // announced
+  });
+
+  it('keeps locked chips: no remove button, Backspace skips them, the prefix cannot be added', async () => {
+    const user = userEvent.setup();
+    render(<Harness initial={{ 'olympos.io/cluster': 'edge', env: 'dev' }} lockedPrefix="olympos.io/" />);
+    expect(screen.queryByRole('button', { name: 'Remove olympos.io/cluster=edge' })).toBeNull();
+    const input = screen.getByLabelText('Labels');
+    await user.click(input);
+    await user.keyboard('{Backspace}{Backspace}');
+    expect(value()).toEqual({ 'olympos.io/cluster': 'edge' });
+    await user.type(input, 'olympos.io/tier=x{Enter}');
+    expect(value()).toEqual({ 'olympos.io/cluster': 'edge' });
+    expect(screen.getByRole('alert')).toHaveTextContent('reserved');
   });
 
   it('creates several chips from pasted a=b,c=d and keeps the invalid rest', async () => {

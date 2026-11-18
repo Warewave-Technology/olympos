@@ -9,7 +9,8 @@ import { age, dateTime, duration, plural } from '../lib/format';
 import { matchesSelector } from '../lib/sas';
 import { auditRoute } from '../router';
 import { AuditRunDialog, FailedRunButton } from '../ui/AuditRunDialog';
-import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { BenchNodeDialog } from '../ui/BenchNodeDialog';
+import { CLUSTER_LABEL, ClusterOverview, ScopeCrumbs, findCluster, resolveScope, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../ui/kit';
 import { PageHead, SeverityBadge } from '../ui/status';
 import { Select } from '../ui/Select';
@@ -377,11 +378,14 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
   const navigate = useNavigate({ from: '/audit' });
   const canOperate = useCan('operate');
   const [creating, setCreating] = useState(false);
+  const [benchNode, setBenchNode] = useState<BenchNode | null>(null);
   const { schedQ, chanQ, runNow, clusters: allClusters } = useAuditBasics();
   const one = scope.mode === 'cluster';
   const info = one ? findCluster(clusters, scope.id) : undefined;
   const full = one ? allClusters.find((c) => c.id === info?.id) : undefined;
   const cid = info?.id ?? (one ? scope.id : undefined);
+  // A schedule made here is pinned to this cluster, so wait for its name.
+  const pinName = info?.name ?? full?.name;
   // every run of this cluster (all tools): history + latest per tool, with the short error
   const runsQ = useQuery({ queryKey: ['audit-runs', { cluster: cid ?? 'all', tool: one ? '' : 'kubescape' }], queryFn: () => api.get<ItemList<AuditRun>>('/audit/runs', { cluster_id: cid, tool: one ? undefined : 'kubescape', limit: 100 }) });
   const runs = runsQ.data?.items ?? [];
@@ -397,7 +401,6 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
     enabled: !one || !!lastKs,
   });
   const channelName = (id: string | null | undefined) => chanQ.data?.items.find((c) => c.id === id)?.name;
-  const switchCluster = (c: string) => navigate({ search: (s) => ({ ...s, cluster: c }) });
   const benchClusters = (summaryQ.data?.items ?? []).filter((r) => r.bench_enabled);
 
   return (
@@ -406,12 +409,7 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
         crumbs={<ScopeCrumbs area="Audit" to="/audit" scope={scope} cluster={info} />}
         title={one ? <span className="mono">{info?.name ?? scope.id}</span> : 'All clusters'}
         sub={one ? `${info ? `${info.provider_label || info.provider} · ` : ''}Scheduled checks of this cluster with full history.` : 'Scheduled checks with full history. What matters is what changed since the last run.'}
-        actions={
-          <>
-            <ClusterSwitcher value={scopeParam(scope) ?? 'all'} clusters={clusters} onChange={switchCluster} />
-            {canOperate && <NewScheduleAction onClick={() => setCreating(true)} />}
-          </>
-        }
+        actions={canOperate && (!one || pinName) && <NewScheduleAction onClick={() => setCreating(true)} />}
       />
 
       <SchedulesCard
@@ -445,7 +443,16 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
                       <FailedRunButton run={r} onOpen={openRun} />
                     </div>
                   )}
-                  <DataTable label="kube-bench nodes" what="node results" rows={r.bench_nodes!} rowKey={(n) => n.node_name + (n.cluster_name ?? '')} columns={benchColumns(r, true)} initialSort={{ id: 'fail', dir: 'desc' }} />
+                  <DataTable
+                    label="kube-bench nodes"
+                    what="node results"
+                    rows={r.bench_nodes!}
+                    rowKey={(n) => n.node_name + (n.cluster_name ?? '')}
+                    columns={benchColumns(r, true)}
+                    initialSort={{ id: 'fail', dir: 'desc' }}
+                    onRowClick={(n) => setBenchNode(n)}
+                    rowLabel={(n) => `Show kube-bench checks of ${n.node_name}`}
+                  />
                 </>
               )}
             </QueryView>
@@ -536,18 +543,20 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
 
       <ActivityCard />
 
-      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} />}
+      {benchNode && <BenchNodeDialog node={benchNode} onClose={() => setBenchNode(null)} />}
+      {creating && (!one || pinName) && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} pinned={one ? pinName : undefined} />}
     </>
   );
 }
 
 
-function NewScheduleDialog({ onClose, channels, clusters }: { onClose: () => void; channels: Channel[]; clusters: Cluster[] }) {
+/** `pinned`: opened from a cluster's page, so the scope is that cluster and cannot be changed. */
+function NewScheduleDialog({ onClose, channels, clusters, pinned }: { onClose: () => void; channels: Channel[]; clusters: Cluster[]; pinned?: string }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [tool, setTool] = useState<AuditTool>('kubescape');
   const [frameworks, setFrameworks] = useState<Set<'nsa' | 'cis' | 'mitre'>>(new Set(['nsa', 'cis', 'mitre']));
-  const [scope, setScope] = useState('');
+  const [scope, setScope] = useState(pinned ? `${CLUSTER_LABEL}=${pinned}` : '');
   const [scopeDraftErr, setScopeDraftErr] = useState<string | null>(null);
   const [cron, setCron] = useState('0 4 * * *');
   const [notify, setNotify] = useState('');
@@ -605,8 +614,27 @@ function NewScheduleDialog({ onClose, channels, clusters }: { onClose: () => voi
           </fieldset>
         )}
         <div className="grid-2">
-          <Field label="Scope (cluster labels)" htmlFor="as-scope" error={fieldError(create.error, 'scope_selector')} hint="No labels = all clusters">
-            <ScopeInput id="as-scope" value={scope} onChange={setScope} clusters={clusters} error={fieldError(create.error, 'scope_selector')} hintId="as-scope-hint" onDraftError={setScopeDraftErr} />
+          <Field label="Scope (cluster labels)" htmlFor="as-scope" error={fieldError(create.error, 'scope_selector')} hint={pinned ? undefined : 'No labels = all clusters'}>
+            <ScopeInput
+              id="as-scope"
+              value={scope}
+              onChange={setScope}
+              clusters={clusters}
+              error={fieldError(create.error, 'scope_selector')}
+              hintId="as-scope-hint"
+              onDraftError={setScopeDraftErr}
+              locked={
+                pinned && (
+                  <>
+                    Only {pinned}. For other clusters, create it from{' '}
+                    <Link to="/audit" onClick={onClose}>
+                      Audit
+                    </Link>
+                    .
+                  </>
+                )
+              }
+            />
           </Field>
           <Field label="Cron" htmlFor="as-cron" error={cronErr ?? fieldError(create.error, 'cron')} hint={!cronErr ? describeCron(cron) : undefined}>
             <input className="in mono" {...aria('as-cron', cronErr ?? undefined, !cronErr)} value={cron} onChange={(e) => setCron(e.target.value)} />

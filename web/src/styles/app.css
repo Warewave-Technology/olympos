@@ -1441,8 +1441,15 @@ textarea.in {
   font-size: 12px;
   max-width: 100%;
 }
-.tags-in.readonly .tag {
+.tags-in.readonly .tag,
+.tags-in.disabled .tag,
+.tag.locked {
   padding-right: 8px;
+}
+.tag.locked {
+  background: var(--bg-surface);
+  border-style: dashed;
+  color: var(--fg-muted);
 }
 .tag .mono {
   font-size: 12px;
@@ -2362,9 +2369,6 @@ label.chk {
 .crumbs-nav [aria-current='page'] {
   color: var(--fg-soft);
 }
-.select.cluster-switch {
-  width: 260px;
-}
 .cl-cell {
   display: flex;
   flex-direction: column;
@@ -2909,7 +2913,82 @@ label.chk {
   .kx-arrow {
     display: none;
   }
-  .select.cluster-switch {
-    width: 100%;
+}
+
+/* kube-bench node checks */
+.bench-sec-h {
+  font-size: 13px;
+  font-weight: 600;
+  margin: 0 0 6px;
+  color: var(--fg-strong);
+}
+.bench-checks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.bench-checks > li + li {
+  border-top: 1px solid var(--border);
+}
+.bench-checks summary {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style-position: outside;
+}
+.bench-checks summary:hover {
+  background: var(--bg-hover);
+}
+.bench-checks summary .badge {
+  flex: none;
+  min-width: 44px;
+  justify-content: center;
+}
+.bench-id {
+  flex: none;
+  min-width: 52px;
+  font-size: 12px;
+}
+.bench-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.bench-body {
+  padding: 4px 12px 12px 74px;
+  display: grid;
+  gap: 8px;
+}
+.bench-kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12.5px;
+}
+.bench-kv dt {
+  color: var(--fg-muted);
+}
+.bench-kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.bench-fix {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .bench-body {
+    padding-left: 12px;
   }
 }

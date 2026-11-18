@@ -36,7 +36,7 @@ describe('cluster scope', () => {
 });
 
 describe('cluster overview pages', () => {
-  it('Security: overview → search → open a cluster → breadcrumb and switcher', async () => {
+  it('Security: overview → search → open a cluster → breadcrumb, no switcher', async () => {
     const user = userEvent.setup();
     await renderApp('/security');
     const table = await screen.findByRole('table', { name: 'Security by cluster' }, T);
@@ -48,8 +48,37 @@ describe('cluster overview pages', () => {
     const crumbs = await screen.findByRole('navigation', { name: 'Breadcrumb' }, T);
     expect(crumbs).toHaveTextContent('Security / eks-fra-data');
     expect(within(crumbs).getByRole('link', { name: 'Security' })).toHaveAttribute('href', '/security');
-    expect(await screen.findByRole('combobox', { name: 'Cluster' }, T)).toHaveTextContent('eks-fra-data');
     await screen.findByRole('table', { name: 'Images' }, T);
+    // Changing cluster goes back through the overview: no switcher on the page.
+    expect(screen.queryByRole('combobox', { name: 'Cluster' })).toBeNull();
+  });
+
+  it('Audit: a schedule created from a cluster page is pinned to that cluster', async () => {
+    const user = userEvent.setup();
+    const c = db.byName('eks-fra-data');
+    await renderApp(`/audit?cluster=${c.id}`);
+    await user.click(await screen.findByRole('button', { name: 'New schedule' }, T));
+    const dlg = await screen.findByRole('dialog', { name: 'New audit schedule' }, T);
+    const chips = within(dlg).getByRole('list', { name: 'Required labels' });
+    expect(chips).toHaveTextContent('olympos.io/cluster=eks-fra-data');
+    expect(within(chips).queryByRole('button')).toBeNull(); // no remove button
+    expect(dlg).toHaveTextContent('Only eks-fra-data.');
+    expect(within(dlg).queryByRole('button', { name: 'Advanced selector' })).toBeNull();
+  });
+
+  it('Audit: a kube-bench node opens its checks, failed first', async () => {
+    const user = userEvent.setup();
+    await renderApp(`/audit?cluster=${db.byName('eks-fra-data').id}`);
+    const rows = await screen.findAllByRole('row', { name: /^Show kube-bench checks of / }, T);
+    await user.click(rows[0]); // sorted by Fail, most first
+    const dlg = await screen.findByRole('dialog', {}, T);
+    const filter = within(dlg).getByRole('group', { name: 'Show checks' });
+    const fail = within(filter).getByRole('button', { name: /^Fail · \d+/ });
+    expect(fail).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dlg).getAllByText('Fail').length).toBeGreaterThan(0);
+    expect(within(dlg).queryByText('Pass')).toBeNull();
+    await user.click(within(filter).getByRole('button', { name: /^Pass · / }));
+    expect(within(dlg).getAllByText('Pass').length).toBeGreaterThan(0);
   });
 
   it('Audit: a failed last run is a short badge that opens the pretty-printed log', async () => {

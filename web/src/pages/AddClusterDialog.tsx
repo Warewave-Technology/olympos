@@ -124,8 +124,8 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
               required
             />
           </Field>
-          <Field label="Labels" htmlFor="ac-labels" error={labelsErr} hint={!locked ? 'Type key=value and press Enter. Used for access and audit scopes.' : undefined}>
-            <TagInput {...aria('ac-labels', labelsErr, !locked)} value={labels} onChange={setLabels} placeholder="env=prod" readOnly={locked} onDraftError={setLabelDraftErr} />
+          <Field label="Labels" htmlFor="ac-labels" error={labelsErr} hint={!locked ? 'Type key=value and press Enter. Used for access and audit scopes. olympos.io/cluster=<name> is added automatically.' : undefined}>
+            <TagInput {...aria('ac-labels', labelsErr, !locked)} value={labels} onChange={setLabels} placeholder="env=prod" readOnly={locked} onDraftError={setLabelDraftErr} lockedPrefix="olympos.io/" />
           </Field>
         </div>
         <label className="opt">

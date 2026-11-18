@@ -3,6 +3,7 @@
 import type {
   ActivityEntry,
   AuditRun,
+  BenchCheck,
   AuditSchedule,
   BackupJob,
   BackupRun,
@@ -38,6 +39,42 @@ const GB = 1e9;
 const TENANT = '72f988bf-86f1-41af-91ab-2d7cd011db47';
 
 /** Deterministic pseudo-random numbers so generated fixtures look the same on every load. */
+// kube-bench results shaped like the agent's output (a few real CIS checks, cycled).
+const BENCH_TEMPLATES: { id: string; section: string; section_text: string; node_type: string; description: string; remediation: string; expected: string; master?: boolean }[] = [
+  { id: '4.1.1', section: '4.1', section_text: 'Worker Node Configuration Files', node_type: 'node', description: 'Ensure that the kubelet service file permissions are set to 600 or more restrictive', remediation: 'Run the below command (based on the file location on your system) on each worker node.\nchmod 600 /etc/systemd/system/kubelet.service.d/10-kubeadm.conf', expected: "permissions has permissions 600, expected 600 or more restrictive" },
+  { id: '4.1.5', section: '4.1', section_text: 'Worker Node Configuration Files', node_type: 'node', description: 'Ensure that the --kubeconfig kubelet.conf file permissions are set to 600 or more restrictive', remediation: 'chmod 600 /etc/kubernetes/kubelet.conf', expected: "'permissions' is present" },
+  { id: '4.2.1', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --anonymous-auth argument is set to false', remediation: 'If using a Kubelet config file, edit the file to set `authentication: anonymous: enabled` to `false`.\nRestart the kubelet service: systemctl daemon-reload && systemctl restart kubelet.service', expected: "'--anonymous-auth' is equal to 'false'" },
+  { id: '4.2.2', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --authorization-mode argument is not set to AlwaysAllow', remediation: 'Set `authorization.mode` to Webhook in the kubelet config file, then restart the kubelet.', expected: "'--authorization-mode' does not have 'AlwaysAllow'" },
+  { id: '4.2.6', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --make-iptables-util-chains argument is set to true', remediation: 'Set `makeIPTablesUtilChains: true` in the kubelet config file and restart the kubelet.', expected: "'--make-iptables-util-chains' is equal to 'true'" },
+  { id: '4.2.13', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that a limit is set on pod PIDs', remediation: 'Decide on an appropriate level for this parameter and set it, either via the --pod-max-pids command line parameter or the PodPidsLimit configuration file setting.', expected: "'--pod-max-pids' is present" },
+  { id: '1.2.1', section: '1.2', section_text: 'API Server', node_type: 'master', description: 'Ensure that the --anonymous-auth argument is set to false', remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --anonymous-auth=false', expected: "'--anonymous-auth' is equal to 'false'", master: true },
+  { id: '1.2.16', section: '1.2', section_text: 'API Server', node_type: 'master', description: 'Ensure that the --audit-log-path argument is set', remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --audit-log-path=/var/log/apiserver/audit.log', expected: "'--audit-log-path' is present", master: true },
+];
+
+function mockBenchChecks(pass: number, fail: number, warn: number, master: boolean): BenchCheck[] {
+  const pool = BENCH_TEMPLATES.filter((t) => master || !t.master);
+  const out: BenchCheck[] = [];
+  const statuses: BenchCheck['status'][] = [...Array<BenchCheck['status']>(fail).fill('FAIL'), ...Array<BenchCheck['status']>(warn).fill('WARN'), ...Array<BenchCheck['status']>(pass).fill('PASS')];
+  statuses.forEach((status, i) => {
+    const t = pool[i % pool.length];
+    const n = Math.floor(i / pool.length);
+    out.push({
+      id: n ? `${t.id}.${n}` : t.id,
+      section: t.section,
+      section_text: t.section_text,
+      node_type: t.node_type,
+      description: t.description,
+      status,
+      scored: status !== 'WARN',
+      remediation: t.remediation,
+      expected_result: status === 'WARN' ? undefined : t.expected,
+      actual_value: status === 'FAIL' ? 'true' : status === 'PASS' ? 'false' : undefined,
+      reason: status === 'WARN' ? 'Manual check: review the setting on the node.' : undefined,
+    });
+  });
+  return out.sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+}
+
 export function seeded(seed: number) {
   let x = seed >>> 0 || 1;
   return () => {
@@ -114,7 +151,6 @@ export function stableId(name: string): string {
 function cluster(p: Partial<Cluster> & Pick<Cluster, 'name'>): Cluster {
   return {
     id: stableId(p.name),
-    labels: {},
     provider: 'azure',
     provider_label: 'Azure',
     provider_override: '',
@@ -137,6 +173,7 @@ function cluster(p: Partial<Cluster> & Pick<Cluster, 'name'>): Cluster {
     inventory_at: iso(40_000),
     created_at: iso(48 * D),
     ...p,
+    labels: { ...(p.labels ?? {}), 'olympos.io/cluster': p.name },
   };
 }
 
@@ -767,7 +804,7 @@ export const auditRuns: AuditRun[] = [];
         control_plane_na: managed,
         message: '',
         duration_s: 36 + ((ci * 7 + n * 3) % 20),
-      }));
+      })).map((x) => ({ ...x, checks: mockBenchChecks(x.pass, x.fail, x.warn, !managed && x.benchmark.endsWith('master')) }));
       auditRuns.push(arun({ tool: 'kube-bench', schedule_id: kbSched, cluster_id: c.id, cluster_name: c.name, started_at: iso(3 * D + order * MIN), finished_at: iso(3 * D + order * MIN - 120_000), score: Math.round((nodes.reduce((s, x) => s + x.pass, 0) / nodes.reduce((s, x) => s + x.pass + x.fail, 0)) * 1000) / 10, resolved_findings: ci % 3 === 0 ? 2 : 0, bench_nodes: nodes }));
     }
   });
@@ -1006,3 +1043,4 @@ export const activity: ActivityEntry[] = [];
 export function record(action: string, objectType: string, objectId: string, summary: string) {
   activity.unshift({ id: uuid(), at: new Date().toISOString(), actor_id: people.yigit.id, actor_name: people.yigit.upn, actor_kind: 'user', action, object_type: objectType, object_id: objectId, cluster_id: null, details: { summary } });
 }
+

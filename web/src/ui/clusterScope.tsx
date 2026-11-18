@@ -1,5 +1,5 @@
-// Cluster-first navigation shared by Security, Audit and Backups (and the Vaults cluster filter):
-// a searchable cluster overview, a breadcrumb "Area / <cluster>", and a cluster switcher. The
+// Cluster-first navigation shared by Security, Audit and Backups: a searchable cluster overview
+// and a breadcrumb "Area / <cluster>". Changing cluster goes back through the overview. The
 // choice lives in the URL (?cluster=<id> | all); no cluster param = the overview.
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from '@tanstack/react-router';
@@ -8,10 +8,11 @@ import { api } from '../api/client';
 import type { Cluster, ItemList } from '../api/types';
 import { DataTable, type Column } from './DataTable';
 import { EmptyState } from './kit';
-import { Select } from './Select';
 import { ClusterStatusBadge } from './status';
 
 export const ALL_CLUSTERS = 'all';
+/** Reserved label every cluster carries (set by the server, read-only): olympos.io/cluster=<name>. */
+export const CLUSTER_LABEL = 'olympos.io/cluster';
 
 export type Scope = { mode: 'overview' } | { mode: 'all' } | { mode: 'cluster'; id: string };
 
@@ -60,31 +61,6 @@ export function useClusterList() {
 export function findCluster(list: ClusterInfo[], idOrName: string | undefined): ClusterInfo | undefined {
   if (!idOrName) return undefined;
   return list.find((c) => c.id === idOrName) ?? list.find((c) => c.name === idOrName);
-}
-
-/** Cluster switcher: "All clusters" + every cluster, searchable by name, provider and labels. */
-export function ClusterSwitcher({ value, clusters, onChange, id, extra }: { value: string; clusters: ClusterInfo[]; onChange: (v: string) => void; id?: string; extra?: { value: string; label: string }[] }) {
-  return (
-    <Select<string>
-      id={id}
-      className="cluster-switch"
-      size="sm"
-      searchable
-      searchLabel="Find a cluster"
-      aria-label="Cluster"
-      value={value}
-      onChange={onChange}
-      placeholder="Choose a cluster"
-      options={[
-        ...(extra ?? []),
-        { value: ALL_CLUSTERS, label: 'All clusters', text: 'All clusters fleet' },
-        ...clusters.map((c) => {
-          const labels = Object.entries(c.labels ?? {}).map(([k, v]) => `${k}=${v}`);
-          return { value: c.id, label: c.name, text: clusterHaystack(c), hint: [providerText(c), ...labels].join(' · ') };
-        }),
-      ]}
-    />
-  );
 }
 
 /** "Security / prod-aks-weu-01" — the area links back to the cluster overview. */

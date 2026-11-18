@@ -6,7 +6,7 @@ import type { Image, ImageDetail, ItemList, KyvernoPolicy, NetpolNamespace, Scan
 import { useCan } from '../auth/me';
 import { age, clockTime, plural, shortDigest, shortText } from '../lib/format';
 import { securityRoute } from '../router';
-import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { ClusterOverview, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { DataTable, type Column } from '../ui/DataTable';
 import { Badge, EmptyState, Modal, QueryView, Tabs, sentence, useToast } from '../ui/kit';
 import { Select } from '../ui/Select';
@@ -349,7 +349,6 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
   const from = scopeParam(scope);
 
   const goTab = (t: Tab) => navigate({ search: (s) => ({ ...s, tab: t === 'images' ? undefined : t }), replace: true });
-  const switchCluster = (c: string) => navigate({ search: (s) => ({ ...s, cluster: c, digest: undefined }) });
 
   return (
     <>
@@ -357,12 +356,7 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
         crumbs={<ScopeCrumbs area="Security" to="/security" scope={scope} cluster={cluster} />}
         title={one ? <span className="mono">{cluster?.name ?? scope.id}</span> : 'All clusters'}
         sub={`Images are deduplicated by digest${one ? '' : ' across clusters'}${lastScan ? ` · last scan ${age(lastScan)} ago` : ''}`}
-        actions={
-          <>
-            <ClusterSwitcher value={from ?? 'all'} clusters={clusters} onChange={switchCluster} />
-            {canOperate && <ScanActions scanAll={scanAll} nothingToScan={nothingToScan} />}
-          </>
-        }
+        actions={canOperate && <ScanActions scanAll={scanAll} nothingToScan={nothingToScan} />}
       />
       <ScanWarning scanAll={scanAll} />
       <section className="stats four" aria-label="Security totals">

@@ -11,7 +11,7 @@ import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
 import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { DataTable, type Column } from '../ui/DataTable';
-import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
+import { ClusterOverview, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
 const ENGINES = [
@@ -147,12 +147,7 @@ function BackupsDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ove
         crumbs={<ScopeCrumbs area="Backups" to="/backups" scope={scope} cluster={info} />}
         title={one ? <span className="mono">{info?.name ?? scope.id}</span> : 'All clusters'}
         sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster."
-        actions={
-          <>
-            <ClusterSwitcher value={param ?? 'all'} clusters={clusters} onChange={(c) => navigate({ search: (s) => ({ ...s, cluster: c }) })} />
-            <DestinationsLink />
-          </>
-        }
+        actions={<DestinationsLink />}
       />
       <Tabs<Tab>
         label="Backup sections"
