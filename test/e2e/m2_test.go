@@ -214,7 +214,9 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 		t.Fatalf("plaintext ClickHouse accepted in e2e-tls: %+v", ct)
 	}
 	admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "compressed"}, nil, 200)
-	t.Cleanup(func() { admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "e2e-tls"}, nil, 200) })
+	t.Cleanup(func() {
+		admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "e2e-tls"}, nil, 200)
+	})
 	runSQL(t, "metrics-ch", "CREATE DATABASE IF NOT EXISTS metrics")
 	runSQL(t, "metrics-ch", "CREATE TABLE IF NOT EXISTS metrics.events (d Date, v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY d")
 	runSQL(t, "metrics-ch", "INSERT INTO metrics.events SELECT toDate('2026-10-01') + number % 60, number FROM numbers(10000)")

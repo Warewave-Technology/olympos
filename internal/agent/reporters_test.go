@@ -444,7 +444,7 @@ func TestKyvernoCELPolicies(t *testing.T) {
 		u(map[string]any{"apiVersion": "wgpolicyk8s.io/v1alpha2", "kind": "PolicyReport",
 			"metadata": map[string]any{"name": "r1", "namespace": "lab"},
 			"scope":    map[string]any{"kind": "Pod", "name": "web-1", "namespace": "lab"},
-			"results": []any{map[string]any{"policy": "require-team-label", "result": "fail", "message": "label team is required"}}}),
+			"results":  []any{map[string]any{"policy": "require-team-label", "result": "fail", "message": "label team is required"}}}),
 	}
 	r, _ := newTestKyverno(t, celKyvernoAPIs, objs...)
 	rep := firstReport(t, r).GetKyverno()
