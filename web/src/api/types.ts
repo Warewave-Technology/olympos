@@ -524,7 +524,11 @@ export interface AuditRun {
   score: number | null;
   new_findings: number;
   resolved_findings: number;
+  /** Short reason, e.g. "agent_offline" or "framework 'cis-v1.23-t1.0.1' not found". */
   error: string;
+  /** Full tool output (stderr/stdout), run detail only (GET /audit/runs/{id}). */
+  log?: string;
+  details?: Record<string, unknown>;
   bench_nodes?: BenchNode[];
 }
 export interface AuditSchedule extends AuditScheduleInput {
@@ -572,6 +576,11 @@ export interface Image {
   scan_error?: string;
   scan_attempts?: number;
   next_retry_at?: string | null;
+  /**
+   * tag = the running digest is not in the registry; the registry's image with the same tag
+   * was scanned instead (results may differ from what runs). '' / digest = scanned by digest.
+   */
+  scanned_by?: '' | 'digest' | 'tag';
   last_scanned_at: string | null;
   /** Vulnerabilities (any severity) that have a fixed version. */
   fixable?: number;
@@ -591,8 +600,26 @@ export interface KyvernoPolicy {
   name: string;
   mode: 'Enforce' | 'Audit';
   rules: number;
+  rule_names?: string[];
   fail_count: number;
   ready: boolean;
+}
+export interface KyvernoViolation {
+  rule: string;
+  result: string;
+  severity: string;
+  message: string;
+  resource_kind: string;
+  resource_namespace: string;
+  resource_name: string;
+}
+/** GET /security/kyverno/policy */
+export interface KyvernoPolicyDetail extends KyvernoPolicy {
+  /** The policy spec as stored in the cluster (metadata trimmed). */
+  spec: Record<string, unknown>;
+  /** The whole object as YAML (apiVersion, kind, name, spec). */
+  yaml: string;
+  violations: KyvernoViolation[];
 }
 export interface NetpolNamespace {
   cluster_id: string;
@@ -601,6 +628,77 @@ export interface NetpolNamespace {
   policy_count: number;
   default_deny: boolean;
   excluded: boolean;
+}
+export interface NetpolWorkload {
+  kind: string;
+  name: string;
+  /** Pod template labels. */
+  labels: Record<string, string>;
+  ports: number[];
+  /** Optional extension: container port names → numbers (named ports in policies). */
+  named_ports?: Record<string, number>;
+}
+/** GET /security/netpol/namespace */
+export interface NetpolNamespaceDetail {
+  cluster_id: string;
+  cluster_name: string;
+  namespace: string;
+  namespace_labels: Record<string, string>;
+  default_deny: boolean;
+  excluded: boolean;
+  /** spec: networking.k8s.io/v1 NetworkPolicySpec as in the cluster. */
+  policies: { name: string; spec: Record<string, unknown>; yaml: string }[];
+  workloads: NetpolWorkload[];
+  other_namespaces: { name: string; labels: Record<string, string> }[];
+}
+
+// ---------------------------------------------------- per-cluster summaries (cluster overview level)
+/** GET /security/clusters */
+export interface SecurityClusterSummary {
+  cluster_id: string;
+  cluster_name: string;
+  provider: string;
+  status: string;
+  images: number;
+  workloads: number;
+  critical: number;
+  high: number;
+  images_with_critical: number;
+  not_scanned: number;
+  kyverno_installed: boolean;
+  kyverno_policies: number;
+  kyverno_failures: number;
+  namespaces: number;
+  namespaces_without_default_deny: number;
+}
+export interface AuditClusterRun {
+  tool: AuditTool | string;
+  run_id: string;
+  status: string;
+  score: number | null;
+  finished_at: string | null;
+  new_findings: number;
+}
+/** GET /audit/clusters */
+export interface AuditClusterSummary {
+  cluster_id: string;
+  cluster_name: string;
+  provider: string;
+  bench_enabled: boolean;
+  last_runs: AuditClusterRun[];
+  open_findings: { critical: number; high: number; medium: number; low: number };
+}
+/** GET /backup/clusters */
+export interface BackupClusterSummary {
+  cluster_id: string;
+  cluster_name: string;
+  targets: number;
+  candidates: number;
+  jobs: number;
+  jobs_enabled: number;
+  last_24h: { succeeded: number; failed: number; missed: number };
+  last_success_at: string | null;
+  bytes_30d: number;
 }
 export interface RegistryInput {
   host_pattern: string;

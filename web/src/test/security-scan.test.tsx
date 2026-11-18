@@ -12,7 +12,7 @@ describe('Security › Scan now', () => {
   it('shows the 409 "nothing to scan" message as a warning, then disables the button with the reason', async () => {
     const { installMocks } = await import('../mocks/install');
     installMocks('1');
-    window.history.pushState({}, '', '/security');
+    window.history.pushState({}, '', '/security?cluster=all');
     const { router } = await import('../router');
     const { RouterProvider } = await import('@tanstack/react-router');
     const { ToastProvider } = await import('../ui/kit');

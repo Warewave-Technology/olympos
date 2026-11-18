@@ -2,10 +2,11 @@ import { useMemo, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api, errorMessage } from '../api/client';
-import type { Image, ImageDetail, ItemList, KyvernoPolicy, NetpolNamespace, ScanStatus } from '../api/types';
+import type { Image, ImageDetail, ItemList, KyvernoPolicy, NetpolNamespace, ScanStatus, SecurityClusterSummary } from '../api/types';
 import { useCan } from '../auth/me';
 import { age, clockTime, plural, shortDigest, shortText } from '../lib/format';
 import { securityRoute } from '../router';
+import { ClusterOverview, ClusterSwitcher, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { DataTable, type Column } from '../ui/DataTable';
 import { Badge, EmptyState, Modal, QueryView, Tabs, sentence, useToast } from '../ui/kit';
 import { Select } from '../ui/Select';
@@ -26,6 +27,15 @@ export function imageName(i: Pick<Image, 'repo' | 'tags'>) {
   return i.tags.length ? `${i.repo}:${i.tags[0]}` : i.repo;
 }
 
+/** Scanned through the registry's image with the same tag (the running digest is not in the registry). */
+export const scannedByTag = (i: Pick<Image, 'scanned_by'>) => i.scanned_by === 'tag';
+/** Has CVE results to show (by digest, or by tag). */
+export const hasResults = (i: Pick<Image, 'scan_status' | 'scanned_by'>) => i.scan_status === 'scanned' || scannedByTag(i);
+/** "Not scanned · needs attention": nothing usable yet. Tag-scanned images have results, so they do not count. */
+export const needsAttention = (i: Pick<Image, 'scan_status' | 'scanned_by'>) => RETRYABLE.includes(i.scan_status) && !scannedByTag(i);
+/** Retry is offered whenever the running digest itself has no scan (incl. tag scans: the digest may appear later). */
+const canRetry = (i: Pick<Image, 'scan_status' | 'scanned_by'>) => RETRYABLE.includes(i.scan_status) || scannedByTag(i);
+
 function credentialCell(i: Image) {
   if (i.scan_status === 'missing_credential') return <span className="muted">none</span>;
   if (i.registry && i.registry !== 'public') return <span className="mono">{i.registry}</span>;
@@ -33,7 +43,7 @@ function credentialCell(i: Image) {
 }
 
 function fixCell(i: Image) {
-  if (i.scan_status !== 'scanned') return <span className="muted">—</span>;
+  if (!hasResults(i)) return <span className="muted">—</span>;
   if (i.critical + i.high === 0) return <span className="muted">—</span>;
   return (i.fixable ?? 0) > 0 ? <Badge tone="ok">Yes · {i.fixable}</Badge> : <Badge tone="mute">No</Badge>;
 }
@@ -41,8 +51,26 @@ function fixCell(i: Image) {
 const UNAVAILABLE_WHY =
   'This digest is not in any registry Olympos can reach: the image was built locally or retagged on the node (for example kind node images loaded with "kind load"). Olympos scans by digest so the results match exactly what runs; push the image to a registry to have it scanned.';
 
+export function tagScanWhy(i: Pick<Image, 'repo' | 'tags'>): string {
+  return `The running digest is not in the registry (built locally or retagged on the node), so Olympos scanned the registry's image with the same tag, ${imageName(i)}, instead. The results describe that registry image and may differ from what actually runs. Retry checks for the digest again.`;
+}
+
 /** Short badge + reason for an image's scan state. Never a dead end: says why and what happens next. */
 export function ScanStatusCell({ i, now = new Date() }: { i: Image; now?: Date }) {
+  if (scannedByTag(i)) {
+    const why = tagScanWhy(i);
+    return (
+      <span className="scan-cell">
+        <Badge tone="info" title={why}>
+          Scanned by tag
+        </Badge>
+        <span className="scan-why" title={why}>
+          Registry image {i.tags[0] ? `:${i.tags[0]}` : ''}
+          {i.last_scanned_at ? ` · ${age(i.last_scanned_at, now.getTime())} ago` : ''}
+        </span>
+      </span>
+    );
+  }
   switch (i.scan_status) {
     case 'scanned':
       return <span className="muted small">{i.last_scanned_at ? `${age(i.last_scanned_at, now.getTime())} ago` : 'scanned'}</span>;
@@ -98,7 +126,7 @@ function useImageScan() {
     mutationFn: (i: Image) => api.post(`/images/${encodeURIComponent(i.digest)}/scan`),
     onSuccess: (_r, i) => {
       setQueued((s) => new Set(s).add(i.digest));
-      toast(`${RETRYABLE.includes(i.scan_status) ? 'Retry' : 'Scan'} queued for ${imageName(i)}.`);
+      toast(`${canRetry(i) ? 'Retry' : 'Scan'} queued for ${imageName(i)}.`);
       setTimeout(() => {
         void qc.invalidateQueries({ queryKey: ['images'] });
         setQueued((s) => {
@@ -113,92 +141,230 @@ function useImageScan() {
   return { scan: (i: Image) => m.mutate(i), busy: (i: Image) => (m.isPending && m.variables?.digest === i.digest) || queued.has(i.digest) };
 }
 
-export function SecurityPage() {
-  const { tab = 'images', digest } = securityRoute.useSearch();
-  const navigate = useNavigate({ from: '/security' });
-  const canOperate = useCan('operate');
-  const canAddCluster = useCan('admin_global');
+/** Scan now for every running image; a 409 (nothing runs yet) becomes a warning, not an error. */
+function useScanAll() {
   const qc = useQueryClient();
   const toast = useToast();
-  const [q, setQ] = useState('');
-  const [sev, setSev] = useState<Sev>('');
-  const [status, setStatus] = useState<StatusFilter>('');
-  const [kyFilter, setKyFilter] = useState<KyFilter>('failing');
-  const [npFilter, setNpFilter] = useState<NpFilter>('missing');
-  const imagesQ = useQuery({ queryKey: ['images', {}], queryFn: () => api.get<ItemList<Image>>('/images') });
-  const kyQ = useQuery({ queryKey: ['kyverno'], queryFn: () => api.get<ItemList<KyvernoPolicy>>('/security/kyverno') });
-  const npQ = useQuery({ queryKey: ['netpol'], queryFn: () => api.get<ItemList<NetpolNamespace>>('/security/netpol') });
-  const [scanWarning, setScanWarning] = useState<string | null>(null);
-  const scanAll = useMutation({
+  const [warning, setWarning] = useState<string | null>(null);
+  const m = useMutation({
     mutationFn: () => api.post('/images/scan'),
-    onMutate: () => setScanWarning(null),
+    onMutate: () => setWarning(null),
     onSuccess: () => {
       toast('Scan queued for all running images.');
       setTimeout(() => void qc.invalidateQueries({ queryKey: ['images'] }), 2000);
     },
     onError: (e) => {
-      // 409: nothing to scan yet (no cluster reports running images). Not a failure: say what to do.
       if (e instanceof ApiError && e.status === 409) {
-        setScanWarning(sentence(e.message));
+        setWarning(sentence(e.message));
         void qc.invalidateQueries({ queryKey: ['images'] });
+        void qc.invalidateQueries({ queryKey: ['security-clusters'] });
       } else toast(`Could not queue the scan: ${errorMessage(e)}`, 'crit');
     },
   });
+  return { m, warning, dismiss: () => setWarning(null) };
+}
+
+function ScanActions({ scanAll, nothingToScan }: { scanAll: ReturnType<typeof useScanAll>; nothingToScan: boolean }) {
+  return (
+    <>
+      {nothingToScan && (
+        <span className="muted small" id="scan-why">
+          No running images yet · add a cluster first
+        </span>
+      )}
+      <button type="button" className="btn" onClick={() => scanAll.m.mutate()} disabled={scanAll.m.isPending || nothingToScan} aria-describedby={nothingToScan ? 'scan-why' : undefined}>
+        {scanAll.m.isPending ? 'Queueing…' : 'Scan now'}
+      </button>
+    </>
+  );
+}
+
+function ScanWarning({ scanAll }: { scanAll: ReturnType<typeof useScanAll> }) {
+  const canAddCluster = useCan('admin_global');
+  if (!scanAll.warning) return null;
+  return (
+    <div className="note warn spread" role="alert">
+      <span>
+        <b>Nothing was scanned.</b> {scanAll.warning}
+        {canAddCluster && (
+          <>
+            {' '}
+            <Link to="/" search={{ add: true }}>
+              Add a cluster
+            </Link>
+          </>
+        )}
+      </span>
+      <button type="button" className="btn sm" onClick={scanAll.dismiss}>
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+export function SecurityPage() {
+  const search = securityRoute.useSearch();
+  const scope = resolveScope(search.cluster, !!(search.tab || search.digest));
+  const { q: clustersQ, list: clusters } = useClusterList();
+  const navigate = useNavigate({ from: '/security' });
+  const canOperate = useCan('operate');
+  const closeDigest = () => navigate({ search: (s) => ({ ...s, digest: undefined }) });
+  return (
+    <>
+      {scope.mode === 'overview' ? <SecurityOverview clusters={clusters} clustersLoading={clustersQ.isPending} /> : <SecurityDetail scope={scope} clusters={clusters} />}
+      {search.digest && <ImageDialog digest={search.digest} onClose={closeDigest} canOperate={canOperate} />}
+    </>
+  );
+}
+
+// ------------------------------------------------------------ cluster overview
+
+function SecurityOverview({ clusters, clustersLoading }: { clusters: ClusterInfo[]; clustersLoading: boolean }) {
+  const navigate = useNavigate({ from: '/security' });
+  const canOperate = useCan('operate');
+  const scanAll = useScanAll();
+  const q = useQuery({ queryKey: ['security-clusters'], queryFn: () => api.get<ItemList<SecurityClusterSummary>>('/security/clusters') });
+  const rows = q.data?.items ?? [];
+  const sum = (f: (r: SecurityClusterSummary) => number) => rows.reduce((s, r) => s + f(r), 0);
+  const open = (cluster: string, tab?: Tab) => navigate({ search: { cluster, tab } });
+  const columns: Column<OverviewRow<SecurityClusterSummary>>[] = [
+    { id: 'images', header: 'Images', align: 'num', sortValue: (r) => r.images, defaultDir: 'desc', cell: (r) => (
+        <>
+          <span className="n">{r.images}</span>
+          <div className="muted small">{plural(r.workloads, 'workload')}</div>
+        </>
+      ) },
+    { id: 'critical', header: 'Critical CVEs', align: 'num', sortValue: (r) => r.critical, defaultDir: 'desc', cell: (r) => (
+        <>
+          <span className={`n${r.critical ? ' crit' : ''}`}>{r.critical}</span>
+          <div className="muted small">{r.images_with_critical > 0 ? `in ${plural(r.images_with_critical, 'image')} · ` : ''}{r.high} high</div>
+        </>
+      ) },
+    { id: 'notscanned', header: 'Not scanned', align: 'num', sortValue: (r) => r.not_scanned, defaultDir: 'desc', cell: (r) => (r.not_scanned ? <Badge tone="warn">{r.not_scanned}</Badge> : <span className="muted">0</span>) },
+    {
+      id: 'kyverno',
+      header: 'Kyverno failures',
+      align: 'num',
+      sortValue: (r) => (r.kyverno_installed ? r.kyverno_failures : -1),
+      defaultDir: 'desc',
+      cell: (r) =>
+        r.kyverno_installed ? (
+          <>
+            <span className={`n${r.kyverno_failures ? ' warn' : ''}`}>{r.kyverno_failures}</span>
+            <div className="muted small">{plural(r.kyverno_policies, 'policy', 'policies')}</div>
+          </>
+        ) : (
+          <Badge tone="mute">Not installed</Badge>
+        ),
+    },
+    {
+      id: 'netpol',
+      header: 'No default-deny',
+      align: 'num',
+      sortValue: (r) => r.namespaces_without_default_deny,
+      defaultDir: 'desc',
+      cell: (r) => (
+        <>
+          <span className={`n${r.namespaces_without_default_deny ? ' warn' : ''}`}>{r.namespaces_without_default_deny}</span>
+          <div className="muted small">of {plural(r.namespaces, 'namespace')}</div>
+        </>
+      ),
+    },
+  ];
+  return (
+    <>
+      <PageHead title="Security" sub="Images by digest, Kyverno policies and NetworkPolicies, per cluster." actions={canOperate && <ScanActions scanAll={scanAll} nothingToScan={!!q.data && sum((r) => r.images) === 0} />} />
+      <ScanWarning scanAll={scanAll} />
+      <section className="stats four" aria-label="Security totals">
+        <button type="button" className="card stat" onClick={() => open('all')}>
+          <div className="k">Clusters</div>
+          <div className="v">{q.data ? rows.length : '—'}</div>
+          <div className="d">{q.data ? `${plural(sum((r) => r.not_scanned), 'image')} not scanned` : ' '}</div>
+        </button>
+        <button type="button" className="card stat" onClick={() => open('all')}>
+          <div className="k">Critical CVEs</div>
+          <div className={`v${sum((r) => r.critical) ? ' crit' : ''}`}>{q.data ? sum((r) => r.critical) : '—'}</div>
+          <div className="d">in running images, summed per cluster</div>
+        </button>
+        <button type="button" className="card stat" onClick={() => open('all', 'kyverno')}>
+          <div className="k">Kyverno violations</div>
+          <div className={`v${sum((r) => r.kyverno_failures) ? ' warn' : ''}`}>{q.data ? sum((r) => r.kyverno_failures) : '—'}</div>
+          <div className="d">{q.data ? `${plural(rows.filter((r) => !r.kyverno_installed).length, 'cluster')} without Kyverno` : ' '}</div>
+        </button>
+        <button type="button" className="card stat" onClick={() => open('all', 'netpol')}>
+          <div className="k">No default-deny</div>
+          <div className={`v${sum((r) => r.namespaces_without_default_deny) ? ' warn' : ''}`}>{q.data ? sum((r) => r.namespaces_without_default_deny) : '—'}</div>
+          <div className="d">namespaces without a default-deny policy</div>
+        </button>
+      </section>
+      <ClusterOverview<SecurityClusterSummary>
+        label="Security by cluster"
+        what="clusters"
+        rows={q.data ? rows : undefined}
+        clusters={clusters}
+        loading={q.isPending || clustersLoading}
+        error={q.isError ? q.error : undefined}
+        onRetry={() => q.refetch()}
+        columns={columns}
+        onOpen={(id) => open(id)}
+        onAll={() => open('all')}
+        initialSort={{ id: 'critical', dir: 'desc' }}
+      />
+    </>
+  );
+}
+
+// ------------------------------------------------------------ one cluster / all clusters
+
+function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'overview' }>; clusters: ClusterInfo[] }) {
+  const { tab = 'images' } = securityRoute.useSearch();
+  const navigate = useNavigate({ from: '/security' });
+  const canOperate = useCan('operate');
+  const scanAll = useScanAll();
+  const cluster = scope.mode === 'cluster' ? findCluster(clusters, scope.id) : undefined;
+  const cq = scope.mode === 'cluster' ? scope.id : undefined;
+  const one = scope.mode === 'cluster';
+  const [q, setQ] = useState('');
+  const [sev, setSev] = useState<Sev>('');
+  const [status, setStatus] = useState<StatusFilter>('');
+  const [kyFilter, setKyFilter] = useState<KyFilter>('failing');
+  const [npFilter, setNpFilter] = useState<NpFilter>('missing');
+  const imagesQ = useQuery({ queryKey: ['images', { cluster: cq }], queryFn: () => api.get<ItemList<Image>>('/images', { cluster: cq }) });
+  const kyQ = useQuery({ queryKey: ['kyverno', { cluster: cq }], queryFn: () => api.get<ItemList<KyvernoPolicy>>('/security/kyverno', { cluster: cq }) });
+  const npQ = useQuery({ queryKey: ['netpol', { cluster: cq }], queryFn: () => api.get<ItemList<NetpolNamespace>>('/security/netpol', { cluster: cq }) });
 
   const all = imagesQ.data?.items ?? [];
   const lastScan = all.map((i) => i.last_scanned_at).filter(Boolean).sort().pop() ?? null;
-  const critImages = all.filter((i) => i.critical > 0);
+  const critImages = all.filter((i) => hasResults(i) && i.critical > 0);
   const critTotal = critImages.reduce((s, i) => s + i.critical, 0);
   const critFix = critImages.filter((i) => (i.fixable ?? 0) > 0).length;
   const workloads = all.reduce((s, i) => s + i.workloads, 0);
-  const attention = all.filter((i) => RETRYABLE.includes(i.scan_status));
+  const attention = all.filter(needsAttention);
   const kyItems = kyQ.data?.items ?? [];
   const kyFail = kyItems.reduce((s, p) => s + p.fail_count, 0);
   const npItems = npQ.data?.items ?? [];
   const noDeny = npItems.filter((n) => !n.default_deny && !n.excluded);
   // Permission-independent state: nothing runs yet, so the button is disabled with the reason shown.
-  const nothingToScan = !!imagesQ.data && all.length === 0;
+  const nothingToScan = !!imagesQ.data && all.length === 0 && !one;
+  const from = scopeParam(scope);
 
   const goTab = (t: Tab) => navigate({ search: (s) => ({ ...s, tab: t === 'images' ? undefined : t }), replace: true });
+  const switchCluster = (c: string) => navigate({ search: (s) => ({ ...s, cluster: c, digest: undefined }) });
 
   return (
     <>
       <PageHead
-        title="Security"
-        sub={`Images are deduplicated by digest across clusters${lastScan ? ` · last scan ${age(lastScan)} ago` : ''}`}
+        crumbs={<ScopeCrumbs area="Security" to="/security" scope={scope} cluster={cluster} />}
+        title={one ? <span className="mono">{cluster?.name ?? scope.id}</span> : 'All clusters'}
+        sub={`Images are deduplicated by digest${one ? '' : ' across clusters'}${lastScan ? ` · last scan ${age(lastScan)} ago` : ''}`}
         actions={
-          canOperate && (
-            <>
-              {nothingToScan && (
-                <span className="muted small" id="scan-why">
-                  No running images yet · add a cluster first
-                </span>
-              )}
-              <button type="button" className="btn" onClick={() => scanAll.mutate()} disabled={scanAll.isPending || nothingToScan} aria-describedby={nothingToScan ? 'scan-why' : undefined}>
-                {scanAll.isPending ? 'Queueing…' : 'Scan now'}
-              </button>
-            </>
-          )
+          <>
+            <ClusterSwitcher value={from ?? 'all'} clusters={clusters} onChange={switchCluster} />
+            {canOperate && <ScanActions scanAll={scanAll} nothingToScan={nothingToScan} />}
+          </>
         }
       />
-      {scanWarning && (
-        <div className="note warn spread" role="alert">
-          <span>
-            <b>Nothing was scanned.</b> {scanWarning}
-            {canAddCluster && (
-              <>
-                {' '}
-                <Link to="/" search={{ add: true }}>
-                  Add a cluster
-                </Link>
-              </>
-            )}
-          </span>
-          <button type="button" className="btn sm" onClick={() => setScanWarning(null)}>
-            Dismiss
-          </button>
-        </div>
-      )}
+      <ScanWarning scanAll={scanAll} />
       <section className="stats four" aria-label="Security totals">
         <button
           type="button"
@@ -269,18 +435,23 @@ export function SecurityPage() {
       />
 
       {tab === 'images' && (
-        <ImagesTab q={q} setQ={setQ} sev={sev} setSev={setSev} status={status} setStatus={setStatus} imagesQ={imagesQ} attention={attention.length} canOperate={canOperate} onOpen={(d) => navigate({ search: (s) => ({ ...s, digest: d }) })} />
+        <ImagesTab q={q} setQ={setQ} sev={sev} setSev={setSev} status={status} setStatus={setStatus} imagesQ={imagesQ} attention={attention.length} canOperate={canOperate} oneCluster={one} onOpen={(d) => navigate({ search: (s) => ({ ...s, digest: d }) })} />
       )}
-      {tab === 'kyverno' && <KyvernoTab q={kyQ} filter={kyFilter} setFilter={setKyFilter} />}
-      {tab === 'netpol' && <NetpolTab q={npQ} filter={npFilter} setFilter={setNpFilter} />}
-
-      {digest && <ImageDialog digest={digest} onClose={() => navigate({ search: (s) => ({ ...s, digest: undefined }) })} canOperate={canOperate} />}
+      {tab === 'kyverno' && (
+        <KyvernoTab
+          q={kyQ}
+          filter={kyFilter}
+          setFilter={setKyFilter}
+          oneCluster={one}
+          onOpen={(p) => navigate({ to: '/security/kyverno', search: { cluster: p.cluster_id, kind: p.kind || (p.namespace ? 'Policy' : 'ClusterPolicy'), namespace: p.namespace || undefined, name: p.name, from } })}
+        />
+      )}
+      {tab === 'netpol' && <NetpolTab q={npQ} filter={npFilter} setFilter={setNpFilter} oneCluster={one} onOpen={(n) => navigate({ to: '/security/netpol', search: { cluster: n.cluster_id, namespace: n.namespace, from } })} />}
     </>
   );
 }
 
 // ------------------------------------------------------------ images
-
 function ImagesTab({
   q,
   setQ,
@@ -291,6 +462,7 @@ function ImagesTab({
   imagesQ,
   attention,
   canOperate,
+  oneCluster,
   onOpen,
 }: {
   q: string;
@@ -302,6 +474,7 @@ function ImagesTab({
   imagesQ: ReturnType<typeof useQuery<ItemList<Image>>>;
   attention: number;
   canOperate: boolean;
+  oneCluster: boolean;
   onOpen: (digest: string) => void;
 }) {
   const { scan, busy } = useImageScan();
@@ -311,7 +484,7 @@ function ImagesTab({
       all.filter((i) => {
         if (sev === 'critical' && !(i.critical > 0)) return false;
         if (sev === 'high' && !(i.high > 0)) return false;
-        if (status === 'attention' && !RETRYABLE.includes(i.scan_status)) return false;
+        if (status === 'attention' && !needsAttention(i)) return false;
         if (status === 'scanned' && i.scan_status !== 'scanned') return false;
         if (status === 'waiting' && i.scan_status !== 'pending' && i.scan_status !== 'scanning') return false;
         return true;
@@ -336,16 +509,25 @@ function ImagesTab({
         </>
       ),
     },
-    { id: 'usage', header: 'Running in', sortValue: (i) => i.workloads, defaultDir: 'desc', cell: (i) => (
-        <>
-          {plural(i.clusters, 'cluster')}
-          <div className="muted small">{plural(i.workloads, 'workload')}</div>
-        </>
-      ) },
-    { id: 'critical', header: 'Critical', align: 'num', sortValue: (i) => (i.scan_status === 'scanned' ? i.critical : null), defaultDir: 'desc', cell: (i) => (i.scan_status === 'scanned' ? <span className={`n${i.critical ? ' crit' : ''}`}>{i.critical}</span> : <span className="muted">—</span>) },
-    { id: 'high', header: 'High', align: 'num', sortValue: (i) => (i.scan_status === 'scanned' ? i.high : null), defaultDir: 'desc', cell: (i) => (i.scan_status === 'scanned' ? <span className="n">{i.high}</span> : <span className="muted">—</span>) },
-    { id: 'fix', header: 'Fix', sortValue: (i) => (i.scan_status === 'scanned' ? (i.fixable ?? 0) : null), defaultDir: 'desc', cell: fixCell },
-    { id: 'scan', header: 'Scan', sortValue: (i) => STATUS_RANK[i.scan_status] ?? 9, cell: (i) => <ScanStatusCell i={i} />, className: 'wrap' },
+    {
+      id: 'usage',
+      header: 'Running in',
+      sortValue: (i) => i.workloads,
+      defaultDir: 'desc',
+      cell: (i) =>
+        oneCluster ? (
+          plural(i.workloads, 'workload')
+        ) : (
+          <>
+            {plural(i.clusters, 'cluster')}
+            <div className="muted small">{plural(i.workloads, 'workload')}</div>
+          </>
+        ),
+    },
+    { id: 'critical', header: 'Critical', align: 'num', sortValue: (i) => (hasResults(i) ? i.critical : null), defaultDir: 'desc', cell: (i) => (hasResults(i) ? <span className={`n${i.critical ? ' crit' : ''}`}>{i.critical}</span> : <span className="muted">—</span>) },
+    { id: 'high', header: 'High', align: 'num', sortValue: (i) => (hasResults(i) ? i.high : null), defaultDir: 'desc', cell: (i) => (hasResults(i) ? <span className="n">{i.high}</span> : <span className="muted">—</span>) },
+    { id: 'fix', header: 'Fix', sortValue: (i) => (hasResults(i) ? (i.fixable ?? 0) : null), defaultDir: 'desc', cell: fixCell },
+    { id: 'scan', header: 'Scan', sortValue: (i) => (scannedByTag(i) ? 4.5 : (STATUS_RANK[i.scan_status] ?? 9)), cell: (i) => <ScanStatusCell i={i} />, className: 'wrap' },
     { id: 'cred', header: 'Pull credential', sortValue: (i) => (i.scan_status === 'missing_credential' ? '' : i.registry || 'public'), cell: credentialCell },
     {
       id: 'actions',
@@ -354,7 +536,7 @@ function ImagesTab({
       align: 'actions',
       hidden: !canOperate,
       cell: (i) => {
-        const retry = RETRYABLE.includes(i.scan_status);
+        const retry = canRetry(i);
         const b = busy(i) || i.scan_status === 'scanning';
         return (
           <button type="button" className={`btn sm${retry ? ' pri' : ''}`} onClick={() => scan(i)} disabled={b} aria-label={`${retry ? 'Retry scan of' : 'Scan'} ${imageName(i)}`}>
@@ -426,7 +608,7 @@ function ImagesTab({
         noMatch={<EmptyState title="No images match">Try another search or filter.</EmptyState>}
       />
       <div className="card-foot">
-        Registry credentials are server objects (<Link to="/settings/registries">Settings › Registries</Link>). The agent never reads imagePullSecrets. Images are scanned by digest, so results match exactly what runs.
+        Registry credentials are server objects (<Link to="/settings/registries">Settings › Registries</Link>). The agent never reads imagePullSecrets. Images are scanned by digest, so results match exactly what runs; “Scanned by tag” marks the exceptions.
       </div>
     </section>
   );
@@ -434,7 +616,7 @@ function ImagesTab({
 
 // ------------------------------------------------------------ kyverno
 
-function KyvernoTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<ItemList<KyvernoPolicy>>>; filter: KyFilter; setFilter: (f: KyFilter) => void }) {
+function KyvernoTab({ q, filter, setFilter, oneCluster, onOpen }: { q: ReturnType<typeof useQuery<ItemList<KyvernoPolicy>>>; filter: KyFilter; setFilter: (f: KyFilter) => void; oneCluster: boolean; onOpen: (p: KyvernoPolicy) => void }) {
   const [text, setText] = useState('');
   const all = q.data?.items ?? [];
   const failing = all.filter((p) => p.fail_count > 0);
@@ -449,7 +631,9 @@ function KyvernoTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<It
       className: 'mono',
       cell: (p) => (
         <>
-          {p.name}
+          <button type="button" className="link-btn mono" onClick={() => onOpen(p)}>
+            {p.name}
+          </button>
           {!p.ready && (
             <>
               {' '}
@@ -460,7 +644,7 @@ function KyvernoTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<It
       ),
     },
     { id: 'kind', header: 'Kind', sortValue: (p) => p.kind || (p.namespace ? 'Policy' : 'ClusterPolicy'), className: 'muted', cell: (p) => p.kind || (p.namespace ? 'Policy' : 'ClusterPolicy') },
-    { id: 'cluster', header: 'Cluster', sortValue: (p) => p.cluster_name, className: 'mono', cell: (p) => p.cluster_name },
+    { id: 'cluster', header: 'Cluster', hidden: oneCluster, sortValue: (p) => p.cluster_name, className: 'mono', cell: (p) => p.cluster_name },
     { id: 'ns', header: 'Namespace', sortValue: (p) => p.namespace || 'cluster-wide', className: (p) => (p.namespace ? 'mono' : 'muted'), cell: (p) => p.namespace || 'cluster-wide' },
     { id: 'mode', header: 'Mode', sortValue: (p) => p.mode, cell: (p) => (p.mode === 'Enforce' ? <Badge tone="ok">Enforce</Badge> : <Badge tone="info">Audit</Badge>) },
     { id: 'rules', header: 'Rules', align: 'num', sortValue: (p) => p.rules, defaultDir: 'desc', cell: (p) => p.rules },
@@ -502,6 +686,8 @@ function KyvernoTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<It
         onRetry={() => q.refetch()}
         columns={columns}
         rowKey={(p) => p.cluster_id + (p.kind ?? '') + p.namespace + p.name}
+        onRowClick={onOpen}
+        rowLabel={(p) => `Open policy ${p.name}${oneCluster ? '' : ` on ${p.cluster_name}`}`}
         filterText={text}
         resetKey={effective}
         initialSort={{ id: 'fail', dir: 'desc' }}
@@ -513,22 +699,32 @@ function KyvernoTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<It
           )
         }
       />
-      <div className="card-foot">Read by the agent from ClusterPolicy / Policy (kyverno.io), ValidatingPolicy and ImageValidatingPolicy kinds (policies.kyverno.io) and PolicyReports. Failures are recorded as findings (source kyverno).</div>
+      <div className="card-foot">Read by the agent from ClusterPolicy / Policy (kyverno.io), ValidatingPolicy and ImageValidatingPolicy kinds (policies.kyverno.io) and PolicyReports. Failures are recorded as findings (source kyverno). Open a policy to see its rules explained, its YAML and the resources that fail it.</div>
     </section>
   );
 }
 
 // ------------------------------------------------------------ network policies
 
-function NetpolTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<ItemList<NetpolNamespace>>>; filter: NpFilter; setFilter: (f: NpFilter) => void }) {
+function NetpolTab({ q, filter, setFilter, oneCluster, onOpen }: { q: ReturnType<typeof useQuery<ItemList<NetpolNamespace>>>; filter: NpFilter; setFilter: (f: NpFilter) => void; oneCluster: boolean; onOpen: (n: NetpolNamespace) => void }) {
   const [text, setText] = useState('');
   const all = q.data?.items ?? [];
   const missing = all.filter((n) => !n.default_deny && !n.excluded);
   const effective: NpFilter = filter === 'missing' && missing.length === 0 && all.length > 0 ? 'all' : filter;
   const rows = effective === 'missing' ? missing : all;
   const columns: Column<NetpolNamespace>[] = [
-    { id: 'cluster', header: 'Cluster', sortValue: (n) => n.cluster_name, className: 'mono', cell: (n) => n.cluster_name },
-    { id: 'ns', header: 'Namespace', sortValue: (n) => n.namespace, className: 'mono', cell: (n) => n.namespace },
+    { id: 'cluster', header: 'Cluster', hidden: oneCluster, sortValue: (n) => n.cluster_name, className: 'mono', cell: (n) => n.cluster_name },
+    {
+      id: 'ns',
+      header: 'Namespace',
+      sortValue: (n) => n.namespace,
+      className: 'mono',
+      cell: (n) => (
+        <button type="button" className="link-btn mono" onClick={() => onOpen(n)}>
+          {n.namespace}
+        </button>
+      ),
+    },
     { id: 'policies', header: 'Policies', align: 'num', sortValue: (n) => n.policy_count, defaultDir: 'desc', cell: (n) => (n.policy_count === 0 ? 0 : !n.default_deny ? `${n.policy_count} (allow only)` : n.policy_count) },
     {
       id: 'deny',
@@ -568,9 +764,11 @@ function NetpolTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<Ite
         onRetry={() => q.refetch()}
         columns={columns}
         rowKey={(n) => n.cluster_id + n.namespace}
+        onRowClick={onOpen}
+        rowLabel={(n) => `Open namespace ${n.namespace}${oneCluster ? '' : ` on ${n.cluster_name}`}`}
         filterText={text}
         resetKey={effective}
-        initialSort={{ id: 'cluster', dir: 'asc' }}
+        initialSort={{ id: oneCluster ? 'ns' : 'cluster', dir: 'asc' }}
         empty={
           all.length === 0 ? (
             <EmptyState title="No namespaces reported yet">Agents report namespaces and NetworkPolicies after connecting.</EmptyState>
@@ -579,7 +777,7 @@ function NetpolTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<Ite
           )
         }
       />
-      <div className="card-foot">A namespace counts as default-deny when a policy selects all pods with policyTypes Ingress and no ingress rules. System namespaces are excluded.</div>
+      <div className="card-foot">A namespace counts as default-deny when a policy selects all pods with policyTypes Ingress and no ingress rules. System namespaces are excluded. Open a namespace for a diagram of its policies and a connection simulator.</div>
     </section>
   );
 }
@@ -587,6 +785,14 @@ function NetpolTab({ q, filter, setFilter }: { q: ReturnType<typeof useQuery<Ite
 // ------------------------------------------------------------ image detail
 
 function ScanExplain({ d }: { d: ImageDetail }) {
+  if (scannedByTag(d)) {
+    return (
+      <div className="note info" role="note">
+        <div className="note-title">Scanned by tag</div>
+        {tagScanWhy(d)}
+      </div>
+    );
+  }
   if (d.scan_status === 'failed') {
     const n = d.scan_attempts ?? 0;
     return (
@@ -636,7 +842,7 @@ function ImageDialog({ digest, onClose, canOperate }: { digest: string; onClose:
               <div className="lbl">Vulnerabilities</div>
               {d.vulns.length === 0 ? (
                 <p className="muted small" style={{ margin: 0 }}>
-                  {d.scan_status === 'scanned' ? 'No known vulnerabilities.' : 'Not scanned yet.'}
+                  {hasResults(d) ? 'No known vulnerabilities.' : 'Not scanned yet.'}
                 </p>
               ) : (
                 <div className="boxed tight">
@@ -673,7 +879,7 @@ function ImageDialog({ digest, onClose, canOperate }: { digest: string; onClose:
             <div className="end">
               {canOperate && (
                 <button type="button" className="btn" onClick={() => scan(d)} disabled={busy(d) || d.scan_status === 'scanning'}>
-                  {busy(d) ? 'Queued…' : RETRYABLE.includes(d.scan_status) ? 'Retry scan' : 'Rescan'}
+                  {busy(d) ? 'Queued…' : canRetry(d) ? 'Retry scan' : 'Rescan'}
                 </button>
               )}
               <button type="button" className="btn pri" onClick={onClose}>
