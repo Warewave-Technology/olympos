@@ -183,7 +183,7 @@ func trimNewline(b []byte) []byte {
 // RequeueUnscanned marks images that could not be scanned for another try
 // (after registries change).
 func RequeueUnscanned(ctx context.Context, q store.Querier) error {
-	_, err := q.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = ''
-		WHERE scan_status IN ('missing_credential','failed')`)
+	_, err := q.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = '', scan_attempts = 0, next_retry_at = NULL
+		WHERE scan_status IN ('missing_credential','failed','unavailable')`)
 	return err
 }

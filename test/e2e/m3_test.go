@@ -223,3 +223,67 @@ func TestM3VaultMakerChecker(t *testing.T) {
 		}
 	}
 }
+
+// TestM3OpenBaoOverTLS: OpenBao (raft, TLS from the lab CA) is inspected
+// through the tunnel like HashiCorp Vault.
+func TestM3OpenBaoOverTLS(t *testing.T) {
+	if labClusterID == "" {
+		t.Skip("needs TestM1EnrollInventoryDiscovery")
+	}
+	b, err := os.ReadFile(filepath.Join(work(), "openbao-init.json"))
+	if err != nil {
+		t.Skipf("lab openbao not initialized: %v", err)
+	}
+	var init struct {
+		RootToken string `json:"root_token"`
+	}
+	_ = json.Unmarshal(b, &init)
+	admin := login(t, devAdminOID, "Lab Admin")
+	var vs struct {
+		Items []struct {
+			ID       string `json:"id"`
+			Provider string `json:"provider"`
+		} `json:"items"`
+	}
+	admin.must("GET", "/vaults", nil, &vs, 200)
+	id := ""
+	for _, v := range vs.Items {
+		if v.Provider == "openbao" {
+			id = v.ID
+		}
+	}
+	if id == "" {
+		t.Fatal("openbao not listed")
+	}
+	var insp struct {
+		Version string `json:"version"`
+		Mounts  []struct {
+			Path    string `json:"path"`
+			Version int    `json:"version"`
+		} `json:"mounts"`
+	}
+	admin.must("POST", "/vaults/"+id+"/inspect", map[string]any{"root_token": init.RootToken}, &insp, 200)
+	found := false
+	for _, m := range insp.Mounts {
+		found = found || (m.Path == "secret/" && m.Version == 2)
+	}
+	if !found || insp.Version == "" {
+		t.Fatalf("openbao inspect: %+v", insp)
+	}
+	// The vault target is a backup candidate even when the vault is configured.
+	var ts struct {
+		Items []struct {
+			Service string `json:"service"`
+			Engine  string `json:"engine"`
+			Status  string `json:"status"`
+		} `json:"items"`
+	}
+	admin.must("GET", "/targets?engine=vault", nil, &ts, 200)
+	svcs := map[string]string{}
+	for _, x := range ts.Items {
+		svcs[x.Service] = x.Status
+	}
+	if _, ok := svcs["openbao"]; !ok {
+		t.Fatalf("openbao not a vault backup target: %+v", ts.Items)
+	}
+}

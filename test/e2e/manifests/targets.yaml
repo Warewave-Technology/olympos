@@ -118,8 +118,41 @@ spec:
       containers:
       - name: bao
         image: openbao/openbao:2.4.1
-        args: [server, -dev, -dev-root-token-id=CANARY-lab-bao-root, -dev-listen-address=0.0.0.0:8200]
+        args: [server, -config=/openbao/olympos/raft.hcl]
+        env:
+        - {name: BAO_ADDR, value: "https://127.0.0.1:8200"}
+        - {name: BAO_SKIP_VERIFY, value: "true"}   # local admin CLI in the pod only
+        - {name: SKIP_SETCAP, value: "true"}
         ports: [{containerPort: 8200}]
+        volumeMounts:
+        - {name: config, mountPath: /openbao/olympos}
+        - {name: data, mountPath: /openbao/data}
+        - {name: tls, mountPath: /openbao/tls, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: openbao-raft}
+      - {name: data, emptyDir: {}}
+      - name: tls
+        secret: {secretName: openbao-tls}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: openbao-raft, namespace: lab}
+data:
+  raft.hcl: |
+    storage "raft" {
+      path    = "/openbao/data"
+      node_id = "bao-0"
+    }
+    listener "tcp" {
+      address       = "0.0.0.0:8200"
+      tls_cert_file = "/openbao/tls/tls.crt"
+      tls_key_file  = "/openbao/tls/tls.key"
+    }
+    api_addr      = "https://openbao.lab.svc:8200"
+    cluster_addr  = "https://openbao.lab.svc:8201"
+    disable_mlock = true
+    ui = false
 ---
 apiVersion: v1
 kind: Service
@@ -128,9 +161,11 @@ metadata:
   namespace: lab
   annotations:
     olympos.io/vault: openbao
+    olympos.io/backup: vault
+    olympos.io/tls-server-name: openbao.lab.svc
 spec:
   selector: {app: openbao}
-  ports: [{name: http, port: 8200}]
+  ports: [{name: https, port: 8200}]
 ---
 apiVersion: apps/v1
 kind: Deployment

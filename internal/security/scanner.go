@@ -118,6 +118,9 @@ func (s *Scanner) Tick(ctx context.Context) error {
 	if err := s.maybeRescanAll(ctx); err != nil {
 		return err
 	}
+	if err := s.requeueRetries(ctx); err != nil {
+		return err
+	}
 	return s.Drain(ctx)
 }
 
@@ -156,7 +159,7 @@ func (s *Scanner) maybeRescanAll(ctx context.Context) error {
 	}
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `UPDATE images i SET scan_status = 'pending'
-			WHERE scan_status IN ('scanned','failed','missing_credential')
+			WHERE scan_status IN ('scanned','failed','missing_credential','unavailable')
 			  AND EXISTS (SELECT 1 FROM image_usage u WHERE u.digest = i.digest)`)
 		if err != nil {
 			return err
@@ -238,8 +241,42 @@ func (s *Scanner) claim(ctx context.Context) (digest, repo string, ok bool, err 
 
 func (s *Scanner) setStatus(ctx context.Context, digest, status, msg string) error {
 	metrics.ImageScans.WithLabelValues(status).Inc()
-	_, err := s.DB.Exec(ctx, `UPDATE images SET scan_status = $2, scan_error = $3, last_scanned_at = now() WHERE digest = $1`,
-		digest, status, truncateStr(msg, 600))
+	_, err := s.DB.Exec(ctx, `UPDATE images SET scan_status = $2, scan_error = $3, last_scanned_at = now(),
+		scan_attempts = 0, next_retry_at = NULL WHERE digest = $1`, digest, status, truncateStr(msg, 600))
+	return err
+}
+
+// MaxScanAttempts is how often a transient failure is retried automatically
+// before the image waits for the daily rescan or a manual retry.
+const MaxScanAttempts = 5
+
+// retryBackoff is the delay before retry n (1-based).
+func retryBackoff(n int) time.Duration {
+	return [...]time.Duration{time.Minute, 5 * time.Minute, 30 * time.Minute, 2 * time.Hour, 6 * time.Hour}[min(max(n, 1), 5)-1]
+}
+
+// fail records a transient failure and schedules the next retry (none
+// after MaxScanAttempts; the daily rescan or a manual retry still applies).
+func (s *Scanner) fail(ctx context.Context, digest, msg string) error {
+	metrics.ImageScans.WithLabelValues("failed").Inc()
+	var n int
+	if err := s.DB.QueryRow(ctx, `UPDATE images SET scan_status = 'failed', scan_error = $2, last_scanned_at = now(),
+		scan_attempts = scan_attempts + 1 WHERE digest = $1 RETURNING scan_attempts`, digest, truncateStr(msg, 600)).Scan(&n); err != nil {
+		return err
+	}
+	var next *time.Time
+	if n < MaxScanAttempts {
+		t := time.Now().Add(retryBackoff(n))
+		next = &t
+	}
+	_, err := s.DB.Exec(ctx, `UPDATE images SET next_retry_at = $2 WHERE digest = $1`, digest, next)
+	return err
+}
+
+// requeueRetries moves failed images whose retry time has come back to pending.
+func (s *Scanner) requeueRetries(ctx context.Context) error {
+	_, err := s.DB.Exec(ctx, `UPDATE images SET scan_status = 'pending'
+		WHERE scan_status = 'failed' AND next_retry_at IS NOT NULL AND next_retry_at <= now()`)
 	return err
 }
 
@@ -248,11 +285,10 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 		return s.setStatus(ctx, digest, "failed", "Invalid image reference.")
 	}
 	host := HostOf(repo)
+	// Without a matching credential the registry is tried anonymously:
+	// many registries outside a fixed list are public (cgr.dev,
+	// reg.kyverno.io, …). Only an auth failure means a credential is missing.
 	reg := MatchRegistry(regs, repo)
-	if reg == nil && !IsPublicHost(host) {
-		return s.setStatus(ctx, digest, "missing_credential",
-			fmt.Sprintf("No registry credential matches %s. Add one in Settings › Registries.", host))
-	}
 	var auth *Auth
 	if reg != nil && reg.CredentialID != nil {
 		a, err := ResolveCredential(ctx, s.DB, s.Envelope, s.KV, *reg.CredentialID)
@@ -271,17 +307,21 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 		}
 		var se *ScanError
 		if errors.As(err, &se) && se.Auth {
-			msg := "The registry requires authentication. Add a credential in Settings › Registries."
+			msg := fmt.Sprintf("%s denied anonymous access: the image is private, or it does not exist there. Add a credential in Settings › Registries.", host)
 			if auth != nil {
 				msg = fmt.Sprintf("Registry %s rejected the stored credential.", reg.HostPattern)
 			}
 			return s.setStatus(ctx, digest, "missing_credential", msg)
 		}
-		return s.setStatus(ctx, digest, "failed", "trivy: "+err.Error())
+		if errors.As(err, &se) && se.NotFound {
+			return s.setStatus(ctx, digest, "unavailable", fmt.Sprintf(
+				"This digest is not in %s: the image was built or retagged locally (e.g. kind node images). Olympos scans by digest so results match what runs.", host))
+		}
+		return s.fail(ctx, digest, "trivy: "+err.Error())
 	}
 	vulns, err := ParseTrivy(bytes.NewReader(out))
 	if err != nil {
-		return s.setStatus(ctx, digest, "failed", err.Error())
+		return s.fail(ctx, digest, err.Error())
 	}
 	if err := s.saveResults(ctx, digest, repo, vulns); err != nil {
 		return err
@@ -344,7 +384,7 @@ func (s *Scanner) saveResults(ctx context.Context, digest, repo string, vulns []
 				return err
 			}
 		}
-		if _, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'scanned', scan_error = '', last_scanned_at = now(),
+		if _, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'scanned', scan_error = '', last_scanned_at = now(), scan_attempts = 0, next_retry_at = NULL,
 			critical = $2, high = $3, medium = $4, low = $5 WHERE digest = $1`,
 			digest, len(counts["critical"]), len(counts["high"]), len(counts["medium"]), len(counts["low"])); err != nil {
 			return err

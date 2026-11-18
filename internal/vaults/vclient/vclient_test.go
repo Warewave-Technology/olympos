@@ -3,6 +3,7 @@ package vclient
 import (
 	"context"
 	"encoding/pem"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -109,5 +110,12 @@ func TestSanitizeDropsRequestDetails(t *testing.T) {
 	s := Sanitize(err).Error()
 	if strings.Contains(s, "secretTokenValue") || strings.Contains(s, "http://") {
 		t.Fatalf("sanitized error leaks request details: %s", s)
+	}
+}
+
+func TestSanitizePlainHTTP(t *testing.T) {
+	err := Sanitize(fmt.Errorf("Get https://x: %w", http.ErrSchemeMismatch))
+	if err == nil || !strings.Contains(err.Error(), "requires TLS") || !strings.Contains(err.Error(), "transfer mode") {
+		t.Fatalf("%v", err)
 	}
 }

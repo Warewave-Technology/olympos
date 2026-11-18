@@ -188,10 +188,10 @@ func TestScannerCredentialsAndStatuses(t *testing.T) {
 	)
 	e.runner.out = func(ref string) ([]byte, error) {
 		switch {
-		case strings.HasPrefix(ref, "docker.io/library/nginx@"):
+		case strings.HasPrefix(ref, "docker.io/library/nginx@"), strings.HasPrefix(ref, "harbor.factory.local/"):
 			return nil, &ScanError{Auth: true, Msg: "UNAUTHORIZED: authentication required"}
 		case strings.HasPrefix(ref, "ghcr.io/"):
-			return nil, &ScanError{Msg: "MANIFEST_UNKNOWN: manifest unknown"}
+			return nil, &ScanError{NotFound: true, Msg: "MANIFEST_UNKNOWN: manifest unknown"}
 		}
 		return fixture(nil)
 	}
@@ -207,12 +207,13 @@ func TestScannerCredentialsAndStatuses(t *testing.T) {
 		c[0].ref != "acr.contoso.io/erp/api@"+dg1 {
 		t.Errorf("acr calls = %+v", c)
 	}
-	// Private host without a match: missing_credential, never contacted.
+	// Host without a match is tried anonymously; an auth error then means
+	// a credential is missing.
 	if st, msg := e.status(t, dg2); st != "missing_credential" || !strings.Contains(msg, "harbor.factory.local") {
 		t.Errorf("harbor = %s %q", st, msg)
 	}
-	if c := e.runner.callsFor(dg2); len(c) != 0 {
-		t.Errorf("harbor was scanned: %+v", c)
+	if c := e.runner.callsFor(dg2); len(c) != 1 || c[0].user != "" {
+		t.Errorf("harbor calls = %+v", c)
 	}
 	// Public host, anonymous, registry says auth required → missing_credential.
 	if st, _ := e.status(t, dg3); st != "missing_credential" {
@@ -225,8 +226,8 @@ func TestScannerCredentialsAndStatuses(t *testing.T) {
 	if c := e.runner.callsFor(dg4); len(c) != 1 || c[0].user != "legacy" || c[0].pass != canaryKV {
 		t.Errorf("quay calls = %+v", c)
 	}
-	// Other trivy errors → failed with the message.
-	if st, msg := e.status(t, dg5); st != "failed" || !strings.Contains(msg, "MANIFEST_UNKNOWN") {
+	// Digest not in the registry → unavailable (permanent, not retried).
+	if st, msg := e.status(t, dg5); st != "unavailable" || !strings.Contains(msg, "not in ghcr.io") {
 		t.Errorf("ghcr = %s %q", st, msg)
 	}
 	for _, canary := range []string{canaryStored, canaryKV} {
@@ -252,6 +253,7 @@ func TestScannerCredentialsAndStatuses(t *testing.T) {
 
 	// Adding a registry for harbor requeues it.
 	e.registry(t, "harbor.factory.local", "", nil)
+	e.runner.out = func(string) ([]byte, error) { return fixture(nil) }
 	if err := RequeueUnscanned(ctx, e.db); err != nil {
 		t.Fatal(err)
 	}
@@ -430,5 +432,42 @@ func TestScannerConcurrentClaims(t *testing.T) {
 		if refs[i] == refs[i-1] {
 			t.Errorf("digest scanned twice: %s", refs[i])
 		}
+	}
+}
+
+func TestScannerRetriesTransientFailures(t *testing.T) {
+	ctx := context.Background()
+	e := newScanEnv(t)
+	e.report(t, use("nginx:1.25", dg1, "web", "Deployment", "front", "nginx"))
+	e.runner.out = func(string) ([]byte, error) { return nil, &ScanError{Msg: "TOOMANYREQUESTS: rate limited"} }
+	if err := e.scanner.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var st string
+	var n int
+	var next *time.Time
+	_ = e.db.QueryRow(ctx, `SELECT scan_status, scan_attempts, next_retry_at FROM images WHERE digest = $1`, dg1).Scan(&st, &n, &next)
+	if st != "failed" || n != 1 || next == nil || time.Until(*next) > 2*time.Minute {
+		t.Fatalf("after first failure: %s attempts=%d next=%v", st, n, next)
+	}
+	// Retry time reached → pending again → succeeds; counters reset.
+	_, _ = e.db.Exec(ctx, `UPDATE images SET next_retry_at = now() - interval '1 second' WHERE digest = $1`, dg1)
+	e.runner.out = func(string) ([]byte, error) { return fixture(nil) }
+	if err := e.scanner.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_ = e.db.QueryRow(ctx, `SELECT scan_status, scan_attempts, next_retry_at FROM images WHERE digest = $1`, dg1).Scan(&st, &n, &next)
+	if st != "scanned" || n != 0 || next != nil {
+		t.Fatalf("after retry: %s attempts=%d next=%v", st, n, next)
+	}
+	// After MaxScanAttempts no automatic retry is scheduled.
+	e.runner.out = func(string) ([]byte, error) { return nil, &ScanError{Msg: "connection reset"} }
+	for i := 0; i < MaxScanAttempts; i++ {
+		_, _ = e.db.Exec(ctx, `UPDATE images SET scan_status = 'pending' WHERE digest = $1`, dg1)
+		_ = e.scanner.Drain(ctx)
+	}
+	_ = e.db.QueryRow(ctx, `SELECT scan_attempts, next_retry_at FROM images WHERE digest = $1`, dg1).Scan(&n, &next)
+	if n != MaxScanAttempts || next != nil {
+		t.Fatalf("after max attempts: attempts=%d next=%v", n, next)
 	}
 }

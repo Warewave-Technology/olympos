@@ -61,20 +61,20 @@ kubectl -n olympos wait --for=delete pod -l app.kubernetes.io/name=olympos-serve
 kubectl -n olympos delete pod olympos-db-0 --wait=true >/dev/null   # no volume: data is gone
 kubectl -n olympos delete pvc olympos-localkv --ignore-not-found >/dev/null
 kubectl -n olympos rollout status statefulset/olympos-db --timeout=180s >/dev/null
-kubectl -n lab rollout restart deploy/vault >/dev/null                # emptyDir: uninitialized again
+kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null   # emptyDir: uninitialized again
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
-rm -f "$WORK/vault-init.json"
-vexec() { kubectl -n lab exec deploy/vault -- "$@"; }
-for i in $(seq 1 30); do rc=0; vexec vault status -format=json >/dev/null 2>&1 || rc=$?; [ "$rc" -le 2 ] && break; sleep 2; done
-vexec vault operator init -key-shares=1 -key-threshold=1 -format=json > "$WORK/vault-init.json"
-UNSEAL=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["unseal_keys_b64"][0])' "$WORK/vault-init.json")
+kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
+rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json"
+source test/e2e/lib.sh
+init_vault vault vault
+init_vault openbao bao
 ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/vault-init.json")
-vexec vault operator unseal "$UNSEAL" >/dev/null
-for i in $(seq 1 30); do vexec env VAULT_TOKEN="$ROOT" vault secrets list >/dev/null 2>&1 && break; sleep 2; done
-vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=secret kv-v2 >/dev/null
-vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=legacy -version=1 kv >/dev/null
-vexec env VAULT_TOKEN="$ROOT" vault kv put secret/shop/payments db_password=demo-only api_key=demo-only >/dev/null
-vexec env VAULT_TOKEN="$ROOT" vault kv put secret/shop/storefront session_secret=demo-only >/dev/null
+BAO_ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/openbao-init.json")
+for t in vault:vault:$ROOT openbao:bao:$BAO_ROOT; do
+  IFS=: read -r d b tok <<<"$t"
+  kubectl -n lab exec "deploy/$d" -- env VAULT_TOKEN="$tok" BAO_TOKEN="$tok" "$b" kv put secret/shop/payments db_password=demo-only api_key=demo-only >/dev/null
+  kubectl -n lab exec "deploy/$d" -- env VAULT_TOKEN="$tok" BAO_TOKEN="$tok" "$b" kv put secret/shop/storefront session_secret=demo-only >/dev/null
+done
 
 log "installing olympos-server for the browsable lab"
 helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \
@@ -125,7 +125,9 @@ Backup destinations (Settings > Destinations > New destination):
 Credentials: orders-pg (lab) backup / CANARY-lab-pg-password; payments-pg (edge) backup / edge-pg-password;
              metrics-ch (lab) backup / CANARY-lab-ch-password
 
-Vault (lab/vault, TLS): root token for Vaults > Configure: $ROOT
+Vaults (TLS, raft) — root tokens for Vaults > Configure (used once, not stored by Olympos):
+  lab/vault   (HashiCorp): $ROOT
+  lab/openbao (OpenBao):   $BAO_ROOT
   (mounts: secret/ = KV v2 with shop/payments and shop/storefront, legacy/ = KV v1)
 EOF
 log "ready"

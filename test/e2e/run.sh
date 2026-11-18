@@ -19,6 +19,7 @@ if [ "${1:-}" = down ]; then
   exit 0
 fi
 
+source "$ROOT/test/e2e/lib.sh"
 log() { printf '\033[1;33m==> %s\033[0m\n' "$*"; }
 
 if ! kind get clusters | grep -qx "$CLUSTER"; then
@@ -46,6 +47,15 @@ if [ ! -f "$WORK/lab-ca.crt" ]; then
   openssl x509 -req -in "$WORK/pg.csr" -CA "$WORK/lab-ca.crt" -CAkey "$WORK/lab-ca.key" -CAcreateserial \
     -days 30 -extfile "$WORK/pg.ext" -out "$WORK/pg.crt" 2>/dev/null
 fi
+for name in openbao; do
+  if [ ! -f "$WORK/$name.crt" ]; then
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$name.lab.svc" \
+      -keyout "$WORK/$name.key" -out "$WORK/$name.csr" 2>/dev/null
+    printf 'subjectAltName=DNS:%s.lab.svc,DNS:%s.lab.svc.cluster.local,IP:127.0.0.1\n' "$name" "$name" > "$WORK/$name.ext"
+    openssl x509 -req -in "$WORK/$name.csr" -CA "$WORK/lab-ca.crt" -CAkey "$WORK/lab-ca.key" -CAcreateserial \
+      -days 30 -extfile "$WORK/$name.ext" -out "$WORK/$name.crt" 2>/dev/null
+  fi
+done
 if [ ! -f "$WORK/vault.crt" ]; then
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=vault.lab.svc" \
     -keyout "$WORK/vault.key" -out "$WORK/vault.csr" 2>/dev/null
@@ -58,6 +68,7 @@ log "deploying lab dependencies and targets"
 kubectl apply -f test/e2e/manifests/olympos-deps.yaml >/dev/null
 kubectl create namespace lab --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab create secret tls pg-tls --cert "$WORK/pg.crt" --key "$WORK/pg.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl -n lab create secret tls openbao-tls --cert "$WORK/openbao.crt" --key "$WORK/openbao.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK/vault.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
@@ -99,20 +110,11 @@ kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/metrics-ch --timeout=240s >/dev/null
 kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
 
-# Vault runs on raft storage (snapshots need it): init + unseal once per pod.
-vexec() { kubectl -n lab exec deploy/vault -- "$@"; }
-for i in $(seq 1 30); do rc=0; vexec vault status -format=json >/dev/null 2>&1 || rc=$?; [ "$rc" -le 2 ] && break; sleep 2; done
-if { vexec vault status -format=json 2>/dev/null || true; } | grep -q '"initialized": false'; then
-  log "initializing lab vault"
-  vexec vault operator init -key-shares=1 -key-threshold=1 -format=json > "$WORK/vault-init.json"
-fi
-if { vexec vault status -format=json 2>/dev/null || true; } | grep -q '"sealed": true'; then
-  vexec vault operator unseal "$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["unseal_keys_b64"][0])' "$WORK/vault-init.json")" >/dev/null
-fi
-ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/vault-init.json")
-for i in $(seq 1 30); do vexec env VAULT_TOKEN="$ROOT" vault secrets list >/dev/null 2>&1 && break; sleep 2; done
-vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=secret kv-v2 >/dev/null 2>&1 || true
-vexec env VAULT_TOKEN="$ROOT" vault secrets enable -path=legacy -version=1 kv >/dev/null 2>&1 || true
+# Vault and OpenBao run on raft storage with TLS (snapshots need raft):
+# init + unseal once per pod; keys in $WORK/<name>-init.json.
+kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
+init_vault vault vault
+init_vault openbao bao
 
 if [ -n "${SETUP_ONLY:-}" ]; then
   log "lab ready (SETUP_ONLY: tests skipped)"

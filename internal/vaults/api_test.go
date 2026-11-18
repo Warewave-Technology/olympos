@@ -160,3 +160,43 @@ func TestRootTokenRequiresTLS(t *testing.T) {
 		t.Fatalf("root token over plain HTTP: %d", code)
 	}
 }
+
+func TestVaultSearch(t *testing.T) {
+	e := apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
+		svc := &vaults.Service{DB: e.DB, Log: e.Log, KV: e.KV, KeyVaultName: "local"}
+		return []server.Module{&vaults.API{Svc: svc, Log: e.Log}}
+	}})
+	prod := seed(t, e.DB, "prod-weu", map[string]string{"env": "prod", "team": "payments"}, "e2e-tls")
+	dev := seed(t, e.DB, "dev-weu", map[string]string{"env": "dev"}, "e2e-tls")
+	ctx := context.Background()
+	for _, v := range []uuid.UUID{prod.vaultID, dev.vaultID} {
+		_, _ = e.DB.Exec(ctx, `INSERT INTO vault_secret_index (vault_id, mount, path, keys, current_version)
+			VALUES ($1, 'secret/', 'payments/db', '{PASSWORD,USER}', 1)`, v)
+	}
+	c := e.Login(e.Principal("vic", "Member", "viewer@env=prod"))
+	var res struct{ Items []vaults.SearchHit }
+	if code := c.Do("GET", "/api/v1/vaults/search?q=payments", nil, &res); code != 200 {
+		t.Fatalf("search: %d", code)
+	}
+	vaultHits, pathHits := 0, 0
+	for _, h := range res.Items {
+		if h.ClusterName != "prod-weu" {
+			t.Fatalf("result outside scope: %+v", h)
+		}
+		switch h.Match {
+		case "vault":
+			vaultHits++ // matched by the cluster label team=payments
+		case "path":
+			pathHits++
+			if h.Path != "payments/db" || h.Keys != 2 {
+				t.Fatalf("path hit: %+v", h)
+			}
+		}
+	}
+	if vaultHits != 1 || pathHits != 1 {
+		t.Fatalf("hits: %+v", res.Items)
+	}
+	if code := c.Do("GET", "/api/v1/vaults/search?q=p", nil, nil); code != http.StatusUnprocessableEntity {
+		t.Fatalf("short query: %d", code)
+	}
+}

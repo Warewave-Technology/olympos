@@ -269,9 +269,10 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	var trigger, ns, svc, cluster, engine string
 	var channel *uuid.UUID
 	var started *time.Time
-	err := tx.QueryRow(ctx, `SELECT r.job_id, r.trigger, r.started_at, j.notify_channel_id, t.namespace, t.service, c.name, t.engine
+	var notifySuccess bool
+	err := tx.QueryRow(ctx, `SELECT r.job_id, r.trigger, r.started_at, j.notify_channel_id, j.notify_on_success, t.namespace, t.service, c.name, t.engine
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
-		WHERE r.id = $1`, runID).Scan(&jobID, &trigger, &started, &channel, &ns, &svc, &cluster, &engine)
+		WHERE r.id = $1`, runID).Scan(&jobID, &trigger, &started, &channel, &notifySuccess, &ns, &svc, &cluster, &engine)
 	if err != nil {
 		return finished{}, err
 	}
@@ -291,6 +292,9 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	fields := map[string]string{"cluster": cluster, "target": ns + "/" + svc, "trigger": trigger}
 	ev := notify.Event{ChannelID: channel, Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
 		Payload: map[string]any{"job_id": jobID.String(), "run_id": runID.String()}}
+	if o.status == "succeeded" && !notifySuccess {
+		return f, nil // backup.succeeded is opt-in per job
+	}
 	if o.status == "succeeded" {
 		ev.Type, ev.Key = notify.BackupSucceeded, "backup.succeeded:"+runID.String()
 		ev.Title = fmt.Sprintf("Backup succeeded: %s/%s", ns, svc)

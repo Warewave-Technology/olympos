@@ -33,8 +33,9 @@ type Runner interface {
 // ScanError is a failed scan. Auth marks registry authentication failures,
 // which the scanner reports as missing_credential.
 type ScanError struct {
-	Auth bool
-	Msg  string
+	Auth     bool
+	NotFound bool // the digest does not exist in the registry
+	Msg      string
 }
 
 func (e *ScanError) Error() string { return e.Msg }
@@ -163,12 +164,20 @@ func (t *TrivyCLI) Scan(ctx context.Context, ref string, auth *Auth) ([]byte, er
 		if msg == "" {
 			msg = err.Error()
 		}
-		return nil, &ScanError{Auth: IsAuthError(stderr), Msg: truncateStr(msg, 600)}
+		return nil, &ScanError{Auth: IsAuthError(stderr), NotFound: IsNotFoundError(stderr), Msg: truncateStr(msg, 600)}
 	}
 	return out, nil
 }
 
 var authErrRe = regexp.MustCompile(`(?i)(unauthorized|authentication required|no basic auth credentials|access to the resource is denied|denied:|status code 401|status code 403|\b401 unauthorized|\b403 forbidden)`)
+
+var notFoundRe = regexp.MustCompile(`(?i)(manifest unknown|MANIFEST_UNKNOWN|unable to find the specified image|status code 404|\b404 not found|NAME_UNKNOWN)`)
+
+// IsNotFoundError reports whether trivy's stderr says the image digest does
+// not exist in the registry (a permanent condition: not retried).
+func IsNotFoundError(stderr string) bool {
+	return notFoundRe.MatchString(stderr) && !authErrRe.MatchString(stderr)
+}
 
 // IsAuthError reports whether trivy's stderr shows a registry auth failure.
 func IsAuthError(stderr string) bool { return authErrRe.MatchString(stderr) }

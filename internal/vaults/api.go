@@ -31,6 +31,7 @@ type API struct {
 // Routes mounts the module under /api/v1.
 func (a *API) Routes(r chi.Router) {
 	r.Get("/vaults", a.list)
+	r.Get("/vaults/search", a.search)
 	r.Get("/vaults/{id}", a.get)
 	r.Post("/vaults/{id}/inspect", a.inspect)
 	r.Post("/vaults/{id}/configure", a.configure)
@@ -41,35 +42,39 @@ func (a *API) Routes(r chi.Router) {
 
 // View is the API shape of a vault (no role_id, no secret_id reference).
 type View struct {
-	ID                uuid.UUID        `json:"id"`
-	Target            inventory.Target `json:"target"`
-	Provider          string           `json:"provider"`
-	Version           string           `json:"version"`
-	Status            string           `json:"status"`
-	KVMounts          []KVMount        `json:"kv_mounts"`
-	ConfiguredByName  string           `json:"configured_by_name"`
-	ConfiguredAt      *time.Time       `json:"configured_at"`
-	SecretIDRotatedAt *time.Time       `json:"secret_id_rotated_at"`
-	LastIndexAt       *time.Time       `json:"last_index_at"`
-	Secrets           int              `json:"secrets"`
-	Drift             int              `json:"drift"`
-	LastError         string           `json:"last_error"`
-	TLSServerName     string           `json:"tls_server_name"`
-	TransferMode      string           `json:"transfer_mode"`
-	CABundleSet       bool             `json:"ca_bundle_set"`
+	ID                uuid.UUID         `json:"id"`
+	Target            inventory.Target  `json:"target"`
+	ClusterLabels     map[string]string `json:"cluster_labels"`
+	Provider          string            `json:"provider"`
+	Version           string            `json:"version"`
+	Status            string            `json:"status"`
+	KVMounts          []KVMount         `json:"kv_mounts"`
+	ConfiguredByName  string            `json:"configured_by_name"`
+	ConfiguredAt      *time.Time        `json:"configured_at"`
+	SecretIDRotatedAt *time.Time        `json:"secret_id_rotated_at"`
+	LastIndexAt       *time.Time        `json:"last_index_at"`
+	Secrets           int               `json:"secrets"`
+	Drift             int               `json:"drift"`
+	LastError         string            `json:"last_error"`
+	TLSServerName     string            `json:"tls_server_name"`
+	TransferMode      string            `json:"transfer_mode"`
+	CABundleSet       bool              `json:"ca_bundle_set"`
 }
 
 func (a *API) view(ctx context.Context, q store.Querier, r *row) (View, error) {
 	v := View{ID: r.ID, Provider: r.Provider, Version: r.Version, Status: r.Status, KVMounts: r.Mounts,
 		ConfiguredByName: r.ConfiguredByName, ConfiguredAt: r.ConfiguredAt, SecretIDRotatedAt: r.RotatedAt,
 		LastIndexAt: r.LastIndexAt, LastError: r.LastError, TLSServerName: r.serverName(), TransferMode: r.TransferMode,
-		CABundleSet: strings.TrimSpace(r.CABundle) != "",
+		CABundleSet: strings.TrimSpace(r.CABundle) != "", ClusterLabels: r.Labels,
 		Target: inventory.Target{ID: r.TargetID, ClusterID: r.ClusterID, ClusterName: r.ClusterName, Namespace: r.Namespace,
 			Service: r.Service, Port: r.Port, PortName: r.PortName, Engine: r.Engine, VaultProvider: r.Provider,
 			TLSServerName: r.TLSServerName, DetectedVersion: r.DetectedVersion, TLSOK: r.TLSOK, Status: r.TargetStatus,
 			FirstSeenAt: r.FirstSeenAt, LastSeenAt: r.LastSeenAt}}
 	if v.KVMounts == nil {
 		v.KVMounts = []KVMount{}
+	}
+	if v.ClusterLabels == nil {
+		v.ClusterLabels = map[string]string{}
 	}
 	err := q.QueryRow(ctx, `SELECT (SELECT count(*) FROM vault_secret_index WHERE vault_id = $1),
 		(SELECT count(*) FROM findings WHERE source = 'vault-drift' AND status = 'open' AND cluster_id = $2 AND control_id = $3)`,
@@ -423,4 +428,89 @@ func (a *API) secret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, d)
+}
+
+// SearchHit is one result of GET /vaults/search.
+type SearchHit struct {
+	Match       string    `json:"match"` // vault | path
+	VaultID     uuid.UUID `json:"vault_id"`
+	VaultName   string    `json:"vault_name"`
+	Provider    string    `json:"provider"`
+	ClusterID   uuid.UUID `json:"cluster_id"`
+	ClusterName string    `json:"cluster_name"`
+	Namespace   string    `json:"namespace"`
+	Mount       string    `json:"mount,omitempty"`
+	Path        string    `json:"path,omitempty"`
+	Keys        int       `json:"keys"`
+}
+
+// search finds vaults (name, cluster, namespace, provider, cluster labels)
+// and indexed secret paths across every vault the caller can read.
+func (a *API) search(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+	if len([]rune(q)) < 2 {
+		httpx.FieldErrors(w, "invalid search", map[string]string{"q": "Type at least 2 characters."})
+		return
+	}
+	lq := strings.ToLower(q)
+	sub := httpx.Subject(r)
+	rows, err := a.Svc.DB.Query(ctx, rowSelect+` WHERE c.status <> 'revoked' ORDER BY c.name, t.namespace, t.service`)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	byID := map[uuid.UUID]*row{}
+	var ids []uuid.UUID
+	out := []SearchHit{}
+	for rows.Next() {
+		vr, err := scanRow(rows)
+		if err != nil {
+			rows.Close()
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		if !sub.Can(authz.PermRead, vr.Labels) {
+			continue
+		}
+		byID[vr.ID], ids = vr, append(ids, vr.ID)
+		hay := []string{vr.Service, vr.ClusterName, vr.Namespace, vr.Provider, vr.Namespace + "/" + vr.Service}
+		for k, v := range vr.Labels {
+			hay = append(hay, k+"="+v, v)
+		}
+		for _, h := range hay {
+			if strings.Contains(strings.ToLower(h), lq) {
+				out = append(out, SearchHit{Match: "vault", VaultID: vr.ID, VaultName: vr.Service, Provider: vr.Provider,
+					ClusterID: vr.ClusterID, ClusterName: vr.ClusterName, Namespace: vr.Namespace})
+				break
+			}
+		}
+	}
+	rows.Close()
+	if len(ids) > 0 && len(out) < 50 {
+		prow, err := a.Svc.DB.Query(ctx, `SELECT vault_id, mount, path, cardinality(keys) FROM vault_secret_index
+			WHERE vault_id = ANY($1) AND (mount || path) ILIKE '%' || $2 || '%'
+			ORDER BY mount, path LIMIT $3`, ids, likeEscape(q), 50-len(out))
+		if err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		for prow.Next() {
+			var h SearchHit
+			if err := prow.Scan(&h.VaultID, &h.Mount, &h.Path, &h.Keys); err != nil {
+				prow.Close()
+				httpx.Internal(w, r, a.Log, err)
+				return
+			}
+			vr := byID[h.VaultID]
+			h.Match, h.VaultName, h.Provider, h.ClusterID, h.ClusterName, h.Namespace = "path", vr.Service, vr.Provider, vr.ClusterID, vr.ClusterName, vr.Namespace
+			out = append(out, h)
+		}
+		prow.Close()
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+func likeEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
 }

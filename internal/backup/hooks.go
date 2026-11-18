@@ -104,7 +104,6 @@ func OnTargetUpsert(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, t *pb.T
 	}
 	// Soft-deleted jobs must not keep a reappearing target "configured".
 	_, err = tx.Exec(ctx, `UPDATE targets SET status = 'candidate' WHERE id = $1 AND status = 'configured'
-		AND NOT EXISTS (SELECT 1 FROM backup_jobs j WHERE j.target_id = targets.id AND j.deleted_at IS NULL)
-		AND NOT EXISTS (SELECT 1 FROM vaults v WHERE v.target_id = targets.id AND v.status = 'configured')`, t.TargetId)
+		AND NOT EXISTS (SELECT 1 FROM backup_jobs j WHERE j.target_id = targets.id AND j.deleted_at IS NULL)`, t.TargetId)
 	return err
 }

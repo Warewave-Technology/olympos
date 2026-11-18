@@ -96,6 +96,7 @@ type JobInput struct {
 	Retention       *Retention       `json:"retention"`
 	Enabled         *bool            `json:"enabled"`
 	NotifyChannelID optUUID          `json:"notify_channel_id"`
+	NotifyOnSuccess *bool            `json:"notify_on_success"`
 }
 
 // needsCredential reports whether jobs for engine need a user credential
@@ -271,6 +272,17 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 	if engine == "" {
 		fields["target_id"] = "target has no backup engine annotation"
 	}
+	if engine == "vault" {
+		// Vault snapshots log in with the Olympos AppRole of that vault.
+		var configured bool
+		if err := a.DB.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM vaults WHERE target_id = $1 AND status = 'configured')`, *in.TargetID).Scan(&configured); err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		if !configured {
+			fields["target_id"] = "Configure this vault first (Vaults › Configure): snapshot backups use its Olympos AppRole."
+		}
+	}
 	if in.DestinationID == nil {
 		fields["destination_id"] = "required"
 	}
@@ -332,9 +344,10 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 			credID = &cid
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO backup_jobs (target_id, credential_id, destination_id, engine_options, cron, timezone,
-			retention, enabled, notify_channel_id, created_by, last_scheduled_for)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CASE WHEN $8 THEN now() END) RETURNING id`,
-			*in.TargetID, credID, *in.DestinationID, opts, cron, tz, retB, enabled, in.NotifyChannelID.V, httpx.ActorID(r)).Scan(&id); err != nil {
+			retention, enabled, notify_channel_id, created_by, last_scheduled_for, notify_on_success)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CASE WHEN $8 THEN now() END, $11) RETURNING id`,
+			*in.TargetID, credID, *in.DestinationID, opts, cron, tz, retB, enabled, in.NotifyChannelID.V, httpx.ActorID(r),
+			in.NotifyOnSuccess != nil && *in.NotifyOnSuccess).Scan(&id); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE targets SET status = 'configured' WHERE id = $1 AND status = 'candidate'`, *in.TargetID); err != nil {
@@ -450,8 +463,9 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 		}
 		if _, err := tx.Exec(ctx, `UPDATE backup_jobs SET credential_id = $2, destination_id = $3, engine_options = $4, cron = $5,
 			timezone = $6, retention = $7, enabled = $8, notify_channel_id = $9,
-			last_scheduled_for = CASE WHEN $10 THEN now() ELSE last_scheduled_for END WHERE id = $1`,
-			j.ID, credID, dest, opts, cron, tz, retB, enabled, notifyCh, resetSchedule); err != nil {
+			last_scheduled_for = CASE WHEN $10 THEN now() ELSE last_scheduled_for END,
+			notify_on_success = COALESCE($11, notify_on_success) WHERE id = $1`,
+			j.ID, credID, dest, opts, cron, tz, retB, enabled, notifyCh, resetSchedule, in.NotifyOnSuccess); err != nil {
 			return err
 		}
 		if in.Credential != nil && j.CredentialID != nil {
@@ -493,8 +507,7 @@ func (a *API) deleteJob(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE targets SET status = 'candidate' WHERE id = $1 AND status = 'configured'
-			AND NOT EXISTS (SELECT 1 FROM backup_jobs x WHERE x.target_id = targets.id AND x.deleted_at IS NULL)
-			AND NOT EXISTS (SELECT 1 FROM vaults v WHERE v.target_id = targets.id AND v.status = 'configured')`, j.Target.ID); err != nil {
+			AND NOT EXISTS (SELECT 1 FROM backup_jobs x WHERE x.target_id = targets.id AND x.deleted_at IS NULL)`, j.Target.ID); err != nil {
 			return err
 		}
 		return httpx.Record(r, tx, "backup.job.deleted", "backup_job", j.ID.String(), &clusterID,

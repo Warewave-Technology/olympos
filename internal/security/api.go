@@ -93,6 +93,9 @@ type Image struct {
 	ScanStatus    string     `json:"scan_status"`
 	LastScannedAt *time.Time `json:"last_scanned_at"`
 	Registry      string     `json:"registry"`
+	ScanError     string     `json:"scan_error"`
+	ScanAttempts  int        `json:"scan_attempts"`
+	NextRetryAt   *time.Time `json:"next_retry_at"`
 }
 
 // Usage is where an image runs.
@@ -109,13 +112,13 @@ type Usage struct {
 // ImageDetail adds usage and vulnerabilities.
 type ImageDetail struct {
 	Image
-	Usage     []Usage `json:"usage"`
-	Vulns     []Vuln  `json:"vulns"`
-	ScanError string  `json:"scan_error"`
+	Usage []Usage `json:"usage"`
+	Vulns []Vuln  `json:"vulns"`
 }
 
 const imageSelect = `
 	SELECT i.digest, i.repo, i.tags, i.critical, i.high, i.medium, i.low, i.scan_status, i.last_scanned_at,
+	       i.scan_error, i.scan_attempts, i.next_retry_at,
 	       count(DISTINCT u.cluster_id),
 	       count(DISTINCT (u.cluster_id, u.namespace, u.workload_kind, u.workload_name)),
 	       (SELECT count(DISTINCT v.cve_id) FROM image_vulns v
@@ -143,7 +146,7 @@ func (a *API) scanImages(rows pgx.Rows, regs []RegistryRef) ([]Image, error) {
 	for rows.Next() {
 		var im Image
 		if err := rows.Scan(&im.Digest, &im.Repo, &im.Tags, &im.Critical, &im.High, &im.Medium, &im.Low, &im.ScanStatus,
-			&im.LastScannedAt, &im.Clusters, &im.Workloads, &im.Fixable); err != nil {
+			&im.LastScannedAt, &im.ScanError, &im.ScanAttempts, &im.NextRetryAt, &im.Clusters, &im.Workloads, &im.Fixable); err != nil {
 			return nil, err
 		}
 		if im.Tags == nil {
@@ -234,10 +237,6 @@ func (a *API) getImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	d := ImageDetail{Image: items[0], Usage: []Usage{}, Vulns: []Vuln{}}
-	if err := a.DB.QueryRow(ctx, `SELECT scan_error FROM images WHERE digest = $1`, digest).Scan(&d.ScanError); err != nil {
-		httpx.Internal(w, r, a.Log, err)
-		return
-	}
 	urows, err := a.DB.Query(ctx, `
 		SELECT u.cluster_id, c.name, u.namespace, u.workload_kind, u.workload_name, u.container, u.image
 		FROM image_usage u JOIN clusters c ON c.id = u.cluster_id
@@ -312,7 +311,7 @@ func (a *API) scanImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err = store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = ''
+		if _, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = '', scan_attempts = 0, next_retry_at = NULL
 			WHERE digest = $1 AND scan_status <> 'scanning'`, digest); err != nil {
 			return err
 		}

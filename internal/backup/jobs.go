@@ -44,6 +44,7 @@ type Job struct {
 	Enabled          bool
 	PausedReason     string
 	NotifyChannelID  *uuid.UUID
+	NotifyOnSuccess  bool
 	LastScheduledFor *time.Time
 	CreatedAt        time.Time
 }
@@ -60,7 +61,7 @@ func (j *Job) TargetInfo() TargetInfo {
 }
 
 const jobSelectBase = `SELECT j.id, j.credential_id, j.destination_id, d.name, j.engine_options, j.cron, j.timezone, j.retention,
-	j.enabled, j.paused_reason, j.notify_channel_id, j.last_scheduled_for, j.created_at,
+	j.enabled, j.paused_reason, j.notify_channel_id, j.notify_on_success, j.last_scheduled_for, j.created_at,
 	t.id, t.cluster_id, c.name, c.labels, c.status, c.transfer_mode, c.egress_rate_per_gb::float8, t.namespace, t.service, t.port,
 	t.port_name, t.engine, t.vault_provider, t.tls_server_name, t.detected_version, t.tls_ok, t.status, t.first_seen_at, t.last_seen_at
 	FROM backup_jobs j JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
@@ -73,7 +74,7 @@ func scanJob(row pgx.Row) (*Job, error) {
 	var ret []byte
 	t := &j.Target
 	if err := row.Scan(&j.ID, &j.CredentialID, &j.DestinationID, &j.DestinationName, &j.EngineOptions, &j.Cron, &j.Timezone, &ret,
-		&j.Enabled, &j.PausedReason, &j.NotifyChannelID, &j.LastScheduledFor, &j.CreatedAt,
+		&j.Enabled, &j.PausedReason, &j.NotifyChannelID, &j.NotifyOnSuccess, &j.LastScheduledFor, &j.CreatedAt,
 		&t.ID, &t.ClusterID, &t.ClusterName, &j.ClusterLabels, &j.ClusterStatus, &j.TransferMode, &j.EgressRatePerGB,
 		&t.Namespace, &t.Service, &t.Port, &t.PortName, &t.Engine, &t.VaultProvider, &t.TLSServerName, &t.DetectedVersion,
 		&t.TLSOK, &t.Status, &t.FirstSeenAt, &t.LastSeenAt); err != nil {
@@ -171,6 +172,7 @@ type JobView struct {
 	Enabled               bool            `json:"enabled"`
 	PausedReason          string          `json:"paused_reason"`
 	NotifyChannelID       *uuid.UUID      `json:"notify_channel_id"`
+	NotifyOnSuccess       bool            `json:"notify_on_success"`
 	NextRunAt             *time.Time      `json:"next_run_at"`
 	LastRun               *Run            `json:"last_run"`
 	EstimatedMonthlyBytes int64           `json:"estimated_monthly_bytes"`
@@ -199,7 +201,7 @@ func MonthlyEstimate(avgWireBytes float64, spec schedule.Spec, now time.Time) in
 // View builds the API shape: next run, last run and transfer estimates.
 func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now time.Time) (*JobView, error) {
 	v := &JobView{ID: j.ID, Target: j.Target, Engine: j.Target.Engine, EngineOptions: j.EngineOptions, Cron: j.Cron, Timezone: j.Timezone,
-		Retention: j.Retention, Enabled: j.Enabled, PausedReason: j.PausedReason, NotifyChannelID: j.NotifyChannelID, CreatedAt: j.CreatedAt}
+		Retention: j.Retention, Enabled: j.Enabled, PausedReason: j.PausedReason, NotifyChannelID: j.NotifyChannelID, NotifyOnSuccess: j.NotifyOnSuccess, CreatedAt: j.CreatedAt}
 	v.Destination.ID, v.Destination.Name = j.DestinationID, j.DestinationName
 	if j.CredentialID != nil {
 		cv, err := creds.View(ctx, q, *j.CredentialID)

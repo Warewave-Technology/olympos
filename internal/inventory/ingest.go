@@ -296,8 +296,8 @@ func (s *Service) upsertTarget(ctx context.Context, tx pgx.Tx, clusterID uuid.UU
 		ON CONFLICT (id) DO UPDATE SET port_name = EXCLUDED.port_name, engine = EXCLUDED.engine,
 		  vault_provider = EXCLUDED.vault_provider, tls_server_name = EXCLUDED.tls_server_name, last_seen_at = now(),
 		  status = CASE WHEN targets.status = 'gone' THEN
+		    -- target status is about backups only (a configured Vault is still a backup candidate)
 		    CASE WHEN EXISTS (SELECT 1 FROM backup_jobs j WHERE j.target_id = targets.id AND j.deleted_at IS NULL)
-		           OR EXISTS (SELECT 1 FROM vaults v WHERE v.target_id = targets.id AND v.status = 'configured')
 		         THEN 'configured' ELSE 'candidate' END
 		    ELSE targets.status END`,
 		t.TargetId, clusterID, t.Namespace, t.Service, t.Port, t.PortName, t.Engine, t.VaultProvider, t.TlsServerName)

@@ -48,7 +48,7 @@ func (a *API) scanAll(w http.ResponseWriter, r *http.Request) {
 	}
 	var n int64
 	err = store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = ''
+		tag, err := tx.Exec(ctx, `UPDATE images SET scan_status = 'pending', scan_error = '', scan_attempts = 0, next_retry_at = NULL
 			WHERE scan_status <> 'scanning'
 			  AND digest IN (SELECT digest FROM image_usage WHERE cluster_id = ANY($1))`, ids)
 		if err != nil {

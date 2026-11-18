@@ -68,6 +68,8 @@ func TestWorkerSuccessManifestAndTier(t *testing.T) {
 	f := seed(t, db, "prod-aks", nil, "online")
 	ch := addChannel(t, db)
 	job := addJob(t, db, f, jobOpts{cron: "0 2 * * *", tz: "Europe/Istanbul", enabled: true, channel: &ch, options: `{"databases":["a"]}`})
+	// backup.succeeded is opt-in per job.
+	_, _ = db.Exec(ctx, `UPDATE backup_jobs SET notify_on_success = true WHERE id = $1`, job)
 	d, b := newDialer(f.ClusterID), newBlobs("olympos/")
 	w := newWorker(t, db, d, b)
 

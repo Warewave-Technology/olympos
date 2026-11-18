@@ -183,6 +183,13 @@ func Sanitize(err error) error {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return err
 	}
+	if errors.Is(err, http.ErrSchemeMismatch) || strings.Contains(err.Error(), "server gave HTTP response to HTTPS client") {
+		// No silent fallback to HTTP: the root token, AppRole tokens and
+		// new secret values would cross the agent in clear.
+		return errors.New("this vault serves plain HTTP, but Olympos requires TLS end-to-end for vaults " +
+			"(otherwise the root token, AppRole tokens and secret values cross the agent in clear). " +
+			"Enable TLS on the vault listener, or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters")
+	}
 	return errors.New("could not reach vault: " + firstLine(err.Error()))
 }
 

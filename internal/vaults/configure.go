@@ -316,7 +316,7 @@ func (s *Service) Configure(ctx context.Context, vaultID uuid.UUID, in Configure
 			r.ID, h.Version, mb, roleID, ref, accessor, now, in.Actor, bundle, indexed); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE targets SET status = 'configured', detected_version = $2 WHERE id = $1`, r.TargetID, h.Version); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE targets SET detected_version = $2 WHERE id = $1`, r.TargetID, h.Version); err != nil {
 			return err
 		}
 		// Drop index rows of mounts that are no longer managed.
