@@ -5,6 +5,7 @@ import type { Registry, RegistryInput, UnmatchedRegistry } from '../../api/types
 import { useCan } from '../../auth/me';
 import { plural } from '../../lib/format';
 import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useAction, useToast } from '../../ui/kit';
+import { Select } from '../../ui/Select';
 import { SettingsLayout } from './SettingsLayout';
 
 type Source = 'keyvault_ref' | 'stored' | 'managed_identity';
@@ -94,10 +95,10 @@ export function RegistriesPage() {
 
       {q.data && unmatched.length > 0 && (
         <section className="card pad-lg" aria-labelledby="unm-t">
-          <div className="spread">
+          <div className="card-title">
             <div>
-              <div className="muted small">Unmatched images</div>
-              <h2 id="unm-t" style={{ margin: '4px 0 0', fontSize: 16, fontWeight: 500 }}>
+              <div className="eyebrow">Unmatched images</div>
+              <h2 id="unm-t">
                 {plural(unmatched.length, 'registry has', 'registries have')} no credential
               </h2>
             </div>
@@ -198,10 +199,15 @@ function RegistryDialog({ host: initialHost, onClose }: { host: string; onClose:
             <input className="in mono" {...aria('r-host', fe('host_pattern'), true)} value={host} onChange={(e) => setHost(e.target.value)} data-autofocus spellCheck={false} />
           </Field>
           <Field label="Credential source" htmlFor="r-src">
-            <select id="r-src" className="in" value={source} onChange={(e) => setSource(e.target.value as Source)}>
-              <option value="keyvault_ref">Key Vault reference</option>
-              <option value="stored">Store in Olympos</option>
-            </select>
+            <Select<Source>
+              id="r-src"
+              value={source}
+              onChange={setSource}
+              options={[
+                { value: 'keyvault_ref', label: 'Key Vault reference', hint: 'Read at scan time; nothing stored in Olympos' },
+                { value: 'stored', label: 'Store in Olympos', hint: 'Envelope-encrypted with a Key Vault key' },
+              ]}
+            />
           </Field>
           {source !== 'managed_identity' && (
             <Field label="Username" htmlFor="r-user" error={fe('username')}>

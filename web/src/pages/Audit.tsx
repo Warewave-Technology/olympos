@@ -9,6 +9,8 @@ import { dateTime, duration, plural } from '../lib/format';
 import { matchesSelector } from '../lib/sas';
 import { Badge, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../ui/kit';
 import { PageHead, SeverityBadge } from '../ui/status';
+import { Select } from '../ui/Select';
+import { ScopeInput } from '../ui/TagInput';
 
 const TOOL_LABEL: Record<string, string> = { kubescape: 'Kubescape', polaris: 'Polaris', 'kube-bench': 'kube-bench' };
 
@@ -215,8 +217,8 @@ export function AuditPage() {
         <div className="card-spacer" />
       </section>
 
-      <div className="row">
-        <section className="card" style={{ flex: '1 1 340px', minWidth: 0 }} aria-labelledby="ksh-t">
+      <div className="cols-2">
+        <section className="card" aria-labelledby="ksh-t">
           <div className="card-head">
             <h2 id="ksh-t">Kubescape run history</h2>
           </div>
@@ -257,7 +259,7 @@ export function AuditPage() {
           <div className="card-foot">Raw reports kept in Blob for 400 days</div>
         </section>
 
-        <section className="card grow" aria-labelledby="new-t">
+        <section className="card" aria-labelledby="new-t">
           <div className="card-head">
             <h2 id="new-t">New since last run{lastKs ? ` · ${dateTime(lastKs.started_at).slice(0, 6)}` : ''}</h2>
             {(() => {
@@ -289,7 +291,7 @@ export function AuditPage() {
                             <SeverityBadge s={f.severity} />
                           </td>
                           <td className="mono">{f.cluster_name}</td>
-                          <td className="mono">{f.resource_ref}</td>
+                          <td className="mono wrap break">{f.resource_ref}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -306,7 +308,7 @@ export function AuditPage() {
 
       <section className="card pad spread">
         <div>
-          <h2 className="title">Platform activity</h2>
+          <h2>Platform activity</h2>
           <p className="muted" style={{ margin: '4px 0 0', fontSize: 13 }}>
             Logins, grants, change requests and drift findings, append-only.
           </p>
@@ -316,17 +318,18 @@ export function AuditPage() {
         </Link>
       </section>
 
-      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} />}
+      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={clusters} />}
     </>
   );
 }
 
-function NewScheduleDialog({ onClose, channels }: { onClose: () => void; channels: Channel[] }) {
+function NewScheduleDialog({ onClose, channels, clusters }: { onClose: () => void; channels: Channel[]; clusters: Cluster[] }) {
   const qc = useQueryClient();
   const toast = useToast();
   const [tool, setTool] = useState<AuditTool>('kubescape');
   const [frameworks, setFrameworks] = useState<Set<'nsa' | 'cis' | 'mitre'>>(new Set(['nsa', 'cis', 'mitre']));
-  const [scope, setScope] = useState('all');
+  const [scope, setScope] = useState('');
+  const [scopeDraftErr, setScopeDraftErr] = useState<string | null>(null);
   const [cron, setCron] = useState('0 4 * * *');
   const [notify, setNotify] = useState('');
   const cronErr = validateCron(cron);
@@ -340,7 +343,7 @@ function NewScheduleDialog({ onClose, channels }: { onClose: () => void; channel
   });
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (cronErr) return;
+    if (cronErr || scopeDraftErr) return;
     create.mutate({ tool, frameworks: tool === 'kubescape' ? [...frameworks] : [], scope_selector: scope.trim() || 'all', cron, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, enabled: true, notify_channel_id: notify || null });
   };
   return (
@@ -383,8 +386,8 @@ function NewScheduleDialog({ onClose, channels }: { onClose: () => void; channel
           </fieldset>
         )}
         <div className="grid-2">
-          <Field label="Scope (cluster labels)" htmlFor="as-scope" error={fieldError(create.error, 'scope_selector')} hint='"all" or a selector such as env=prod'>
-            <input className="in mono" {...aria('as-scope', fieldError(create.error, 'scope_selector'), true)} value={scope} onChange={(e) => setScope(e.target.value)} />
+          <Field label="Scope (cluster labels)" htmlFor="as-scope" error={fieldError(create.error, 'scope_selector')} hint="No labels = all clusters">
+            <ScopeInput id="as-scope" value={scope} onChange={setScope} clusters={clusters} error={fieldError(create.error, 'scope_selector')} hintId="as-scope-hint" onDraftError={setScopeDraftErr} />
           </Field>
           <Field label="Cron" htmlFor="as-cron" error={cronErr ?? fieldError(create.error, 'cron')} hint={!cronErr ? describeCron(cron) : undefined}>
             <input className="in mono" {...aria('as-cron', cronErr ?? undefined, !cronErr)} value={cron} onChange={(e) => setCron(e.target.value)} />
@@ -398,14 +401,7 @@ function NewScheduleDialog({ onClose, channels }: { onClose: () => void; channel
           ))}
         </div>
         <Field label="Notify" htmlFor="as-nc">
-          <select id="as-nc" className="in" value={notify} onChange={(e) => setNotify(e.target.value)}>
-            <option value="">Default routing</option>
-            {channels.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name}
-              </option>
-            ))}
-          </select>
+          <Select id="as-nc" value={notify} onChange={setNotify} options={[{ value: '', label: 'Default routing' }, ...channels.map((c) => ({ value: c.id, label: c.name }))]} />
         </Field>
         <FormError error={create.error} />
         <div className="end">

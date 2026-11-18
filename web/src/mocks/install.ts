@@ -3,6 +3,8 @@
 //   VITE_MOCK=fallback  endpoints the backend already implements go to the real server
 //                       (through the Vite proxy); the rest are answered from fixtures
 // Switch the mocked role: localStorage.setItem('olympos.mock.role', 'viewer' | 'operator' | 'maker' | 'approver' | 'admin')
+// Empty states: localStorage.setItem('olympos.mock.noImages', '1')  (no images; Scan now answers 409)
+//               localStorage.setItem('olympos.mock.noMounts', '1')  (GET /destinations/mounts is empty)
 import { match } from './handlers';
 
 /** Backend modules not implemented yet (M2–M5). In fallback mode only these are mocked. */

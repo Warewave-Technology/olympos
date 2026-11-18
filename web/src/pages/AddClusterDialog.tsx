@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { Cluster, InstallResponse } from '../api/types';
-import { formatLabels, parseLabels } from '../lib/sas';
 import { CheckIcon } from '../ui/icons';
 import { Badge, CopyButton, Field, FormError, Modal, Spinner, aria, fieldError, useNow } from '../ui/kit';
+import { TagInput } from '../ui/TagInput';
 
 const NAME_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 
@@ -23,7 +23,8 @@ function countdown(expiresAt: string, now: number): { text: string; expired: boo
 export function AddClusterDialog({ open, onClose, existing }: { open: boolean; onClose: () => void; existing?: Cluster }) {
   const qc = useQueryClient();
   const [name, setName] = useState('');
-  const [labels, setLabels] = useState('');
+  const [labels, setLabels] = useState<Record<string, string>>({});
+  const [labelDraftErr, setLabelDraftErr] = useState<string | null>(null);
   const [bench, setBench] = useState(false);
   const [localErr, setLocalErr] = useState<Record<string, string>>({});
   const [install, setInstall] = useState<InstallResponse | null>(null);
@@ -35,12 +36,13 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
       // The command contains a one-time token: drop it as soon as the dialog closes.
       setInstall(null);
       setName('');
-      setLabels('');
+      setLabels({});
+      setLabelDraftErr(null);
       setBench(false);
       setLocalErr({});
     } else if (existing) {
       setName(existing.name);
-      setLabels(formatLabels(existing.labels));
+      setLabels({ ...(existing.labels ?? {}) });
       setBench(existing.bench_enabled);
     }
   }, [open, existing]);
@@ -81,14 +83,13 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
     }
     const errs: Record<string, string> = {};
     if (!NAME_RE.test(name)) errs.name = 'Use lowercase letters, digits and dashes (max 63), starting and ending with a letter or digit.';
-    const pl = parseLabels(labels);
-    if (pl.error) errs.labels = pl.error;
+    if (labelDraftErr) errs.labels = 'Fix or remove the label you are typing, then try again.';
     setLocalErr(errs);
     if (Object.keys(errs).length) {
       nameRef.current?.focus();
       return;
     }
-    create.mutate({ name, labels: pl.labels, bench_enabled: bench });
+    create.mutate({ name, labels, bench_enabled: bench });
   };
 
   const err = create.error ?? reissue.error;
@@ -123,17 +124,8 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
               required
             />
           </Field>
-          <Field label="Labels" htmlFor="ac-labels" error={labelsErr} hint={!locked ? 'key=value, comma separated. Used for access and audit scopes.' : undefined}>
-            <input
-              className="in mono"
-              {...aria('ac-labels', labelsErr, !locked)}
-              value={labels}
-              onChange={(e) => setLabels(e.target.value)}
-              placeholder="env=prod, site=factory"
-              readOnly={locked}
-              autoComplete="off"
-              spellCheck={false}
-            />
+          <Field label="Labels" htmlFor="ac-labels" error={labelsErr} hint={!locked ? 'Type key=value and press Enter. Used for access and audit scopes.' : undefined}>
+            <TagInput {...aria('ac-labels', labelsErr, !locked)} value={labels} onChange={setLabels} placeholder="env=prod" readOnly={locked} onDraftError={setLabelDraftErr} />
           </Field>
         </div>
         <label className="opt">

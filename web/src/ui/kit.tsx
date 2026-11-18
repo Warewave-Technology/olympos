@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useId, useRef, useSt
 import { createPortal } from 'react-dom';
 import { ApiError, errorMessage } from '../api/client';
 import { useFocusTrap } from '../lib/focusTrap';
-import { IconClose, IconCopy } from './icons';
+import { IconClose, IconCopy, IconInbox } from './icons';
 
 // ------------------------------------------------------------ badges
 export type Tone = 'ok' | 'warn' | 'crit' | 'info' | 'mute';
@@ -59,6 +59,19 @@ export function EmptyState({ title, children, action }: { title: string; childre
       {children && <div className="state-body">{children}</div>}
       {action && <div className="inline">{action}</div>}
     </div>
+  );
+}
+
+/** Detail pane of a list/detail page when nothing is selected, so the page never looks half empty. */
+export function DetailPlaceholder({ title, children, icon }: { title: string; children?: ReactNode; icon?: ReactNode }) {
+  return (
+    <section className="card detail-empty" aria-label={title}>
+      <span className="ico-big" aria-hidden="true">
+        {icon ?? <IconInbox />}
+      </span>
+      <h2>{title}</h2>
+      {children && <p>{children}</p>}
+    </section>
   );
 }
 
@@ -168,7 +181,7 @@ export function Field({
 }) {
   return (
     <div className={className}>
-      <label className="lbl" htmlFor={htmlFor}>
+      <label className="lbl" htmlFor={htmlFor} id={`${htmlFor}-label`}>
         {label}
       </label>
       {children}
@@ -218,7 +231,7 @@ export function Modal({
   title: ReactNode;
   description?: ReactNode;
   children: ReactNode;
-  size?: 'wide' | 'narrow';
+  size?: 'wide' | 'narrow' | 'xl';
   danger?: boolean;
   eyebrowTone?: 'crit';
   initialFocus?: React.RefObject<HTMLElement | null>;
@@ -388,7 +401,7 @@ export function Tabs<T extends string>({ tabs, value, onChange, label }: { tabs:
 }
 
 // ------------------------------------------------------------ toasts
-type Toast = { id: number; text: string; tone: 'ok' | 'crit' | 'info' };
+type Toast = { id: number; text: string; tone: 'ok' | 'crit' | 'info' | 'warn' };
 const ToastCtx = createContext<(text: string, tone?: Toast['tone']) => void>(() => {});
 
 export function ToastProvider({ children }: { children: ReactNode }) {
