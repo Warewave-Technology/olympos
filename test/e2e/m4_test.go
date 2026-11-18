@@ -88,7 +88,7 @@ func TestM4Audit(t *testing.T) {
 	})
 
 	t.Run("kubescape", func(t *testing.T) {
-		r := runAudit(t, admin, auditSchedule(t, admin, "kubescape", []string{"nsa"}), 20*time.Minute)
+		r := runAudit(t, admin, auditSchedule(t, admin, "kubescape", []string{"nsa", "cis"}), 20*time.Minute) // cis: name resolved from the installed kubescape
 		if r.Score == nil {
 			t.Errorf("kubescape run has no score")
 		}
