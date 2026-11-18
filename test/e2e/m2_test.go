@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
-	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
@@ -161,15 +160,15 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	admin.must("PATCH", "/backup/jobs/"+pgJob, map[string]any{"enabled": true}, nil, 200)
 	start = time.Now()
 	admin.must("POST", "/backup/jobs/"+pgJob+"/run", map[string]any{"trigger": "manual"}, nil, 202)
-	run := waitRun(t, admin, pgJob, start, "manual")
-	if run.WireBytes == 0 || run.Bytes == 0 || len(run.SHA256) != 64 {
-		t.Fatalf("run accounting: %+v", run)
+	pgRun := waitRun(t, admin, pgJob, start, "manual")
+	if pgRun.WireBytes == 0 || pgRun.Bytes == 0 || len(pgRun.SHA256) != 64 {
+		t.Fatalf("run accounting: %+v", pgRun)
 	}
 	wantPrefix := "olympos/lab/lab/orders-pg/postgresql/"
-	if !strings.HasPrefix(run.BlobPath, wantPrefix) || !strings.HasSuffix(run.BlobPath, run.ID.String()+".zip") {
-		t.Fatalf("blob path %q", run.BlobPath)
+	if !strings.HasPrefix(pgRun.BlobPath, wantPrefix) || !strings.HasSuffix(pgRun.BlobPath, pgRun.ID.String()+".zip") {
+		t.Fatalf("blob path %q", pgRun.BlobPath)
 	}
-	body := download(t, az, run.BlobPath)
+	body := download(t, az, pgRun.BlobPath)
 	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
 	if err != nil {
 		t.Fatal(err)
@@ -182,13 +181,13 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 		t.Fatalf("zip entries: %v", names)
 	}
 	var man map[string]any
-	if err := json.Unmarshal(download(t, az, strings.TrimSuffix(run.BlobPath, ".zip")+".manifest.json"), &man); err != nil {
+	if err := json.Unmarshal(download(t, az, strings.TrimSuffix(pgRun.BlobPath, ".zip")+".manifest.json"), &man); err != nil {
 		t.Fatal(err)
 	}
-	if man["sha256"] != run.SHA256 {
-		t.Fatalf("manifest sha256 %v != run %s", man["sha256"], run.SHA256)
+	if man["sha256"] != pgRun.SHA256 {
+		t.Fatalf("manifest sha256 %v != run %s", man["sha256"], pgRun.SHA256)
 	}
-	tags, err := az.ServiceClient().NewContainerClient("backups").NewBlobClient(run.BlobPath).GetTags(ctx, nil)
+	tags, err := az.ServiceClient().NewContainerClient("backups").NewBlobClient(pgRun.BlobPath).GetTags(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,8 +197,8 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 			tier = *tg.Value
 		}
 	}
-	if tier != run.Tier || tier == "" {
-		t.Fatalf("olympos-tier tag %q, run tier %q", tier, run.Tier)
+	if tier != pgRun.Tier || tier == "" {
+		t.Fatalf("olympos-tier tag %q, run tier %q", tier, pgRun.Tier)
 	}
 
 	// --- ClickHouse (no TLS on the target: allowed, tls.missing finding) ---
@@ -286,4 +285,3 @@ func runSQL(t *testing.T, deploy, sql string) {
 		"--password", "CANARY-lab-ch-password", "--query", sql)
 }
 
-var _ = container.AccessTypeBlob

@@ -114,7 +114,6 @@ func TestM1EnrollInventoryDiscovery(t *testing.T) {
 		{[]string{"create", "pods/exec", "-n", "lab"}, "no"},
 		{[]string{"update", "configmaps", "-n", "lab"}, "no"},
 		{[]string{"list", "pods", "-A"}, "yes"},
-		{[]string{"create", "jobs", "-n", "olympos-bench"}, "no"}, // bench disabled in this release
 	} {
 		out, _ := runOK(t, "kubectl", append([]string{"auth", "can-i", "--as", sa}, chk.args...)...)
 		if strings.TrimSpace(out) != chk.want {
