@@ -1,0 +1,27 @@
+{
+  "clusterName": "olympos",
+  "summaryDetails": {
+    "controls": {
+      "C-0016": {"controlID": "C-0016", "name": "Allow privilege escalation", "status": "failed", "ResourceCounters": {"passedResources": 4, "failedResources": 2}, "score": 66.7, "complianceScore": 66.7, "scoreFactor": 6},
+      "C-0057": {"controlID": "C-0057", "name": "Privileged container", "status": "passed", "ResourceCounters": {"passedResources": 6, "failedResources": 0}, "score": 100, "complianceScore": 100, "scoreFactor": 8},
+      "C-0035": {"controlID": "C-0035", "name": "Administrative Roles", "status": "failed", "ResourceCounters": {"passedResources": 10, "failedResources": 1}, "score": 90.9, "complianceScore": 90.9, "scoreFactor": 6},
+      "C-0262": {"controlID": "C-0262", "name": "Anonymous access enabled", "status": "passed", "ResourceCounters": {"passedResources": 1, "failedResources": 0}, "score": 100, "complianceScore": 100, "scoreFactor": 9}
+    },
+    "frameworks": [{"name": "NSA", "score": 85.2, "complianceScore": 85.2}],
+    "score": 85.0,
+    "complianceScore": 85.04
+  },
+  "resources": [],
+  "results": [
+    {"resourceID": "apps/v1/default/Deployment/web", "controls": [
+      {"controlID": "C-0016", "name": "Allow privilege escalation", "status": {"status": "failed"}},
+      {"controlID": "C-0057", "name": "Privileged container", "status": {"status": "passed"}}
+    ]},
+    {"resourceID": "apps/v1/shop/StatefulSet/db", "controls": [
+      {"controlID": "C-0016", "name": "Allow privilege escalation", "status": {"status": "failed"}}
+    ]},
+    {"resourceID": "rbac.authorization.k8s.io/v1//ClusterRoleBinding/ops-admin", "controls": [
+      {"controlID": "C-0035", "name": "Administrative Roles", "status": {"status": "failed"}}
+    ]}
+  ]
+}

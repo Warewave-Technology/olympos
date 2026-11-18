@@ -1,0 +1,38 @@
+{
+  "Controls": [
+    {
+      "id": "2",
+      "version": "aks-1.8",
+      "detected_version": "1.32",
+      "text": "Control Plane Configuration",
+      "node_type": "controlplane",
+      "tests": [
+        {"section": "2.1", "type": "", "pass": 0, "fail": 1, "warn": 0, "info": 0, "desc": "Logging",
+         "results": [{"test_number": "2.1.1", "test_desc": "Enable audit Logs (Manual)", "audit": "", "type": "manual", "remediation": "Azure audit logs are enabled and managed in the Azure portal.", "test_info": ["Azure audit logs are enabled"], "status": "FAIL", "actual_value": "", "scored": false, "IsMultiple": false, "expected_result": "", "reason": ""}]}
+      ],
+      "total_pass": 0, "total_fail": 1, "total_warn": 0, "total_info": 0
+    },
+    {
+      "id": "3",
+      "version": "aks-1.8",
+      "detected_version": "1.32",
+      "text": "Worker Node Security Configuration",
+      "node_type": "node",
+      "tests": [
+        {"section": "3.1", "type": "", "pass": 2, "fail": 1, "warn": 0, "info": 0, "desc": "Worker Node Configuration Files",
+         "results": [
+           {"test_number": "3.1.1", "test_desc": "Ensure that the kubeconfig file permissions are set to 644 or more restrictive (Automated)", "audit": "stat -c %a /var/lib/kubelet/kubeconfig", "type": "", "remediation": "chmod 644 /var/lib/kubelet/kubeconfig", "test_info": ["..."], "status": "PASS", "actual_value": "600", "scored": true, "IsMultiple": false, "expected_result": "'permissions' is present", "reason": ""},
+           {"test_number": "3.1.2", "test_desc": "Ensure that the kubelet kubeconfig file ownership is set to root:root (Automated)", "audit": "", "type": "", "remediation": "chown root:root /var/lib/kubelet/kubeconfig", "test_info": ["..."], "status": "PASS", "actual_value": "root:root", "scored": true, "IsMultiple": false, "expected_result": "", "reason": ""},
+           {"test_number": "3.1.3", "test_desc": "Ensure that the azure.json file has permissions set to 644 or more restrictive (Automated)", "audit": "", "type": "", "remediation": "chmod 644 /etc/kubernetes/azure.json", "test_info": ["..."], "status": "FAIL", "actual_value": "666", "scored": true, "IsMultiple": false, "expected_result": "", "reason": ""}
+         ]},
+        {"section": "3.2", "type": "", "pass": 1, "fail": 0, "warn": 1, "info": 0, "desc": "Kubelet",
+         "results": [
+           {"test_number": "3.2.1", "test_desc": "Ensure that the --anonymous-auth argument is set to false (Automated)", "audit": "", "type": "", "remediation": "", "test_info": [], "status": "PASS", "actual_value": "false", "scored": true, "IsMultiple": false, "expected_result": "", "reason": ""},
+           {"test_number": "3.2.9", "test_desc": "Ensure that the --event-qps argument is set to 0 or a level which ensures appropriate event capture (Manual)", "audit": "", "type": "manual", "remediation": "", "test_info": [], "status": "WARN", "actual_value": "", "scored": false, "IsMultiple": false, "expected_result": "", "reason": ""}
+         ]}
+      ],
+      "total_pass": 3, "total_fail": 1, "total_warn": 1, "total_info": 0
+    }
+  ],
+  "Totals": {"total_pass": 3, "total_fail": 2, "total_warn": 1, "total_info": 0}
+}

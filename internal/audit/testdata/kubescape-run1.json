@@ -1,0 +1,49 @@
+{
+  "clusterName": "olympos",
+  "customerGUID": "",
+  "reportGUID": "8f3c6f0e-2c62-4bfc-9d8d-0d8f0e3d1c11",
+  "generationTime": "2026-11-18T03:00:12Z",
+  "summaryDetails": {
+    "controls": {
+      "C-0016": {"controlID": "C-0016", "name": "Allow privilege escalation", "status": "failed", "statusInfo": {"status": "failed"}, "ResourceCounters": {"passedResources": 4, "failedResources": 1, "skippedResources": 0, "excludedResources": 0}, "score": 80, "complianceScore": 80, "scoreFactor": 6},
+      "C-0057": {"controlID": "C-0057", "name": "Privileged container", "status": "failed", "statusInfo": {"status": "failed"}, "ResourceCounters": {"passedResources": 4, "failedResources": 1, "skippedResources": 0, "excludedResources": 0}, "score": 80, "complianceScore": 80, "scoreFactor": 8},
+      "C-0035": {"controlID": "C-0035", "name": "Administrative Roles", "status": "failed", "statusInfo": {"status": "failed"}, "ResourceCounters": {"passedResources": 10, "failedResources": 1, "skippedResources": 0, "excludedResources": 0}, "score": 90.9, "complianceScore": 90.9, "scoreFactor": 6},
+      "C-0012": {"controlID": "C-0012", "name": "Applications credentials in configuration files", "status": "passed", "statusInfo": {"status": "passed"}, "ResourceCounters": {"passedResources": 5, "failedResources": 0, "skippedResources": 0, "excludedResources": 0}, "score": 100, "complianceScore": 100, "scoreFactor": 8},
+      "C-0262": {"controlID": "C-0262", "name": "Anonymous access enabled", "status": "failed", "statusInfo": {"status": "failed"}, "ResourceCounters": {"passedResources": 0, "failedResources": 1, "skippedResources": 0, "excludedResources": 0}, "score": 0, "complianceScore": 0, "scoreFactor": 9}
+    },
+    "status": "failed",
+    "frameworks": [
+      {"name": "NSA", "status": "failed", "version": "v1.0.1", "ResourceCounters": {"passedResources": 20, "failedResources": 3}, "score": 74.5, "complianceScore": 74.53},
+      {"name": "MITRE", "status": "failed", "version": "v1.0.1", "ResourceCounters": {"passedResources": 14, "failedResources": 1}, "score": 81.2, "complianceScore": 81.25}
+    ],
+    "ResourceCounters": {"passedResources": 20, "failedResources": 3, "skippedResources": 0, "excludedResources": 0},
+    "score": 77.1,
+    "complianceScore": 77.14
+  },
+  "resources": [
+    {"resourceID": "apps/v1/default/Deployment/web", "object": {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web", "namespace": "default"}}},
+    {"resourceID": "rbac.authorization.k8s.io/v1//ClusterRoleBinding/ops-admin", "object": {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding", "metadata": {"name": "ops-admin"}}}
+  ],
+  "results": [
+    {
+      "resourceID": "apps/v1/default/Deployment/web",
+      "controls": [
+        {"controlID": "C-0016", "name": "Allow privilege escalation", "status": {"status": "failed"}, "rules": [{"name": "rule-allow-privilege-escalation", "status": "failed"}]},
+        {"controlID": "C-0057", "name": "Privileged container", "status": {"status": "failed"}, "rules": [{"name": "rule-privilege-escalation", "status": "failed"}]},
+        {"controlID": "C-0012", "name": "Applications credentials in configuration files", "status": {"status": "passed"}}
+      ]
+    },
+    {
+      "resourceID": "rbac.authorization.k8s.io/v1//ClusterRoleBinding/ops-admin",
+      "controls": [
+        {"controlID": "C-0035", "name": "Administrative Roles", "status": {"status": "failed"}}
+      ]
+    },
+    {
+      "resourceID": "/v1/kube-system/Pod/kube-apiserver-cp1",
+      "controls": [
+        {"controlID": "C-0262", "name": "Anonymous access enabled", "status": {"status": "failed"}}
+      ]
+    }
+  ]
+}

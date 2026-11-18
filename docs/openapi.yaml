@@ -449,42 +449,59 @@ paths:
   /audit/schedules:
     get:
       tags: [audit]
+      summary: List audit schedules (any role). `clusters` and `last_run` only count clusters the caller can read.
       responses:
         "200":
           description: Schedules
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/AuditSchedule"}}}}}}
     post:
       tags: [audit]
+      summary: Create a schedule (operator with scope all — schedules are global objects). `tool` is required.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/AuditScheduleInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSchedule"}}}}
+        "403": {description: Not operator with scope all}
+        "422": {description: "Validation (`fields`: tool, frameworks, scope_selector, cron, timezone, notify_channel_id)"}
   /audit/schedules/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     patch:
       tags: [audit]
+      summary: Update a schedule (operator with scope all). Omitted fields are kept; `notify_channel_id` null clears it. `tool` cannot change (422). Changing cron/timezone or re-enabling restarts the schedule from now.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/AuditScheduleInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSchedule"}}}}
+        "403": {description: Not operator with scope all}
+        "422": {description: Validation}
     delete:
       tags: [audit]
+      summary: Delete a schedule (operator with scope all). Run history is kept (schedule_id becomes null); queued runs fail with "schedule deleted".
       responses: {"204": {description: Deleted}}
   /audit/schedules/{id}/run:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [audit]
+      summary: |
+        Queue a manual run. With `cluster_id`: operator on that cluster (404 outside scope, 403 if only viewer).
+        Without: every cluster in the schedule scope on which the caller is operator. kube-bench only runs on clusters
+        whose agent advertised the bench capability (422 otherwise). A pending run for the same schedule and cluster is
+        returned instead of queuing a duplicate.
       requestBody: {content: {application/json: {schema: {type: object, properties: {cluster_id: {type: string, description: "Only this cluster (default: every cluster in the schedule scope)"}}}}}}
       responses:
         "202":
           description: Queued runs
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/AuditRun"}}}}}}
+        "403": {description: Visible cluster but not operator}
+        "404": {description: Unknown schedule, or cluster outside the caller's scope}
+        "422": {description: "Cluster not enrolled, kube-bench not enabled on the agent, or no eligible cluster"}
   /audit/runs:
     get:
       tags: [audit]
+      summary: Runs on clusters the caller can read, newest first.
       parameters:
         - {name: schedule_id, in: query, schema: {type: string}}
         - {name: cluster_id, in: query, schema: {type: string}}
-        - {name: tool, in: query, schema: {type: string}}
-        - {name: limit, in: query, schema: {type: integer}}
+        - {name: tool, in: query, schema: {type: string, enum: [kubescape, polaris, kube-bench]}}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 500}}
       responses:
         "200":
           description: Runs newest first
@@ -495,15 +512,17 @@ paths:
       tags: [audit]
       responses:
         "200": {description: Run incl. kube-bench node results, content: {application/json: {schema: {$ref: "#/components/schemas/AuditRun"}}}}
+        "404": {description: Unknown run or cluster outside the caller's scope}
   /findings:
     get:
       tags: [audit]
+      summary: Findings on clusters the caller can read; most severe and newest first. A `cluster` outside scope yields an empty list.
       parameters:
         - {name: source, in: query, schema: {type: string, enum: [kubescape, polaris, kube-bench, kyverno, netpol, tls, vault-drift, transfer]}}
         - {name: status, in: query, schema: {type: string, enum: [open, resolved]}}
-        - {name: cluster, in: query, schema: {type: string}}
+        - {name: cluster, in: query, schema: {type: string, description: Cluster id or name}}
         - {name: run_id, in: query, schema: {type: string, description: Findings first seen in this run ("new")}}
-        - {name: limit, in: query, schema: {type: integer}}
+        - {name: limit, in: query, schema: {type: integer, default: 200, maximum: 1000}}
       responses:
         "200":
           description: Findings
@@ -1056,12 +1075,15 @@ components:
       type: object
       properties:
         tool: {type: string, enum: [kubescape, polaris, kube-bench]}
-        frameworks: {type: array, items: {type: string, enum: [nsa, cis, mitre]}, description: kubescape only}
-        scope_selector: {type: string, default: all}
-        cron: {type: string}
-        timezone: {type: string}
-        enabled: {type: boolean}
-        notify_channel_id: {type: [string, "null"]}
+        frameworks:
+          type: array
+          items: {type: string, enum: [nsa, cis, mitre]}
+          description: kubescape only (default all three). "cis" maps to kubescape's CIS framework for the cluster's provider (AKS, EKS, else generic).
+        scope_selector: {type: string, default: all, description: '"all" or a label selector over cluster labels, e.g. env=prod'}
+        cron: {type: string, description: 5-field cron or @daily etc.}
+        timezone: {type: string, default: UTC, description: IANA zone}
+        enabled: {type: boolean, default: true}
+        notify_channel_id: {type: [string, "null"], description: Overrides routing for audit.new_findings}
     AuditSchedule:
       allOf:
         - $ref: "#/components/schemas/AuditScheduleInput"
@@ -1069,36 +1091,46 @@ components:
           properties:
             id: {type: string}
             next_run_at: {type: [string, "null"], format: date-time}
-            clusters: {type: integer, description: clusters currently matched by scope}
+            clusters: {type: integer, description: clusters currently matched by scope (and visible to the caller; kube-bench counts only bench-enabled clusters)}
             last_run: {oneOf: [{$ref: "#/components/schemas/AuditRun"}, {type: "null"}]}
+            created_at: {type: string, format: date-time}
     AuditRun:
       type: object
       properties:
         id: {type: string}
-        schedule_id: {type: [string, "null"]}
-        tool: {type: string}
+        schedule_id: {type: [string, "null"], description: null once the schedule was deleted}
+        tool: {type: string, enum: [kubescape, polaris, kube-bench]}
         cluster_id: {type: string}
         cluster_name: {type: string}
         status: {type: string, enum: [queued, running, succeeded, failed]}
+        scheduled_for: {type: [string, "null"], format: date-time, description: null for manual runs}
         started_at: {type: [string, "null"], format: date-time}
         finished_at: {type: [string, "null"], format: date-time}
-        score: {type: [number, "null"]}
+        score: {type: [number, "null"], description: "0–100: kubescape compliance score, polaris score, kube-bench pass/(pass+fail)"}
         new_findings: {type: integer}
         resolved_findings: {type: integer}
-        error: {type: string}
+        raw_blob_path: {type: string, description: "Blob path of the raw JSON report ({prefix}/audit/{cluster}/{tool}/{run_id}.json); empty when not stored"}
+        error: {type: string, description: 'e.g. "agent_offline"'}
+        details:
+          type: object
+          description: >-
+            trigger (schedule|manual), frameworks, summary, findings_total, raw_report (why it was not stored),
+            nodes_succeeded/nodes_failed/partial and control_plane ("Control plane N/A · managed") for kube-bench
+        created_at: {type: string, format: date-time}
         bench_nodes:
           type: array
-          description: kube-bench only
+          description: kube-bench only (run detail)
           items:
             type: object
             properties:
               node_name: {type: string}
-              benchmark: {type: string}
-              state: {type: string}
+              benchmark: {type: string, example: aks-1.8}
+              state: {type: string, enum: [pending, accepted, rejected, running, succeeded, failed]}
               pass: {type: integer}
               fail: {type: integer}
               warn: {type: integer}
-              control_plane_na: {type: boolean, description: 'Show "Control plane N/A · managed"'}
+              info: {type: integer}
+              control_plane_na: {type: boolean, description: 'Managed cluster: show "Control plane N/A · managed" (control plane checks are never counted as failed or missing)'}
               message: {type: string}
     Finding:
       type: object
@@ -1107,15 +1139,16 @@ components:
         source: {type: string}
         cluster_id: {type: string}
         cluster_name: {type: string}
-        control_id: {type: string}
+        control_id: {type: string, description: 'kubescape "C-0016", polaris check ID, kube-bench "<benchmark>:<test>" e.g. "cis-1.12:4.2.6"'}
         severity: {type: string, enum: [critical, high, medium, low, info]}
-        resource_ref: {type: string}
+        resource_ref: {type: string, description: '"<ns>/<Kind>/<name>", "<Kind>/<name>" (cluster-scoped), polaris adds "/container:<name>", kube-bench "node/<name>"'}
         title: {type: string}
         details: {type: object}
         status: {type: string, enum: [open, resolved]}
         first_seen_at: {type: string, format: date-time}
         last_seen_at: {type: string, format: date-time}
         resolved_at: {type: [string, "null"], format: date-time}
+        first_seen_run_id: {type: [string, "null"]}
 
     # ---------------------------------------------------- security
     Image:
