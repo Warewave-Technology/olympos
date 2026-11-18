@@ -513,38 +513,53 @@ paths:
   /images:
     get:
       tags: [security]
+      description: |
+        Running images deduplicated by digest. Only images used in clusters the caller can read are listed;
+        `clusters`/`workloads` count only those clusters.
       parameters:
-        - {name: cluster, in: query, schema: {type: string}}
-        - {name: severity, in: query, schema: {type: string, enum: [critical, high]}}
-        - {name: status, in: query, schema: {type: string}}
-        - {name: q, in: query, schema: {type: string}}
+        - {name: cluster, in: query, schema: {type: string}, description: Cluster ID or name (out of scope → empty list)}
+        - {name: severity, in: query, schema: {type: string, enum: [critical, high]}, description: "critical: critical > 0; high: critical + high > 0"}
+        - {name: status, in: query, schema: {type: string, enum: [pending, scanning, scanned, missing_credential, failed]}}
+        - {name: q, in: query, schema: {type: string}, description: Substring of repo or tag, or digest prefix}
       responses:
         "200":
           description: Images by digest in scope
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Image"}}}}}}
+        "422": {description: Invalid filter}
   /images/{digest}:
     parameters: [{name: digest, in: path, required: true, schema: {type: string}, description: "sha256:..."}]
     get:
       tags: [security]
       responses:
-        "200": {description: Image with usage and vulnerabilities, content: {application/json: {schema: {$ref: "#/components/schemas/ImageDetail"}}}}
+        "200": {description: Image with usage (visible clusters only) and vulnerabilities, content: {application/json: {schema: {$ref: "#/components/schemas/ImageDetail"}}}}
+        "404": {description: Unknown digest, or not running in any cluster the caller can read}
   /images/{digest}/scan:
     parameters: [{name: digest, in: path, required: true, schema: {type: string}}]
     post:
       tags: [security]
-      responses: {"202": {description: Queued}}
+      description: Queue a rescan. Requires operator on at least one cluster running the image.
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {status: {type: string, enum: [queued]}}}}}}
+        "403": {description: Visible but the role does not allow scans}
+        "404": {description: Unknown or out of scope}
   /security/kyverno:
     get:
       tags: [security]
-      parameters: [{name: cluster, in: query, schema: {type: string}}]
+      parameters: [{name: cluster, in: query, schema: {type: string}, description: Cluster ID or name}]
       responses:
         "200":
-          description: Kyverno policies per cluster
-          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/KyvernoPolicy"}}}}}}
+          description: Kyverno policies per cluster (most failures first) and Kyverno install state per cluster
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/KyvernoPolicy"}}
+                  clusters: {type: array, items: {$ref: "#/components/schemas/KyvernoCluster"}}
   /security/netpol:
     get:
       tags: [security]
-      parameters: [{name: cluster, in: query, schema: {type: string}}]
+      parameters: [{name: cluster, in: query, schema: {type: string}, description: Cluster ID or name}]
       responses:
         "200":
           description: NetworkPolicy default-deny status per namespace
@@ -552,6 +567,9 @@ paths:
   /registries:
     get:
       tags: [security]
+      description: |
+        Readable by every signed-in user with a grant. `images` and `unmatched` only consider images running in
+        clusters the caller can read. Passwords are never returned.
       responses:
         "200":
           description: Registry credentials (no secrets) and unmatched registries
@@ -564,19 +582,28 @@ paths:
                   unmatched: {type: array, items: {$ref: "#/components/schemas/UnmatchedRegistry"}}
     post:
       tags: [security]
+      description: Admin with scope `all`. Requeues images in missing_credential/failed for a scan.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RegistryInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Registry"}}}}
+        "403": {description: Not a global admin}
+        "422": {description: Validation (incl. duplicate host_pattern)}
   /registries/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     patch:
       tags: [security]
+      description: |
+        Admin with scope `all`. Omitted fields are unchanged. `password` replaces the credential
+        (`{"source": "none"}` removes it); `username` alone renames the existing credential.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RegistryInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Registry"}}}}
+        "404": {description: Not found}
+        "422": {description: Validation}
     delete:
       tags: [security]
-      responses: {"204": {description: Deleted}}
+      description: Admin with scope `all`. Deletes the registry and its credential.
+      responses: {"204": {description: Deleted}, "404": {description: Not found}}
 
   # ------------------------------------------------------------ activity
   /activity:
@@ -1122,16 +1149,18 @@ components:
       type: object
       properties:
         digest: {type: string}
-        repo: {type: string}
+        repo: {type: string, description: "Normalized repository, e.g. docker.io/library/nginx"}
         tags: {type: array, items: {type: string}}
         clusters: {type: integer}
         workloads: {type: integer}
-        critical: {type: integer}
+        critical: {type: integer, description: distinct CVEs}
         high: {type: integer}
         medium: {type: integer}
         low: {type: integer}
+        fixable: {type: integer, description: critical/high CVEs with a fixed version}
         scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, failed]}
         last_scanned_at: {type: [string, "null"], format: date-time}
+        registry: {type: string, description: "Matching registry host_pattern, \"public\" (anonymous pull), or \"\" (no credential)"}
     ImageDetail:
       allOf:
         - $ref: "#/components/schemas/Image"
@@ -1139,10 +1168,10 @@ components:
           properties:
             usage:
               type: array
-              items: {type: object, properties: {cluster_id: {type: string}, cluster_name: {type: string}, namespace: {type: string}, workload_kind: {type: string}, workload_name: {type: string}, container: {type: string}}}
+              items: {type: object, properties: {cluster_id: {type: string}, cluster_name: {type: string}, namespace: {type: string}, workload_kind: {type: string}, workload_name: {type: string}, container: {type: string}, image: {type: string, description: image string from the pod spec}}}
             vulns:
               type: array
-              items: {type: object, properties: {cve_id: {type: string}, severity: {type: string}, package: {type: string}, installed: {type: string}, fixed_in: {type: string}, title: {type: string}}}
+              items: {type: object, properties: {cve_id: {type: string}, severity: {type: string, enum: [critical, high, medium, low, unknown]}, package: {type: string}, installed: {type: string}, fixed_in: {type: string}, title: {type: string}}}
             scan_error: {type: string}
     KyvernoPolicy:
       type: object
@@ -1151,10 +1180,20 @@ components:
         cluster_name: {type: string}
         namespace: {type: string, description: empty = ClusterPolicy}
         name: {type: string}
-        mode: {type: string, enum: [Enforce, Audit]}
+        mode: {type: string, enum: [Enforce, Audit], description: Enforce when any validate rule (or namespace override) enforces}
         rules: {type: integer}
+        rule_names: {type: array, items: {type: string}}
         fail_count: {type: integer}
         ready: {type: boolean}
+    KyvernoCluster:
+      type: object
+      properties:
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        installed: {type: boolean, description: false when the Kyverno CRDs are absent}
+        policies: {type: integer}
+        fail_count: {type: integer}
+        reported_at: {type: string, format: date-time}
     NetpolNamespace:
       type: object
       properties:
@@ -1162,30 +1201,42 @@ components:
         cluster_name: {type: string}
         namespace: {type: string}
         policy_count: {type: integer}
-        default_deny: {type: boolean}
+        default_deny: {type: boolean, description: "a policy selects all pods, policyTypes include Ingress, no ingress rules"}
         excluded: {type: boolean, description: system namespace}
     RegistryInput:
       type: object
-      required: [host_pattern]
+      description: "POST requires host_pattern. username and password go together."
       properties:
-        host_pattern: {type: string, example: "*.azurecr.io"}
+        host_pattern:
+          type: string
+          example: "*.azurecr.io"
+          description: >
+            Registry host ("acr.contoso.io", "*.azurecr.io") or host/path ("ghcr.io/contoso/*"). The most specific
+            match wins. A wildcard host must end in a registry domain ("*" and "*.io" are rejected).
         username: {type: string}
-        password: {$ref: "#/components/schemas/SecretSourceInput"}
+        password:
+          type: object
+          description: Write-only registry password or token. Either a Key Vault reference or a value stored envelope-encrypted.
+          required: [source]
+          properties:
+            source: {type: string, enum: [keyvault_ref, stored, none], description: "none (PATCH only) removes the credential"}
+            ref: {type: string, example: "kv://kv-platform-weu/acr-pull"}
+            value: {type: string, writeOnly: true}
     Registry:
       type: object
       properties:
         id: {type: string}
         host_pattern: {type: string}
         username: {type: string}
-        credential_source: {type: string, enum: ["", keyvault_ref, stored]}
-        credential_ref: {type: string}
-        images: {type: integer, description: images matched}
+        credential_source: {type: string, enum: ["", keyvault_ref, stored], description: '"" = anonymous pull'}
+        credential_ref: {type: string, description: kv:// reference (keyvault_ref only)}
+        images: {type: integer, description: running images (in the caller's scope) matched by this registry}
         created_at: {type: string, format: date-time}
     UnmatchedRegistry:
       type: object
       properties:
         host: {type: string}
-        images: {type: integer}
+        images: {type: integer, description: images in missing_credential}
         example_repo: {type: string}
 
     ActivityEntry:
