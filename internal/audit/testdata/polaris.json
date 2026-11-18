@@ -1,0 +1,46 @@
+{
+  "PolarisOutputVersion": "1.0",
+  "AuditTime": "2026-11-18T03:00:00Z",
+  "SourceType": "Cluster",
+  "SourceName": "",
+  "DisplayName": "",
+  "ClusterInfo": {"Version": "1.32", "Nodes": 3, "Pods": 12, "Namespaces": 5, "Controllers": 7},
+  "Results": [
+    {
+      "Name": "web",
+      "Namespace": "default",
+      "Kind": "Deployment",
+      "Results": {
+        "deploymentMissingReplicas": {"ID": "deploymentMissingReplicas", "Message": "Only one replica is scheduled", "Details": null, "Success": false, "Severity": "warning", "Category": "Reliability"},
+        "hostIPCSet": {"ID": "hostIPCSet", "Message": "Host IPC is not configured", "Details": null, "Success": true, "Severity": "danger", "Category": "Security"}
+      },
+      "PodResult": {
+        "Name": "",
+        "Results": {
+          "hostNetworkSet": {"ID": "hostNetworkSet", "Message": "Host network is configured", "Details": null, "Success": false, "Severity": "danger", "Category": "Security"},
+          "priorityClassNotSet": {"ID": "priorityClassNotSet", "Message": "Priority class should be set", "Details": null, "Success": false, "Severity": "ignore", "Category": "Reliability"}
+        },
+        "ContainerResults": [
+          {
+            "Name": "nginx",
+            "Results": {
+              "runAsRootAllowed": {"ID": "runAsRootAllowed", "Message": "Should not be allowed to run as root", "Details": null, "Success": false, "Severity": "danger", "Category": "Security"},
+              "cpuLimitsMissing": {"ID": "cpuLimitsMissing", "Message": "CPU limits are set", "Details": null, "Success": true, "Severity": "warning", "Category": "Efficiency"}
+            }
+          }
+        ]
+      },
+      "CreatedTime": "2026-11-01T10:00:00Z"
+    },
+    {
+      "Name": "ops",
+      "Namespace": "",
+      "Kind": "ClusterRole",
+      "Results": {
+        "clusterrolePodExecAttach": {"ID": "clusterrolePodExecAttach", "Message": "The ClusterRole does not allow pods/exec", "Details": null, "Success": true, "Severity": "danger", "Category": "Security"}
+      },
+      "PodResult": null,
+      "CreatedTime": "2026-11-01T10:00:00Z"
+    }
+  ]
+}

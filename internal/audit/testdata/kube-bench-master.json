@@ -1,0 +1,37 @@
+[
+  {
+    "id": "1",
+    "version": "cis-1.12",
+    "detected_version": "1.33",
+    "text": "Control Plane Security Configuration",
+    "node_type": "master",
+    "tests": [
+      {"section": "1.1", "desc": "Control Plane Node Configuration Files", "pass": 1, "fail": 1, "warn": 0, "info": 0,
+       "results": [
+         {"test_number": "1.1.1", "test_desc": "Ensure that the API server pod specification file permissions are set to 600 or more restrictive (Automated)", "status": "PASS", "scored": true, "remediation": "chmod 600 /etc/kubernetes/manifests/kube-apiserver.yaml"},
+         {"test_number": "1.1.12", "test_desc": "Ensure that the etcd data directory ownership is set to etcd:etcd (Automated)", "status": "FAIL", "scored": true, "remediation": "chown etcd:etcd /var/lib/etcd"}
+       ]},
+      {"section": "1.2", "desc": "API Server", "pass": 0, "fail": 0, "warn": 1, "info": 0,
+       "results": [
+         {"test_number": "1.2.1", "test_desc": "Ensure that the --anonymous-auth argument is set to false (Manual)", "status": "WARN", "scored": false}
+       ]}
+    ],
+    "total_pass": 1, "total_fail": 1, "total_warn": 1, "total_info": 0
+  },
+  {
+    "id": "4",
+    "version": "cis-1.12",
+    "detected_version": "1.33",
+    "text": "Worker Node Security Configuration",
+    "node_type": "node",
+    "tests": [
+      {"section": "4.2", "desc": "Kubelet", "pass": 1, "fail": 1, "warn": 0, "info": 1,
+       "results": [
+         {"test_number": "4.2.1", "test_desc": "Ensure that the --anonymous-auth argument is set to false (Automated)", "status": "PASS", "scored": true},
+         {"test_number": "4.2.6", "test_desc": "Ensure that the --make-iptables-util-chains argument is set to true (Manual)", "status": "FAIL", "scored": false},
+         {"test_number": "4.2.13", "test_desc": "Ensure that a limit is set on pod PIDs (Manual)", "status": "INFO", "scored": false}
+       ]}
+    ],
+    "total_pass": 1, "total_fail": 1, "total_warn": 0, "total_info": 1
+  }
+]
