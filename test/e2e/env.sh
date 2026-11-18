@@ -48,24 +48,10 @@ KUBECONFIG=$EDGE_KC kubectl apply -f test/e2e/manifests/edge-targets.yaml >/dev/
 
 # 3. Reset Olympos to an empty installation (no clusters, no history).
 export KUBECONFIG=$LAB_KC
-log "removing e2e agents"
-helm -n olympos-system uninstall olympos-agent >/dev/null 2>&1 || true
-helm -n olympos-e2e uninstall olympos-agent-e2e >/dev/null 2>&1 || true
-kubectl delete namespace olympos-system olympos-e2e olympos-bench --ignore-not-found --wait=true --timeout=180s >/dev/null
-for crb in $(kubectl get clusterrolebinding,clusterrole -o name | grep olympos-agent-); do kubectl delete "$crb" >/dev/null; done
-KUBECONFIG=$EDGE_KC helm -n olympos-system uninstall olympos-agent >/dev/null 2>&1 || true
-
-log "resetting the Olympos database, local key vault and lab Vault"
-kubectl -n olympos scale deploy/olympos --replicas=0 >/dev/null
-kubectl -n olympos wait --for=delete pod -l app.kubernetes.io/name=olympos-server --timeout=120s >/dev/null 2>&1 || true
-kubectl -n olympos delete pod olympos-db-0 --wait=true >/dev/null   # no volume: data is gone
-kubectl -n olympos delete pvc olympos-localkv --ignore-not-found >/dev/null
-kubectl -n olympos rollout status statefulset/olympos-db --timeout=180s >/dev/null
-kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null   # emptyDir: uninitialized again
+source test/e2e/lib.sh
+reset_olympos
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
-rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json"
-source test/e2e/lib.sh
 init_vault vault vault
 init_vault openbao bao
 ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/vault-init.json")

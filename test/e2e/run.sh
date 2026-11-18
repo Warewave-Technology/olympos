@@ -73,6 +73,10 @@ kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
 
+# Every e2e run starts from an empty Olympos (it also removes clusters added
+# by hand in the browsable lab; run env.sh afterwards to get a clean one).
+if [ -z "${KEEP_STATE:-}" ]; then reset_olympos; fi
+
 # Kyverno 1.20 (chart 3.10) runs only policies.kyverno.io CEL policies.
 # KYVERNO_CHART=3.9.2 (1.19) also runs the legacy kyverno.io ClusterPolicy.
 KYVERNO_CHART=${KYVERNO_CHART:-3.10.0}
