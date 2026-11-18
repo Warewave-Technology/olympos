@@ -372,13 +372,32 @@ paths:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [vaults]
-      summary: Before configure, list KV mounts using the pasted root token (token used once, not stored).
+      summary: "Admin. Before configure, list KV mounts using the pasted root token (token used once, never stored). TLS only."
       requestBody:
-        content: {application/json: {schema: {type: object, required: [root_token], properties: {root_token: {type: string, writeOnly: true}}}}}
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [root_token]
+              properties:
+                root_token: {type: string, writeOnly: true}
+                ca_bundle: {type: string, description: "Optional PEM bundle to verify the vault's TLS certificate (e2e-tls mode), not stored by inspect"}
       responses:
         "200":
           description: Mounts
-          content: {application/json: {schema: {type: object, properties: {version: {type: string}, sealed: {type: boolean}, mounts: {type: array, items: {$ref: "#/components/schemas/KVMount"}}}}}}
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version: {type: string}
+                  sealed: {type: boolean}
+                  storage_type: {type: string, description: "e.g. raft (required for snapshot backups)"}
+                  mounts: {type: array, items: {$ref: "#/components/schemas/KVMount"}}
+        "400": {description: Root token sent over plain HTTP}
+        "403": {description: Not admin on the vault's cluster}
+        "422": {description: Token rejected by Vault, or invalid CA bundle}
+        "502": {description: Vault unreachable through the tunnel}
   /vaults/{id}/configure:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
@@ -392,15 +411,24 @@ paths:
               required: [root_token, mounts]
               properties:
                 root_token: {type: string, writeOnly: true}
-                mounts: {type: array, items: {type: string}, description: KV v2 mount paths to manage, e.g. "secret/"}
+                mounts: {type: array, items: {type: string}, description: 'KV v2 mount paths to manage, e.g. "secret/". KV v1 mounts are rejected (read-only, keys not listed).'}
+                ca_bundle: {type: string, description: "Optional PEM bundle stored on the vault and used to verify its certificate end-to-end (not secret)"}
       responses:
         "200": {description: Configured, content: {application/json: {schema: {$ref: "#/components/schemas/Vault"}}}}
+        "400": {description: Root token sent over plain HTTP}
+        "403": {description: Not admin on the vault's cluster}
+        "409": {description: Vault sealed/uninitialized, gone, or approle/ path used by another auth method}
+        "422": {description: "Invalid mounts (`fields.mounts`), token rejected, invalid CA bundle"}
+        "502": {description: A Vault step failed (safe message)}
   /vaults/{id}/refresh:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [vaults]
-      summary: Refresh the secret index now.
-      responses: {"202": {description: Started}}
+      summary: Refresh the secret index (and drift detection) now. operator, vault-maker or vault-approver in scope.
+      responses:
+        "202": {description: Started}
+        "403": {description: Viewer}
+        "409": {description: Vault not configured}
   /vaults/{id}/tree:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -417,8 +445,9 @@ paths:
       - {name: mount, in: query, required: true, schema: {type: string}}
     get:
       tags: [vaults]
-      summary: Keys and versions only. Values are never returned.
+      summary: Keys and versions only (from the index; key names come from KV v2 subkeys). Values are never returned.
       responses:
+        "404": {description: Not indexed, or vault outside scope}
         "200": {description: Secret, content: {application/json: {schema: {$ref: "#/components/schemas/SecretDetail"}}}}
 
   # ------------------------------------------------------------ change requests (M3)
@@ -430,16 +459,21 @@ paths:
         - {name: waiting_for_me, in: query, schema: {type: boolean}}
         - {name: status, in: query, schema: {type: string}}
         - {name: vault_id, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 200}}
       responses:
         "200":
-          description: Change requests
+          description: Change requests in read scope, newest first (items without events)
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/ChangeRequest"}}}}}}
     post:
       tags: [approvals]
-      summary: vault-maker. New values are sealed at submit; only HMAC fingerprints are ever shown.
+      summary: "vault-maker in scope. New values are sealed at submit (envelope, AAD change_items:<id>); only HMAC fingerprints are ever shown. Expires after changeRequests.ttl (default 72h)."
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequestInput"}}}}
       responses:
         "201": {description: Opened, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+        "403": {description: Not vault-maker on the vault's cluster}
+        "404": {description: Vault missing or outside scope}
+        "409": {description: Vault not configured}
+        "422": {description: "Validation: justification >= 10 chars, managed KV v2 mount, key required (except destroy_history), value required for create/replace and forbidden for delete/destroy_history, versions for destroy_history only, one base_version per path"}
   /change-requests/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -450,18 +484,24 @@ paths:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [approvals]
-      summary: vault-approver, maker ≠ checker (no bypass, admin included). Applies immediately.
+      summary: "vault-approver in scope, maker ≠ checker by (tenant_id, object_id) (no bypass, admin included), never a guest. Applies immediately: items on one path → one PATCH (merge-patch, options.cas = base_version); new path → POST cas 0; destroy_history → POST destroy."
       requestBody: {content: {application/json: {schema: {type: object, properties: {comment: {type: string}}}}}}
       responses:
-        "200": {description: Approved (status applied or failed), content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
-        "403": {description: Own request or not an approver}
+        "200": {description: Approved (status applied or failed; failure has a safe message such as a check-and-set conflict), content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+        "403": {description: 'Own request ("You opened this request"), guest, or not an approver'}
+        "404": {description: Missing or outside scope}
+        "409": {description: Already decided or expired}
   /change-requests/{id}/reject:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [approvals]
+      summary: Same rules as approve. A comment is required.
       requestBody: {content: {application/json: {schema: {type: object, required: [comment], properties: {comment: {type: string}}}}}}
       responses:
         "200": {description: Rejected, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+        "403": {description: Own request, guest, or not an approver}
+        "409": {description: Already decided or expired}
+        "422": {description: Comment missing}
   /change-requests/{id}/cancel:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
@@ -469,6 +509,8 @@ paths:
       summary: Maker withdraws a pending request.
       responses:
         "200": {description: Cancelled, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+        "403": {description: Not the maker}
+        "409": {description: Not pending}
 
   # ------------------------------------------------------------ audit (M4)
   /audit/schedules:
@@ -1047,6 +1089,9 @@ components:
         secrets: {type: integer}
         drift: {type: integer, description: open vault-drift findings}
         last_error: {type: string}
+        tls_server_name: {type: string, description: "Name verified in the vault's certificate (default <svc>.<ns>.svc)"}
+        transfer_mode: {type: string, enum: [e2e-tls, compressed]}
+        ca_bundle_set: {type: boolean}
     SecretSummary:
       type: object
       properties:
