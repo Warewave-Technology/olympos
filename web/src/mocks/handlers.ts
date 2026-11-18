@@ -691,6 +691,13 @@ const routes: [string, string, Handler][] = [
     Object.assign(s, r.body);
     return ok(s);
   }],
+  ['DELETE', '/audit/schedules/:id', (_r, p) => {
+    if (!perms().operate) return forbidden();
+    const i = db.auditSchedules.findIndex((x) => x.id === p.id);
+    if (i < 0) return notFound();
+    db.auditSchedules.splice(i, 1);
+    return { status: 204 };
+  }],
   ['POST', '/audit/schedules/:id/run', (_r, p) => {
     const s = db.auditSchedules.find((x) => x.id === p.id);
     if (!s) return notFound();

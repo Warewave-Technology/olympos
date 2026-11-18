@@ -193,7 +193,8 @@ function SchedulesCard({
   onRun,
   running,
   onOpenRun,
-  onCreate,
+  channels,
+  pinned,
 }: {
   schedQ: ReturnType<typeof useQuery<ItemList<AuditSchedule>>>;
   clusters: Cluster[];
@@ -204,8 +205,23 @@ function SchedulesCard({
   onRun: (s: AuditSchedule) => void;
   running: boolean;
   onOpenRun: (id: string) => void;
-  onCreate: () => void;
+  channels: Channel[];
+  /** Cluster page: its name (null while loading), so a schedule pinned to it keeps its scope locked when edited. */
+  pinned?: string | null;
 }) {
+  const qc = useQueryClient();
+  const toast = useToast();
+  const [editing, setEditing] = useState<AuditSchedule | null>(null);
+  const [deleting, setDeleting] = useState<AuditSchedule | null>(null);
+  const del = useMutation({
+    mutationFn: (s: AuditSchedule) => api.del(`/audit/schedules/${s.id}`),
+    onSuccess: (_r, s) => {
+      toast(`${TOOL_LABEL[s.tool]} schedule deleted.`);
+      setDeleting(null);
+      void qc.invalidateQueries({ queryKey: ['audit-schedules'] });
+      void qc.invalidateQueries({ queryKey: ['audit-clusters'] });
+    },
+  });
   const benchOn = clusters.filter((c) => c.bench_enabled);
   const scopeText = (s: AuditSchedule) => {
     const sel = s.scope_selector || 'all';
@@ -234,7 +250,7 @@ function SchedulesCard({
         what="audit schedules"
         isEmpty={(d) => d.items.filter(applies).length === 0}
         empty={
-          <EmptyState title={scoped ? 'No schedule covers this cluster' : 'No audit schedules yet'} action={canOperate ? <button type="button" className="btn pri" onClick={onCreate}>New schedule</button> : undefined}>
+          <EmptyState title={scoped ? 'No schedule covers this cluster' : 'No audit schedules yet'}>
             {scoped ? 'Add a schedule whose scope matches its labels, or an "all clusters" schedule.' : 'Add a schedule for Kubescape (NSA, CIS, MITRE), Polaris or kube-bench. Kubescape and Polaris run on the server through the agent’s read-only API proxy.'}
           </EmptyState>
         }
@@ -276,9 +292,17 @@ function SchedulesCard({
                     </td>
                     <td className="actions">
                       {canOperate && (
-                        <button type="button" className="btn sm" onClick={() => onRun(s)} disabled={running} aria-label={`Run ${TOOL_LABEL[s.tool]} now${scoped ? ` on ${scoped.name}` : ''}`}>
-                          Run now
-                        </button>
+                        <span className="inline-sm">
+                          <button type="button" className="btn sm" onClick={() => onRun(s)} disabled={running} aria-label={`Run ${TOOL_LABEL[s.tool]} now${scoped ? ` on ${scoped.name}` : ''}`}>
+                            Run now
+                          </button>
+                          <button type="button" className="btn sm" onClick={() => setEditing(s)} aria-label={`Edit ${TOOL_LABEL[s.tool]} schedule`}>
+                            Edit
+                          </button>
+                          <button type="button" className="btn sm danger" onClick={() => setDeleting(s)} aria-label={`Delete ${TOOL_LABEL[s.tool]} schedule`}>
+                            Delete
+                          </button>
+                        </span>
                       )}
                     </td>
                   </tr>
@@ -291,6 +315,20 @@ function SchedulesCard({
       <div className="card-foot">
         kube-bench must read node files, so it is the one check that runs as a Job on each node. It is off until enabled per cluster with the agent Helm value <span className="mono">bench.enabled</span>.
       </div>
+      {editing && pinned !== null && <ScheduleDialog editing={editing} onClose={() => setEditing(null)} channels={channels} clusters={clusters} pinned={pinned && editing.scope_selector === `${CLUSTER_LABEL}=${pinned}` ? pinned : undefined} />}
+      {deleting && (
+        <Modal open onClose={() => setDeleting(null)} size="narrow" danger eyebrow="Audit" title={`Delete the ${TOOL_LABEL[deleting.tool]} schedule?`} description={`Scope ${deleting.scope_selector || 'all'} · ${describeCron(deleting.cron ?? '')}. Run history and findings are kept; queued runs are cancelled.`}>
+          <FormError error={del.error} />
+          <div className="end">
+            <button type="button" className="btn" onClick={() => setDeleting(null)}>
+              Cancel
+            </button>
+            <button type="button" className="btn danger" onClick={() => del.mutate(deleting)} disabled={del.isPending}>
+              Delete schedule
+            </button>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }
@@ -364,10 +402,10 @@ function AuditOverview({ clusters, clustersLoading, openRun }: { clusters: Clust
         onRun={(s) => runNow.mutate({ s })}
         running={runNow.isPending}
         onOpenRun={openRun}
-        onCreate={() => setCreating(true)}
+        channels={chanQ.data?.items ?? []}
       />
       <ActivityCard />
-      {creating && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} />}
+      {creating && <ScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} />}
     </>
   );
 }
@@ -421,7 +459,8 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
         onRun={(s) => runNow.mutate({ s, cluster: one ? cid : undefined })}
         running={runNow.isPending}
         onOpenRun={openRun}
-        onCreate={() => setCreating(true)}
+        channels={chanQ.data?.items ?? []}
+        pinned={one ? (pinName ?? null) : undefined}
       />
 
       <section className="card" aria-labelledby="kb-t">
@@ -544,27 +583,31 @@ function AuditDetail({ scope, clusters, openRun }: { scope: Exclude<Scope, { mod
       <ActivityCard />
 
       {benchNode && <BenchNodeDialog node={benchNode} onClose={() => setBenchNode(null)} />}
-      {creating && (!one || pinName) && <NewScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} pinned={one ? pinName : undefined} />}
+      {creating && (!one || pinName) && <ScheduleDialog onClose={() => setCreating(false)} channels={chanQ.data?.items ?? []} clusters={allClusters} pinned={one ? pinName : undefined} />}
     </>
   );
 }
 
 
-/** `pinned`: opened from a cluster's page, so the scope is that cluster and cannot be changed. */
-function NewScheduleDialog({ onClose, channels, clusters, pinned }: { onClose: () => void; channels: Channel[]; clusters: Cluster[]; pinned?: string }) {
+/**
+ * New or edited audit schedule. `pinned`: opened from a cluster's page, so the scope is that
+ * cluster and cannot be changed. The check (tool) of an existing schedule cannot change.
+ */
+function ScheduleDialog({ onClose, channels, clusters, pinned, editing }: { onClose: () => void; channels: Channel[]; clusters: Cluster[]; pinned?: string; editing?: AuditSchedule }) {
   const qc = useQueryClient();
   const toast = useToast();
-  const [tool, setTool] = useState<AuditTool>('kubescape');
-  const [frameworks, setFrameworks] = useState<Set<'nsa' | 'cis' | 'mitre'>>(new Set(['nsa', 'cis', 'mitre']));
-  const [scope, setScope] = useState(pinned ? `${CLUSTER_LABEL}=${pinned}` : '');
+  const [tool, setTool] = useState<AuditTool>(editing?.tool ?? 'kubescape');
+  const [frameworks, setFrameworks] = useState<Set<'nsa' | 'cis' | 'mitre'>>(new Set(editing?.tool === 'kubescape' && editing.frameworks?.length ? editing.frameworks : ['nsa', 'cis', 'mitre']));
+  const [scope, setScope] = useState(pinned ? `${CLUSTER_LABEL}=${pinned}` : editing && editing.scope_selector !== 'all' ? (editing.scope_selector ?? '') : '');
   const [scopeDraftErr, setScopeDraftErr] = useState<string | null>(null);
-  const [cron, setCron] = useState('0 4 * * *');
-  const [notify, setNotify] = useState('');
+  const [cron, setCron] = useState(editing?.cron ?? '0 4 * * *');
+  const [notify, setNotify] = useState(editing?.notify_channel_id ?? '');
+  const [enabled, setEnabled] = useState(editing?.enabled ?? true);
   const cronErr = validateCron(cron);
   const create = useMutation({
-    mutationFn: (b: AuditScheduleInput) => api.post<AuditSchedule>('/audit/schedules', b),
+    mutationFn: (b: AuditScheduleInput) => (editing ? api.patch<AuditSchedule>(`/audit/schedules/${editing.id}`, b) : api.post<AuditSchedule>('/audit/schedules', b)),
     onSuccess: () => {
-      toast('Audit schedule created.');
+      toast(editing ? 'Audit schedule saved.' : 'Audit schedule created.');
       void qc.invalidateQueries({ queryKey: ['audit-schedules'] });
       onClose();
     },
@@ -572,16 +615,17 @@ function NewScheduleDialog({ onClose, channels, clusters, pinned }: { onClose: (
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
     if (cronErr || scopeDraftErr) return;
-    create.mutate({ tool, frameworks: tool === 'kubescape' ? [...frameworks] : [], scope_selector: scope.trim() || 'all', cron, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, enabled: true, notify_channel_id: notify || null });
+    const body: AuditScheduleInput = { frameworks: tool === 'kubescape' ? [...frameworks] : [], scope_selector: scope.trim() || 'all', cron, timezone: editing?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone, enabled, notify_channel_id: notify || null };
+    create.mutate(editing ? body : { ...body, tool });
   };
   return (
-    <Modal open onClose={onClose} eyebrow="Audit" title="New audit schedule">
+    <Modal open onClose={onClose} eyebrow="Audit" title={editing ? `Edit ${TOOL_LABEL[editing.tool]} schedule` : 'New audit schedule'}>
       <form onSubmit={submit} className="stack-sm" style={{ gap: 18 }} noValidate>
         <fieldset className="opts" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' }}>
           <legend className="lbl">Check</legend>
           {(['kubescape', 'polaris', 'kube-bench'] as AuditTool[]).map((t) => (
             <label className="opt" key={t}>
-              <input type="radio" name="tool" checked={tool === t} onChange={() => setTool(t)} />
+              <input type="radio" name="tool" checked={tool === t} onChange={() => setTool(t)} disabled={!!editing && t !== tool} />
               <span>
                 <span className="t1">{TOOL_LABEL[t]}</span>
                 <span className="t2">{t === 'kube-bench' ? 'Job per node, opt-in clusters' : 'Remote via agent API proxy'}</span>
@@ -650,13 +694,19 @@ function NewScheduleDialog({ onClose, channels, clusters, pinned }: { onClose: (
         <Field label="Notify" htmlFor="as-nc">
           <Select id="as-nc" value={notify} onChange={setNotify} options={[{ value: '', label: 'Default routing' }, ...channels.map((c) => ({ value: c.id, label: c.name }))]} />
         </Field>
+        {editing && (
+          <label className="chk">
+            <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
+            Enabled (unchecked pauses the schedule; manual runs still work)
+          </label>
+        )}
         <FormError error={create.error} />
         <div className="end">
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
           <button type="submit" className="btn pri" disabled={create.isPending || !!cronErr || (tool === 'kubescape' && frameworks.size === 0)}>
-            Create schedule
+            {editing ? 'Save changes' : 'Create schedule'}
           </button>
         </div>
       </form>

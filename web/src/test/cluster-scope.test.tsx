@@ -66,6 +66,39 @@ describe('cluster overview pages', () => {
     expect(within(dlg).queryByRole('button', { name: 'Advanced selector' })).toBeNull();
   });
 
+  it('Audit: schedules can be edited (scope stays pinned) and deleted', async () => {
+    const user = userEvent.setup();
+    const c = db.byName('eks-fra-data');
+    const pin = `olympos.io/cluster=${c.name}`;
+    db.auditSchedules.push({ id: 'pinned-1', tool: 'polaris', frameworks: [], scope_selector: pin, cron: '0 4 * * *', timezone: 'UTC', enabled: true, notify_channel_id: null, next_run_at: null, clusters: 1, last_run: null });
+    await renderApp(`/audit?cluster=${c.id}`);
+    const card = (await screen.findByRole('heading', { name: 'Schedules' }, T)).closest('section')!;
+    const row = (await within(card).findByText(pin, {}, T)).closest('tr')!;
+    await user.click(within(row).getByRole('button', { name: 'Edit Polaris schedule' }));
+    const dlg = await screen.findByRole('dialog', { name: 'Edit Polaris schedule' }, T);
+    expect(within(dlg).getByRole('radio', { name: /Kubescape/ })).toBeDisabled(); // the tool is fixed
+    expect(within(within(dlg).getByRole('list', { name: 'Required labels' })).queryByRole('button')).toBeNull();
+    await user.click(within(dlg).getByRole('checkbox', { name: /^Enabled/ }));
+    await user.click(within(dlg).getByRole('button', { name: 'Save changes' }));
+    await waitFor(() => expect(db.auditSchedules.find((x) => x.id === 'pinned-1')?.enabled).toBe(false));
+    expect(db.auditSchedules.find((x) => x.id === 'pinned-1')?.scope_selector).toBe(pin);
+    await user.click(within(row).getByRole('button', { name: 'Delete Polaris schedule' }));
+    const confirm = await screen.findByRole('dialog', { name: 'Delete the Polaris schedule?' }, T);
+    await user.click(within(confirm).getByRole('button', { name: 'Delete schedule' }));
+    await waitFor(() => expect(db.auditSchedules.some((x) => x.id === 'pinned-1')).toBe(false));
+  });
+
+  it('Audit: an empty schedule list has no second New schedule button', async () => {
+    const saved = db.auditSchedules.splice(0);
+    try {
+      await renderApp(`/audit?cluster=${db.byName('eks-fra-data').id}`);
+      await screen.findByText('No schedule covers this cluster', {}, T);
+      expect(screen.getAllByRole('button', { name: 'New schedule' })).toHaveLength(1);
+    } finally {
+      db.auditSchedules.push(...saved);
+    }
+  });
+
   it('Audit: a kube-bench node opens its checks, failed first', async () => {
     const user = userEvent.setup();
     await renderApp(`/audit?cluster=${db.byName('eks-fra-data').id}`);
