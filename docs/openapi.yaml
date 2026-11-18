@@ -1404,13 +1404,14 @@ components:
         maker: {$ref: "#/components/schemas/Principal"}
         checker: {oneOf: [{$ref: "#/components/schemas/Principal"}, {type: "null"}]}
         justification: {type: string}
-        status: {type: string, enum: [pending, approved, applied, rejected, expired, failed, cancelled]}
+        status: {type: string, enum: [pending, approved, applying, applied, rejected, expired, failed, cancelled], description: "applying = approved and committed, the outcome of the Vault write is being recorded or reconciled (settled within ~3 minutes)"}
         created_at: {type: string, format: date-time}
         expires_at: {type: string, format: date-time}
         decided_at: {type: [string, "null"], format: date-time}
         decision_comment: {type: string}
         applied_at: {type: [string, "null"], format: date-time}
         failure: {type: string}
+        failure_code: {type: string, enum: ["", apply_error, apply_unknown, conflict], description: "apply_unknown = the outcome was lost and the vault shows no new version (nothing changed, open a new request); conflict = the vault shows changes Olympos cannot attribute"}
         can_approve: {type: boolean, description: Caller may approve/reject}
         approve_disabled_reason: {type: string, description: 'e.g. "You opened this request"'}
         can_cancel: {type: boolean}

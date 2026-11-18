@@ -261,14 +261,14 @@ func TestApproveAppliesAndScrubs(t *testing.T) {
 	if managed != 1 {
 		t.Fatalf("managed versions recorded: %d", managed)
 	}
-	// Trail: opened, approved, applied.
+	// Trail: opened, approved, applying, applied.
 	var full approvals.ChangeRequest
 	e.do(checker, "GET", "/api/v1/change-requests/"+cr.ID.String(), nil, &full)
 	var kinds []string
 	for _, ev := range full.Events {
 		kinds = append(kinds, ev.Kind)
 	}
-	if strings.Join(kinds, ",") != "opened,approved,applied" {
+	if strings.Join(kinds, ",") != "opened,approved,applying,applied" {
 		t.Fatalf("events: %v", kinds)
 	}
 	// Second decision is impossible.

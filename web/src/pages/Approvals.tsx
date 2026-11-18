@@ -133,7 +133,12 @@ function CrDetail({ id }: { id: string }) {
   const me = useMe();
   const qc = useQueryClient();
   const toast = useToast();
-  const q = useQuery({ queryKey: ['change-requests', id], queryFn: () => api.get<ChangeRequest>(`/change-requests/${id}`) });
+  const q = useQuery({
+    queryKey: ['change-requests', id],
+    queryFn: () => api.get<ChangeRequest>(`/change-requests/${id}`),
+    // 'applying' is settled within minutes (outcome recorded or reconciled).
+    refetchInterval: (query) => (query.state.data?.status === 'applying' ? 15_000 : false),
+  });
   const nsOf = useVaultNamespaces();
   const [comment, setComment] = useState('');
   const [commentErr, setCommentErr] = useState<string | undefined>();
@@ -142,6 +147,10 @@ function CrDetail({ id }: { id: string }) {
     qc.setQueryData(['change-requests', id], cr);
     void qc.invalidateQueries({ queryKey: ['change-requests'] });
     void qc.invalidateQueries({ queryKey: ['vault-secret'] });
+    if (cr.status === 'applying') {
+      toast(`${crLabel(cr)} approved. Olympos is still confirming the write with the vault; this page updates when it is settled.`, 'warn');
+      return;
+    }
     toast(cr.status === 'failed' ? `Approved, but applying failed: ${cr.failure}` : `${crLabel(cr)} ${verb}.`, cr.status === 'failed' ? 'crit' : 'ok');
   };
   const approve = useMutation({ mutationFn: () => api.post<ChangeRequest>(`/change-requests/${id}/approve`, { comment }), onSuccess: done('approved and applied') });
@@ -355,8 +364,10 @@ function eventText(e: ChangeRequest['events'][number]) {
       return <>Approved by {who}</>;
     case 'rejected':
       return <>Rejected by {who}</>;
+    case 'applying':
+      return <>Writing to the vault</>;
     case 'applied':
-      return <>Applied to Vault</>;
+      return e.details?.reconciled ? <>Applied to Vault (confirmed from the vault metadata)</> : <>Applied to Vault</>;
     case 'failed':
       return <>Apply failed</>;
     case 'expired':
@@ -385,6 +396,7 @@ function eventDetail(e: ChangeRequest['events'][number]): string {
   if (e.kind === 'notified') return 'link only, no approve button';
   if (e.kind === 'applied' && d.version) return `new version v${String(d.version)}`;
   if ((e.kind === 'approved' || e.kind === 'rejected') && d.comment) return `“${String(d.comment)}”`;
+  if (e.kind === 'failed' && d.failure) return String(d.failure);
   if (e.kind === 'failed' && d.error) return String(d.error);
   return '';
 }

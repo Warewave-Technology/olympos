@@ -49,7 +49,7 @@ func (s *Service) Maintenance(extra func(ctx context.Context) error) func(ctx co
 		schedule.RunLeader(ctx, s.DB, LockVaults, time.Minute, s.Log, func(ctx context.Context) error {
 			if extra != nil {
 				if err := extra(ctx); err != nil && ctx.Err() == nil {
-					s.Log.Error("change request expiry", "err", err)
+					s.Log.Error("change request expiry/reconcile", "err", err)
 				}
 			}
 			now := time.Now()

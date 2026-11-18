@@ -44,8 +44,13 @@ func TestTransitions(t *testing.T) {
 		{StatusPending, EvReject, StatusRejected, true},
 		{StatusPending, EvCancel, StatusCancelled, true},
 		{StatusPending, EvExpire, StatusExpired, true},
-		{StatusApproved, EvApplyOK, StatusApplied, true},
-		{StatusApproved, EvApplyErr, StatusFailed, true},
+		{StatusApproved, EvApplyStart, StatusApplying, true},
+		{StatusApproved, EvApplyOK, StatusApproved, false},
+		{StatusApplying, EvApplyOK, StatusApplied, true},
+		{StatusApplying, EvApplyErr, StatusFailed, true},
+		{StatusApplying, EvApprove, StatusApplying, false},
+		{StatusApplying, EvExpire, StatusApplying, false},
+		{StatusApplying, EvCancel, StatusApplying, false},
 		// No double decisions, no skipping approval.
 		{StatusPending, EvApplyOK, StatusPending, false},
 		{StatusApproved, EvApprove, StatusApproved, false},
@@ -74,8 +79,8 @@ func TestTransitions(t *testing.T) {
 			t.Errorf("Next(%s, %s): want ErrInvalidTransition, got %v", c.from, c.ev, err)
 		}
 	}
-	if StatusPending.Terminal() || StatusApproved.Terminal() {
-		t.Error("pending/approved are not terminal")
+	if StatusPending.Terminal() || StatusApproved.Terminal() || StatusApplying.Terminal() {
+		t.Error("pending/approved/applying are not terminal")
 	}
 }
 
@@ -155,7 +160,7 @@ func TestCheckDecideRules(t *testing.T) {
 		t.Fatal("stale grant must not authorize")
 	}
 	// Double decision impossible.
-	for _, s := range []Status{StatusApproved, StatusApplied, StatusRejected, StatusExpired, StatusFailed, StatusCancelled} {
+	for _, s := range []Status{StatusApproved, StatusApplying, StatusApplied, StatusRejected, StatusExpired, StatusFailed, StatusCancelled} {
 		err := CheckDecide(subject(checker, "vault-approver"), maker, prod, s, exp, now)
 		var de *DenyError
 		if !errors.As(err, &de) || !de.Conflict {

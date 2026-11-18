@@ -61,6 +61,36 @@ func LoadVault(ctx context.Context, q store.Querier, id uuid.UUID) (VaultInfo, e
 // produced by Olympos is never mistaken for an unmanaged write.
 const VaultLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('olympos-vault:' || $1::text, 0))`
 
+// Session-level form of VaultLockSQL (same key).
+const (
+	vaultSessionLockSQL = `SELECT pg_advisory_lock(hashtextextended('olympos-vault:' || $1::text, 0))`
+	vaultUnlockSQL      = `SELECT pg_advisory_unlock(hashtextextended('olympos-vault:' || $1::text, 0))`
+)
+
+// lockVaultSession holds the vault lock on a dedicated connection across the
+// two apply transactions and the Vault call (session-level and transaction-
+// level advisory locks on the same key exclude each other). A lost server
+// drops the connection and with it the lock.
+func lockVaultSession(ctx context.Context, db *store.DB, vaultID uuid.UUID) (func(), error) {
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := conn.Exec(ctx, vaultSessionLockSQL, vaultID); err != nil {
+		conn.Release()
+		return nil, err
+	}
+	return func() {
+		uctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(uctx, vaultUnlockSQL, vaultID); err != nil {
+			// Do not return a connection that may still hold the lock.
+			_ = conn.Conn().Close(uctx)
+		}
+		conn.Release()
+	}, nil
+}
+
 // LockVault takes VaultLockSQL in tx.
 func LockVault(ctx context.Context, tx pgx.Tx, vaultID uuid.UUID) error {
 	_, err := tx.Exec(ctx, VaultLockSQL, vaultID)
@@ -113,6 +143,7 @@ type ChangeRequest struct {
 	DecisionComment       string           `json:"decision_comment"`
 	AppliedAt             *time.Time       `json:"applied_at"`
 	Failure               string           `json:"failure"`
+	FailureCode           string           `json:"failure_code"`
 	CanApprove            bool             `json:"can_approve"`
 	ApproveDisabledReason string           `json:"approve_disabled_reason"`
 	CanCancel             bool             `json:"can_cancel"`
@@ -135,7 +166,7 @@ type Filter struct {
 
 const crSelect = `SELECT cr.id, cr.vault_id, t.namespace || '/' || t.service, c.name, c.labels, v.provider,
 	cr.maker_principal_id, cr.checker_principal_id, cr.justification, cr.status, cr.created_at, cr.expires_at,
-	cr.decided_at, cr.decision_comment, cr.applied_at, cr.failure
+	cr.decided_at, cr.decision_comment, cr.applied_at, cr.failure, cr.failure_code
 	FROM change_requests cr JOIN vaults v ON v.id = cr.vault_id JOIN targets t ON t.id = v.target_id
 	JOIN clusters c ON c.id = t.cluster_id`
 
@@ -144,7 +175,7 @@ func scanCR(row pgx.Row) (*ChangeRequest, error) {
 	var st string
 	err := row.Scan(&cr.ID, &cr.Vault.ID, &cr.Vault.Name, &cr.Vault.ClusterName, &cr.labels, &cr.Vault.Provider,
 		&cr.makerID, &cr.checkerID, &cr.Justification, &st, &cr.CreatedAt, &cr.ExpiresAt,
-		&cr.DecidedAt, &cr.DecisionComment, &cr.AppliedAt, &cr.Failure)
+		&cr.DecidedAt, &cr.DecisionComment, &cr.AppliedAt, &cr.Failure, &cr.FailureCode)
 	cr.Status = Status(st)
 	cr.Vault.Namespace, _, _ = strings.Cut(cr.Vault.Name, "/")
 	return cr, err

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -13,7 +15,51 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/vaults/vclient"
 )
 
-var _ approvals.Applier = (*Service)(nil)
+var (
+	_ approvals.Applier   = (*Service)(nil)
+	_ approvals.Inspector = (*Service)(nil)
+)
+
+// KVMetadata reads <mount>metadata/<path> with the Olympos AppRole (for
+// approvals.ReconcileApplying). nil, nil when the path does not exist.
+func (s *Service) KVMetadata(ctx context.Context, vaultID uuid.UUID, mount, path string) (*approvals.KVMeta, error) {
+	r, err := loadRow(ctx, s.DB, vaultID)
+	if err != nil {
+		return nil, err
+	}
+	c, done, err := s.approle(ctx, r, requestTimout)
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	md, err := c.Logical().ReadWithContext(ctx, mount+"metadata/"+path)
+	if err != nil {
+		if vclient.StatusCode(err) == 404 {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read metadata of %s%s: %w", mount, path, vclient.Sanitize(err))
+	}
+	if md == nil || md.Data == nil {
+		return nil, nil
+	}
+	m := &approvals.KVMeta{Current: intOf(md.Data["current_version"]), Versions: map[int]approvals.KVVersion{}}
+	if vs, ok := md.Data["versions"].(map[string]any); ok {
+		for k, v := range vs {
+			n, err := strconv.Atoi(k)
+			if err != nil {
+				continue
+			}
+			x, _ := v.(map[string]any)
+			var kv approvals.KVVersion
+			if ts, ok := x["created_time"].(string); ok {
+				kv.Created, _ = time.Parse(time.RFC3339Nano, ts)
+			}
+			kv.Destroyed, _ = x["destroyed"].(bool)
+			m.Versions[n] = kv
+		}
+	}
+	return m, nil
+}
 
 // Apply writes an approved plan with the Olympos AppRole (§11.3):
 //   - patch:   PATCH <mount>data/<path>, merge-patch+json, options.cas = base

@@ -4,8 +4,12 @@
 // This file is the pure part: the state machine, the authorization rules
 // and the write plan. It has no I/O and is unit-tested exhaustively.
 //
-//	pending ──approve──▶ approved ──apply ok──▶ applied
-//	   │                     └──apply err──▶ failed
+//	pending ──approve──▶ approved ──start──▶ applying ──apply ok──▶ applied
+//	   │                                          └──apply err──▶ failed
+//
+//	'approved' and 'applying' are entered in one transaction (committed
+//	before Vault is called); a request left in 'applying' is settled by the
+//	reconciler from the KV metadata (applied or failed).
 //	   ├──reject──▶ rejected
 //	   ├──cancel──▶ cancelled (maker only)
 //	   └──ttl─────▶ expired
@@ -29,6 +33,7 @@ type Status string
 const (
 	StatusPending   Status = "pending"
 	StatusApproved  Status = "approved"
+	StatusApplying  Status = "applying"
 	StatusApplied   Status = "applied"
 	StatusRejected  Status = "rejected"
 	StatusExpired   Status = "expired"
@@ -50,18 +55,27 @@ func (s Status) Terminal() bool {
 type Event string
 
 const (
-	EvApprove  Event = "approve"
-	EvReject   Event = "reject"
-	EvCancel   Event = "cancel"
-	EvExpire   Event = "expire"
-	EvApplyOK  Event = "apply_ok"
-	EvApplyErr Event = "apply_err"
+	EvApprove    Event = "approve"
+	EvReject     Event = "reject"
+	EvCancel     Event = "cancel"
+	EvExpire     Event = "expire"
+	EvApplyStart Event = "apply_start"
+	EvApplyOK    Event = "apply_ok"
+	EvApplyErr   Event = "apply_err"
 )
 
 var transitions = map[Status]map[Event]Status{
 	StatusPending:  {EvApprove: StatusApproved, EvReject: StatusRejected, EvCancel: StatusCancelled, EvExpire: StatusExpired},
-	StatusApproved: {EvApplyOK: StatusApplied, EvApplyErr: StatusFailed},
+	StatusApproved: {EvApplyStart: StatusApplying},
+	StatusApplying: {EvApplyOK: StatusApplied, EvApplyErr: StatusFailed},
 }
+
+// Failure codes (change_requests.failure_code).
+const (
+	FailApplyError   = "apply_error"   // Vault refused or was unreachable
+	FailApplyUnknown = "apply_unknown" // reconciled: Vault has no trace of the write; open a new request
+	FailConflict     = "conflict"      // reconciled: the secret changed in a way Olympos did not write
+)
 
 // ErrInvalidTransition is returned for a transition the machine does not allow
 // (e.g. a second decision on an already decided request).

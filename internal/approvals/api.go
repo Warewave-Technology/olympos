@@ -42,11 +42,22 @@ type API struct {
 	Envelope *secrets.Envelope
 	HMAC     *secrets.Fingerprinter
 	Applier  Applier
-	TTL      time.Duration
-	Now      func() time.Time
+	// Inspector reads KV metadata for ReconcileApplying (optional).
+	Inspector Inspector
+	TTL       time.Duration
+	Now       func() time.Time
 	// OnApplied is called after a commit in which Vault was written (e.g. to
 	// refresh the index of that vault). Optional.
 	OnApplied func(vaultID uuid.UUID)
+
+	// Faults is fault injection for tests only (nil in production).
+	Faults *Faults
+}
+
+// Faults stops an apply where a crash would: BeforeVault right before the
+// Vault call, AfterVault right after it (before transaction 2).
+type Faults struct {
+	BeforeVault, AfterVault func() error
 }
 
 // Routes mounts the module under /api/v1.
@@ -346,7 +357,20 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 	ctx := r.Context()
 	var wrote bool
 	var vaultID uuid.UUID
+	var pa *pendingApply
 	expired := false
+	if ev == EvApprove {
+		// The vault lock is held from transaction 1 until the outcome is
+		// recorded, so drift never sees a half-recorded write.
+		if err := a.DB.QueryRow(ctx, `SELECT vault_id FROM change_requests WHERE id = $1`, id).Scan(&vaultID); err == nil {
+			unlock, err := lockVaultSession(ctx, a.DB, vaultID)
+			if err != nil {
+				httpx.Internal(w, r, a.Log, err)
+				return
+			}
+			defer unlock()
+		}
+	}
 	err := store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
 		c, err := lockCR(ctx, tx, id)
 		if errors.Is(err, errNotFound) {
@@ -387,7 +411,7 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 		if ev == EvReject {
 			return a.rejectTx(ctx, r, tx, c, v, actor, in.Comment)
 		}
-		wrote, err = a.approveTx(ctx, r, tx, c, v, actor, in.Comment)
+		pa, err = a.approveTx(ctx, r, tx, c, v, actor, in.Comment)
 		return err
 	})
 	if errors.Is(err, errHandled) {
@@ -400,6 +424,9 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 	if expired {
 		httpx.Error(w, http.StatusConflict, ReasonExpired)
 		return
+	}
+	if pa != nil {
+		wrote = a.apply(ctx, pa)
 	}
 	if wrote && a.OnApplied != nil {
 		a.OnApplied(vaultID)
@@ -434,52 +461,116 @@ func (a *API) rejectTx(ctx context.Context, r *http.Request, tx pgx.Tx, c locked
 		Title: "Change request rejected", Link: Link(c.ID), Fields: map[string]string{"Vault": v.Name}})
 }
 
-// approveTx records the approval, applies the plan to Vault and records the
-// outcome, all in the transaction that holds the row lock, so two approvals
-// of the same request can never both apply.
-func (a *API) approveTx(ctx context.Context, r *http.Request, tx pgx.Tx, c lockedCR, v VaultInfo, actor uuid.UUID, comment string) (bool, error) {
+// pendingApply is an approved request committed as 'applying', with its
+// unsealed plan in memory (zeroed after the Vault call).
+type pendingApply struct {
+	crID  uuid.UUID
+	v     VaultInfo
+	items []Item
+	plan  []Write
+}
+
+// approveTx is transaction 1: it records the approval and moves the request
+// to 'applying', and unseals the plan. Vault is called only after commit.
+func (a *API) approveTx(ctx context.Context, r *http.Request, tx pgx.Tx, c lockedCR, v VaultInfo, actor uuid.UUID, comment string) (*pendingApply, error) {
 	to, err := Next(c.Status, EvApprove)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, checker_principal_id = $3, decided_at = $4, decision_comment = $5
 		WHERE id = $1`, c.ID, string(to), actor, a.now(), comment); err != nil {
-		return false, err
+		return nil, err
 	}
 	if err := addEvent(ctx, tx, c.ID, &actor, EventKind(to), map[string]any{"comment": comment}); err != nil {
-		return false, err
+		return nil, err
 	}
 	if err := httpx.Record(r, tx, "cr.approved", "change_request", c.ID.String(), &v.ClusterID, map[string]any{"vault_id": v.ID}); err != nil {
-		return false, err
+		return nil, err
 	}
 	if err := notify.Emit(ctx, tx, notify.Event{Type: notify.CRApproved, Key: notify.CRApproved + ":" + c.ID.String(),
 		Title: "Change request approved", Link: Link(c.ID), Fields: map[string]string{"Vault": v.Name}}); err != nil {
-		return false, err
+		return nil, err
 	}
-
 	items, err := a.unsealItems(ctx, tx, c.ID)
-	defer zeroItems(items)
 	if err != nil {
-		return false, err
+		zeroItems(items)
+		return nil, err
 	}
 	plan, err := Plan(items)
 	if err != nil {
-		return false, err
+		zeroItems(items)
+		return nil, err
 	}
-	if err := LockVault(ctx, tx, v.ID); err != nil {
-		return false, err
+	if to, err = Next(to, EvApplyStart); err != nil {
+		zeroItems(items)
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, applying_at = now() WHERE id = $1`, c.ID, string(to)); err != nil {
+		zeroItems(items)
+		return nil, err
+	}
+	if err := addEvent(ctx, tx, c.ID, nil, EventKind(to), map[string]any{"writes": len(plan)}); err != nil {
+		zeroItems(items)
+		return nil, err
+	}
+	return &pendingApply{crID: c.ID, v: v, items: items, plan: plan}, nil
+}
+
+// apply calls Vault (cas) and runs transaction 2. A failure to record the
+// outcome leaves the request in 'applying' for ReconcileApplying. It reports
+// whether Vault was written.
+func (a *API) apply(ctx context.Context, p *pendingApply) bool {
+	defer zeroItems(p.items)
+	ctx = context.WithoutCancel(ctx) // a closed browser tab must not abort a write half-way
+	if a.Faults != nil && a.Faults.BeforeVault != nil {
+		if err := a.Faults.BeforeVault(); err != nil {
+			a.Log.Error("change request apply interrupted before the vault call", "cr_id", p.crID, "err", err)
+			return false
+		}
 	}
 	actx, cancel := context.WithTimeout(ctx, applyTimeout)
-	applied, applyErr := a.Applier.Apply(actx, v.ID, plan)
+	applied, applyErr := a.Applier.Apply(actx, p.v.ID, p.plan)
 	cancel()
-	zeroItems(items)
+	zeroItems(p.items)
+	if a.Faults != nil && a.Faults.AfterVault != nil {
+		if err := a.Faults.AfterVault(); err != nil {
+			a.Log.Error("change request outcome not recorded; the reconciler will settle it", "cr_id", p.crID, "err", err)
+			return len(applied) > 0
+		}
+	}
+	code := ""
+	if applyErr != nil {
+		code = FailApplyError
+	}
+	fctx, fcancel := context.WithTimeout(ctx, 30*time.Second)
+	defer fcancel()
+	err := store.Tx(fctx, a.DB, func(tx pgx.Tx) error {
+		return a.finishApply(fctx, tx, p.crID, p.v, applied, applyErr, code, len(p.plan), false)
+	})
+	if err != nil {
+		a.Log.Error("change request outcome not recorded; the reconciler will settle it", "cr_id", p.crID, "err", err)
+	}
+	return len(applied) > 0
+}
 
+// finishApply is transaction 2 (and the reconciler's): it records the
+// versions Olympos produced and moves 'applying' to 'applied' or 'failed'.
+// A request no longer in 'applying' was settled already: nothing happens.
+func (a *API) finishApply(ctx context.Context, tx pgx.Tx, crID uuid.UUID, v VaultInfo, applied []Applied, applyErr error,
+	code string, planLen int, reconciled bool) error {
+	c, err := lockCR(ctx, tx, crID)
+	if err != nil {
+		return err
+	}
+	if c.Status != StatusApplying {
+		return nil
+	}
 	produced := []map[string]any{}
 	for _, ap := range applied {
 		if ap.Kind != WriteDestroy && ap.Version > 0 {
 			if _, err := tx.Exec(ctx, `INSERT INTO vault_managed_versions (vault_id, mount, path, version, cr_id) VALUES ($1,$2,$3,$4,$5)
-				ON CONFLICT DO NOTHING`, v.ID, ap.Mount, ap.Path, ap.Version, c.ID); err != nil {
-				return false, err
+				ON CONFLICT DO NOTHING`, v.ID, ap.Mount, ap.Path, ap.Version, crID); err != nil {
+				return err
 			}
 		}
 		produced = append(produced, map[string]any{"ref": ap.Mount + ap.Path, "kind": ap.Kind, "version": ap.Version})
@@ -487,51 +578,59 @@ func (a *API) approveTx(ctx context.Context, r *http.Request, tx pgx.Tx, c locke
 	if applyErr != nil {
 		msg := SafeMessage(applyErr)
 		if len(applied) > 0 {
-			msg = fmt.Sprintf("%s (%d of %d writes were applied before the failure)", msg, len(applied), len(plan))
+			msg = fmt.Sprintf("%s (%d of %d writes were applied before the failure)", msg, len(applied), planLen)
 		}
-		a.Log.Warn("change request apply failed", "cr_id", c.ID, "vault_id", v.ID, "failure", msg)
-		to, err := Next(StatusApproved, EvApplyErr)
+		a.Log.Warn("change request apply failed", "cr_id", crID, "vault_id", v.ID, "failure", msg, "code", code, "reconciled", reconciled)
+		to, err := Next(StatusApplying, EvApplyErr)
 		if err != nil {
-			return false, err
+			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, failure = $3 WHERE id = $1`, c.ID, string(to), msg); err != nil {
-			return false, err
+		if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, failure = $3, failure_code = $4 WHERE id = $1`,
+			crID, string(to), msg, code); err != nil {
+			return err
 		}
-		if err := scrub(ctx, tx, c.ID); err != nil {
-			return false, err
+		if err := scrub(ctx, tx, crID); err != nil {
+			return err
 		}
-		if err := addEvent(ctx, tx, c.ID, nil, EventKind(to), map[string]any{"failure": msg, "applied": produced}); err != nil {
-			return false, err
+		details := map[string]any{"failure": msg, "code": code, "applied": produced}
+		if reconciled {
+			details["reconciled"] = true
 		}
-		if err := activity.Record(ctx, tx, activity.Entry{Action: "cr.failed", ObjectType: "change_request", ObjectID: c.ID.String(),
-			ClusterID: &v.ClusterID, Details: map[string]any{"vault_id": v.ID, "failure": msg, "applied": produced}}); err != nil {
-			return false, err
+		if err := addEvent(ctx, tx, crID, nil, EventKind(to), details); err != nil {
+			return err
 		}
-		if err := notify.Emit(ctx, tx, notify.Event{Type: notify.CRFailed, Key: notify.CRFailed + ":" + c.ID.String(),
-			Title: "Change request failed to apply", Link: Link(c.ID), Fields: map[string]string{"Vault": v.Name}}); err != nil {
-			return false, err
+		if err := activity.Record(ctx, tx, activity.Entry{Action: "cr.failed", ObjectType: "change_request", ObjectID: crID.String(),
+			ClusterID: &v.ClusterID, Details: map[string]any{"vault_id": v.ID, "failure": msg, "code": code, "applied": produced, "reconciled": reconciled}}); err != nil {
+			return err
 		}
-		return len(applied) > 0, nil
+		return notify.Emit(ctx, tx, notify.Event{Type: notify.CRFailed, Key: notify.CRFailed + ":" + crID.String(),
+			Title: "Change request failed to apply", Link: Link(crID), Fields: map[string]string{"Vault": v.Name}})
 	}
-	to, err = Next(StatusApproved, EvApplyOK)
+	to, err := Next(StatusApplying, EvApplyOK)
 	if err != nil {
-		return false, err
+		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, applied_at = $3 WHERE id = $1`, c.ID, string(to), a.now()); err != nil {
-		return false, err
+	if _, err := tx.Exec(ctx, `UPDATE change_requests SET status = $2, applied_at = $3 WHERE id = $1`, crID, string(to), a.now()); err != nil {
+		return err
 	}
-	if err := scrub(ctx, tx, c.ID); err != nil {
-		return false, err
+	if err := scrub(ctx, tx, crID); err != nil {
+		return err
 	}
-	if err := addEvent(ctx, tx, c.ID, nil, EventKind(to), map[string]any{"applied": produced}); err != nil {
-		return false, err
+	details := map[string]any{"applied": produced}
+	action := "cr.applied"
+	if reconciled {
+		details["reconciled"] = true
+		action = "cr.applied_reconciled"
 	}
-	if err := activity.Record(ctx, tx, activity.Entry{Action: "cr.applied", ObjectType: "change_request", ObjectID: c.ID.String(),
+	if err := addEvent(ctx, tx, crID, nil, EventKind(to), details); err != nil {
+		return err
+	}
+	if err := activity.Record(ctx, tx, activity.Entry{Action: action, ObjectType: "change_request", ObjectID: crID.String(),
 		ClusterID: &v.ClusterID, Details: map[string]any{"vault_id": v.ID, "applied": produced}}); err != nil {
-		return false, err
+		return err
 	}
-	a.Log.Info("change request applied", "cr_id", c.ID, "vault_id", v.ID, "writes", len(plan))
-	return true, nil
+	a.Log.Info("change request applied", "cr_id", crID, "vault_id", v.ID, "writes", planLen, "reconciled", reconciled)
+	return nil
 }
 
 func (a *API) unsealItems(ctx context.Context, tx pgx.Tx, crID uuid.UUID) ([]Item, error) {

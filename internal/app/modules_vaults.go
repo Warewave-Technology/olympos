@@ -20,7 +20,7 @@ func init() {
 		svc := &vaults.Service{DB: d.DB, Log: log, KV: d.KV, KeyVaultName: d.Cfg.KeyVault.Name, Dial: vaults.GatewayDial(d.Gateway)}
 		svc.RegisterBackup()
 		cr := &approvals.API{DB: d.DB, Log: d.Log.With("component", "approvals"), Envelope: d.Envelope, HMAC: d.HMAC,
-			Applier: svc, TTL: d.Cfg.ChangeRequests.TTL,
+			Applier: svc, Inspector: svc, TTL: d.Cfg.ChangeRequests.TTL,
 			OnApplied: func(id uuid.UUID) {
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -31,10 +31,16 @@ func init() {
 				}()
 			}}
 		api := &vaults.API{Svc: svc, Log: log, RequireTLS: !d.Cfg.DevMode}
-		expire := func(ctx context.Context) error { _, err := cr.ExpireDue(ctx); return err }
+		maint := func(ctx context.Context) error {
+			if _, err := cr.ExpireDue(ctx); err != nil {
+				return err
+			}
+			_, err := cr.ReconcileApplying(ctx)
+			return err
+		}
 		return Wiring{
 			Modules: []server.Module{api, cr},
-			Workers: []Worker{svc.Maintenance(expire)},
+			Workers: []Worker{svc.Maintenance(maint)},
 		}, nil
 	})
 }

@@ -301,9 +301,33 @@ func (s *Service) checkDrift(ctx context.Context, tx pgx.Tx, r *row) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
+	// Paths of requests still 'applying' are skipped (not advanced): their
+	// new version is Olympos' own until the outcome is recorded or
+	// reconciled (F4), then the next pass evaluates it.
+	applying := map[string]bool{}
+	rows, err = tx.Query(ctx, `SELECT DISTINCT i.mount || i.path FROM change_items i JOIN change_requests cr ON cr.id = i.cr_id
+		WHERE cr.vault_id = $1 AND cr.status = 'applying'`, r.ID)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			rows.Close()
+			return err
+		}
+		applying[ref] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	vaultName := r.Namespace + "/" + r.Service
 	for _, x := range all {
 		ref := x.mount + x.path
+		if applying[ref] {
+			continue
+		}
 		m := managed[ref]
 		if x.current < x.checked { // metadata deleted and recreated
 			x.checked = 0

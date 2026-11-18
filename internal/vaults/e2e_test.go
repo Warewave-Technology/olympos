@@ -174,6 +174,8 @@ type e2e struct {
 	t       *testing.T
 	env     *apitest.Env
 	svc     *vaults.Service
+	cr      *approvals.API
+	faults  *approvals.Faults
 	srv     *server_
 	fx      fixture
 	admin   *apitest.Client
@@ -268,7 +270,7 @@ func runE2E(t *testing.T, p provider) {
 		t.Fatal(err)
 	}
 
-	x := &e2e{t: t, srv: srv}
+	x := &e2e{t: t, srv: srv, faults: &approvals.Faults{}}
 	x.env = apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
 		x.svc = &vaults.Service{DB: e.DB, Log: e.Log, KV: e.KV, KeyVaultName: "local",
 			Dial: func(ctx context.Context, _ uuid.UUID, targetID string, opt gateway.DialOptions) (net.Conn, error) {
@@ -278,8 +280,8 @@ func runE2E(t *testing.T, p provider) {
 				var d net.Dialer
 				return d.DialContext(ctx, "tcp", srv.addr)
 			}}
-		cr := &approvals.API{DB: e.DB, Log: e.Log, Envelope: e.Envelope, HMAC: e.HMAC, Applier: x.svc}
-		return []server.Module{&vaults.API{Svc: x.svc, Log: e.Log}, cr}
+		x.cr = &approvals.API{DB: e.DB, Log: e.Log, Envelope: e.Envelope, HMAC: e.HMAC, Applier: x.svc, Inspector: x.svc, Faults: x.faults}
+		return []server.Module{&vaults.API{Svc: x.svc, Log: e.Log}, x.cr}
 	}})
 	x.fx = seed(t, x.env.DB, "prod-"+p.name, map[string]string{"env": "prod"}, "compressed")
 	if p.name == "openbao" {
@@ -543,6 +545,95 @@ func runE2E(t *testing.T, p provider) {
 	assertAbsent(t, x, srv.root, "root token")
 	for _, c := range canaries {
 		assertAbsent(t, x, c, "secret value")
+	}
+
+	applyFaults(t, x)
+}
+
+// applyFaults (F4): the outcome of a Vault write is lost (commit fails after
+// the write, or the server dies before the call). The request stays
+// 'applying', drift never reports Olympos' own write, and the reconciler
+// settles it from the KV metadata.
+func applyFaults(t *testing.T, x *e2e) {
+	ctx := context.Background()
+	lost := errors.New("injected: server killed")
+	openApprove := func(path string) approvals.ChangeRequest {
+		t.Helper()
+		var cr, out approvals.ChangeRequest
+		if code := x.call(x.maker, "POST", "/api/v1/change-requests", map[string]any{"vault_id": x.fx.vaultID, "justification": "fault injection " + path,
+			"items": []map[string]any{{"mount": "secret/", "path": path, "key": "K", "op": "create", "base_version": 0, "value": canaryNew}}}, &cr); code != 201 {
+			t.Fatalf("open %s: %d", path, code)
+		}
+		if code := x.call(x.checker, "POST", "/api/v1/change-requests/"+cr.ID.String()+"/approve", map[string]any{}, &out); code != 200 {
+			t.Fatalf("approve %s: %d", path, code)
+		}
+		if out.Status != approvals.StatusApplying {
+			t.Fatalf("%s: status %s, want applying", path, out.Status)
+		}
+		return out
+	}
+	backdate := func(id uuid.UUID) {
+		t.Helper()
+		if _, err := x.env.DB.Exec(ctx, `UPDATE change_requests SET applying_at = now() - interval '3 minutes' WHERE id = $1`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status := func(id uuid.UUID) (approvals.Status, string) {
+		t.Helper()
+		var st, code string
+		_ = x.env.DB.QueryRow(ctx, `SELECT status, failure_code FROM change_requests WHERE id = $1`, id).Scan(&st, &code)
+		return approvals.Status(st), code
+	}
+	driftOpen := func(ref string) int {
+		var n int
+		_ = x.env.DB.QueryRow(ctx, `SELECT count(*) FROM findings WHERE source = 'vault-drift' AND status = 'open' AND resource_ref = $1`, ref).Scan(&n)
+		return n
+	}
+
+	// Commit lost after Vault wrote v1.
+	x.faults.AfterVault = func() error { return lost }
+	written := openApprove("app/f4-written")
+	x.faults.AfterVault = nil
+	if s := x.kv("app/f4-written"); s.VersionMetadata.Version != 1 {
+		t.Fatalf("vault write: v%d", s.VersionMetadata.Version)
+	}
+	x.refresh()
+	if driftOpen("secret/app/f4-written") != 0 {
+		t.Fatal("Olympos' own write reported as drift while applying")
+	}
+	if n, _ := x.cr.ReconcileApplying(ctx); n != 0 {
+		t.Fatal("reconciled before 2 minutes")
+	}
+	backdate(written.ID)
+
+	// Server died before the Vault call.
+	x.faults.BeforeVault = func() error { return lost }
+	unwritten := openApprove("app/f4-unwritten")
+	x.faults.BeforeVault = nil
+	backdate(unwritten.ID)
+
+	if n, err := x.cr.ReconcileApplying(ctx); err != nil || n != 2 {
+		t.Fatalf("reconcile: %d %v", n, err)
+	}
+	if st, _ := status(written.ID); st != approvals.StatusApplied {
+		t.Fatalf("written: %s", st)
+	}
+	if st, code := status(unwritten.ID); st != approvals.StatusFailed || code != approvals.FailApplyUnknown {
+		t.Fatalf("unwritten: %s %s", st, code)
+	}
+	var acts, sealed int
+	_ = x.env.DB.QueryRow(ctx, `SELECT count(*) FROM activity_log WHERE action = 'cr.applied_reconciled' AND object_id = $1`, written.ID.String()).Scan(&acts)
+	_ = x.env.DB.QueryRow(ctx, `SELECT count(*) FROM change_items WHERE cr_id = ANY($1) AND (sealed_value IS NOT NULL OR wrapped_dek IS NOT NULL)`,
+		[]uuid.UUID{written.ID, unwritten.ID}).Scan(&sealed)
+	if acts != 1 || sealed != 0 {
+		t.Fatalf("reconciled activity %d, sealed left %d", acts, sealed)
+	}
+	x.refresh()
+	if driftOpen("secret/app/f4-written") != 0 {
+		t.Fatal("reconciled write reported as drift")
+	}
+	if d := x.secret("app/f4-written"); !d.Managed {
+		t.Fatalf("reconciled write not managed: %+v", d)
 	}
 }
 

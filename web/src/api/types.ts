@@ -448,7 +448,7 @@ export interface ChangeRequestInput {
   justification: string;
   items: ChangeItemInput[];
 }
-export type CRStatus = 'pending' | 'approved' | 'applied' | 'rejected' | 'expired' | 'failed' | 'cancelled';
+export type CRStatus = 'pending' | 'approved' | 'applying' | 'applied' | 'rejected' | 'expired' | 'failed' | 'cancelled';
 export interface ChangeRequest {
   id: string;
   /** Optional (openapi extension): short display number, e.g. CR-0142. */
@@ -465,6 +465,8 @@ export interface ChangeRequest {
   decision_comment: string;
   applied_at: string | null;
   failure: string;
+  /** apply_error | apply_unknown | conflict ('' unless failed). */
+  failure_code?: string;
   can_approve: boolean;
   approve_disabled_reason: string;
   can_cancel: boolean;
@@ -480,7 +482,7 @@ export interface ChangeRequest {
   }[];
   events: {
     at: string;
-    kind: 'opened' | 'approved' | 'rejected' | 'applied' | 'failed' | 'expired' | 'cancelled' | string;
+    kind: 'opened' | 'approved' | 'applying' | 'rejected' | 'applied' | 'failed' | 'expired' | 'cancelled' | string;
     actor_name: string;
     details: Record<string, unknown>;
   }[];

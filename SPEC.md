@@ -506,14 +506,15 @@ A KV v2 secret is one JSON map at a path; every write creates a new **version** 
 ### 11.4 Approvals (maker/checker) — MUST
 State machine:
 ```
-pending ──approve──▶ approved ──apply ok──▶ applied
-   │                     └──apply err──▶ failed (e.g. cas conflict)
+pending ──approve──▶ approved ──▶ applying ──apply ok──▶ applied
+   │                                  └──apply err──▶ failed (e.g. cas conflict)
    ├──reject──▶ rejected
    └──ttl──▶ expired
 ```
+- Vault write and DB commit are not atomic, so the apply is two transactions around the Vault call: (1) `approved → applying` committed with `change_events`, (2) `applying → applied` with the resulting versions, or `failed`. The vault lock is held across both. A **reconciler** (every minute, leader only) settles requests left in `applying` for more than 2 minutes from the KV metadata: version `base+1` created after `applying` → `applied` (`cr.applied_reconciled`); version still `base` → `failed` (`apply_unknown`, retry with a new request); anything else → `failed` (`conflict`). Drift detection skips paths of requests in `applying`.
 - Maker ≠ checker, compared by `(tenant_id, object_id)`. **No role bypasses this, including admin.**
 - Checker needs `vault-approver` in scope of the vault's cluster; maker needs `vault-maker`.
-- New values sealed with envelope encryption at submit; **sealed_value set to NULL** on applied/rejected/expired/failed.
+- New values sealed with envelope encryption at submit; **sealed_value set to NULL** on applied/rejected/expired/failed (kept while `applying`).
 - TTL default 72 h (configurable).
 - Checker sees: vault, path, key, op, HMAC fingerprint, base version, justification, maker. Never the value.
 - UI: change request form is a **right-side drawer** on the Vaults page with "New value" + "Confirm value".

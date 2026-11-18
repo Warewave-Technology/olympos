@@ -46,6 +46,7 @@ export function RunBadge({ run }: { run: Pick<BackupRun, 'status' | 'error'> }) 
 const CR_LABEL: Record<string, [string, Tone]> = {
   pending: ['Pending approval', 'warn'],
   approved: ['Approved', 'info'],
+  applying: ['Applying', 'info'],
   applied: ['Applied', 'ok'],
   rejected: ['Rejected', 'crit'],
   expired: ['Expired', 'mute'],
