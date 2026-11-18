@@ -54,9 +54,26 @@ kubectl -n lab create secret tls pg-tls --cert "$WORK/pg.crt" --key "$WORK/pg.ke
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
 
+if ! kubectl get ns kyverno >/dev/null 2>&1; then
+  log "installing kyverno"
+  helm repo add kyverno https://kyverno.github.io/kyverno/ >/dev/null 2>&1 || true
+  helm repo update kyverno >/dev/null
+  helm upgrade --install kyverno kyverno/kyverno -n kyverno --create-namespace --wait --timeout 5m \
+    --set admissionController.replicas=1 --set backgroundController.replicas=1 \
+    --set cleanupController.enabled=false --set reportsController.replicas=1 >/dev/null
+fi
+kubectl apply -f test/e2e/manifests/kyverno-policy.yaml >/dev/null
+
 log "deploying olympos-server (dev mode, local key vault)"
 helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \
   -f test/e2e/server-values.yaml --wait --timeout 5m >/dev/null
+# Same image tag on every build: restart so freshly loaded images are used.
+kubectl -n olympos rollout restart deploy/olympos >/dev/null
+kubectl -n olympos rollout status deploy/olympos --timeout=180s >/dev/null
+if kubectl -n olympos-system get deploy olympos-agent >/dev/null 2>&1; then
+  kubectl -n olympos-system rollout restart deploy/olympos-agent >/dev/null
+  kubectl -n olympos-system rollout status deploy/olympos-agent --timeout=180s >/dev/null
+fi
 
 kubectl -n lab rollout status statefulset/orders-pg --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
