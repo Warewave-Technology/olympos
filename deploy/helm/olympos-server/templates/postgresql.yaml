@@ -1,0 +1,114 @@
+{{- if .Values.postgresql.bundled }}
+{{- $name := printf "%s-postgresql" .Release.Name }}
+{{- /* The password is generated once and kept across upgrades. */}}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
+{{- $password := randAlphaNum 40 }}
+{{- if and $existing $existing.data (index $existing.data "password") }}
+{{- $password = index $existing.data "password" | b64dec }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $name }}
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+type: Opaque
+data:
+  password: {{ $password | b64enc | quote }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  selector: {{- include "olympos-server.postgresqlSelector" . | nindent 4 }}
+  ports:
+  - {name: postgresql, port: 5432, targetPort: postgresql}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name }}
+  replicas: 1
+  selector:
+    matchLabels: {{- include "olympos-server.postgresqlSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "olympos-server.postgresqlSelector" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: postgresql
+        image: {{ .Values.postgresql.image }}
+        imagePullPolicy: IfNotPresent
+        env:
+        - {name: POSTGRES_USER, value: olympos}
+        - {name: POSTGRES_DB, value: olympos}
+        - {name: POSTGRES_PASSWORD_FILE, value: /etc/olympos-db/password}
+        - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+        # Network connections authenticate with SCRAM-SHA-256 only; the Unix
+        # socket (inside this container, kubectl exec) is trusted.
+        - {name: POSTGRES_HOST_AUTH_METHOD, value: scram-sha-256}
+        - {name: POSTGRES_INITDB_ARGS, value: "--auth-host=scram-sha-256"}
+        ports:
+        - {name: postgresql, containerPort: 5432}
+        readinessProbe:
+          exec: {command: [pg_isready, -U, olympos, -d, olympos]}
+          periodSeconds: 5
+        livenessProbe:
+          exec: {command: [pg_isready, -U, olympos, -d, olympos]}
+          initialDelaySeconds: 30
+          periodSeconds: 20
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities: {drop: [ALL]}
+        resources: {{- toYaml .Values.postgresql.resources | nindent 10 }}
+        volumeMounts:
+        - {name: data, mountPath: /var/lib/postgresql/data}
+        - {name: password, mountPath: /etc/olympos-db, readOnly: true}
+        - {name: run, mountPath: /var/run/postgresql}
+      volumes:
+      - name: password
+        secret: {secretName: {{ $name }}, defaultMode: 0440}
+      - name: run
+        emptyDir: {}
+      {{- with .Values.postgresql.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata: {name: data}
+    spec:
+      accessModes: [ReadWriteOnce]
+      {{- if .Values.postgresql.storageClass }}
+      storageClassName: {{ .Values.postgresql.storageClass }}
+      {{- end }}
+      resources: {requests: {storage: {{ .Values.postgresql.size }}}}
+---
+# Only the server pods reach the database.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "olympos-server.postgresqlSelector" . | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - podSelector:
+        matchLabels: {{- include "olympos-server.selector" . | nindent 10 }}
+    ports:
+    - {protocol: TCP, port: 5432}
+{{- end }}

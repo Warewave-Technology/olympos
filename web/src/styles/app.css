@@ -2996,3 +2996,28 @@ label.chk {
     padding-left: 12px;
   }
 }
+
+/* Built-in olympos-self job (Backups) */
+.self-backup .card-head h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.self-backup .lock {
+  color: var(--fg-muted);
+}
+.self-backup.attention-card {
+  border-color: var(--warn-border, var(--border));
+}
+.self-backup dl.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 6px 16px;
+  margin: 0;
+}
+.self-backup dl.kv dt {
+  color: var(--fg-muted);
+}
+.self-backup dl.kv dd {
+  margin: 0;
+}

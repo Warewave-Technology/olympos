@@ -16,3 +16,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{ .Values.image.repository }}:{{ default .Chart.AppVersion .Values.image.tag }}
 {{- end -}}
 {{- end -}}
+{{- define "olympos-server.postgresqlSelector" -}}
+app.kubernetes.io/name: olympos-postgresql
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end -}}

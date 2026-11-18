@@ -33,10 +33,16 @@ type Querier interface {
 }
 
 // Open connects and verifies the connection.
-func Open(ctx context.Context, dsn string) (*DB, error) {
+func Open(ctx context.Context, dsn string) (*DB, error) { return OpenWithPassword(ctx, dsn, "") }
+
+// OpenWithPassword is Open with the password kept out of the DSN.
+func OpenWithPassword(ctx context.Context, dsn, password string) (*DB, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("parse database dsn: %w", err)
+	}
+	if password != "" {
+		cfg.ConnConfig.Password = password
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
@@ -58,10 +64,34 @@ func Migrate(ctx context.Context, pool *DB) error {
 	}
 	db := stdlib.OpenDBFromPool(pool)
 	defer db.Close()
+	// Downgrades are refused: a database migrated by a newer Olympos has
+	// versions this binary does not know.
+	known, err := goose.CollectMigrations("migrations", 0, goose.MaxVersion)
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	latest, err := known.Last()
+	if err != nil {
+		return fmt.Errorf("migrate: %w", err)
+	}
+	var applied int64
+	err = pool.QueryRow(ctx, `SELECT COALESCE(max(version_id), 0) FROM goose_db_version WHERE is_applied`).Scan(&applied)
+	if err != nil && !isUndefinedTable(err) {
+		return fmt.Errorf("migrate: read schema version: %w", err)
+	}
+	if applied > latest.Version {
+		return fmt.Errorf("the database schema is at version %d, newer than this olympos-server (%d): downgrades are not supported; "+
+			"run the newer version or restore a dump taken before the upgrade", applied, latest.Version)
+	}
 	if err := goose.UpContext(ctx, db, "migrations"); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
+}
+
+func isUndefinedTable(err error) bool {
+	var pg *pgconn.PgError
+	return errors.As(err, &pg) && pg.Code == "42P01"
 }
 
 // Tx runs fn in a transaction, committing on nil error.

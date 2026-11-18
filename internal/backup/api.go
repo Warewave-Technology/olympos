@@ -49,6 +49,9 @@ func (a *API) Routes(r chi.Router) {
 	r.Get("/backup/runs/{id}", a.getRun)
 	r.Post("/backup/test-connection", a.testConnection)
 	r.Get("/backup/schedule-preview", a.schedulePreview)
+	r.Get("/backup/self", a.getSelf)
+	r.Put("/backup/self", a.putSelf)
+	r.Post("/backup/self/run", a.runSelf)
 }
 
 func (a *API) now() time.Time {

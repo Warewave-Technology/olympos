@@ -238,3 +238,38 @@ func TestServerSingleReplica(t *testing.T) {
 		t.Fatalf("multiReplica keeps the rolling update: %v", spec["strategy"])
 	}
 }
+
+// F17: the bundled PostgreSQL by default; only the server may reach it.
+func TestServerBundledPostgreSQL(t *testing.T) {
+	docs, err := renderServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range [][2]string{{"StatefulSet", "o-postgresql"}, {"Service", "o-postgresql"}, {"Secret", "o-postgresql"}, {"NetworkPolicy", "o-postgresql"}} {
+		if find(docs, k[0], k[1]) == nil {
+			t.Fatalf("%s %s missing", k[0], k[1])
+		}
+	}
+	sts, _ := yaml.Marshal(find(docs, "StatefulSet", "o-postgresql"))
+	if !strings.Contains(string(sts), "@sha256:") || !strings.Contains(string(sts), "scram-sha-256") {
+		t.Fatalf("postgres image must be pinned by digest and use SCRAM:\n%s", sts)
+	}
+	np, _ := yaml.Marshal(find(docs, "NetworkPolicy", "o-postgresql"))
+	if !strings.Contains(string(np), "app.kubernetes.io/name: olympos-server") {
+		t.Fatalf("network policy must admit only the server:\n%s", np)
+	}
+	cfg := find(docs, "ConfigMap", "o-config")["data"].(map[string]any)["config.yaml"].(string)
+	if !strings.Contains(cfg, "dsn: postgres://olympos@o-postgresql.olympos.svc:5432/olympos") || !strings.Contains(cfg, "passwordFile: /etc/olympos/db/password") {
+		t.Fatalf("config: %s", cfg)
+	}
+	docs, err = renderServer(t, "--set", "postgresql.bundled=false", "--set", "olympos.database.dsnRef=kv://kv/dsn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if find(docs, "StatefulSet", "o-postgresql") != nil {
+		t.Fatal("external database: no bundled PostgreSQL")
+	}
+	if _, err := renderServer(t, "--set", "olympos.database.dsnRef=kv://kv/dsn"); err == nil {
+		t.Fatal("bundled + dsnRef must fail")
+	}
+}

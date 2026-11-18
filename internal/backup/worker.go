@@ -203,7 +203,9 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 	}
 	var done []finished
 	err := store.Tx(ctx, w.DB, func(tx pgx.Tx) error {
+		// The olympos-self runner settles its own runs (SelfBackup).
 		rows, err := tx.Query(ctx, `SELECT id FROM backup_runs WHERE status = 'running' AND updated_at < now() - $1::interval
+			AND job_id NOT IN (SELECT id FROM backup_jobs WHERE system <> '')
 			FOR UPDATE SKIP LOCKED`, fmt.Sprintf("%d seconds", int(stale.Seconds())))
 		if err != nil {
 			return err

@@ -50,6 +50,7 @@ type Deps struct {
 	Gateway   *gateway.Gateway
 	Inventory *inventory.Service
 	Cred      azcore.TokenCredential // nil in devMode without Azure
+	SelfDB    SelfDB
 }
 
 // Worker is a background loop started with the server.
@@ -72,8 +73,14 @@ func NewLogger(level slog.Level) *slog.Logger {
 	return slog.New(secrets.NewRedactingHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 }
 
+// SelfDB is the login of Olympos' own database, for the olympos-self backup.
+type SelfDB struct {
+	DSN, Password string
+}
+
 // Run starts the server and blocks until SIGTERM.
 func Run(cfgPath string) error {
+	started := time.Now()
 	log := NewLogger(slog.LevelInfo)
 	cfg, err := config.Load(cfgPath)
 	if err != nil {
@@ -98,8 +105,27 @@ func Run(cfgPath string) error {
 		dsn = strings.TrimSpace(string(b))
 		secrets.Zero(b)
 	}
-	d.DB, err = store.Open(ctx, dsn)
-	dsn = ""
+	var dbPassword string
+	if cfg.Database.PasswordFile != "" {
+		b, err := os.ReadFile(cfg.Database.PasswordFile)
+		if err != nil {
+			return fmt.Errorf("read database.passwordFile: %w", err)
+		}
+		dbPassword = strings.TrimSpace(string(b))
+	}
+	// The database may start after the server (bundled PostgreSQL, a host
+	// booting): wait for it for up to two minutes.
+	for wait := time.Second; ; wait = min(2*wait, 10*time.Second) {
+		d.DB, err = store.OpenWithPassword(ctx, dsn, dbPassword)
+		if err == nil || ctx.Err() != nil || time.Since(started) > 2*time.Minute {
+			break
+		}
+		log.Warn("database not reachable yet, retrying", "err", err, "in", wait.String())
+		time.Sleep(wait)
+	}
+	// The self-backup (olympos-self) dumps this database with the same login.
+	d.SelfDB = SelfDB{DSN: dsn, Password: dbPassword}
+	dsn, dbPassword = "", ""
 	if err != nil {
 		return err
 	}
@@ -163,8 +189,10 @@ func Run(cfgPath string) error {
 		return err
 	}
 	srv.SPA = sub
+	sysWarn := d.checkKEKRecovery(ctx)
 	srv.Modules = append(srv.Modules, &inventory.API{DB: d.DB, Log: log.With("component", "inventory"), Gateway: d.Gateway, CA: d.CA,
-		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART"), AgentSets: agentSets()})
+		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART"), AgentSets: agentSets(),
+		SystemWarnings: func() []inventory.AttentionItem { return sysWarn }})
 	for _, w := range wiring {
 		srv.Modules = append(srv.Modules, w.Modules...)
 	}
@@ -228,6 +256,30 @@ func Run(cfgPath string) error {
 	_ = opsSrv.Shutdown(shutdown)
 	gs.GracefulStop()
 	wg.Wait()
+	return nil
+}
+
+// checkKEKRecovery warns when the KEK could be purged (F17): the Olympos
+// database dump is useless without it. Checked once at startup.
+func (d *Deps) checkKEKRecovery(ctx context.Context) []inventory.AttentionItem {
+	rc, ok := d.KV.(secrets.RecoveryChecker)
+	if !ok {
+		return nil
+	}
+	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	okRec, level, err := rc.KEKRecoverable(cctx)
+	switch {
+	case err != nil:
+		d.Log.Warn("could not check Key Vault purge protection", "err", err)
+		return []inventory.AttentionItem{{Kind: "kek_recovery_unknown", Severity: "warn", Label: "Key Vault",
+			Detail: "could not check purge protection of the KEK (needs keys/get)", Link: "/settings"}}
+	case !okRec:
+		d.Log.Error("Key Vault purge protection is off: the KEK can be purged and every Olympos backup of its own database becomes useless",
+			"recovery_level", level)
+		return []inventory.AttentionItem{{Kind: "kek_purgeable", Severity: "crit", Label: "Key Vault",
+			Detail: "purge protection is off (" + level + "): enable soft delete and purge protection", Link: "/settings"}}
+	}
 	return nil
 }
 

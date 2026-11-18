@@ -42,6 +42,9 @@ type API struct {
 	// image mirror for air-gapped installs (OLYMPOS_AGENT_INSTALL_SETS).
 	AgentSets []string
 	Now       func() time.Time
+	// SystemWarnings returns setup problems of the server itself (e.g. Key
+	// Vault purge protection off) for the Needs-attention strip. Optional.
+	SystemWarnings func() []AttentionItem
 }
 
 // Routes mounts the module under /api/v1.
@@ -787,6 +790,30 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid.UUID) ([]AttentionItem, error) {
 	var out []AttentionItem
+	// Olympos itself (F17): its database must be backed up (olympos-self)
+	// and its Key Vault must keep the KEK recoverable.
+	if s.CanGlobal(authz.PermRead) {
+		var configured bool
+		var lastStatus, lastErr string
+		err := a.DB.QueryRow(ctx, `SELECT true, COALESCE((SELECT r.status || '|' || r.error FROM backup_runs r WHERE r.job_id = j.id
+			AND r.status IN ('succeeded','failed') AND r.created_at > now() - interval '48 hours' ORDER BY r.created_at DESC LIMIT 1), '')
+			FROM backup_jobs j WHERE j.system = 'olympos-self'`).Scan(&configured, &lastStatus)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		lastStatus, lastErr, _ = strings.Cut(lastStatus, "|")
+		switch {
+		case !configured:
+			out = append(out, AttentionItem{Kind: "self_backup_unset", Severity: "warn", Label: "Olympos backup",
+				Detail: "choose where the Olympos database is backed up", Link: "/backups?self=1"})
+		case lastStatus == "failed":
+			out = append(out, AttentionItem{Kind: "self_backup_failed", Severity: "crit", Label: "Olympos backup failed",
+				Detail: shortErr(lastErr), Link: "/backups?self=1"})
+		}
+		if a.SystemWarnings != nil {
+			out = append(out, a.SystemWarnings()...)
+		}
+	}
 	// Latest run per job in the last 48 h that failed or was missed.
 	rows, err := a.DB.Query(ctx, `
 		SELECT DISTINCT ON (j.id) j.id, t.service, r.status, r.error

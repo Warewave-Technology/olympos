@@ -6,7 +6,14 @@ metadata:
 data:
   config.yaml: |
     olympos:
-{{ toYaml .Values.olympos | indent 6 }}
+{{- $o := deepCopy .Values.olympos }}
+{{- if .Values.postgresql.bundled }}
+{{- if or .Values.olympos.database.dsnRef .Values.olympos.database.dsn }}
+{{- fail "postgresql.bundled=true and olympos.database.dsn/dsnRef are both set: set postgresql.bundled=false to use an external database" }}
+{{- end }}
+{{- $_ := set $o "database" (dict "dsn" (printf "postgres://olympos@%s-postgresql.%s.svc:5432/olympos?sslmode=disable" .Release.Name .Release.Namespace) "passwordFile" "/etc/olympos/db/password") }}
+{{- end }}
+{{ toYaml $o | indent 6 }}
       experimental:
         multiReplica: {{ .Values.experimental.multiReplica }}
       listen:

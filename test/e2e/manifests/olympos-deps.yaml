@@ -1,34 +1,8 @@
-# Olympos's own dependencies in the lab: its PostgreSQL and Azurite (Blob fake).
+# Olympos's own dependencies in the lab: Azurite (Blob fake) and MinIO. Its
+# PostgreSQL is the chart's bundled one.
 apiVersion: v1
 kind: Namespace
 metadata: {name: olympos}
----
-apiVersion: apps/v1
-kind: StatefulSet
-metadata: {name: olympos-db, namespace: olympos}
-spec:
-  serviceName: olympos-db
-  replicas: 1
-  selector: {matchLabels: {app: olympos-db}}
-  template:
-    metadata: {labels: {app: olympos-db}}
-    spec:
-      containers:
-      - name: pg
-        image: postgres:16-alpine
-        env:
-        - {name: POSTGRES_USER, value: olympos}
-        - {name: POSTGRES_PASSWORD, value: lab-db-password}
-        - {name: POSTGRES_DB, value: olympos}
-        ports: [{containerPort: 5432}]
-        readinessProbe: {exec: {command: [pg_isready, -U, olympos]}, periodSeconds: 3}
----
-apiVersion: v1
-kind: Service
-metadata: {name: olympos-db, namespace: olympos}
-spec:
-  selector: {app: olympos-db}
-  ports: [{port: 5432}]
 ---
 apiVersion: apps/v1
 kind: Deployment

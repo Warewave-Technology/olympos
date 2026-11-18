@@ -30,7 +30,9 @@ olympos:
     hmacSecretName: olympos-hmac
     managedIdentityClientID: ""
   database:
-    dsnRef: ""                 # kv://<vault>/olympos-db-dsn
+    # Used only with postgresql.bundled=false (external PostgreSQL, e.g.
+    # Azure Database for PostgreSQL): kv://<vault>/olympos-db-dsn.
+    dsnRef: ""
   slack:
     botTokenRef: ""
   deadMansSwitch:
@@ -40,6 +42,21 @@ olympos:
     perClusterConcurrency: 2
   changeRequests:
     ttl: 72h
+
+# Olympos' own database. bundled: a single-instance PostgreSQL 16 in the
+# same namespace (PVC, NetworkPolicy allowing only the server, generated
+# password in a Secret kept across upgrades). Set bundled=false and
+# olympos.database.dsnRef for an external database. Back the database up
+# with the built-in olympos-self job (Backups) and see docs/restore-olympos.md.
+postgresql:
+  bundled: true
+  image: docker.io/library/postgres:16.11-bookworm@sha256:a2420e9555e2224583fe84d0bb3f0b967e69354ae3a0be55a9c14e251388c4eb
+  size: 8Gi
+  storageClass: ""
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {memory: 1Gi}
+  nodeSelector: {}
 
 # Azure Workload Identity: annotate the ServiceAccount with the MI client ID.
 workloadIdentity:

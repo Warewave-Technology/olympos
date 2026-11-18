@@ -66,6 +66,9 @@ spec:
         - {name: config, mountPath: /etc/olympos/config, readOnly: true}
         - {name: tmp, mountPath: /tmp}
         - {name: trivy-cache, mountPath: /var/cache/trivy}
+        {{- if .Values.postgresql.bundled }}
+        - {name: db-password, mountPath: /etc/olympos/db, readOnly: true}
+        {{- end }}
         {{- if .Values.gatewayTLSSecret }}
         - {name: gateway-tls, mountPath: /etc/olympos/gateway-tls, readOnly: true}
         {{- end }}
@@ -87,6 +90,10 @@ spec:
         {{- else }}
         emptyDir: {sizeLimit: {{ .Values.trivyCache.size }}}
         {{- end }}
+      {{- if .Values.postgresql.bundled }}
+      - name: db-password
+        secret: {secretName: {{ .Release.Name }}-postgresql, defaultMode: 0440}
+      {{- end }}
       {{- if .Values.gatewayTLSSecret }}
       - name: gateway-tls
         secret: {secretName: {{ .Values.gatewayTLSSecret }}}

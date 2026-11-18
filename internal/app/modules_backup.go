@@ -23,14 +23,18 @@ func init() {
 
 		api := &backup.API{DB: d.DB, Log: log, Dialer: d.Gateway, Creds: creds}
 		sched := &backup.Scheduler{DB: d.DB, Log: log.With("loop", "scheduler"), DeadMansSwitchURL: d.Cfg.DeadMansSwitch.URL}
+		blobs := blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage))
 		worker := &backup.Worker{
 			DB: d.DB, Log: log.With("loop", "worker"), Dialer: d.Gateway, Creds: creds,
-			Blobs:  blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage)),
+			Blobs:  blobs,
 			Global: d.Cfg.Backup.GlobalConcurrency, PerCluster: d.Cfg.Backup.PerClusterConcurrency,
 		}
+		// olympos-self: Olympos' own database (F17).
+		self := &backup.SelfBackup{DB: d.DB, Log: log.With("loop", "olympos-self"), Blobs: blobs,
+			DSN: d.SelfDB.DSN, Password: d.SelfDB.Password}
 		return Wiring{
 			Modules: []server.Module{api},
-			Workers: []Worker{sched.Run, worker.Run},
+			Workers: []Worker{sched.Run, worker.Run, self.Run},
 		}, nil
 	})
 }

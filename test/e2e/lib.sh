@@ -38,9 +38,12 @@ reset_olympos() {
   fi
   kubectl -n olympos scale deploy/olympos --replicas=0 >/dev/null 2>&1 || true
   kubectl -n olympos wait --for=delete pod -l app.kubernetes.io/name=olympos-server --timeout=120s >/dev/null 2>&1 || true
-  kubectl -n olympos delete pod olympos-db-0 --ignore-not-found --wait=true >/dev/null   # no volume: data is gone
-  kubectl -n olympos delete pvc olympos-localkv --ignore-not-found >/dev/null
-  kubectl -n olympos rollout status statefulset/olympos-db --timeout=180s >/dev/null
+  # The bundled PostgreSQL and its volume go; helm upgrade recreates them
+  # (the password Secret is kept). Also drop the pre-F17 external lab DB.
+  kubectl -n olympos delete statefulset olympos-postgresql olympos-db --ignore-not-found --wait=true >/dev/null
+  kubectl -n olympos delete service olympos-db --ignore-not-found >/dev/null
+  kubectl -n olympos wait --for=delete pod/olympos-postgresql-0 --timeout=120s >/dev/null 2>&1 || true
+  kubectl -n olympos delete pvc data-olympos-postgresql-0 olympos-localkv --ignore-not-found --wait=true >/dev/null
   kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null 2>&1 || true
   rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json"
 }

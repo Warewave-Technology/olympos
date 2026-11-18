@@ -57,9 +57,15 @@ type Server struct {
 		ManagedIdentityClientID string `yaml:"managedIdentityClientID"`
 	} `yaml:"keyVault"`
 
+	// Database: Olympos' own PostgreSQL. Default: the local server on the
+	// same host over the Unix socket with peer auth (systemd install, F17).
+	// The Helm chart sets dsn + passwordFile for its bundled PostgreSQL;
+	// dsnRef (Key Vault) is for external databases.
 	Database struct {
 		DSNRef string `yaml:"dsnRef"`
-		DSN    string `yaml:"dsn"` // dev only; prefer dsnRef
+		DSN    string `yaml:"dsn"`
+		// PasswordFile holds the password for DSN (not in the DSN itself).
+		PasswordFile string `yaml:"passwordFile"`
 	} `yaml:"database"`
 
 	Gateway struct {
@@ -152,6 +158,10 @@ func Load(path string) (*Server, error) {
 	return c, c.Validate()
 }
 
+// DefaultDSN: local PostgreSQL over the Unix socket, peer auth, database
+// and role "olympos".
+const DefaultDSN = "postgres:///olympos?host=/var/run/postgresql"
+
 func envOverride(dst *string, key string) {
 	if v := os.Getenv(key); v != "" {
 		*dst = v
@@ -173,6 +183,9 @@ func (c *Server) defaults() {
 	def(&c.KeyVault.KEKName, "olympos-kek")
 	def(&c.KeyVault.HMACSecretName, "olympos-hmac")
 	def(&c.KeyVault.LocalDir, "/var/lib/olympos/localkv")
+	if c.Database.DSNRef == "" {
+		def(&c.Database.DSN, DefaultDSN)
+	}
 	def(&c.Backup.PgDumpDir, "/usr/lib/postgresql")
 	def(&c.Backup.NFSRoot, "/var/lib/olympos/nfs")
 	if c.Backup.S3PartSizeMiB == 0 {
@@ -226,8 +239,8 @@ func (c *Server) Validate() error {
 	if c.Backup.S3PartSizeMiB < 5 || c.Backup.S3PartSizeMiB > 5120 {
 		errs = append(errs, "backup.s3PartSizeMiB must be between 5 and 5120")
 	}
-	if c.Database.DSN == "" && c.Database.DSNRef == "" {
-		errs = append(errs, "database.dsnRef is required")
+	if c.Database.DSN != "" && c.Database.DSNRef != "" {
+		errs = append(errs, "set database.dsn or database.dsnRef, not both")
 	}
 	if len(errs) > 0 {
 		return errors.New("invalid config: " + strings.Join(errs, "; "))

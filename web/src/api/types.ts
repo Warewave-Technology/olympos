@@ -140,7 +140,7 @@ export interface Target {
 }
 
 export interface AttentionItem {
-  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves';
+  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'self_backup_unset' | 'self_backup_failed' | 'kek_purgeable' | 'kek_recovery_unknown';
   severity: 'crit' | 'warn';
   label: string;
   detail: string;
@@ -325,6 +325,29 @@ export interface BackupRun {
   destination_name?: string;
   /** Optional (openapi extension): dry-run checklist steps. */
   steps?: { name: string; ok: boolean; detail: string }[];
+}
+/** GET /backup/self: the built-in olympos-self job (Olympos' own database). */
+export interface SelfBackup {
+  configured: boolean;
+  job: {
+    id: string;
+    destination_id: string;
+    destination_name: string;
+    cron: string;
+    timezone: string;
+    retention: Retention;
+    enabled: boolean;
+    notify_channel_id: string | null;
+    created_at: string;
+  } | null;
+  runs: BackupRun[];
+}
+export interface SelfBackupInput {
+  destination_id?: string;
+  cron?: string;
+  timezone?: string;
+  retention?: Retention;
+  enabled?: boolean;
 }
 export interface BackupJob {
   id: string;

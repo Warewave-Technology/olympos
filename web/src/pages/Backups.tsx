@@ -11,6 +11,7 @@ import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
 import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { DataTable, type Column } from '../ui/DataTable';
+import { SelfBackupCard } from '../ui/SelfBackupCard';
 import { ClusterOverview, ScopeCrumbs, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
@@ -33,10 +34,10 @@ function jobStatus(j: BackupJob) {
 }
 
 export function BackupsPage() {
-  const { tab, cluster } = backupsRoute.useSearch();
+  const { tab, cluster, self } = backupsRoute.useSearch();
   const scope = resolveScope(cluster, !!tab);
   const { list: clusters, q: clustersQ } = useClusterList();
-  return scope.mode === 'overview' ? <BackupsOverview clusters={clusters} clustersLoading={clustersQ.isPending} /> : <BackupsDetail scope={scope} clusters={clusters} />;
+  return scope.mode === 'overview' ? <BackupsOverview clusters={clusters} clustersLoading={clustersQ.isPending} focusSelf={!!self} /> : <BackupsDetail scope={scope} clusters={clusters} />;
 }
 
 function DestinationsLink() {
@@ -47,7 +48,7 @@ function DestinationsLink() {
   );
 }
 
-function BackupsOverview({ clusters, clustersLoading }: { clusters: ClusterInfo[]; clustersLoading: boolean }) {
+function BackupsOverview({ clusters, clustersLoading, focusSelf }: { clusters: ClusterInfo[]; clustersLoading: boolean; focusSelf: boolean }) {
   const navigate = useNavigate({ from: '/backups' });
   const q = useQuery({ queryKey: ['backup-clusters'], queryFn: () => api.get<ItemList<BackupClusterSummary>>('/backup/clusters') });
   const rows = q.data?.items ?? [];
@@ -95,6 +96,7 @@ function BackupsOverview({ clusters, clustersLoading }: { clusters: ClusterInfo[
           <b>{plural(failing, 'cluster')} with failed or missed runs in the last 24 hours.</b> Open a cluster to see its runs.
         </div>
       )}
+      <SelfBackupCard focus={focusSelf} />
       <ClusterOverview<BackupClusterSummary>
         label="Backups by cluster"
         what="backup-clusters"

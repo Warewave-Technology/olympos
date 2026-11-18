@@ -105,3 +105,9 @@ export function CheckIcon({ ok, warn, label }: { ok: boolean | null | undefined;
   if (warn) return <IconWarn className="ico ico-warn" label={label ?? 'Warning'} />;
   return ok ? <IconCheck className="ico ico-ok" label={label ?? 'Passed'} /> : <IconCross className="ico ico-crit" label={label ?? 'Failed'} />;
 }
+export const IconLock = (p: P) => (
+  <Svg {...p}>
+    <rect x="5" y="11" width="14" height="9" rx="2" />
+    <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+  </Svg>
+);

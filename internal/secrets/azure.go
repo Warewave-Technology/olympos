@@ -138,3 +138,37 @@ func statusOnly(err error) string {
 	}
 	return s
 }
+
+// RecoveryChecker is implemented by key vaults that can tell whether the KEK
+// survives a deletion (F17: a database dump is useless without the KEK).
+type RecoveryChecker interface {
+	// KEKRecoverable reports whether the KEK is protected from purge
+	// (soft delete + purge protection) and the raw recovery level.
+	KEKRecoverable(ctx context.Context) (bool, string, error)
+}
+
+// KEKRecoverable reads the KEK's recoveryLevel (data plane, keys/get): any
+// level containing "Purgeable" means purge protection is off.
+func (a *AzureKeyVault) KEKRecoverable(ctx context.Context) (bool, string, error) {
+	c, err := a.keyClient()
+	if err != nil {
+		return false, "", err
+	}
+	resp, err := c.GetKey(ctx, a.KEKName, "", nil)
+	if err != nil {
+		return false, "", errors.New("read KEK attributes: " + statusOnly(err))
+	}
+	if resp.Attributes == nil || resp.Attributes.RecoveryLevel == nil {
+		return false, "", errors.New("the KEK has no recovery level")
+	}
+	level := string(*resp.Attributes.RecoveryLevel)
+	return RecoverableLevel(level), level, nil
+}
+
+// RecoverableLevel: soft delete with purge protection (no "Purgeable").
+func RecoverableLevel(level string) bool {
+	if strings.Contains(level, "Purgeable") {
+		return false
+	}
+	return strings.HasPrefix(level, "Recoverable") || strings.HasPrefix(level, "CustomizedRecoverable")
+}

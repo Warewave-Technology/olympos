@@ -28,9 +28,17 @@ Kubernetes cluster. Agents dial out to the server; the server never connects int
 
 ### Key Vault
 
+**Soft delete and purge protection must be on.** Olympos encrypts its secrets with a KEK in Key Vault
+(envelope encryption): a dump of the Olympos database (the built-in `olympos-self` backup) is useless
+without that key. `deploy/bicep/keyvault.bicep` creates a vault with both enabled, the KEK and the role
+assignments. The server checks the KEK's recovery level at startup (needs `keys/get`, part of *Key Vault
+Crypto User*) and shows "Key Vault · purge protection is off" in *Needs attention* otherwise.
+
 ```bash
+az keyvault update --name kv-platform-weu --enable-purge-protection true   # existing vault
 az keyvault key create --vault-name kv-platform-weu --name olympos-kek --kty RSA --size 3072 --ops wrapKey unwrapKey
 az keyvault secret set --vault-name kv-platform-weu --name olympos-hmac --value "$(openssl rand -hex 32)"
+# only for an external database (postgresql.bundled=false):
 az keyvault secret set --vault-name kv-platform-weu --name olympos-db-dsn \
   --value 'postgres://olympos:<password>@<server>.postgres.database.azure.com:5432/olympos?sslmode=verify-full'
 ```
@@ -57,8 +65,9 @@ olympos:
     kekName: olympos-kek
     hmacSecretName: olympos-hmac
     managedIdentityClientID: <managed identity client id>
-  database:
-    dsnRef: kv://kv-platform-weu/olympos-db-dsn
+  # database: by default the chart runs a bundled PostgreSQL 16 in the same namespace
+  # (postgresql.bundled=true). For an external one: postgresql.bundled=false and
+  #   database: {dsnRef: kv://kv-platform-weu/olympos-db-dsn}
   slack:
     botTokenRef: kv://kv-platform-weu/olympos-slack-bot-token   # chat:write
   deadMansSwitch:
@@ -76,6 +85,21 @@ The gateway (`:8443`) is exposed by an internal LoadBalancer by default. Its TLS
 issued by Olympos's internal CA for the host of `agentGatewayURL` (agents pin that CA); set
 `gatewayTLSSecret` to use your own. **Do not terminate TLS for `:8443` in a proxy** — mTLS must reach
 the server.
+
+### Olympos' own database
+
+By default the chart deploys a single-instance PostgreSQL 16 next to the server (`postgresql.bundled:
+true`): the official `postgres` image pinned by digest, a PVC (`postgresql.size`, default 8 Gi), a
+NetworkPolicy that admits only the server pods, and a generated password in the Secret
+`<release>-postgresql` (kept on upgrade and uninstall). Host connections use SCRAM-SHA-256. For an
+external database (Azure Database for PostgreSQL) set `postgresql.bundled: false` and
+`olympos.database.dsnRef`.
+
+Its state (grants, the internal CA key, change requests, schedules) must survive a lost cluster: after
+installing, open **Backups › Olympos database** and choose a destination. The built-in job
+`olympos-self` (`pg_dump -Fc`, daily by default, same manifest, tags and retention as every job) cannot
+be deleted; the Dashboard shows *Needs attention* until it has a destination. Restore:
+`docs/restore-olympos.md`.
 
 **v0.1 runs as a single replica.** Availability comes from Kubernetes restarting the pod; agents reconnect
 automatically. Multi-replica is planned for v0.2. A tunnel can only be opened on the replica the agent is
@@ -252,4 +276,5 @@ no buttons, never secret values.
   backlog, change requests). `/healthz`, `/readyz`.
 - Logs are JSON (slog) with a redaction layer.
 - Upgrade: `helm upgrade`. Migrations run at start-up.
-- Restore procedures: `docs/restore.md`. Vault break-glass: `docs/runbooks/vault-break-glass.md`.
+- Restore procedures: `docs/restore.md` (targets) and `docs/restore-olympos.md` (Olympos itself).
+  Vault break-glass: `docs/runbooks/vault-break-glass.md`.

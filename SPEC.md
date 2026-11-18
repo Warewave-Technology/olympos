@@ -99,7 +99,9 @@ olympos/
 ## 2. Deployment & configuration
 
 ### 2.1 Server
-- Runs in the customer's Azure (AKS or VM/Container Apps — Helm chart targets k8s).
+- Two deployment modes (owner decision): **Kubernetes** (Helm chart) and a plain **systemd service** on a Linux VM (`.deb`/`.rpm`/tarball, `docs/install-systemd.md`). v0.1 runs as a **single instance** in both (§17, F5).
+- **Olympos' own database** runs next to the server by default: a bundled single-instance PostgreSQL 16 StatefulSet in the same namespace (Helm, `postgresql.bundled: true`), or the local PostgreSQL on the same host over the Unix socket with peer auth (systemd, `database.dsn: postgres:///olympos?host=/var/run/postgresql`). An external PostgreSQL (e.g. Azure Database for PostgreSQL) stays supported (`postgresql.bundled: false` + `database.dsnRef`).
+- The built-in, non-deletable backup job **`olympos-self`** dumps that database (`pg_dump -Fc`, daily by default) to a destination the admin chooses at setup (Dashboard *Needs attention* until set); same manifest, tags and retention as every job. Restore: `docs/restore-olympos.md`. The dump is useless without the Key Vault KEK: soft delete + purge protection MUST be on (the server warns otherwise).
 - Uses a **User-Assigned Managed Identity** for Key Vault, Blob and (optionally) Graph.
 - Needs network reachability to every agent? **No** — agents dial in. The server only needs one inbound endpoint for agents (`:8443`, mTLS) and one for users (`:443`).
 - Config via env/Helm values. Key settings:
@@ -118,8 +120,8 @@ olympos:
     name: kv-platform-weu
     kekName: olympos-kek       # RSA/EC key used to wrap DEKs
     hmacSecretName: olympos-hmac
-  database:
-    dsnRef: kv://kv-platform-weu/olympos-db-dsn
+  database:                   # default: local/bundled PostgreSQL (see above)
+    dsnRef: kv://kv-platform-weu/olympos-db-dsn   # external database only
   deadMansSwitch:
     url: https://heartbeat.example/olympos   # optional, see §10.6
 ```
@@ -709,10 +711,10 @@ Each milestone ends with an e2e test on kind (agent + server + Postgres + Vault 
 
 ---
 
-## 20. Open questions
+## 20. Open questions — resolved (owner decisions, v0.1)
 
-1. Server hosting default: AKS (Helm) only, or also a single VM/Container Apps option?
-2. Olympos DB: require Azure Database for PostgreSQL, or allow in-cluster Postgres?
-3. Restore UI timing (v1.x?) and whether verified restores should integrate with a separate recoverability product later.
-4. Agent offline behaviour for on-prem sites with intermittent links: buffer inventory diffs, or full resync on reconnect only?
-5. Default change-request TTL (72 h) and whether some paths require **two** approvers.
+1. **Hosting:** Kubernetes (Helm) **and** a systemd service on Linux (§2.1, `docs/install-systemd.md`).
+2. **Olympos DB:** PostgreSQL on the same server/namespace by default (bundled), external PostgreSQL optional; backed up by the built-in `olympos-self` job (§2.1).
+3. **Restore UI:** v0.1 shows ready-to-copy restore commands per successful run; a UI restore to a **new** target only (maker/checker) is planned for v0.2.
+4. **Intermittent links:** full resync on reconnect (state snapshots with a generation), no diff buffering; a bounded buffer only for result-bearing work (kube-bench results, report chunks).
+5. **Approvers:** one approver in v0.1 (maker ≠ checker); TTL 72 h. Multiple approvers per path: later.

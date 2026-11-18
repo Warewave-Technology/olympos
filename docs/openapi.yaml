@@ -375,6 +375,38 @@ paths:
                 engine_options: {type: object, description: Same as BackupJobInput.engine_options}
       responses:
         "200": {description: Result, content: {application/json: {schema: {$ref: "#/components/schemas/ConnectionTest"}}}}
+  /backup/self:
+    get:
+      tags: [backups]
+      summary: The built-in olympos-self job (Olympos' own database) and its last 20 runs. Global read.
+      responses:
+        "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
+    put:
+      tags: [backups]
+      summary: Configure the olympos-self job (global admin). There is no DELETE; the job is built in.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                destination_id: {type: string}
+                cron: {type: string, description: "Default 30 2 * * *"}
+                timezone: {type: string}
+                retention: {$ref: "#/components/schemas/Retention"}
+                enabled: {type: boolean}
+                notify_channel_id: {type: [string, "null"]}
+      responses:
+        "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
+        "403": {description: Not a global admin}
+        "422": {description: Field errors}
+  /backup/self/run:
+    post:
+      tags: [backups]
+      summary: Queue a manual olympos-self run (global operate).
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {run_id: {type: string}}}}}}
+        "409": {description: Not configured yet, or a run is already queued/running}
   /backup/schedule-preview:
     get:
       tags: [backups]
@@ -1275,6 +1307,25 @@ components:
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
         estimated_monthly_cost: {type: [number, "null"], description: "estimated_monthly_bytes / GiB x cluster egress_rate_per_gb (when set)"}
         created_at: {type: string, format: date-time}
+    SelfBackup:
+      type: object
+      properties:
+        configured: {type: boolean, description: "false until an admin chose a destination (Dashboard Needs attention: self_backup_unset)"}
+        job:
+          oneOf:
+          - type: "null"
+          - type: object
+            properties:
+              id: {type: string}
+              destination_id: {type: string}
+              destination_name: {type: string}
+              cron: {type: string}
+              timezone: {type: string}
+              retention: {$ref: "#/components/schemas/Retention"}
+              enabled: {type: boolean}
+              notify_channel_id: {type: [string, "null"]}
+              created_at: {type: string, format: date-time}
+        runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}}
     BackupRun:
       type: object
       properties:

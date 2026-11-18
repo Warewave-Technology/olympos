@@ -1,5 +1,5 @@
 // DEV-ONLY request handlers for the VITE_MOCK fixture layer.
-import type { BackupJobInput, BackupRun, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
+import type { BackupJobInput, BackupRun, SelfBackup, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
@@ -64,6 +64,7 @@ function dashboard(): Dashboard {
     ...offline.map((c) => ({ kind: 'agent_offline' as const, severity: 'crit' as const, label: 'Agent offline', detail: `${c.name} · 2 h`, link: `/settings/clusters?cluster=${c.id}` })),
     { kind: 'backup_failed', severity: 'crit', label: 'Backup failed', detail: 'metrics-ch · SAS expired', link: '/backups?tab=runs' },
   ];
+  if (!selfBackup.configured) attention.push({ kind: 'self_backup_unset', severity: 'warn', label: 'Olympos backup', detail: 'choose where the Olympos database is backed up', link: '/backups?self=1' });
   if (perms().vault_approve && waiting.length) attention.push({ kind: 'approvals', severity: 'warn', label: `${waiting.length} approvals`, detail: 'waiting for you · oldest 51 h left', link: '/approvals' });
   const eol = cs.filter((c) => c.eol);
   if (eol.length) attention.push({ kind: 'eol', severity: 'warn', label: 'End of life', detail: `${eol.length} cluster${eol.length > 1 ? 's' : ''} on v1.29`, link: '/?filter=eol' });
@@ -106,6 +107,9 @@ function runFor(id: string): BackupRun | undefined {
   else Object.assign(r, { status: 'succeeded', finished_at: new Date(started + 6000).toISOString(), bytes: 2.1e6, wire_bytes: 0.4e6, steps });
   return r;
 }
+
+// The built-in olympos-self job starts unconfigured (Dashboard: Needs attention).
+const selfBackup: SelfBackup = { configured: false, job: null, runs: [] };
 
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
@@ -466,6 +470,28 @@ const routes: [string, string, Handler][] = [
       const run: BackupRun = { id: db.uuid(), job_id: j.id, target_service: j.target.service, cluster_name: j.target.cluster_name, engine: j.engine, trigger, status: 'queued', scheduled_for: null, tier: trigger === 'test' ? '' : 'daily', started_at: new Date().toISOString(), finished_at: null, bytes: 0, wire_bytes: 0, blob_path: '', sha256: '', error: '', destination_name: j.destination.name, steps: [] };
       db.runs.unshift(run);
       return ok(run, 202);
+    },
+  ],
+  ['GET', '/backup/self', () => ok(selfBackup)],
+  [
+    'PUT',
+    '/backup/self',
+    (r) => {
+      const d = db.destinations.find((x) => x.id === (r.body?.destination_id ?? selfBackup.job?.destination_id));
+      if (!d) return invalid('invalid self-backup', { destination_id: 'Choose where the Olympos database is backed up.' });
+      selfBackup.configured = true;
+      selfBackup.job = { id: selfBackup.job?.id ?? db.uuid(), destination_id: d.id, destination_name: d.name, cron: r.body?.cron ?? selfBackup.job?.cron ?? '30 2 * * *', timezone: r.body?.timezone ?? selfBackup.job?.timezone ?? 'UTC', retention: r.body?.retention ?? selfBackup.job?.retention ?? { daily: 7, weekly: 4, monthly: 12 }, enabled: r.body?.enabled ?? true, notify_channel_id: null, created_at: selfBackup.job?.created_at ?? new Date().toISOString() };
+      return ok(selfBackup);
+    },
+  ],
+  [
+    'POST',
+    '/backup/self/run',
+    () => {
+      if (!selfBackup.job) return { status: 409, body: { error: 'choose a destination for the Olympos self-backup first' } };
+      const now = new Date().toISOString();
+      selfBackup.runs.unshift({ id: db.uuid(), job_id: selfBackup.job.id, target_service: 'olympos-db', cluster_name: 'olympos', engine: 'postgresql', trigger: 'manual', status: 'succeeded', scheduled_for: null, tier: 'daily', started_at: now, finished_at: now, bytes: 4_812_331, wire_bytes: 4_812_331, blob_path: 'olympos/olympos/olympos/olympos-db/postgresql/x.zip', sha256: '', error: '' });
+      return ok({ run_id: selfBackup.runs[0].id }, 202);
     },
   ],
   [
