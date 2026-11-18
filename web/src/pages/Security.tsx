@@ -67,7 +67,7 @@ export function ScanStatusCell({ i, now = new Date() }: { i: Image; now?: Date }
           Scanned by tag
         </Badge>
         <span className="scan-why" title={why}>
-          Registry image {i.tags[0] ? `:${i.tags[0]}` : ''}
+          Registry image {i.tags[0] ? `:${i.tags[0]}` : ''} · may differ from the running image
           {i.last_scanned_at ? ` · ${age(i.last_scanned_at, now.getTime())} ago` : ''}
         </span>
       </span>
@@ -809,7 +809,7 @@ function ScanExplain({ d }: { d: ImageDetail }) {
   if (scannedByTag(d)) {
     return (
       <div className="note info" role="note">
-        <div className="note-title">Scanned by tag</div>
+        <div className="note-title">Scanned by tag · may differ from the running image</div>
         {tagScanWhy(d)}
       </div>
     );

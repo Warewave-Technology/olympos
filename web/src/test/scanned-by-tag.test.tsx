@@ -15,7 +15,7 @@ describe('scanned_by: tag', () => {
     render(<ScanStatusCell i={base} />);
     const badge = screen.getByText('Scanned by tag');
     expect(badge).toHaveAttribute('title', expect.stringMatching(/running digest is not in the registry.*registry.k8s.io\/etcd:3\.5\.15-0/));
-    expect(screen.getByText(/Registry image :3\.5\.15-0 · 3 h ago/)).toBeInTheDocument();
+    expect(screen.getByText(/Registry image :3\.5\.15-0 · may differ from the running image · 3 h ago/)).toBeInTheDocument();
   });
 
   it('counts as having results, never as "needs attention" (also when the status says unavailable)', () => {

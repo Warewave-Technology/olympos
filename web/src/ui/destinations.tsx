@@ -45,8 +45,9 @@ export function DestinationStatus({ d }: { d: Destination }) {
 }
 
 export function DeleteRefused({ d }: { d: Destination }) {
+  // NFS: always shown (deviation #13): a file system has no "write but not delete".
+  if (d.kind === 'nfs') return <Badge tone="warn" title="Olympos can delete files on NFS. Protect backups with storage-side snapshots or WORM.">No · protect on storage</Badge>;
   if (!d.last_test) return <span className="muted">Not tested</span>;
-  if (d.kind === 'nfs') return <Badge tone="warn">No · protect on storage</Badge>;
   return d.last_test.can_delete ? <Badge tone="crit">No · can delete</Badge> : <Badge tone="ok">Yes</Badge>;
 }
 

@@ -477,6 +477,11 @@ export function DestinationDialog({ dest, onClose }: { dest?: Destination; onClo
         )}
 
         {report && <TestReport report={report} kind={kind} at={reportAt} note={reportNote} />}
+        {kind === 'nfs' && (
+          <div className="note warn" role="note">
+            <b>Olympos can delete files on NFS.</b> A file system has no “write but not delete” permission. Olympos only removes its own <span className="mono">.partial</span> and probe files, but protect backups with storage-side snapshots or WORM.
+          </div>
+        )}
         {report?.can_delete && kind !== 'nfs' && (
           <div className="note crit" role="alert">
             <b>This credential can delete backups.</b> Olympos must not be able to delete backups (retention is done by lifecycle rules). Remove the delete permission ({kind === 's3' ? <>no <span className="mono">s3:DeleteObject</span></> : <>SAS without <span className="mono">d</span>, or a custom role without <span className="mono">blobs/delete</span></>}). Saving is possible, but the destination stays flagged.
