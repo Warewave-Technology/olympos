@@ -210,7 +210,9 @@ func (a *Agent) send(m *pb.AgentMessage) error {
 }
 
 func (a *Agent) runBench(ctx context.Context, req *pb.RunBench) {
-	status := func(s *pb.BenchStatus) { _ = a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchStatus{BenchStatus: s}}) }
+	status := func(s *pb.BenchStatus) {
+		_ = a.send(&pb.AgentMessage{Msg: &pb.AgentMessage_BenchStatus{BenchStatus: s}})
+	}
 	if a.Bench == nil || !a.cfg.BenchEnabled {
 		status(&pb.BenchStatus{RunId: req.RunId, NodeName: req.NodeName, State: "rejected", Message: "kube-bench is not enabled on this agent"})
 		return

@@ -6,7 +6,9 @@ import "k8s.io/client-go/rest"
 // registers itself with registerExtender in an init().
 var extenders []func(a *Agent, cfg Config, rc *rest.Config)
 
-func registerExtender(f func(a *Agent, cfg Config, rc *rest.Config)) { extenders = append(extenders, f) }
+func registerExtender(f func(a *Agent, cfg Config, rc *rest.Config)) {
+	extenders = append(extenders, f)
+}
 
 // Extend installs optional reporters and the bench runner.
 func Extend(a *Agent, cfg Config, rc *rest.Config) {
