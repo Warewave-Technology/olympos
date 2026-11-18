@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympos — Settings — notifications and access</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1d2021}
+a{color:#83a598}a:hover{color:#8ec07c}
+.nav a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:7px;color:#bdae93;text-decoration:none;font-size:14px;min-height:20px}
+.nav a:hover{background:#32302f;color:#ebdbb2}
+.nav a.on{background:#3c3836;color:#fbf1c7}
+.card{background:#282828;border:1px solid #3c3836;border-radius:10px}
+.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{text-align:left;font-weight:500;color:#a89984;padding:10px 14px;border-bottom:1px solid #3c3836;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.t td{padding:12px 14px;border-bottom:1px solid #3c3836;color:#ebdbb2;white-space:nowrap}
+.mono{font-family:'JetBrains Mono',monospace;font-size:12.5px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.ok{background:#2f3317;color:#b8bb26}.warn{background:#3d3014;color:#fabd2f}.crit{background:#3c1f1e;color:#fc7f6f}.info{background:#273436;color:#83a598}.mute{background:#3c3836;color:#d5c4a1}
+.btn{font:inherit;font-size:13px;font-weight:500;padding:9px 14px;border-radius:7px;border:1px solid #504945;background:#3c3836;color:#ebdbb2;cursor:pointer;min-height:40px}
+.btn.pri{background:#d79921;border-color:#d79921;color:#1d2021}
+.btn.sm{min-height:32px;padding:5px 11px;font-size:12.5px}
+.muted{color:#a89984}
+.side a{display:block;padding:9px 12px;border-radius:7px;color:#bdae93;text-decoration:none;font-size:14px}
+.side a.on{background:#3c3836;color:#fbf1c7}
+.chip{display:inline-block;padding:2px 8px;border-radius:5px;background:#3c3836;font-family:'JetBrains Mono',monospace;font-size:12px;color:#d5c4a1;margin:2px 4px 2px 0}
+</style>
+</head>
+<body>
+<div style="min-height: 1100px; display: flex; flex-wrap: wrap; font-family: Inter, system-ui, sans-serif; color: #ebdbb2; background: #1d2021">
+<nav class="nav" aria-label="Main" style="flex: 0 0 232px; box-sizing: border-box; padding: 20px 14px; border-right: 1px solid #3c3836; background: #282828; display: flex; flex-direction: column; gap: 4px">
+<div style="display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px">
+<svg width="30" height="30" viewBox="18 26 84 78" aria-hidden="true"><path d="M35.75 60.00 47.88 67.00 35.75 74.00 23.63 67.00Z" fill="#ebdbb2"/><path d="M23.63 67.00 35.75 74.00 35.75 88.00 23.63 81.00Z" fill="#bdae93"/><path d="M35.75 74.00 47.88 67.00 47.88 81.00 35.75 88.00Z" fill="#7c6f64"/><path d="M60.00 60.00 72.12 67.00 60.00 74.00 47.88 67.00Z" fill="#ebdbb2"/><path d="M47.88 67.00 60.00 74.00 60.00 88.00 47.88 81.00Z" fill="#bdae93"/><path d="M60.00 74.00 72.12 67.00 72.12 81.00 60.00 88.00Z" fill="#7c6f64"/><path d="M84.25 60.00 96.37 67.00 84.25 74.00 72.12 67.00Z" fill="#ebdbb2"/><path d="M72.12 67.00 84.25 74.00 84.25 88.00 72.12 81.00Z" fill="#bdae93"/><path d="M84.25 74.00 96.37 67.00 96.37 81.00 84.25 88.00Z" fill="#7c6f64"/><path d="M47.88 46.00 60.00 53.00 47.88 60.00 35.75 53.00Z" fill="#ebdbb2"/><path d="M35.75 53.00 47.88 60.00 47.88 74.00 35.75 67.00Z" fill="#bdae93"/><path d="M47.88 60.00 60.00 53.00 60.00 67.00 47.88 74.00Z" fill="#7c6f64"/><path d="M72.12 46.00 84.25 53.00 72.12 60.00 60.00 53.00Z" fill="#ebdbb2"/><path d="M60.00 53.00 72.12 60.00 72.12 74.00 60.00 67.00Z" fill="#bdae93"/><path d="M72.12 60.00 84.25 53.00 84.25 67.00 72.12 74.00Z" fill="#7c6f64"/><path d="M60.00 32.00 72.12 39.00 60.00 46.00 47.88 39.00Z" fill="#fabd2f"/><path d="M47.88 39.00 60.00 46.00 60.00 60.00 47.88 53.00Z" fill="#d79921"/><path d="M60.00 46.00 72.12 39.00 72.12 53.00 60.00 60.00Z" fill="#b57614"/><path d="M24 99H96" stroke="#fe8019" stroke-width="4" stroke-linecap="round"/></svg>
+<span style="font-family: 'Space Grotesk', Inter, sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.02em; color: #ebdbb2">olympos</span>
+</div>
+<a href="dashboard.html">Dashboard</a>
+<a href="backups.html">Backups</a>
+<a href="vaults.html">Vaults</a>
+<a href="approvals.html">Approvals <span class="badge warn">2</span></a>
+<a href="audit.html">Audit</a>
+<a href="security.html">Security</a>
+<a href="settings.html" class="on">Settings</a>
+<div style="margin-top: auto; padding: 14px 10px 0; border-top: 1px solid #3c3836; font-size: 13px">
+<div style="color: #ebdbb2">yigit@contoso.com</div>
+<div class="muted" style="font-size: 12px; margin-top: 2px">admin · Entra ID</div>
+</div>
+</nav>
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+<header>
+<h1 style="margin: 0; font-size: 24px; font-weight: 600">Settings</h1>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">Tenant <span class="mono">contoso.onmicrosoft.com</span> · tokens from other tenants are refused</p>
+</header>
+
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+<nav class="side card" aria-label="Settings sections" style="flex: 0 1 200px; padding: 8px; display: flex; flex-direction: column; gap: 2px">
+<a href="#" class="on">Access</a>
+<a href="#">Notifications</a>
+<a href="settings-destinations.html">Destinations</a>
+<a href="settings-registries.html">Registries</a>
+<a href="settings-clusters.html">Clusters &amp; agents</a>
+</nav>
+
+<div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
+<section class="card">
+<div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center">
+<div>
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">Access grants</h2>
+<div class="muted" style="font-size: 12px; margin-top: 4px">Granted to people (Entra object ID), not groups. Every change is posted to #platform-access.</div>
+</div>
+<a href="dialog-grant-access.html" class="btn pri" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none; box-sizing: border-box">Grant access</a>
+</div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Person</th><th>Object ID</th><th>Roles</th><th>Scope</th><th>Granted</th><th>Status</th><th></th></tr></thead>
+<tbody>
+<tr><td>yigit@contoso.com</td><td class="mono muted">9a2f…41bd</td><td><span class="chip">admin</span><span class="chip">vault-maker</span><span class="chip">vault-approver</span></td><td>All clusters</td><td class="mono">Bootstrap</td><td><span class="badge ok">Active</span></td><td></td></tr>
+<tr><td>selin@contoso.com</td><td class="mono muted">4c1e…a07f</td><td><span class="chip">vault-maker</span><span class="chip">vault-approver</span></td><td class="mono">env=prod</td><td class="mono">Oct 12 · yigit</td><td><span class="badge ok">Active</span></td><td><button class="btn sm">Edit</button></td></tr>
+<tr><td>mert@contoso.com</td><td class="mono muted">d71b…0c3e</td><td><span class="chip">vault-maker</span></td><td>All clusters</td><td class="mono">Oct 12 · yigit</td><td><span class="badge ok">Active</span></td><td><button class="btn sm">Edit</button></td></tr>
+<tr><td>deniz@contoso.com</td><td class="mono muted">5e09…b8a2</td><td><span class="chip">viewer</span></td><td>All clusters</td><td class="mono">Sep 03 · yigit</td><td><span class="badge warn">Stale · account disabled</span></td><td><button class="btn sm">Revoke</button></td></tr>
+</tbody>
+</table>
+</div>
+<div class="muted" style="padding: 12px 20px; font-size: 12px">vault-approver cannot be given to guest (#EXT#) accounts · Entra app requires assignment, so unassigned users get no token</div>
+</section>
+
+<section class="card">
+<div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center">
+<div>
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">Notification channels &amp; routing</h2>
+<div class="muted" style="font-size: 12px; margin-top: 4px">Slack app connected to workspace <span class="mono">contoso</span>. Define a channel once, route any event to it.</div>
+</div>
+<button class="btn">Add channel</button>
+</div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Channel</th><th>Events routed here</th><th>Used by</th><th>Last delivery</th></tr></thead>
+<tbody>
+<tr><td class="mono">#infra-backups</td><td><span class="chip">backup.failed</span><span class="chip">backup.missed</span></td><td>9 backup jobs</td><td><span class="badge ok">Today 03:34</span></td></tr>
+<tr><td class="mono">#vault-approvals</td><td><span class="chip">cr.opened</span><span class="chip">cr.expired</span><span class="chip">vault.unmanaged_write</span></td><td>3 vaults</td><td><span class="badge ok">Today 10:22</span></td></tr>
+<tr><td class="mono">#infra-audit</td><td><span class="chip">audit.new_findings</span><span class="chip">vuln.critical</span></td><td>3 schedules</td><td><span class="badge ok">Today 04:12</span></td></tr>
+<tr><td class="mono">#platform-access</td><td><span class="chip">grant.changed</span><span class="chip">grant.stale</span></td><td>Platform</td><td><span class="badge ok">Nov 14</span></td></tr>
+</tbody>
+</table>
+</div>
+<div style="height: 6px"></div>
+</section>
+</div>
+</div>
+</main>
+</div>
+</body>
+</html>

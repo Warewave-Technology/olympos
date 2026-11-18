@@ -1,0 +1,259 @@
+syntax = "proto3";
+
+package olympos.v1;
+
+option go_package = "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1;olymposv1";
+
+// AgentGateway is served by the Olympos server on :8443. The agent always
+// dials out; the server never connects to a cluster.
+//
+// SECURITY: no message in this file may carry a credential (database
+// password, Vault token, SAS token, Blob key, registry credential). This is
+// enforced by internal/gateway/proto_test.go.
+service AgentGateway {
+  // Enroll exchanges a one-time bootstrap token + CSR for a client
+  // certificate. Server-TLS only (no client cert yet).
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
+  // Control is the long-lived control stream, one per agent (mTLS).
+  rpc Control(stream AgentMessage) returns (stream ServerMessage);
+  // Tunnel carries bytes for exactly one tunnel opened via OpenTunnel or
+  // OpenAPIProxy (mTLS). The first agent->server frame carries tunnel_id.
+  rpc Tunnel(stream TunnelFrame) returns (stream TunnelFrame);
+  // RenewCert issues a fresh client certificate over the authenticated
+  // channel (mTLS) for the same cluster identity.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+}
+
+message EnrollRequest {
+  string bootstrap_token = 1;
+  bytes csr_der = 2;
+  string agent_version = 3;
+}
+
+message EnrollResponse {
+  string cluster_id = 1;
+  bytes cert_der = 2;
+  bytes ca_der = 3;
+}
+
+message RenewCertRequest {
+  bytes csr_der = 1;
+}
+
+message RenewCertResponse {
+  bytes cert_der = 1;
+}
+
+message AgentMessage {
+  oneof msg {
+    Hello hello = 1;
+    InventorySnapshot inventory = 2;
+    InventoryDiff inventory_diff = 3;
+    TargetUpsert target_upsert = 4;
+    TargetDelete target_delete = 5;
+    ResourceReport report = 6;
+    TunnelAccepted tunnel_accepted = 7;
+    TunnelRejected tunnel_rejected = 8;
+    BenchStatus bench_status = 9;
+    BenchResultChunk bench_result = 10;
+    Pong pong = 11;
+  }
+}
+
+message ServerMessage {
+  oneof msg {
+    OpenTunnel open_tunnel = 1;
+    OpenAPIProxy open_api_proxy = 2;
+    RunBench run_bench = 3;
+    RequestResync resync = 4;
+    Ping ping = 5;
+  }
+}
+
+message Hello {
+  string agent_version = 1;
+  string cluster_id = 2;
+  Capabilities capabilities = 3;
+  string provider_override = 4; // Helm providerOverride (e.g. "onprem")
+}
+
+message Capabilities {
+  bool bench_enabled = 1;
+  int32 bench_max_parallel = 2;
+  int32 max_tunnels = 3;
+  repeated string bench_allowlist = 4;
+}
+
+// ---- inventory ----
+
+message Node {
+  string name = 1;
+  string provider_id = 2;
+  string kubelet_version = 3;
+  string region = 4;
+  string zone = 5;
+  string instance_type = 6;
+  int64 cpu_capacity_milli = 7;
+  int64 mem_capacity_bytes = 8;
+  int64 cpu_allocatable_milli = 9;
+  int64 mem_allocatable_bytes = 10;
+  repeated string roles = 11;
+  bool ready = 12;
+}
+
+message InventorySnapshot {
+  string api_version = 1; // kube-apiserver gitVersion
+  repeated Node nodes = 2;
+  repeated string namespaces = 3;
+  repeated Target targets = 4; // full set of discovered targets
+}
+
+message InventoryDiff {
+  string api_version = 1;
+  repeated Node upserted_nodes = 2;
+  repeated string deleted_nodes = 3;
+  repeated string added_namespaces = 4;
+  repeated string deleted_namespaces = 5;
+}
+
+// ---- discovery ----
+
+message Target {
+  string target_id = 1; // hex(sha256(cluster|ns|svc|port)[:16])
+  string namespace = 2;
+  string service = 3;
+  int32 port = 4;
+  string port_name = 5;
+  string engine = 6;          // postgresql | clickhouse | vault (from olympos.io/backup)
+  string vault_provider = 7;  // hashicorp | openbao (from olympos.io/vault)
+  string tls_server_name = 8;
+}
+
+message TargetUpsert {
+  Target target = 1;
+}
+
+message TargetDelete {
+  string target_id = 1;
+}
+
+// ResourceReport is a full replacement of one resource kind as seen by the
+// agent. Partial updates are not supported: the server diffs.
+message ResourceReport {
+  oneof report {
+    KyvernoReport kyverno = 1;
+    NetworkPolicyReport network_policies = 2;
+    ImageReport images = 3;
+  }
+}
+
+message KyvernoPolicy {
+  string namespace = 1; // empty for ClusterPolicy
+  string name = 2;
+  string mode = 3;      // Enforce | Audit
+  repeated string rules = 4;
+  bool ready = 5;
+}
+
+message KyvernoResult {
+  string policy = 1;
+  string rule = 2;
+  string result = 3;    // pass | fail | warn | error | skip
+  string severity = 4;
+  string message = 5;
+  string resource_kind = 6;
+  string resource_namespace = 7;
+  string resource_name = 8;
+}
+
+message KyvernoReport {
+  bool installed = 1;
+  repeated KyvernoPolicy policies = 2;
+  repeated KyvernoResult results = 3;
+}
+
+message NetworkPolicy {
+  string namespace = 1;
+  string name = 2;
+  bool selects_all_pods = 3;
+  repeated string policy_types = 4;
+  int32 ingress_rules = 5;
+  int32 egress_rules = 6;
+}
+
+message NetworkPolicyReport {
+  repeated string namespaces = 1;
+  repeated NetworkPolicy policies = 2;
+}
+
+message ImageUse {
+  string image = 1;    // image string from spec (repo:tag)
+  string digest = 2;   // sha256:... from status.containerStatuses[].imageID
+  string namespace = 3;
+  string workload_kind = 4;
+  string workload_name = 5;
+  string container = 6;
+}
+
+message ImageReport {
+  repeated ImageUse uses = 1;
+}
+
+// ---- tunnels ----
+
+message OpenTunnel {
+  string tunnel_id = 1;
+  string target_id = 2; // never host:port
+  bool compressed = 3;  // transfer mode "compressed": zstd frames
+}
+
+message OpenAPIProxy {
+  string tunnel_id = 1;
+}
+
+message TunnelAccepted {
+  string tunnel_id = 1;
+}
+
+message TunnelRejected {
+  string tunnel_id = 1;
+  string reason = 2;
+}
+
+message TunnelFrame {
+  string tunnel_id = 1;
+  bytes data = 2;
+  bool close = 3;
+}
+
+// ---- kube-bench ----
+
+message RunBench {
+  string run_id = 1;
+  string node_name = 2;
+  string benchmark = 3;
+}
+
+message BenchStatus {
+  string run_id = 1;
+  string node_name = 2;
+  string state = 3; // accepted | rejected | running | succeeded | failed
+  string message = 4;
+}
+
+message BenchResultChunk {
+  string run_id = 1;
+  string node_name = 2;
+  bytes data = 3;
+  bool last = 4;
+}
+
+message RequestResync {}
+
+message Ping {
+  int64 unix_nano = 1;
+}
+
+message Pong {
+  int64 unix_nano = 1;
+}

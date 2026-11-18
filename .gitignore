@@ -1,0 +1,10 @@
+/bin/
+/dist/
+web/node_modules/
+web/dist/*
+!web/dist/index.html
+*.test
+coverage.out
+.env
+/tmp/
+test/e2e/.work/

@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympos — Audit</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1d2021}
+a{color:#83a598}a:hover{color:#8ec07c}
+.nav a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:7px;color:#bdae93;text-decoration:none;font-size:14px;min-height:20px}
+.nav a:hover{background:#32302f;color:#ebdbb2}
+.nav a.on{background:#3c3836;color:#fbf1c7}
+.card{background:#282828;border:1px solid #3c3836;border-radius:10px}
+.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{text-align:left;font-weight:500;color:#a89984;padding:10px 14px;border-bottom:1px solid #3c3836;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.t td{padding:12px 14px;border-bottom:1px solid #3c3836;color:#ebdbb2;white-space:nowrap}
+.mono{font-family:'JetBrains Mono',monospace;font-size:12.5px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.ok{background:#2f3317;color:#b8bb26}.warn{background:#3d3014;color:#fabd2f}.crit{background:#3c1f1e;color:#fc7f6f}.info{background:#273436;color:#83a598}.mute{background:#3c3836;color:#d5c4a1}
+.btn{font:inherit;font-size:13px;font-weight:500;padding:9px 14px;border-radius:7px;border:1px solid #504945;background:#3c3836;color:#ebdbb2;cursor:pointer;min-height:40px}
+.btn.pri{background:#d79921;border-color:#d79921;color:#1d2021}
+.btn.sm{min-height:32px;padding:5px 11px;font-size:12.5px}
+.muted{color:#a89984}
+.up{color:#fc7f6f;font-weight:600}.down{color:#b8bb26;font-weight:600}
+</style>
+</head>
+<body>
+<div style="min-height: 1100px; display: flex; flex-wrap: wrap; font-family: Inter, system-ui, sans-serif; color: #ebdbb2; background: #1d2021">
+<nav class="nav" aria-label="Main" style="flex: 0 0 232px; box-sizing: border-box; padding: 20px 14px; border-right: 1px solid #3c3836; background: #282828; display: flex; flex-direction: column; gap: 4px">
+<div style="display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px">
+<svg width="30" height="30" viewBox="18 26 84 78" aria-hidden="true"><path d="M35.75 60.00 47.88 67.00 35.75 74.00 23.63 67.00Z" fill="#ebdbb2"/><path d="M23.63 67.00 35.75 74.00 35.75 88.00 23.63 81.00Z" fill="#bdae93"/><path d="M35.75 74.00 47.88 67.00 47.88 81.00 35.75 88.00Z" fill="#7c6f64"/><path d="M60.00 60.00 72.12 67.00 60.00 74.00 47.88 67.00Z" fill="#ebdbb2"/><path d="M47.88 67.00 60.00 74.00 60.00 88.00 47.88 81.00Z" fill="#bdae93"/><path d="M60.00 74.00 72.12 67.00 72.12 81.00 60.00 88.00Z" fill="#7c6f64"/><path d="M84.25 60.00 96.37 67.00 84.25 74.00 72.12 67.00Z" fill="#ebdbb2"/><path d="M72.12 67.00 84.25 74.00 84.25 88.00 72.12 81.00Z" fill="#bdae93"/><path d="M84.25 74.00 96.37 67.00 96.37 81.00 84.25 88.00Z" fill="#7c6f64"/><path d="M47.88 46.00 60.00 53.00 47.88 60.00 35.75 53.00Z" fill="#ebdbb2"/><path d="M35.75 53.00 47.88 60.00 47.88 74.00 35.75 67.00Z" fill="#bdae93"/><path d="M47.88 60.00 60.00 53.00 60.00 67.00 47.88 74.00Z" fill="#7c6f64"/><path d="M72.12 46.00 84.25 53.00 72.12 60.00 60.00 53.00Z" fill="#ebdbb2"/><path d="M60.00 53.00 72.12 60.00 72.12 74.00 60.00 67.00Z" fill="#bdae93"/><path d="M72.12 60.00 84.25 53.00 84.25 67.00 72.12 74.00Z" fill="#7c6f64"/><path d="M60.00 32.00 72.12 39.00 60.00 46.00 47.88 39.00Z" fill="#fabd2f"/><path d="M47.88 39.00 60.00 46.00 60.00 60.00 47.88 53.00Z" fill="#d79921"/><path d="M60.00 46.00 72.12 39.00 72.12 53.00 60.00 60.00Z" fill="#b57614"/><path d="M24 99H96" stroke="#fe8019" stroke-width="4" stroke-linecap="round"/></svg>
+<span style="font-family: 'Space Grotesk', Inter, sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.02em; color: #ebdbb2">olympos</span>
+</div>
+<a href="dashboard.html">Dashboard</a>
+<a href="backups.html">Backups</a>
+<a href="vaults.html">Vaults</a>
+<a href="approvals.html">Approvals <span class="badge warn">2</span></a>
+<a href="audit.html" class="on">Audit</a>
+<a href="security.html">Security</a>
+<a href="settings.html">Settings</a>
+<div style="margin-top: auto; padding: 14px 10px 0; border-top: 1px solid #3c3836; font-size: 13px">
+<div style="color: #ebdbb2">yigit@contoso.com</div>
+<div class="muted" style="font-size: 12px; margin-top: 2px">admin · Entra ID</div>
+</div>
+</nav>
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+<header style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between">
+<div>
+<h1 style="margin: 0; font-size: 24px; font-weight: 600">Audit</h1>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">Scheduled checks with full history. What matters is what changed since the last run.</p>
+</div>
+<button class="btn pri">New schedule</button>
+</header>
+
+<section class="card">
+<div style="padding: 16px 20px 6px"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Schedules</h2></div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Check</th><th>Framework</th><th>Scope</th><th>Schedule</th><th>Runs how</th><th>Last result</th><th></th></tr></thead>
+<tbody>
+<tr><td>Kubescape</td><td class="mono">NSA, CIS, MITRE</td><td>All 14 clusters</td><td class="mono">Daily 04:00</td><td><span class="badge ok">Remote via agent</span></td><td><span class="badge warn">+3 new failed</span></td><td><button class="btn sm">Run now</button></td></tr>
+<tr><td>Polaris</td><td class="mono">Best practices</td><td>env=prod (6)</td><td class="mono">Weekly Mon</td><td><span class="badge ok">Remote via agent</span></td><td><span class="badge ok">No change</span></td><td><button class="btn sm">Run now</button></td></tr>
+<tr><td>kube-bench</td><td class="mono">CIS (auto per provider)</td><td>9 opted-in clusters · all nodes</td><td class="mono">Weekly Sun</td><td><span class="badge warn">Node Job · opt-in</span></td><td><span class="badge ok">−2 resolved</span></td><td><button class="btn sm">Run now</button></td></tr>
+</tbody>
+</table>
+</div>
+<div class="muted" style="padding: 12px 20px; font-size: 12px">kube-bench must read node files, so it is the one check that runs as a Job on each node. It is off until enabled per cluster with the agent Helm value bench.enabled.</div>
+</section>
+
+
+<section class="card">
+<div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center">
+<div>
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">kube-bench · last run per node</h2>
+<div class="muted" style="font-size: 12px; margin-top: 4px">Short-lived Job per node, spec built into the agent, image pinned by digest, host paths read-only</div>
+</div>
+<span class="badge warn">Exception · enabled on 9 of 14 clusters</span>
+</div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Node</th><th>Cluster</th><th>Benchmark</th><th style="text-align: right">Pass</th><th style="text-align: right">Fail</th><th style="text-align: right">Warn</th><th>Job</th></tr></thead>
+<tbody>
+<tr><td class="mono">aks-sys-17402-vmss000000</td><td class="mono">prod-aks-weu-01</td><td class="mono">aks-1.7 (auto) <span class="badge mute" style="font-family: Inter, sans-serif">Control plane N/A · managed</span></td><td style="text-align: right">41</td><td style="text-align: right" class="up">2</td><td style="text-align: right">6</td><td><span class="badge ok">Done · 38 s · cleaned up</span></td></tr>
+<tr><td class="mono">ip-10-20-4-17</td><td class="mono">eks-fra-data</td><td class="mono">eks-1.5 (auto) <span class="badge mute" style="font-family: Inter, sans-serif">Control plane N/A · managed</span></td><td style="text-align: right">39</td><td style="text-align: right" class="up">1</td><td style="text-align: right">7</td><td><span class="badge ok">Done · 41 s · cleaned up</span></td></tr>
+<tr><td class="mono">factory-cp-1</td><td class="mono">onprem-factory-01</td><td class="mono">cis-1.9 master</td><td style="text-align: right">58</td><td style="text-align: right" class="up">4</td><td style="text-align: right">9</td><td><span class="badge ok">Done · 52 s · cleaned up</span></td></tr>
+<tr><td class="mono">ist-lab-w1</td><td class="mono">onprem-ist-lab</td><td class="mono">cis-1.9 node</td><td class="muted" style="text-align: right">—</td><td class="muted" style="text-align: right">—</td><td class="muted" style="text-align: right">—</td><td><span class="badge crit">Skipped · agent offline</span></td></tr>
+</tbody>
+</table>
+</div>
+<div style="height: 6px"></div>
+</section>
+
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+<section class="card" style="flex: 1 1 340px; min-width: 0">
+<div style="padding: 16px 20px 6px"><h2 style="margin: 0; font-size: 15px; font-weight: 600">Kubescape run history</h2></div>
+<table class="t">
+<thead><tr><th>Run</th><th style="text-align: right">Score</th><th style="text-align: right">New</th><th style="text-align: right">Resolved</th></tr></thead>
+<tbody>
+<tr><td class="mono">Nov 18 04:00</td><td style="text-align: right">78.4%</td><td style="text-align: right" class="up">+3</td><td style="text-align: right" class="down">−1</td></tr>
+<tr><td class="mono">Nov 17 04:00</td><td style="text-align: right">78.9%</td><td style="text-align: right">0</td><td style="text-align: right" class="down">−4</td></tr>
+<tr><td class="mono">Nov 16 04:00</td><td style="text-align: right">77.2%</td><td style="text-align: right" class="up">+1</td><td style="text-align: right">0</td></tr>
+<tr><td class="mono">Nov 15 04:00</td><td style="text-align: right">77.4%</td><td style="text-align: right">0</td><td style="text-align: right" class="down">−2</td></tr>
+</tbody>
+</table>
+<div class="muted" style="padding: 12px 20px; font-size: 12px">Raw reports kept in Blob for 400 days</div>
+</section>
+
+<section class="card" style="flex: 999 1 560px; min-width: 0">
+<div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center">
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">New since last run · Nov 18</h2>
+<span class="muted" style="font-size: 12px">sent to #infra-audit</span>
+</div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Control</th><th>Severity</th><th>Cluster</th><th>Resource</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">C-0057</span> Privileged container</td><td><span class="badge crit">High</span></td><td class="mono">eks-fra-data</td><td class="mono">analytics/deploy/spark-driver</td></tr>
+<tr><td><span class="mono">C-0017</span> Immutable root filesystem</td><td><span class="badge warn">Medium</span></td><td class="mono">prod-aks-weu-02</td><td class="mono">billing/deploy/invoice-api</td></tr>
+<tr><td><span class="mono">C-0034</span> Automount SA token</td><td><span class="badge warn">Medium</span></td><td class="mono">oke-fra-erp</td><td class="mono">erp/sts/report-gen</td></tr>
+</tbody>
+</table>
+</div>
+<div style="height: 6px"></div>
+</section>
+</div>
+
+<section class="card" style="padding: 18px 20px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px">
+<div>
+<h2 style="margin: 0; font-size: 15px; font-weight: 600">Platform activity</h2>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">Logins, grants, change requests and drift findings · 2 unmanaged Vault writes in the last 30 days</p>
+</div>
+<a href="activity-log.html" class="btn" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none; box-sizing: border-box">Open activity log</a>
+</section>
+</main>
+</div>
+</body>
+</html>

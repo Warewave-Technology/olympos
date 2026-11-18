@@ -1,0 +1,1203 @@
+openapi: 3.1.0
+info:
+  title: Olympos API
+  version: "1.0"
+  description: |
+    REST API of the Olympos server (SPEC §16). JSON only.
+
+    **Auth**: BFF session. The SPA never sees tokens. `GET /auth/login?return_to=/path` starts Entra sign-in;
+    the server sets `olympos_session` (HttpOnly) and `olympos_csrf` (readable) cookies. Every state-changing
+    request (POST/PUT/PATCH/DELETE) MUST send header `X-CSRF-Token: <olympos_csrf cookie>`. `POST /auth/logout` ends the session.
+    In dev mode `GET /auth/dev-login?oid=<object-id>&name=&upn=` signs in a principal.
+
+    **Errors**: `{"error": "...", "fields": {"name": "..."}}`. 401 = not signed in / session expired (SPA redirects to /login),
+    403 = visible object but role does not allow, 404 = missing or outside the caller's scope (never 403), 409 = conflict,
+    422 = validation (`fields` per input).
+
+    **Lists** return `{"items": [...]}`. Times are RFC 3339. Sizes in bytes. CPU in millicores.
+
+    **Secret values are never returned** by any endpoint. Write-only fields are marked `writeOnly`.
+servers:
+  - url: /api/v1
+tags:
+  - {name: identity}
+  - {name: clusters}
+  - {name: notifications}
+  - {name: backups}
+  - {name: vaults}
+  - {name: approvals}
+  - {name: audit}
+  - {name: security}
+  - {name: activity}
+
+paths:
+  /me:
+    get:
+      tags: [identity]
+      responses:
+        "200": {description: Current user, content: {application/json: {schema: {$ref: "#/components/schemas/Me"}}}}
+
+  /dashboard:
+    get:
+      tags: [clusters]
+      responses:
+        "200": {description: Fleet overview, content: {application/json: {schema: {$ref: "#/components/schemas/Dashboard"}}}}
+
+  /clusters:
+    get:
+      tags: [clusters]
+      responses:
+        "200": {description: Clusters in scope, content: {application/json: {schema: {$ref: "#/components/schemas/ClusterList"}}}}
+    post:
+      tags: [clusters]
+      summary: Add cluster (admin, scope all). Returns the one-time Helm install command (token TTL 1 h).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: {type: string, pattern: "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$"}
+                labels: {type: object, additionalProperties: {type: string}}
+                bench_enabled: {type: boolean}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
+  /clusters/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [clusters]
+      responses:
+        "200": {description: Cluster, content: {application/json: {schema: {$ref: "#/components/schemas/Cluster"}}}}
+    patch:
+      tags: [clusters]
+      summary: Update labels, provider override, transfer mode, egress rate (admin, scope all).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                labels: {type: object, additionalProperties: {type: string}}
+                provider_override: {type: string, enum: ["", azure, aws, gcp, oracle, huawei, onprem]}
+                transfer_mode: {type: string, enum: [e2e-tls, compressed]}
+                egress_rate_per_gb: {type: number, minimum: 0}
+                clear_egress_rate: {type: boolean}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Cluster"}}}}
+    delete:
+      tags: [clusters]
+      summary: Revoke the cluster (cert serial denied, streams dropped). Irreversible.
+      responses:
+        "204": {description: Revoked}
+  /clusters/{id}/token:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [clusters]
+      summary: Issue a fresh bootstrap token / install command (invalidates unused ones).
+      responses:
+        "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
+  /clusters/{id}/nodes:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [clusters]
+      responses:
+        "200":
+          description: Nodes
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Node"}}}}}}
+  /targets:
+    get:
+      tags: [clusters]
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [candidate, configured, gone]}}
+        - {name: engine, in: query, schema: {type: string, enum: [postgresql, clickhouse, vault]}}
+      responses:
+        "200":
+          description: Discovered targets
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Target"}}}}}}
+
+  # ------------------------------------------------------------ access
+  /grants:
+    get:
+      tags: [identity]
+      responses:
+        "200":
+          description: Active grants
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Grant"}}}}}}
+    post:
+      tags: [identity]
+      summary: Grant roles to a person by Entra object ID (admin, scope all). vault-approver/admin refused for guests (422).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [object_id, roles]
+              properties:
+                object_id: {type: string, format: uuid}
+                roles: {type: array, items: {$ref: "#/components/schemas/Role"}}
+                scope: {type: string, description: '"all" or a label selector over cluster labels, e.g. "env=prod,team in (a,b)"'}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {type: object, properties: {ids: {type: array, items: {type: string}}}}}}}
+  /grants/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    delete:
+      tags: [identity]
+      responses:
+        "204": {description: Revoked}
+        "409": {description: Last admin with scope all}
+  /principals/search:
+    get:
+      tags: [identity]
+      summary: Directory (Graph) lookup, min 2 chars.
+      parameters: [{name: q, in: query, required: true, schema: {type: string}}]
+      responses:
+        "200":
+          description: People
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/DirectoryUser"}}}}}}
+
+  # ------------------------------------------------------------ notifications (M2)
+  /notifications/channels:
+    get:
+      tags: [notifications]
+      responses:
+        "200":
+          description: Channels
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Channel"}}}}}}
+    post:
+      tags: [notifications]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ChannelInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+  /notifications/channels/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    patch:
+      tags: [notifications]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ChannelInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Channel"}}}}
+    delete:
+      tags: [notifications]
+      responses: {"204": {description: Deleted}}
+  /notifications/channels/{id}/test:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [notifications]
+      summary: Send a test message to the channel now.
+      responses:
+        "200": {description: Result, content: {application/json: {schema: {type: object, properties: {ok: {type: boolean}, error: {type: string}}}}}}
+  /notifications/routes:
+    get:
+      tags: [notifications]
+      responses:
+        "200": {description: Event catalog and routing, content: {application/json: {schema: {$ref: "#/components/schemas/Routes"}}}}
+    put:
+      tags: [notifications]
+      summary: Replace all routes.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                routes: {type: array, items: {$ref: "#/components/schemas/Route"}}
+      responses:
+        "200": {description: Saved, content: {application/json: {schema: {$ref: "#/components/schemas/Routes"}}}}
+
+  # ------------------------------------------------------------ destinations (M2)
+  /destinations:
+    get:
+      tags: [backups]
+      responses:
+        "200":
+          description: Destinations
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Destination"}}}}}}
+    post:
+      tags: [backups]
+      summary: Create destination (admin, scope all). Runs the destination test first; 422 if the test fails. A credential that can delete is saved with a warning (never silently).
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+  /destinations/test:
+    post:
+      tags: [backups]
+      summary: Test an unsaved destination (probe write, read, tag, delete-refused check, SAS parse).
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationInput"}}}}
+      responses:
+        "200": {description: Report, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTest"}}}}
+  /destinations/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    patch:
+      tags: [backups]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
+    delete:
+      tags: [backups]
+      responses:
+        "204": {description: Deleted}
+        "409": {description: Used by backup jobs}
+  /destinations/{id}/test:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [backups]
+      responses:
+        "200": {description: Report, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTest"}}}}
+
+  # ------------------------------------------------------------ backups (M2)
+  /backup/jobs:
+    get:
+      tags: [backups]
+      responses:
+        "200":
+          description: Jobs in scope
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/BackupJob"}}}}}}
+    post:
+      tags: [backups]
+      summary: Create a job (operator on the target's cluster). Usually created disabled, then dry-run, then enabled.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+  /backup/jobs/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [backups]
+      responses:
+        "200": {description: Job, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+    patch:
+      tags: [backups]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+    delete:
+      tags: [backups]
+      summary: Delete the job (runs and blobs are kept).
+      responses: {"204": {description: Deleted}}
+  /backup/jobs/{id}/run:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [backups]
+      summary: Queue a manual run, or a dry run with trigger=test (small test backup, e.g. schema-only for Postgres).
+      requestBody:
+        content:
+          application/json:
+            schema: {type: object, properties: {trigger: {type: string, enum: [manual, test], default: manual}}}
+      responses:
+        "202": {description: Queued, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
+  /backup/runs:
+    get:
+      tags: [backups]
+      parameters:
+        - {name: job_id, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer, default: 50}}
+      responses:
+        "200":
+          description: Runs newest first
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/BackupRun"}}}}}}
+  /backup/runs/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [backups]
+      responses:
+        "200": {description: Run, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
+  /backup/test-connection:
+    post:
+      tags: [backups]
+      summary: Real connection check through the tunnel. Shows version, TLS and privileges. Never echoes the password.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [target_id, credential]
+              properties:
+                target_id: {type: string}
+                credential: {$ref: "#/components/schemas/CredentialInput"}
+                credential_id: {type: string, description: Existing job credential (instead of credential)}
+      responses:
+        "200": {description: Result, content: {application/json: {schema: {$ref: "#/components/schemas/ConnectionTest"}}}}
+  /backup/schedule-preview:
+    get:
+      tags: [backups]
+      parameters:
+        - {name: cron, in: query, required: true, schema: {type: string}}
+        - {name: timezone, in: query, schema: {type: string, default: UTC}}
+        - {name: count, in: query, schema: {type: integer, default: 5}}
+      responses:
+        "200":
+          description: Next run times or a validation error (422)
+          content: {application/json: {schema: {type: object, properties: {next: {type: array, items: {type: string, format: date-time}}, description: {type: string}}}}}
+
+  # ------------------------------------------------------------ vaults (M3)
+  /vaults:
+    get:
+      tags: [vaults]
+      responses:
+        "200":
+          description: Discovered and configured vaults in scope
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Vault"}}}}}}
+  /vaults/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [vaults]
+      responses:
+        "200": {description: Vault, content: {application/json: {schema: {$ref: "#/components/schemas/Vault"}}}}
+  /vaults/{id}/inspect:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [vaults]
+      summary: Before configure, list KV mounts using the pasted root token (token used once, not stored).
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [root_token], properties: {root_token: {type: string, writeOnly: true}}}}}
+      responses:
+        "200":
+          description: Mounts
+          content: {application/json: {schema: {type: object, properties: {version: {type: string}, sealed: {type: boolean}, mounts: {type: array, items: {$ref: "#/components/schemas/KVMount"}}}}}}
+  /vaults/{id}/configure:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [vaults]
+      summary: "Admin. Creates policy `olympos` + AppRole `olympos`, stores secret_id in Key Vault, verifies login, discards the root token."
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [root_token, mounts]
+              properties:
+                root_token: {type: string, writeOnly: true}
+                mounts: {type: array, items: {type: string}, description: KV v2 mount paths to manage, e.g. "secret/"}
+      responses:
+        "200": {description: Configured, content: {application/json: {schema: {$ref: "#/components/schemas/Vault"}}}}
+  /vaults/{id}/refresh:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [vaults]
+      summary: Refresh the secret index now.
+      responses: {"202": {description: Started}}
+  /vaults/{id}/tree:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [vaults]
+      parameters: [{name: mount, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: Indexed secret paths (from vault_secret_index)
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/SecretSummary"}}}}}}
+  /vaults/{id}/secrets/{path}:
+    parameters:
+      - {$ref: "#/components/parameters/id"}
+      - {name: path, in: path, required: true, schema: {type: string}, description: "Secret path below the mount, may contain slashes"}
+      - {name: mount, in: query, required: true, schema: {type: string}}
+    get:
+      tags: [vaults]
+      summary: Keys and versions only. Values are never returned.
+      responses:
+        "200": {description: Secret, content: {application/json: {schema: {$ref: "#/components/schemas/SecretDetail"}}}}
+
+  # ------------------------------------------------------------ change requests (M3)
+  /change-requests:
+    get:
+      tags: [approvals]
+      parameters:
+        - {name: mine, in: query, schema: {type: boolean}}
+        - {name: waiting_for_me, in: query, schema: {type: boolean}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: vault_id, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: Change requests
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/ChangeRequest"}}}}}}
+    post:
+      tags: [approvals]
+      summary: vault-maker. New values are sealed at submit; only HMAC fingerprints are ever shown.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequestInput"}}}}
+      responses:
+        "201": {description: Opened, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+  /change-requests/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [approvals]
+      responses:
+        "200": {description: Change request with trail, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+  /change-requests/{id}/approve:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      summary: vault-approver, maker ≠ checker (no bypass, admin included). Applies immediately.
+      requestBody: {content: {application/json: {schema: {type: object, properties: {comment: {type: string}}}}}}
+      responses:
+        "200": {description: Approved (status applied or failed), content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+        "403": {description: Own request or not an approver}
+  /change-requests/{id}/reject:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      requestBody: {content: {application/json: {schema: {type: object, required: [comment], properties: {comment: {type: string}}}}}}
+      responses:
+        "200": {description: Rejected, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+  /change-requests/{id}/cancel:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      summary: Maker withdraws a pending request.
+      responses:
+        "200": {description: Cancelled, content: {application/json: {schema: {$ref: "#/components/schemas/ChangeRequest"}}}}
+
+  # ------------------------------------------------------------ audit (M4)
+  /audit/schedules:
+    get:
+      tags: [audit]
+      responses:
+        "200":
+          description: Schedules
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/AuditSchedule"}}}}}}
+    post:
+      tags: [audit]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/AuditScheduleInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSchedule"}}}}
+  /audit/schedules/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    patch:
+      tags: [audit]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/AuditScheduleInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSchedule"}}}}
+    delete:
+      tags: [audit]
+      responses: {"204": {description: Deleted}}
+  /audit/schedules/{id}/run:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [audit]
+      requestBody: {content: {application/json: {schema: {type: object, properties: {cluster_id: {type: string, description: "Only this cluster (default: every cluster in the schedule scope)"}}}}}}
+      responses:
+        "202":
+          description: Queued runs
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/AuditRun"}}}}}}
+  /audit/runs:
+    get:
+      tags: [audit]
+      parameters:
+        - {name: schedule_id, in: query, schema: {type: string}}
+        - {name: cluster_id, in: query, schema: {type: string}}
+        - {name: tool, in: query, schema: {type: string}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: Runs newest first
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/AuditRun"}}}}}}
+  /audit/runs/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [audit]
+      responses:
+        "200": {description: Run incl. kube-bench node results, content: {application/json: {schema: {$ref: "#/components/schemas/AuditRun"}}}}
+  /findings:
+    get:
+      tags: [audit]
+      parameters:
+        - {name: source, in: query, schema: {type: string, enum: [kubescape, polaris, kube-bench, kyverno, netpol, tls, vault-drift, transfer]}}
+        - {name: status, in: query, schema: {type: string, enum: [open, resolved]}}
+        - {name: cluster, in: query, schema: {type: string}}
+        - {name: run_id, in: query, schema: {type: string, description: Findings first seen in this run ("new")}}
+        - {name: limit, in: query, schema: {type: integer}}
+      responses:
+        "200":
+          description: Findings
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Finding"}}}}}}
+
+  # ------------------------------------------------------------ security (M5)
+  /images:
+    get:
+      tags: [security]
+      parameters:
+        - {name: cluster, in: query, schema: {type: string}}
+        - {name: severity, in: query, schema: {type: string, enum: [critical, high]}}
+        - {name: status, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+      responses:
+        "200":
+          description: Images by digest in scope
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Image"}}}}}}
+  /images/{digest}:
+    parameters: [{name: digest, in: path, required: true, schema: {type: string}, description: "sha256:..."}]
+    get:
+      tags: [security]
+      responses:
+        "200": {description: Image with usage and vulnerabilities, content: {application/json: {schema: {$ref: "#/components/schemas/ImageDetail"}}}}
+  /images/{digest}/scan:
+    parameters: [{name: digest, in: path, required: true, schema: {type: string}}]
+    post:
+      tags: [security]
+      responses: {"202": {description: Queued}}
+  /security/kyverno:
+    get:
+      tags: [security]
+      parameters: [{name: cluster, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: Kyverno policies per cluster
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/KyvernoPolicy"}}}}}}
+  /security/netpol:
+    get:
+      tags: [security]
+      parameters: [{name: cluster, in: query, schema: {type: string}}]
+      responses:
+        "200":
+          description: NetworkPolicy default-deny status per namespace
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/NetpolNamespace"}}}}}}
+  /registries:
+    get:
+      tags: [security]
+      responses:
+        "200":
+          description: Registry credentials (no secrets) and unmatched registries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/Registry"}}
+                  unmatched: {type: array, items: {$ref: "#/components/schemas/UnmatchedRegistry"}}
+    post:
+      tags: [security]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RegistryInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Registry"}}}}
+  /registries/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    patch:
+      tags: [security]
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RegistryInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Registry"}}}}
+    delete:
+      tags: [security]
+      responses: {"204": {description: Deleted}}
+
+  # ------------------------------------------------------------ activity
+  /activity:
+    get:
+      tags: [activity]
+      parameters:
+        - {name: action, in: query, schema: {type: string}, description: "Prefix, e.g. backup. or cr."}
+        - {name: object_type, in: query, schema: {type: string}}
+        - {name: actor, in: query, schema: {type: string}}
+        - {name: q, in: query, schema: {type: string}}
+        - {name: since, in: query, schema: {type: string}, description: "Go duration, e.g. 24h, 168h"}
+        - {name: before, in: query, schema: {type: string, format: date-time}, description: Cursor (at of last item)}
+        - {name: limit, in: query, schema: {type: integer, default: 100}}
+      responses:
+        "200":
+          description: Entries newest first
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/ActivityEntry"}}}}}}
+
+components:
+  parameters:
+    id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+
+  schemas:
+    Role: {type: string, enum: [viewer, operator, vault-maker, vault-approver, admin]}
+
+    Principal:
+      type: object
+      properties:
+        id: {type: string}
+        tenant_id: {type: string}
+        object_id: {type: string}
+        upn: {type: string}
+        display_name: {type: string}
+        user_type: {type: string}
+        account_enabled: {type: boolean}
+
+    Me:
+      type: object
+      properties:
+        principal: {$ref: "#/components/schemas/Principal"}
+        is_guest: {type: boolean}
+        roles: {type: array, items: {$ref: "#/components/schemas/Role"}}
+        grants: {type: array, items: {type: object, properties: {role: {$ref: "#/components/schemas/Role"}, scope: {type: string}}}}
+        permissions:
+          type: object
+          description: Booleans that decide which controls are rendered (hidden, not disabled).
+          properties:
+            read: {type: boolean}
+            operate: {type: boolean}
+            operate_global: {type: boolean}
+            vault_make: {type: boolean}
+            vault_approve: {type: boolean}
+            admin: {type: boolean}
+            admin_global: {type: boolean}
+        csrf_token: {type: string}
+        dev_mode: {type: boolean}
+
+    Grant:
+      type: object
+      properties:
+        id: {type: string}
+        principal: {$ref: "#/components/schemas/Principal"}
+        is_guest: {type: boolean}
+        role: {$ref: "#/components/schemas/Role"}
+        scope: {type: string}
+        granted_by: {type: [string, "null"]}
+        granted_by_name: {type: string}
+        granted_at: {type: string, format: date-time}
+        stale: {type: boolean}
+
+    DirectoryUser:
+      type: object
+      properties:
+        object_id: {type: string}
+        display_name: {type: string}
+        upn: {type: string}
+        mail: {type: string}
+        user_type: {type: string}
+        account_enabled: {type: boolean}
+        is_guest: {type: boolean}
+
+    Cluster:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        labels: {type: object, additionalProperties: {type: string}}
+        provider: {type: string, enum: ["", azure, aws, gcp, oracle, huawei, onprem]}
+        provider_label: {type: string, example: Azure}
+        provider_override: {type: string}
+        region: {type: string}
+        api_version: {type: string, example: v1.31.4}
+        status: {type: string, enum: [pending, online, offline, revoked]}
+        last_seen_at: {type: [string, "null"], format: date-time}
+        agent_version: {type: string}
+        bench_enabled: {type: boolean}
+        transfer_mode: {type: string, enum: [e2e-tls, compressed]}
+        egress_rate_per_gb: {type: [number, "null"]}
+        cert_expires_at: {type: [string, "null"], format: date-time}
+        nodes: {type: integer}
+        nodes_ready: {type: integer}
+        cpu_milli: {type: integer}
+        mem_bytes: {type: integer}
+        min_kubelet: {type: string}
+        version_skew: {type: boolean}
+        eol: {type: boolean}
+        inventory_at: {type: [string, "null"], format: date-time}
+        created_at: {type: string, format: date-time}
+    ClusterList:
+      type: object
+      properties:
+        items: {type: array, items: {$ref: "#/components/schemas/Cluster"}}
+    InstallResponse:
+      type: object
+      properties:
+        cluster: {$ref: "#/components/schemas/Cluster"}
+        command: {type: string, description: "Multi-line helm command containing the one-time token"}
+        expires_at: {type: string, format: date-time}
+    Node:
+      type: object
+      properties:
+        name: {type: string}
+        provider_id: {type: string}
+        kubelet_version: {type: string}
+        region: {type: string}
+        zone: {type: string}
+        instance_type: {type: string}
+        cpu_milli: {type: integer}
+        mem_bytes: {type: integer}
+        roles: {type: array, items: {type: string}}
+        ready: {type: boolean}
+        seen_at: {type: string, format: date-time}
+    Target:
+      type: object
+      properties:
+        id: {type: string, description: 32 hex chars}
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        namespace: {type: string}
+        service: {type: string}
+        port: {type: integer}
+        port_name: {type: string}
+        engine: {type: string, enum: ["", postgresql, clickhouse, vault]}
+        vault_provider: {type: string, enum: ["", hashicorp, openbao]}
+        tls_server_name: {type: string}
+        detected_version: {type: string}
+        tls_ok: {type: [boolean, "null"], description: null = not probed yet}
+        status: {type: string, enum: [candidate, configured, gone]}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+
+    Dashboard:
+      type: object
+      properties:
+        attention:
+          type: array
+          description: Needs-attention strip; hide the section when empty.
+          items:
+            type: object
+            properties:
+              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, approvals, eol, critical_cves]}
+              severity: {type: string, enum: [crit, warn]}
+              label: {type: string}
+              detail: {type: string}
+              link: {type: string, description: SPA path}
+        totals:
+          type: object
+          properties:
+            clusters: {type: integer}
+            agents_online: {type: integer}
+            nodes: {type: integer}
+            cpu_milli: {type: integer}
+            mem_bytes: {type: integer}
+            versions: {type: integer}
+            version_min: {type: string}
+            version_max: {type: string}
+            skew_clusters: {type: integer}
+            offline_agents: {type: integer}
+            offline_detail: {type: string}
+        version_matrix:
+          type: array
+          items: {type: object, properties: {minor: {type: string, example: "1.31"}, clusters: {type: integer}, eol: {type: boolean}}}
+        providers:
+          type: array
+          items: {type: object, properties: {provider: {type: string}, label: {type: string}, clusters: {type: integer}, nodes: {type: integer}}}
+        clusters: {type: array, items: {$ref: "#/components/schemas/Cluster"}}
+        refreshed_at: {type: [string, "null"], format: date-time}
+
+    # ---------------------------------------------------- notifications
+    Channel:
+      type: object
+      properties:
+        id: {type: string}
+        kind: {type: string, enum: [slack]}
+        name: {type: string, example: "#platform-alerts"}
+        slack_channel_id: {type: string, example: C0123ABCD}
+        routes: {type: array, items: {type: string}, description: Event types routed here}
+        created_at: {type: string, format: date-time}
+    ChannelInput:
+      type: object
+      required: [name, slack_channel_id]
+      properties:
+        name: {type: string}
+        slack_channel_id: {type: string}
+    Route:
+      type: object
+      properties:
+        event_type: {type: string}
+        channel_ids: {type: array, items: {type: string}}
+    Routes:
+      type: object
+      properties:
+        catalog:
+          type: array
+          items:
+            type: object
+            properties:
+              event_type: {type: string, example: backup.failed}
+              description: {type: string}
+              opt_in: {type: boolean, description: true for backup.succeeded}
+        routes: {type: array, items: {$ref: "#/components/schemas/Route"}}
+
+    # ---------------------------------------------------- destinations
+    SecretSourceInput:
+      type: object
+      description: Either a Key Vault reference (recommended) or a value stored envelope-encrypted in Olympos.
+      required: [source]
+      properties:
+        source: {type: string, enum: [keyvault_ref, stored]}
+        ref: {type: string, example: "kv://kv-platform-weu/backup-sas"}
+        value: {type: string, writeOnly: true}
+    DestinationInput:
+      type: object
+      required: [name, account, container, auth]
+      properties:
+        name: {type: string}
+        account: {type: string, example: stolymposbackups}
+        container: {type: string}
+        prefix: {type: string}
+        auth: {type: string, enum: [managed_identity, sas_token]}
+        sas: {$ref: "#/components/schemas/SecretSourceInput"}
+        endpoint_override: {type: string, description: "Optional blob endpoint (Azurite / sovereign clouds)"}
+    Destination:
+      type: object
+      properties:
+        id: {type: string}
+        name: {type: string}
+        kind: {type: string, enum: [azure_blob]}
+        account: {type: string}
+        container: {type: string}
+        prefix: {type: string}
+        auth: {type: string, enum: [managed_identity, sas_token]}
+        sas_source: {type: string, enum: ["", keyvault_ref, stored]}
+        sas_ref: {type: string}
+        sas_expires_at: {type: [string, "null"], format: date-time}
+        sas_permissions: {type: string, example: rcwt}
+        endpoint_override: {type: string}
+        last_test_at: {type: [string, "null"], format: date-time}
+        last_test_ok: {type: [boolean, "null"]}
+        last_test: {$ref: "#/components/schemas/DestinationTest"}
+        jobs: {type: integer}
+    DestinationTest:
+      type: object
+      properties:
+        ok: {type: boolean, description: Write/read/tag succeeded}
+        can_delete: {type: boolean, description: true = WARNING, credential can delete blobs}
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              name: {type: string, enum: [write, read, tag, delete_refused, sas_permissions, sas_expiry]}
+              ok: {type: boolean}
+              detail: {type: string}
+        sas:
+          type: [object, "null"]
+          properties:
+            permissions: {type: string}
+            expires_at: {type: [string, "null"], format: date-time}
+            missing: {type: array, items: {type: string}, description: "required of r,c,w,t not granted"}
+            extra: {type: array, items: {type: string}, description: "e.g. d, l"}
+            scope: {type: string, enum: [container, account, service, unknown]}
+        error: {type: string}
+
+    # ---------------------------------------------------- backups
+    CredentialInput:
+      type: object
+      required: [source, username]
+      properties:
+        source: {type: string, enum: [keyvault_ref, stored]}
+        ref: {type: string, description: "kv://<vault>/<secret>; the secret holds the password"}
+        username: {type: string}
+        password: {type: string, writeOnly: true}
+    Retention:
+      type: object
+      properties:
+        daily: {type: integer, default: 7}
+        weekly: {type: integer, default: 4}
+        monthly: {type: integer, default: 12}
+    BackupJobInput:
+      type: object
+      properties:
+        target_id: {type: string}
+        credential: {$ref: "#/components/schemas/CredentialInput"}
+        destination_id: {type: string}
+        engine_options:
+          type: object
+          description: "postgresql: {databases: [..] (empty = all), globals: true}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
+        cron: {type: string, example: "0 2 * * *"}
+        timezone: {type: string, example: Europe/Istanbul}
+        retention: {$ref: "#/components/schemas/Retention"}
+        enabled: {type: boolean}
+        notify_channel_id: {type: [string, "null"]}
+    BackupJob:
+      type: object
+      properties:
+        id: {type: string}
+        target: {$ref: "#/components/schemas/Target"}
+        engine: {type: string}
+        credential: {type: object, properties: {id: {type: string}, source: {type: string}, ref: {type: string}, username: {type: string}}}
+        destination: {type: object, properties: {id: {type: string}, name: {type: string}}}
+        engine_options: {type: object}
+        cron: {type: string}
+        timezone: {type: string}
+        retention: {$ref: "#/components/schemas/Retention"}
+        enabled: {type: boolean}
+        paused_reason: {type: string, description: "e.g. target_gone"}
+        notify_channel_id: {type: [string, "null"]}
+        next_run_at: {type: [string, "null"], format: date-time}
+        last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}]}
+        estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
+        estimated_monthly_cost: {type: [number, "null"], description: when the cluster has an egress rate}
+        created_at: {type: string, format: date-time}
+    BackupRun:
+      type: object
+      properties:
+        id: {type: string}
+        job_id: {type: string}
+        target_service: {type: string}
+        cluster_name: {type: string}
+        engine: {type: string}
+        trigger: {type: string, enum: [schedule, manual, test]}
+        status: {type: string, enum: [queued, running, succeeded, failed, missed]}
+        scheduled_for: {type: [string, "null"], format: date-time}
+        tier: {type: string, enum: ["", daily, weekly, monthly]}
+        started_at: {type: [string, "null"], format: date-time}
+        finished_at: {type: [string, "null"], format: date-time}
+        bytes: {type: integer}
+        wire_bytes: {type: integer}
+        blob_path: {type: string}
+        sha256: {type: string}
+        error: {type: string}
+    ConnectionTest:
+      type: object
+      properties:
+        ok: {type: boolean}
+        server_version: {type: string}
+        tls: {type: boolean}
+        privileges: {type: array, items: {type: object, properties: {name: {type: string}, ok: {type: boolean}, detail: {type: string}}}}
+        databases: {type: array, items: {type: string}}
+        error: {type: string}
+
+    # ---------------------------------------------------- vaults
+    KVMount:
+      type: object
+      properties:
+        path: {type: string, example: "secret/"}
+        version: {type: integer, enum: [1, 2]}
+        managed: {type: boolean}
+        description: {type: string}
+    Vault:
+      type: object
+      properties:
+        id: {type: string}
+        target: {$ref: "#/components/schemas/Target"}
+        provider: {type: string, enum: [hashicorp, openbao]}
+        version: {type: string}
+        status: {type: string, enum: [discovered, configured, error, gone]}
+        kv_mounts: {type: array, items: {$ref: "#/components/schemas/KVMount"}}
+        configured_by_name: {type: string}
+        configured_at: {type: [string, "null"], format: date-time}
+        secret_id_rotated_at: {type: [string, "null"], format: date-time}
+        last_index_at: {type: [string, "null"], format: date-time}
+        secrets: {type: integer}
+        drift: {type: integer, description: open vault-drift findings}
+        last_error: {type: string}
+    SecretSummary:
+      type: object
+      properties:
+        mount: {type: string}
+        path: {type: string}
+        keys: {type: integer}
+        current_version: {type: integer}
+        updated_time: {type: [string, "null"], format: date-time}
+        managed: {type: boolean, description: false = latest version not written by Olympos (drift)}
+    SecretDetail:
+      type: object
+      properties:
+        mount: {type: string}
+        path: {type: string}
+        keys: {type: array, items: {type: string}}
+        current_version: {type: integer}
+        updated_time: {type: [string, "null"], format: date-time}
+        managed: {type: boolean}
+        versions:
+          type: array
+          items:
+            type: object
+            properties:
+              version: {type: integer}
+              created_time: {type: string, format: date-time}
+              deletion_time: {type: string}
+              destroyed: {type: boolean}
+              by_olympos: {type: boolean}
+        pending_change_requests: {type: integer}
+    ChangeItemInput:
+      type: object
+      required: [mount, path, op]
+      properties:
+        mount: {type: string}
+        path: {type: string}
+        key: {type: string, description: Required except for destroy_history}
+        op: {type: string, enum: [create, replace, delete, destroy_history]}
+        value: {type: string, writeOnly: true, description: create/replace only}
+        base_version: {type: integer, description: "Version the maker saw (cas); 0 for a new secret path"}
+        versions: {type: array, items: {type: integer}, description: destroy_history only}
+    ChangeRequestInput:
+      type: object
+      required: [vault_id, justification, items]
+      properties:
+        vault_id: {type: string}
+        justification: {type: string, minLength: 10}
+        items: {type: array, minItems: 1, items: {$ref: "#/components/schemas/ChangeItemInput"}}
+    ChangeRequest:
+      type: object
+      properties:
+        id: {type: string}
+        vault: {type: object, properties: {id: {type: string}, name: {type: string}, cluster_name: {type: string}, provider: {type: string}}}
+        maker: {$ref: "#/components/schemas/Principal"}
+        checker: {oneOf: [{$ref: "#/components/schemas/Principal"}, {type: "null"}]}
+        justification: {type: string}
+        status: {type: string, enum: [pending, approved, applied, rejected, expired, failed, cancelled]}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time}
+        decided_at: {type: [string, "null"], format: date-time}
+        decision_comment: {type: string}
+        applied_at: {type: [string, "null"], format: date-time}
+        failure: {type: string}
+        can_approve: {type: boolean, description: Caller may approve/reject}
+        approve_disabled_reason: {type: string, description: 'e.g. "You opened this request"'}
+        can_cancel: {type: boolean}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              mount: {type: string}
+              path: {type: string}
+              key: {type: [string, "null"]}
+              op: {type: string}
+              base_version: {type: integer}
+              versions: {type: array, items: {type: integer}}
+              fingerprint: {type: string, example: "hm:3f9a·c210·77be"}
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              at: {type: string, format: date-time}
+              kind: {type: string, enum: [opened, approved, rejected, applied, failed, expired, cancelled]}
+              actor_name: {type: string}
+              details: {type: object}
+
+    # ---------------------------------------------------- audit
+    AuditScheduleInput:
+      type: object
+      properties:
+        tool: {type: string, enum: [kubescape, polaris, kube-bench]}
+        frameworks: {type: array, items: {type: string, enum: [nsa, cis, mitre]}, description: kubescape only}
+        scope_selector: {type: string, default: all}
+        cron: {type: string}
+        timezone: {type: string}
+        enabled: {type: boolean}
+        notify_channel_id: {type: [string, "null"]}
+    AuditSchedule:
+      allOf:
+        - $ref: "#/components/schemas/AuditScheduleInput"
+        - type: object
+          properties:
+            id: {type: string}
+            next_run_at: {type: [string, "null"], format: date-time}
+            clusters: {type: integer, description: clusters currently matched by scope}
+            last_run: {oneOf: [{$ref: "#/components/schemas/AuditRun"}, {type: "null"}]}
+    AuditRun:
+      type: object
+      properties:
+        id: {type: string}
+        schedule_id: {type: [string, "null"]}
+        tool: {type: string}
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        status: {type: string, enum: [queued, running, succeeded, failed]}
+        started_at: {type: [string, "null"], format: date-time}
+        finished_at: {type: [string, "null"], format: date-time}
+        score: {type: [number, "null"]}
+        new_findings: {type: integer}
+        resolved_findings: {type: integer}
+        error: {type: string}
+        bench_nodes:
+          type: array
+          description: kube-bench only
+          items:
+            type: object
+            properties:
+              node_name: {type: string}
+              benchmark: {type: string}
+              state: {type: string}
+              pass: {type: integer}
+              fail: {type: integer}
+              warn: {type: integer}
+              control_plane_na: {type: boolean, description: 'Show "Control plane N/A · managed"'}
+              message: {type: string}
+    Finding:
+      type: object
+      properties:
+        id: {type: string}
+        source: {type: string}
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        control_id: {type: string}
+        severity: {type: string, enum: [critical, high, medium, low, info]}
+        resource_ref: {type: string}
+        title: {type: string}
+        details: {type: object}
+        status: {type: string, enum: [open, resolved]}
+        first_seen_at: {type: string, format: date-time}
+        last_seen_at: {type: string, format: date-time}
+        resolved_at: {type: [string, "null"], format: date-time}
+
+    # ---------------------------------------------------- security
+    Image:
+      type: object
+      properties:
+        digest: {type: string}
+        repo: {type: string}
+        tags: {type: array, items: {type: string}}
+        clusters: {type: integer}
+        workloads: {type: integer}
+        critical: {type: integer}
+        high: {type: integer}
+        medium: {type: integer}
+        low: {type: integer}
+        scan_status: {type: string, enum: [pending, scanning, scanned, missing_credential, failed]}
+        last_scanned_at: {type: [string, "null"], format: date-time}
+    ImageDetail:
+      allOf:
+        - $ref: "#/components/schemas/Image"
+        - type: object
+          properties:
+            usage:
+              type: array
+              items: {type: object, properties: {cluster_id: {type: string}, cluster_name: {type: string}, namespace: {type: string}, workload_kind: {type: string}, workload_name: {type: string}, container: {type: string}}}
+            vulns:
+              type: array
+              items: {type: object, properties: {cve_id: {type: string}, severity: {type: string}, package: {type: string}, installed: {type: string}, fixed_in: {type: string}, title: {type: string}}}
+            scan_error: {type: string}
+    KyvernoPolicy:
+      type: object
+      properties:
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        namespace: {type: string, description: empty = ClusterPolicy}
+        name: {type: string}
+        mode: {type: string, enum: [Enforce, Audit]}
+        rules: {type: integer}
+        fail_count: {type: integer}
+        ready: {type: boolean}
+    NetpolNamespace:
+      type: object
+      properties:
+        cluster_id: {type: string}
+        cluster_name: {type: string}
+        namespace: {type: string}
+        policy_count: {type: integer}
+        default_deny: {type: boolean}
+        excluded: {type: boolean, description: system namespace}
+    RegistryInput:
+      type: object
+      required: [host_pattern]
+      properties:
+        host_pattern: {type: string, example: "*.azurecr.io"}
+        username: {type: string}
+        password: {$ref: "#/components/schemas/SecretSourceInput"}
+    Registry:
+      type: object
+      properties:
+        id: {type: string}
+        host_pattern: {type: string}
+        username: {type: string}
+        credential_source: {type: string, enum: ["", keyvault_ref, stored]}
+        credential_ref: {type: string}
+        images: {type: integer, description: images matched}
+        created_at: {type: string, format: date-time}
+    UnmatchedRegistry:
+      type: object
+      properties:
+        host: {type: string}
+        images: {type: integer}
+        example_repo: {type: string}
+
+    ActivityEntry:
+      type: object
+      properties:
+        id: {type: string}
+        at: {type: string, format: date-time}
+        actor_id: {type: [string, "null"]}
+        actor_name: {type: string}
+        actor_kind: {type: string, enum: [user, system, agent]}
+        action: {type: string, example: cr.approved}
+        object_type: {type: string}
+        object_id: {type: string}
+        cluster_id: {type: [string, "null"]}
+        details: {type: object}

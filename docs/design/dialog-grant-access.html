@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympos — Grant access</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1d2021}
+a{color:#83a598}a:hover{color:#8ec07c}
+.nav a{display:flex;justify-content:space-between;align-items:center;padding:10px 12px;border-radius:7px;color:#bdae93;text-decoration:none;font-size:14px;min-height:20px}
+.nav a:hover{background:#32302f;color:#ebdbb2}
+.nav a.on{background:#3c3836;color:#fbf1c7}
+.card{background:#282828;border:1px solid #3c3836;border-radius:10px}
+.t{width:100%;border-collapse:collapse;font-size:13px}
+.t th{text-align:left;font-weight:500;color:#a89984;padding:10px 14px;border-bottom:1px solid #3c3836;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;white-space:nowrap}
+.t td{padding:12px 14px;border-bottom:1px solid #3c3836;color:#ebdbb2;white-space:nowrap}
+.t tr.sel td{background:#32302f}
+.mono{font-family:'JetBrains Mono',monospace;font-size:12.5px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.ok{background:#2f3317;color:#b8bb26}.warn{background:#3d3014;color:#fabd2f}.crit{background:#3c1f1e;color:#fc7f6f}.info{background:#273436;color:#83a598}.mute{background:#3c3836;color:#d5c4a1}
+.btn{font:inherit;font-size:13px;font-weight:500;padding:9px 16px;border-radius:7px;border:1px solid #504945;background:#3c3836;color:#ebdbb2;cursor:pointer;min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;box-sizing:border-box}
+.btn:hover{color:#fbf1c7}
+.btn.pri{background:#d79921;border-color:#d79921;color:#1d2021}
+.btn.danger{background:#351a19;border-color:#cc241d;color:#fc7f6f}
+.btn.sm{min-height:32px;padding:5px 11px;font-size:12.5px}
+.in{font:inherit;font-size:13px;background:#1d2021;border:1px solid #504945;border-radius:7px;color:#ebdbb2;padding:10px 12px;box-sizing:border-box;min-height:40px;width:100%}
+.lbl{display:block;font-size:12px;color:#a89984;margin-bottom:6px}
+.muted{color:#a89984}
+.opt{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px solid #504945;border-radius:8px;font-size:13px;cursor:pointer}
+.opt.on{border-color:#d79921;background:#32302f}
+.step{display:flex;gap:12px;align-items:flex-start;padding:12px;border-radius:8px;font-size:13px}
+.step.on{background:#3c3836}
+.num{flex:0 0 26px;height:26px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;border:1px solid #504945;color:#bdae93}
+.done .num{background:#2f3317;border-color:#98971a;color:#b8bb26}
+.on .num{background:#d79921;border-color:#d79921;color:#1d2021}
+.side a{display:block;padding:9px 12px;border-radius:7px;color:#bdae93;text-decoration:none;font-size:14px}
+.side a.on{background:#3c3836;color:#fbf1c7}
+.chip{display:inline-block;padding:2px 8px;border-radius:5px;background:#3c3836;font-family:'JetBrains Mono',monospace;font-size:12px;color:#d5c4a1;margin:2px 4px 2px 0}
+.code{font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;background:#1d2021;border:1px solid #3c3836;border-radius:8px;padding:14px 16px;color:#ebdbb2;white-space:pre-wrap;word-break:break-all;margin:0}
+.chk{display:flex;gap:10px;align-items:center;font-size:13px;padding:6px 0}
+.pill{display:inline-flex;align-items:center;padding:6px 12px;border-radius:999px;border:1px solid #504945;font-size:12.5px;color:#d5c4a1;background:#282828;font-family:inherit;cursor:pointer;min-height:32px}
+.pill.on{border-color:#d79921;color:#fabd2f;background:#32302f}
+.dl{display:grid;grid-template-columns:180px minmax(0,1fr);gap:10px 16px;font-size:13px;margin:0}
+.dl dt{color:#a89984}.dl dd{margin:0}
+.note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
+.note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
+.note.crit{border-color:#cc241d;background:#2a1a19;color:#d5c4a1}
+</style>
+</head>
+<body>
+<div style="min-height: 1100px; display: flex; flex-wrap: wrap; font-family: Inter, system-ui, sans-serif; color: #ebdbb2; background: #1d2021; position: relative">
+<nav class="nav" aria-label="Main" style="flex: 0 0 232px; box-sizing: border-box; padding: 20px 14px; border-right: 1px solid #3c3836; background: #282828; display: flex; flex-direction: column; gap: 4px">
+<div style="display: flex; align-items: center; gap: 10px; padding: 4px 8px 20px"><svg width="30" height="30" viewBox="18 26 84 78" aria-hidden="true"><path d="M35.75 60.00 47.88 67.00 35.75 74.00 23.63 67.00Z" fill="#ebdbb2"/><path d="M23.63 67.00 35.75 74.00 35.75 88.00 23.63 81.00Z" fill="#bdae93"/><path d="M35.75 74.00 47.88 67.00 47.88 81.00 35.75 88.00Z" fill="#7c6f64"/><path d="M60.00 60.00 72.12 67.00 60.00 74.00 47.88 67.00Z" fill="#ebdbb2"/><path d="M47.88 67.00 60.00 74.00 60.00 88.00 47.88 81.00Z" fill="#bdae93"/><path d="M60.00 74.00 72.12 67.00 72.12 81.00 60.00 88.00Z" fill="#7c6f64"/><path d="M84.25 60.00 96.37 67.00 84.25 74.00 72.12 67.00Z" fill="#ebdbb2"/><path d="M72.12 67.00 84.25 74.00 84.25 88.00 72.12 81.00Z" fill="#bdae93"/><path d="M84.25 74.00 96.37 67.00 96.37 81.00 84.25 88.00Z" fill="#7c6f64"/><path d="M47.88 46.00 60.00 53.00 47.88 60.00 35.75 53.00Z" fill="#ebdbb2"/><path d="M35.75 53.00 47.88 60.00 47.88 74.00 35.75 67.00Z" fill="#bdae93"/><path d="M47.88 60.00 60.00 53.00 60.00 67.00 47.88 74.00Z" fill="#7c6f64"/><path d="M72.12 46.00 84.25 53.00 72.12 60.00 60.00 53.00Z" fill="#ebdbb2"/><path d="M60.00 53.00 72.12 60.00 72.12 74.00 60.00 67.00Z" fill="#bdae93"/><path d="M72.12 60.00 84.25 53.00 84.25 67.00 72.12 74.00Z" fill="#7c6f64"/><path d="M60.00 32.00 72.12 39.00 60.00 46.00 47.88 39.00Z" fill="#fabd2f"/><path d="M47.88 39.00 60.00 46.00 60.00 60.00 47.88 53.00Z" fill="#d79921"/><path d="M60.00 46.00 72.12 39.00 72.12 53.00 60.00 60.00Z" fill="#b57614"/><path d="M24 99H96" stroke="#fe8019" stroke-width="4" stroke-linecap="round"/></svg><span style="font-family: 'Space Grotesk', Inter, sans-serif; font-weight: 700; font-size: 20px; letter-spacing: -0.02em; color: #ebdbb2">olympos</span></div>
+<a href="dashboard.html">Dashboard</a>
+<a href="backups.html">Backups</a>
+<a href="vaults.html">Vaults</a>
+<a href="approvals.html">Approvals <span class="badge warn">2</span></a>
+<a href="audit.html">Audit</a>
+<a href="security.html">Security</a>
+<a href="settings.html" class="on">Settings</a>
+<div style="margin-top: auto; padding: 14px 10px 0; border-top: 1px solid #3c3836; font-size: 13px">
+<div style="color: #ebdbb2">yigit@contoso.com</div>
+<div class="muted" style="font-size: 12px; margin-top: 2px">admin · Entra ID</div>
+</div>
+</nav>
+<main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+<header style="display: flex; flex-wrap: wrap; gap: 16px; align-items: center; justify-content: space-between">
+<div>
+<h1 style="margin: 0; font-size: 24px; font-weight: 600">Settings</h1>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">Access grants</p>
+</div>
+
+</header>
+<section class="card" style="height: 260px"></section>
+<section class="card" style="height: 420px"></section>
+</main>
+<div aria-hidden="true" style="position: absolute; inset: 0; background: rgba(29, 32, 33, 0.75)"></div>
+<div role="dialog" aria-modal="true" aria-labelledby="dlg-t" style="position: absolute; top: 72px; left: 50%; transform: translateX(-50%); width: 620px; max-width: calc(100% - 32px); box-sizing: border-box; background: #282828; border: 1px solid #504945; border-radius: 12px; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); padding: 28px; display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Access</div>
+<h2 id="dlg-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Grant access to a person</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Grants are by Entra object ID. Group membership is ignored.</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div><label class="lbl" for="ps">Person</label><input id="ps" class="in" value="ayse"></div>
+<div style="border: 1px solid #3c3836; border-radius: 8px; overflow: hidden; margin-top: -8px">
+<div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; background: #32302f"><div><div style="font-size: 13px">Ayşe Kaya · ayse.kaya@contoso.com</div><div class="mono muted" style="font-size: 12px">oid 7b3e…c19d · Member</div></div><span class="badge ok">Selected</span></div>
+<div style="display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-top: 1px solid #3c3836"><div><div style="font-size: 13px">Ayşe Demir · ayse_partner.com#EXT#@contoso.onmicrosoft.com</div><div class="mono muted" style="font-size: 12px">oid 2f90…a4b1</div></div><span class="badge warn">Guest</span></div>
+</div>
+<fieldset style="border: 0; padding: 0; margin: 0">
+<legend class="lbl">Roles</legend>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 16px">
+<label class="chk"><input type="checkbox" checked> viewer</label>
+<label class="chk"><input type="checkbox" checked> operator</label>
+<label class="chk"><input type="checkbox" checked> vault-maker</label>
+<label class="chk"><input type="checkbox"> vault-approver <span class="muted" style="font-size: 12px">(not for guests)</span></label>
+<label class="chk"><input type="checkbox"> admin</label>
+</div>
+</fieldset>
+<fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
+<legend class="lbl">Scope</legend>
+<label class="opt"><input type="radio" name="sc" style="margin-top: 2px"><span>All clusters</span></label>
+<label class="opt on"><input type="radio" name="sc" checked style="margin-top: 2px"><span>Clusters matching <span class="mono">env=prod, team=data</span><br><span class="muted" style="font-size: 12px">3 clusters today</span></span></label>
+</fieldset>
+<div class="note">This change is posted to <span class="mono">#platform-access</span> and recorded in the activity log.</div>
+<div style="display: flex; justify-content: flex-end; gap: 10px"><button class="btn">Cancel</button><button class="btn pri">Grant access</button></div>
+</div>
+</div>
+</body>
+</html>

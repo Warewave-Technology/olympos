@@ -1,0 +1,864 @@
+package inventory
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/pem"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"k8s.io/apimachinery/pkg/util/validation"
+
+	"github.com/Warewave-Technology/olympos/internal/authz"
+	"github.com/Warewave-Technology/olympos/internal/findings"
+	"github.com/Warewave-Technology/olympos/internal/gateway"
+	"github.com/Warewave-Technology/olympos/internal/httpx"
+	"github.com/Warewave-Technology/olympos/internal/pki"
+	"github.com/Warewave-Technology/olympos/internal/store"
+)
+
+// EnrollTokenTTL is the bootstrap token lifetime (SPEC §2.2).
+const EnrollTokenTTL = time.Hour
+
+// API serves clusters, targets and the dashboard.
+type API struct {
+	DB         *store.DB
+	Log        *slog.Logger
+	Gateway    *gateway.Gateway
+	CA         *pki.CA
+	GatewayURL string
+	AgentChart string
+	Now        func() time.Time
+}
+
+// Routes mounts the module under /api/v1.
+func (a *API) Routes(r chi.Router) {
+	r.Get("/dashboard", a.dashboard)
+	r.Get("/clusters", a.listClusters)
+	r.Post("/clusters", a.createCluster)
+	r.Get("/clusters/{id}", a.getCluster)
+	r.Patch("/clusters/{id}", a.patchCluster)
+	r.Delete("/clusters/{id}", a.revokeCluster)
+	r.Post("/clusters/{id}/token", a.newToken)
+	r.Get("/clusters/{id}/nodes", a.listNodes)
+	r.Get("/targets", a.listTargets)
+}
+
+func (a *API) now() time.Time {
+	if a.Now != nil {
+		return a.Now()
+	}
+	return time.Now()
+}
+
+// Cluster is the API shape of a cluster.
+type Cluster struct {
+	ID               uuid.UUID         `json:"id"`
+	Name             string            `json:"name"`
+	Labels           map[string]string `json:"labels"`
+	Provider         string            `json:"provider"`
+	ProviderLabel    string            `json:"provider_label"`
+	ProviderOverride string            `json:"provider_override"`
+	Region           string            `json:"region"`
+	APIVersion       string            `json:"api_version"`
+	Status           string            `json:"status"`
+	LastSeenAt       *time.Time        `json:"last_seen_at"`
+	AgentVersion     string            `json:"agent_version"`
+	BenchEnabled     bool              `json:"bench_enabled"`
+	TransferMode     string            `json:"transfer_mode"`
+	EgressRatePerGB  *float64          `json:"egress_rate_per_gb"`
+	CertExpiresAt    *time.Time        `json:"cert_expires_at"`
+	Nodes            int               `json:"nodes"`
+	NodesReady       int               `json:"nodes_ready"`
+	CPUMilli         int64             `json:"cpu_milli"`
+	MemBytes         int64             `json:"mem_bytes"`
+	MinKubelet       string            `json:"min_kubelet"`
+	VersionSkew      bool              `json:"version_skew"`
+	EOL              bool              `json:"eol"`
+	InventoryAt      *time.Time        `json:"inventory_at"`
+	CreatedAt        time.Time         `json:"created_at"`
+}
+
+const clusterSelect = `
+	SELECT c.id, c.name, c.labels, c.provider, c.provider_override, c.region, c.api_version, c.status, c.last_seen_at,
+	       c.agent_version, c.bench_enabled, c.transfer_mode, c.egress_rate_per_gb::float8, c.cert_expires_at, c.inventory_at, c.created_at,
+	       count(n.name), count(n.name) FILTER (WHERE n.ready), COALESCE(sum(n.cpu_capacity),0), COALESCE(sum(n.mem_capacity),0),
+	       COALESCE(array_agg(n.kubelet_version) FILTER (WHERE n.name IS NOT NULL), '{}')
+	FROM clusters c LEFT JOIN nodes n ON n.cluster_id = c.id`
+
+func (a *API) scanClusters(rows pgx.Rows) ([]Cluster, error) {
+	defer rows.Close()
+	var out []Cluster
+	now := a.now()
+	for rows.Next() {
+		var c Cluster
+		var kubelets []string
+		if err := rows.Scan(&c.ID, &c.Name, &c.Labels, &c.Provider, &c.ProviderOverride, &c.Region, &c.APIVersion, &c.Status,
+			&c.LastSeenAt, &c.AgentVersion, &c.BenchEnabled, &c.TransferMode, &c.EgressRatePerGB, &c.CertExpiresAt, &c.InventoryAt,
+			&c.CreatedAt, &c.Nodes, &c.NodesReady, &c.CPUMilli, &c.MemBytes, &kubelets); err != nil {
+			return nil, err
+		}
+		if c.ProviderOverride != "" {
+			c.Provider = c.ProviderOverride
+		}
+		if c.Provider == "" && c.Nodes > 0 {
+			c.Provider = ProviderOnPrem
+		}
+		c.ProviderLabel = ProviderLabel[c.Provider]
+		apiMinor := Minor(c.APIVersion)
+		minK := 0
+		for _, k := range kubelets {
+			if m := Minor(k); m > 0 && (minK == 0 || m < minK) {
+				minK = m
+				c.MinKubelet = k
+			}
+		}
+		c.VersionSkew = apiMinor > 0 && minK > 0 && minK < apiMinor
+		c.EOL = IsEOL(apiMinor, now)
+		if c.Labels == nil {
+			c.Labels = map[string]string{}
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// visibleClusters returns clusters the subject can read.
+func (a *API) visibleClusters(ctx context.Context, s *authz.Subject) ([]Cluster, error) {
+	rows, err := a.DB.Query(ctx, clusterSelect+` GROUP BY c.id ORDER BY c.name`)
+	if err != nil {
+		return nil, err
+	}
+	all, err := a.scanClusters(rows)
+	if err != nil {
+		return nil, err
+	}
+	out := []Cluster{}
+	for _, c := range all {
+		if s.Can(authz.PermRead, c.Labels) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (a *API) listClusters(w http.ResponseWriter, r *http.Request) {
+	cs, err := a.visibleClusters(r.Context(), httpx.Subject(r))
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": cs})
+}
+
+func (a *API) loadCluster(ctx context.Context, id uuid.UUID) (*Cluster, error) {
+	rows, err := a.DB.Query(ctx, clusterSelect+` WHERE c.id = $1 GROUP BY c.id`, id)
+	if err != nil {
+		return nil, err
+	}
+	cs, err := a.scanClusters(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(cs) == 0 {
+		return nil, store.ErrNotFound
+	}
+	return &cs[0], nil
+}
+
+func (a *API) getCluster(w http.ResponseWriter, r *http.Request) {
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	c, err := a.loadCluster(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !httpx.Subject(r).Can(authz.PermRead, c.Labels)) {
+		httpx.NotFound(w)
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, c)
+}
+
+var clusterNameRe = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+
+// ValidateLabels checks Kubernetes-style label keys/values.
+func ValidateLabels(l map[string]string) error {
+	for k, v := range l {
+		if errs := validation.IsQualifiedName(k); len(errs) > 0 {
+			return fmt.Errorf("label key %q: %s", k, strings.Join(errs, "; "))
+		}
+		if errs := validation.IsValidLabelValue(v); len(errs) > 0 {
+			return fmt.Errorf("label value %q: %s", v, strings.Join(errs, "; "))
+		}
+	}
+	return nil
+}
+
+type createClusterReq struct {
+	Name         string            `json:"name"`
+	Labels       map[string]string `json:"labels"`
+	BenchEnabled bool              `json:"bench_enabled"`
+}
+
+// InstallResponse carries the one-time install command.
+type InstallResponse struct {
+	Cluster   *Cluster  `json:"cluster"`
+	Command   string    `json:"command"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	if !s.CanGlobal(authz.PermAdmin) {
+		httpx.Forbidden(w, "")
+		return
+	}
+	var req createClusterReq
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.Name = strings.TrimSpace(req.Name)
+	if !clusterNameRe.MatchString(req.Name) {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"name": "Use lowercase letters, digits and dashes (max 63)."})
+		return
+	}
+	if req.Labels == nil {
+		req.Labels = map[string]string{}
+	}
+	if err := ValidateLabels(req.Labels); err != nil {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"labels": err.Error()})
+		return
+	}
+	var id uuid.UUID
+	var token string
+	var exp time.Time
+	err := store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		err := tx.QueryRow(r.Context(), `INSERT INTO clusters (name, labels, bench_enabled, created_by) VALUES ($1, $2, $3, $4) RETURNING id`,
+			req.Name, req.Labels, req.BenchEnabled, httpx.ActorID(r)).Scan(&id)
+		if err != nil {
+			return err
+		}
+		token, exp, err = a.issueToken(r.Context(), tx, id)
+		if err != nil {
+			return err
+		}
+		return httpx.Record(r, tx, "cluster.created", "cluster", id.String(), &id, map[string]any{"name": req.Name, "labels": req.Labels, "bench_enabled": req.BenchEnabled})
+	})
+	if store.IsUniqueViolation(err) {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"name": "A cluster with this name already exists."})
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	c, err := a.loadCluster(r.Context(), id)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp})
+}
+
+// newToken issues a fresh bootstrap token (e.g. the first one expired, or
+// a re-install after the identity Secret was lost).
+func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	c, err := a.loadCluster(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !s.Can(authz.PermRead, c.Labels)) {
+		httpx.NotFound(w)
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !s.CanGlobal(authz.PermAdmin) {
+		httpx.Forbidden(w, "")
+		return
+	}
+	if c.Status == "revoked" {
+		httpx.Error(w, http.StatusConflict, "cluster is revoked; add it again as a new cluster")
+		return
+	}
+	var token string
+	var exp time.Time
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND used_at IS NULL AND expires_at > now()`, id); err != nil {
+			return err
+		}
+		var err error
+		if token, exp, err = a.issueToken(r.Context(), tx, id); err != nil {
+			return err
+		}
+		return httpx.Record(r, tx, "cluster.token_issued", "cluster", id.String(), &id, nil)
+	})
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp})
+}
+
+func (a *API) issueToken(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID) (string, time.Time, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", time.Time{}, err
+	}
+	token := "olyb_" + base64.RawURLEncoding.EncodeToString(b)
+	exp := a.now().Add(EnrollTokenTTL)
+	_, err := tx.Exec(ctx, `INSERT INTO enroll_tokens (cluster_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+		clusterID, gateway.HashToken(token), exp)
+	return token, exp, err
+}
+
+func (a *API) installCommand(c *Cluster, token string) string {
+	ca := base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.CA.Cert.Raw}))
+	chart := a.AgentChart
+	if chart == "" {
+		chart = "oci://ghcr.io/warewave-technology/charts/olympos-agent"
+	}
+	lines := []string{
+		"helm upgrade --install olympos-agent " + chart,
+		"--namespace olympos-system --create-namespace",
+		"--set server=" + a.GatewayURL,
+		"--set clusterName=" + c.Name,
+		"--set bootstrapToken=" + token,
+		"--set serverCA=" + ca,
+	}
+	if c.BenchEnabled {
+		lines = append(lines, "--set bench.enabled=true")
+	}
+	return strings.Join(lines, " \\\n  ")
+}
+
+type patchClusterReq struct {
+	Labels           *map[string]string `json:"labels"`
+	ProviderOverride *string            `json:"provider_override"`
+	TransferMode     *string            `json:"transfer_mode"`
+	EgressRatePerGB  *float64           `json:"egress_rate_per_gb"`
+	ClearEgressRate  bool               `json:"clear_egress_rate"`
+}
+
+func (a *API) patchCluster(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	allowed, visible, err := httpx.CanCluster(r.Context(), a.DB, s, id, authz.PermAdmin)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !visible {
+		httpx.NotFound(w)
+		return
+	}
+	// Relabelling can move a cluster out of scoped grants: require admin on all.
+	if !allowed || !s.CanGlobal(authz.PermAdmin) {
+		httpx.Forbidden(w, "")
+		return
+	}
+	var req patchClusterReq
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Labels != nil {
+		if err := ValidateLabels(*req.Labels); err != nil {
+			httpx.FieldErrors(w, "invalid cluster", map[string]string{"labels": err.Error()})
+			return
+		}
+	}
+	if req.ProviderOverride != nil && *req.ProviderOverride != "" && ProviderLabel[*req.ProviderOverride] == "" {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"provider_override": "Unknown provider."})
+		return
+	}
+	if req.TransferMode != nil && *req.TransferMode != "e2e-tls" && *req.TransferMode != "compressed" {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"transfer_mode": "Use e2e-tls or compressed."})
+		return
+	}
+	if req.EgressRatePerGB != nil && *req.EgressRatePerGB < 0 {
+		httpx.FieldErrors(w, "invalid cluster", map[string]string{"egress_rate_per_gb": "Must be zero or more."})
+		return
+	}
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		details := map[string]any{}
+		if req.Labels != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET labels = $2 WHERE id = $1`, id, *req.Labels); err != nil {
+				return err
+			}
+			details["labels"] = *req.Labels
+		}
+		if req.ProviderOverride != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET provider_override = $2 WHERE id = $1`, id, *req.ProviderOverride); err != nil {
+				return err
+			}
+			details["provider_override"] = *req.ProviderOverride
+		}
+		if req.EgressRatePerGB != nil || req.ClearEgressRate {
+			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET egress_rate_per_gb = $2 WHERE id = $1`, id, req.EgressRatePerGB); err != nil {
+				return err
+			}
+			details["egress_rate_per_gb"] = req.EgressRatePerGB
+		}
+		if req.TransferMode != nil {
+			if _, err := tx.Exec(r.Context(), `UPDATE clusters SET transfer_mode = $2 WHERE id = $1`, id, *req.TransferMode); err != nil {
+				return err
+			}
+			if err := SyncTransferFinding(r.Context(), tx, id, *req.TransferMode); err != nil {
+				return err
+			}
+			details["transfer_mode"] = *req.TransferMode
+		}
+		return httpx.Record(r, tx, "cluster.updated", "cluster", id.String(), &id, details)
+	})
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	c, err := a.loadCluster(r.Context(), id)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, c)
+}
+
+// SyncTransferFinding opens or resolves the transfer.compressed_mode finding.
+// "compressed" mode always produces a visible finding (SPEC §18).
+func SyncTransferFinding(ctx context.Context, q store.Querier, clusterID uuid.UUID, mode string) error {
+	if mode == "compressed" {
+		_, err := findings.Open(ctx, q, findings.Finding{
+			Source: findings.SourceTransfer, ClusterID: clusterID, ControlID: "transfer.compressed_mode",
+			Severity: "medium", ResourceRef: "cluster",
+			Title:   "Compressed transfer mode: backup traffic is plaintext inside the cluster and visible to the agent",
+			Details: map[string]any{"mode": mode},
+		}, nil)
+		return err
+	}
+	_, err := findings.Resolve(ctx, q, findings.SourceTransfer, clusterID, "transfer.compressed_mode", "cluster", nil)
+	return err
+}
+
+func (a *API) revokeCluster(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	allowed, visible, err := httpx.CanCluster(r.Context(), a.DB, s, id, authz.PermAdmin)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !visible {
+		httpx.NotFound(w)
+		return
+	}
+	if !allowed {
+		httpx.Forbidden(w, "")
+		return
+	}
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		if err := a.Gateway.Revoke(r.Context(), tx, id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND used_at IS NULL`, id); err != nil {
+			return err
+		}
+		return httpx.Record(r, tx, "cluster.revoked", "cluster", id.String(), &id, nil)
+	})
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	a.Gateway.Disconnect(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// Node is the API shape of a node.
+type Node struct {
+	Name           string    `json:"name"`
+	ProviderID     string    `json:"provider_id"`
+	KubeletVersion string    `json:"kubelet_version"`
+	Region         string    `json:"region"`
+	Zone           string    `json:"zone"`
+	InstanceType   string    `json:"instance_type"`
+	CPUMilli       int64     `json:"cpu_milli"`
+	MemBytes       int64     `json:"mem_bytes"`
+	Roles          []string  `json:"roles"`
+	Ready          bool      `json:"ready"`
+	SeenAt         time.Time `json:"seen_at"`
+}
+
+func (a *API) listNodes(w http.ResponseWriter, r *http.Request) {
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	_, visible, err := httpx.CanCluster(r.Context(), a.DB, httpx.Subject(r), id, authz.PermRead)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !visible {
+		httpx.NotFound(w)
+		return
+	}
+	rows, err := a.DB.Query(r.Context(), `SELECT name, provider_id, kubelet_version, region, zone, instance_type, cpu_capacity, mem_capacity, roles, ready, seen_at
+		FROM nodes WHERE cluster_id = $1 ORDER BY name`, id)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	defer rows.Close()
+	out := []Node{}
+	for rows.Next() {
+		var n Node
+		if err := rows.Scan(&n.Name, &n.ProviderID, &n.KubeletVersion, &n.Region, &n.Zone, &n.InstanceType, &n.CPUMilli, &n.MemBytes, &n.Roles, &n.Ready, &n.SeenAt); err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		out = append(out, n)
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": out})
+}
+
+// Target is the API shape of a discovered target.
+type Target struct {
+	ID              string    `json:"id"`
+	ClusterID       uuid.UUID `json:"cluster_id"`
+	ClusterName     string    `json:"cluster_name"`
+	Namespace       string    `json:"namespace"`
+	Service         string    `json:"service"`
+	Port            int       `json:"port"`
+	PortName        string    `json:"port_name"`
+	Engine          string    `json:"engine"`
+	VaultProvider   string    `json:"vault_provider"`
+	TLSServerName   string    `json:"tls_server_name"`
+	DetectedVersion string    `json:"detected_version"`
+	TLSOK           *bool     `json:"tls_ok"`
+	Status          string    `json:"status"`
+	FirstSeenAt     time.Time `json:"first_seen_at"`
+	LastSeenAt      time.Time `json:"last_seen_at"`
+}
+
+// ListTargets returns targets visible to s, optionally filtered.
+func ListTargets(ctx context.Context, q store.Querier, s *authz.Subject, status, engine string) ([]Target, error) {
+	rows, err := q.Query(ctx, `SELECT t.id, t.cluster_id, c.name, c.labels, t.namespace, t.service, t.port, t.port_name, t.engine,
+		t.vault_provider, t.tls_server_name, t.detected_version, t.tls_ok, t.status, t.first_seen_at, t.last_seen_at
+		FROM targets t JOIN clusters c ON c.id = t.cluster_id
+		WHERE ($1 = '' OR t.status = $1) AND ($2 = '' OR t.engine = $2) AND c.status <> 'revoked'
+		ORDER BY c.name, t.namespace, t.service`, status, engine)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Target{}
+	for rows.Next() {
+		var t Target
+		var labels map[string]string
+		if err := rows.Scan(&t.ID, &t.ClusterID, &t.ClusterName, &labels, &t.Namespace, &t.Service, &t.Port, &t.PortName, &t.Engine,
+			&t.VaultProvider, &t.TLSServerName, &t.DetectedVersion, &t.TLSOK, &t.Status, &t.FirstSeenAt, &t.LastSeenAt); err != nil {
+			return nil, err
+		}
+		if s.Can(authz.PermRead, labels) {
+			out = append(out, t)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (a *API) listTargets(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	ts, err := ListTargets(r.Context(), a.DB, httpx.Subject(r), q.Get("status"), q.Get("engine"))
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": ts})
+}
+
+// ---------------------------------------------------------------- dashboard
+
+// AttentionItem is one entry of the Needs-attention strip.
+type AttentionItem struct {
+	Kind     string `json:"kind"`     // agent_offline | backup_failed | backup_missed | approvals | eol | critical_cves
+	Severity string `json:"severity"` // crit | warn
+	Label    string `json:"label"`
+	Detail   string `json:"detail"`
+	Link     string `json:"link"`
+}
+
+// Dashboard is GET /api/v1/dashboard.
+type Dashboard struct {
+	Attention []AttentionItem `json:"attention"`
+	Totals    struct {
+		Clusters      int    `json:"clusters"`
+		AgentsOnline  int    `json:"agents_online"`
+		Nodes         int    `json:"nodes"`
+		CPUMilli      int64  `json:"cpu_milli"`
+		MemBytes      int64  `json:"mem_bytes"`
+		Versions      int    `json:"versions"`
+		VersionMin    string `json:"version_min"`
+		VersionMax    string `json:"version_max"`
+		SkewClusters  int    `json:"skew_clusters"`
+		OfflineAgents int    `json:"offline_agents"`
+		OfflineDetail string `json:"offline_detail"`
+	} `json:"totals"`
+	VersionMatrix []VersionRow  `json:"version_matrix"`
+	Providers     []ProviderRow `json:"providers"`
+	Clusters      []Cluster     `json:"clusters"`
+	RefreshedAt   *time.Time    `json:"refreshed_at"`
+}
+
+// VersionRow counts clusters per API minor.
+type VersionRow struct {
+	Minor    string `json:"minor"`
+	Clusters int    `json:"clusters"`
+	EOL      bool   `json:"eol"`
+}
+
+// ProviderRow counts clusters per provider.
+type ProviderRow struct {
+	Provider string `json:"provider"`
+	Label    string `json:"label"`
+	Clusters int    `json:"clusters"`
+	Nodes    int    `json:"nodes"`
+}
+
+func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	s := httpx.Subject(r)
+	cs, err := a.visibleClusters(ctx, s)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	d := Dashboard{Clusters: cs, Attention: []AttentionItem{}, VersionMatrix: []VersionRow{}, Providers: []ProviderRow{}}
+	now := a.now()
+	minors := map[int]int{}
+	provs := map[string]*ProviderRow{}
+	ids := make([]uuid.UUID, 0, len(cs))
+	var eolClusters []string
+	var eolMinor = map[int]bool{}
+	for _, c := range cs {
+		if c.Status == "revoked" {
+			continue
+		}
+		ids = append(ids, c.ID)
+		d.Totals.Clusters++
+		if c.Status == "online" {
+			d.Totals.AgentsOnline++
+		}
+		d.Totals.Nodes += c.Nodes
+		d.Totals.CPUMilli += c.CPUMilli
+		d.Totals.MemBytes += c.MemBytes
+		if c.VersionSkew {
+			d.Totals.SkewClusters++
+		}
+		if m := Minor(c.APIVersion); m > 0 {
+			minors[m]++
+			if c.EOL {
+				eolClusters = append(eolClusters, c.Name)
+				eolMinor[m] = true
+			}
+		}
+		if c.Provider != "" {
+			p := provs[c.Provider]
+			if p == nil {
+				p = &ProviderRow{Provider: c.Provider, Label: ProviderLabel[c.Provider]}
+				provs[c.Provider] = p
+			}
+			p.Clusters++
+			p.Nodes += c.Nodes
+		}
+		if c.InventoryAt != nil && (d.RefreshedAt == nil || c.InventoryAt.After(*d.RefreshedAt)) {
+			t := *c.InventoryAt
+			d.RefreshedAt = &t
+		}
+		if c.Status == "offline" {
+			d.Totals.OfflineAgents++
+			ago := "unknown"
+			if c.LastSeenAt != nil {
+				ago = humanDuration(now.Sub(*c.LastSeenAt))
+				if now.Sub(*c.LastSeenAt) > 5*time.Minute {
+					d.Attention = append(d.Attention, AttentionItem{Kind: "agent_offline", Severity: "crit", Label: "Agent offline",
+						Detail: c.Name + " · " + ago, Link: "/settings/clusters?cluster=" + c.ID.String()})
+				}
+			}
+			if d.Totals.OfflineDetail == "" {
+				d.Totals.OfflineDetail = c.Name + " · " + ago + " ago"
+			}
+		}
+	}
+	keys := make([]int, 0, len(minors))
+	for m := range minors {
+		keys = append(keys, m)
+	}
+	sort.Ints(keys)
+	for _, m := range keys {
+		d.VersionMatrix = append(d.VersionMatrix, VersionRow{Minor: fmt.Sprintf("1.%d", m), Clusters: minors[m], EOL: IsEOL(m, now)})
+	}
+	d.Totals.Versions = len(keys)
+	if len(keys) > 0 {
+		d.Totals.VersionMin = fmt.Sprintf("1.%d", keys[0])
+		d.Totals.VersionMax = fmt.Sprintf("1.%d", keys[len(keys)-1])
+	}
+	for _, p := range provs {
+		d.Providers = append(d.Providers, *p)
+	}
+	sort.Slice(d.Providers, func(i, j int) bool { return d.Providers[i].Clusters > d.Providers[j].Clusters })
+
+	att, err := a.attention(ctx, s, ids)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	d.Attention = append(d.Attention, att...)
+	if len(eolClusters) > 0 {
+		vs := []string{}
+		for _, m := range keys {
+			if eolMinor[m] {
+				vs = append(vs, fmt.Sprintf("v1.%d", m))
+			}
+		}
+		d.Attention = append(d.Attention, AttentionItem{Kind: "eol", Severity: "warn", Label: "End of life",
+			Detail: fmt.Sprintf("%d %s on %s", len(eolClusters), plural(len(eolClusters), "cluster", "clusters"), strings.Join(vs, ", ")), Link: "/?filter=eol"})
+	}
+	// Critical CVEs last (lowest urgency of the crit items is shown after the warns? no: crit first).
+	sort.SliceStable(d.Attention, func(i, j int) bool { return d.Attention[i].Severity == "crit" && d.Attention[j].Severity != "crit" })
+	httpx.JSON(w, http.StatusOK, d)
+}
+
+func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid.UUID) ([]AttentionItem, error) {
+	var out []AttentionItem
+	// Latest run per job in the last 48 h that failed or was missed.
+	rows, err := a.DB.Query(ctx, `
+		SELECT DISTINCT ON (j.id) j.id, t.service, r.status, r.error
+		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
+		WHERE t.cluster_id = ANY($1) AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
+		  AND r.status IN ('succeeded','failed','missed')
+		ORDER BY j.id, r.created_at DESC`, clusterIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var jobID uuid.UUID
+		var svc, st, errMsg string
+		if err := rows.Scan(&jobID, &svc, &st, &errMsg); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		switch st {
+		case "failed":
+			out = append(out, AttentionItem{Kind: "backup_failed", Severity: "crit", Label: "Backup failed",
+				Detail: svc + " · " + shortErr(errMsg), Link: "/backups?job=" + jobID.String()})
+		case "missed":
+			out = append(out, AttentionItem{Kind: "backup_missed", Severity: "crit", Label: "Backup missed",
+				Detail: svc, Link: "/backups?job=" + jobID.String()})
+		}
+	}
+	rows.Close()
+
+	// Pending approvals the current user can act on (not their own).
+	if s.CanAny(authz.PermVaultApprove) {
+		rows, err := a.DB.Query(ctx, `SELECT cr.expires_at, c.labels FROM change_requests cr
+			JOIN vaults v ON v.id = cr.vault_id JOIN targets t ON t.id = v.target_id JOIN clusters c ON c.id = t.cluster_id
+			WHERE cr.status = 'pending' AND cr.expires_at > now() AND cr.maker_principal_id <> $1`, s.Principal.ID)
+		if err != nil {
+			return nil, err
+		}
+		n := 0
+		var oldest time.Time
+		for rows.Next() {
+			var exp time.Time
+			var labels map[string]string
+			if err := rows.Scan(&exp, &labels); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if s.Can(authz.PermVaultApprove, labels) {
+				n++
+				if oldest.IsZero() || exp.Before(oldest) {
+					oldest = exp
+				}
+			}
+		}
+		rows.Close()
+		if n > 0 {
+			out = append(out, AttentionItem{Kind: "approvals", Severity: "warn", Label: fmt.Sprintf("%d %s", n, plural(n, "approval", "approvals")),
+				Detail: "waiting for you · oldest " + humanDuration(time.Until(oldest)) + " left", Link: "/approvals"})
+		}
+	}
+
+	// New critical CVEs (first seen in the last 24 h) in running images in scope.
+	var cves, imgs int
+	err = a.DB.QueryRow(ctx, `SELECT count(DISTINCT v.cve_id), count(DISTINCT v.digest) FROM image_vulns v
+		WHERE lower(v.severity) = 'critical' AND v.first_seen_at > now() - interval '24 hours'
+		  AND EXISTS (SELECT 1 FROM image_usage u WHERE u.digest = v.digest AND u.cluster_id = ANY($1))`, clusterIDs).Scan(&cves, &imgs)
+	if err != nil {
+		return nil, err
+	}
+	if cves > 0 {
+		out = append(out, AttentionItem{Kind: "critical_cves", Severity: "crit", Label: "Critical CVEs",
+			Detail: fmt.Sprintf("%d new in %d %s", cves, imgs, plural(imgs, "image", "images")), Link: "/security"})
+	}
+	return out, nil
+}
+
+func shortErr(s string) string {
+	if s == "" {
+		return "see run details"
+	}
+	if i := strings.IndexByte(s, '\n'); i > 0 {
+		s = s[:i]
+	}
+	if len(s) > 60 {
+		s = s[:57] + "…"
+	}
+	return s
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
+}
+
+func humanDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%d s", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%d min", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%d h", int(d.Hours()))
+	}
+	return fmt.Sprintf("%d d", int(d.Hours()/24))
+}
