@@ -11,9 +11,13 @@ import (
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		log := d.Log.With("component", "audit")
+		storage, err := storageOptions(d.Cfg)
+		if err != nil {
+			return Wiring{}, err
+		}
 		svc := &audit.Service{
 			DB: d.DB, Log: log, Gateway: d.Gateway,
-			Blob:         blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred),
+			Blob:         blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage)),
 			KubescapeBin: d.Cfg.Audit.KubescapeBin,
 			PolarisBin:   d.Cfg.Audit.PolarisBin,
 		}

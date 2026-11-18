@@ -119,6 +119,118 @@ If Managed Identity is not possible, paste a **container-scoped SAS** with permi
 (no `d`, no `l`). Olympos parses `se` and raises `sas.expiring` 14 and 3 days before expiry; runs fail
 fast after expiry. Account/service SAS requires shared-key access on the account.
 
+### Azure endpoint override
+
+`endpoint_override` (Settings › Destinations, or the API) replaces
+`https://<account>.blob.core.windows.net` — for sovereign clouds, private DNS names or Azurite
+(`http://azurite.olympos.svc:10000/devstoreaccount1`). The scheme decides TLS.
+
+### S3 and S3-compatible storage
+
+Kind **s3** writes to an AWS S3 bucket, or to any S3-compatible service (MinIO, Ceph RGW, NetApp
+StorageGRID, Wasabi, …) through `endpoint_override` (`https://minio.example.internal:9000`; the scheme
+decides TLS; empty = `https://s3.<region>.amazonaws.com`, region default `us-east-1`). Most
+S3-compatible services need **path-style** addressing; AWS uses virtual-hosted style. Auth is a static
+access key: the access key ID is shown in the UI, the secret key is stored envelope-encrypted or as a
+`kv://` reference and is read at use time. Private CAs: set `olympos.backup.storageCABundleFile` (PEM,
+added to the system roots; independent of `targetTLS`).
+
+```yaml
+olympos:
+  backup:
+    storageCABundleFile: /etc/olympos/storage-ca/ca.crt   # optional
+    s3PartSizeMiB: 32        # multipart part size; memory per running upload; max object = 10 000 parts
+```
+
+Uploads stream (no temp file) as multipart uploads, compute sha256 on the fly, set the object tag
+`olympos-tier` with the upload and never overwrite an existing key (HEAD before every upload; objects
+up to 8 MiB additionally use `If-None-Match: *`).
+
+**Policy — no `s3:DeleteObject`.** Give the Olympos user exactly this (AWS IAM policy; MinIO and Ceph
+accept the same document):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:GetBucketLocation", "s3:ListBucketMultipartUploads"],
+     "Resource": "arn:aws:s3:::olympos-backups"},
+    {"Effect": "Allow",
+     "Action": ["s3:PutObject", "s3:GetObject", "s3:PutObjectTagging", "s3:GetObjectTagging",
+                "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+     "Resource": "arn:aws:s3:::olympos-backups/*"}
+  ]
+}
+```
+
+`s3:ListBucket` is needed so that a missing key answers 404 (the existence check before each upload)
+and for the bucket check of *Test destination*. On AWS, add a bucket policy statement that denies
+deletes to everyone but a break-glass role:
+
+```json
+{"Effect": "Deny", "Principal": "*",
+ "Action": ["s3:DeleteObject", "s3:DeleteObjectVersion", "s3:PutLifecycleConfiguration", "s3:PutBucketObjectLockConfiguration"],
+ "Resource": ["arn:aws:s3:::olympos-backups", "arn:aws:s3:::olympos-backups/*"],
+ "Condition": {"ArnNotLike": {"aws:PrincipalArn": "arn:aws:iam::<account>:role/backup-break-glass"}}}
+```
+
+*Test destination* checks the endpoint (reachable, TLS verified, bucket exists), writes/reads/tags a
+probe under `{prefix}/.olympos-probe/` and expects the delete of the probe to be refused
+(`AccessDenied`); if the delete succeeds the destination is saved with a **can delete** warning.
+
+**Object Lock.** Create the bucket with Object Lock enabled (implies versioning) and a default retention
+in **compliance** mode ≥ the longest tier, e.g.
+`aws s3api put-object-lock-configuration --bucket olympos-backups --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":400}}}'`
+(MinIO: `mc retention set --default compliance 400d <alias>/olympos-backups`). Compliance mode cannot be
+shortened or removed, not even by the root user.
+
+**Retention = lifecycle rules filtered by the `olympos-tier` tag** (Olympos never deletes):
+
+```json
+{"Rules": [
+  {"ID": "daily",   "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "daily"}},   "Expiration": {"Days": 8},   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "weekly",  "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "weekly"}},  "Expiration": {"Days": 29},  "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "monthly", "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "monthly"}}, "Expiration": {"Days": 366}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "test",    "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "test"}},    "Expiration": {"Days": 7},   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "audit",   "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "audit"}},   "Expiration": {"Days": 400}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "probe",   "Status": "Enabled", "Filter": {"Prefix": "olympos/.olympos-probe/"},                 "Expiration": {"Days": 1}},
+  {"ID": "mpu",     "Status": "Enabled", "Filter": {}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2}}
+]}
+```
+
+Apply with `aws s3api put-bucket-lifecycle-configuration --bucket olympos-backups --lifecycle-configuration file://lifecycle.json`
+(MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …) and adjust the
+probe prefix to your destination prefix. With Object Lock, an expiration only adds a delete marker
+until the lock period of the version has ended.
+
+### NFS
+
+Kind **nfs** writes files below a volume mounted into the server. Volumes live under
+`olympos.backup.nfsRoot` (default `/var/lib/olympos/nfs`); **every first-level subdirectory is one
+mount** (the Helm value `nfsMounts: [{name, <volume source>}]` mounts each at
+`/var/lib/olympos/nfs/<name>`; hidden names and symlinks are ignored). *Settings › Destinations* lists
+them (`GET /destinations/mounts`, with a writable check). A destination `path` must resolve — after
+cleaning and symlink evaluation — inside a mount, e.g. `/var/lib/olympos/nfs/backup-nas/olympos`; `..`
+is rejected. The pod runs as uid/gid 65532 with fsGroup 65532: export the share so that this user can
+write (e.g. `all_squash,anonuid=65532,anongid=65532`, or a directory owned by 65532).
+
+```yaml
+olympos:
+  backup:
+    nfsRoot: /var/lib/olympos/nfs   # default
+```
+
+Each file is written as `<file>.partial` (0640, created exclusively) → fsync → hard-linked to its
+final name (never replaces an existing file; filesystems without hard links fall back to check +
+rename) → `.partial` removed; directories are 0750. Tags are stored next to each file in
+`<file>.tags.json` (`{"olympos-tier":"daily"}`) and the tier is also in the manifest.
+
+**Retention is the storage's job.** Olympos never deletes backups, but on a filesystem it technically
+*can* (the server user owns the files), so *Test destination* reports **can delete** with a warning.
+Protect backups on the storage side with read-only **snapshots** on their own schedule or **WORM**
+(NetApp SnapLock, PowerScale SmartLock, ZFS snapshots with holds), and expire files by tier with a
+storage-side job that reads the `.tags.json` sidecars or the manifests.
+
 ### Audit raw results
 
 Raw kubescape/polaris JSON is uploaded to `audit/{cluster}/{tool}/{run_id}.json` on the destination set

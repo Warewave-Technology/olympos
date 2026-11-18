@@ -21,6 +21,8 @@ const (
 	StepRead           = "read"
 	StepTag            = "tag"
 	StepDeleteRefused  = "delete_refused"
+	StepEndpoint       = "endpoint" // s3: reachable, TLS, bucket exists
+	StepPath           = "path"     // nfs: inside a mount, exists or creatable, writable
 )
 
 // Step is one check of the destination test.
@@ -60,6 +62,23 @@ type Prober struct {
 	Cred    azcore.TokenCredential
 	Now     func() time.Time
 	Timeout time.Duration // per storage operation, default 30s
+	Storage blob.StorageOptions
+}
+
+// probeStore is what the probe needs from a writer of any kind.
+type probeStore interface {
+	blob.Writer
+	Download(ctx context.Context, path string, max int64) ([]byte, error)
+	SetTags(ctx context.Context, path string, tags map[string]string) error
+	GetTags(ctx context.Context, path string) (map[string]string, error)
+	ProbeDeleteRefused(ctx context.Context, path string) (bool, error)
+}
+
+func (p *Prober) timeout() time.Duration {
+	if p.Timeout == 0 {
+		return 30 * time.Second
+	}
+	return p.Timeout
 }
 
 func (p *Prober) now() time.Time {
@@ -122,30 +141,119 @@ func (p *Prober) Test(ctx context.Context, t blob.Target) Report {
 		rep.Error = err.Error()
 		return rep
 	}
-	timeout := p.Timeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
+	p.probe(ctx, &rep, az, t.Prefix, kindTexts[blob.KindAzureBlob])
+	if !sasOK {
+		rep.OK = false
 	}
-	op := func() (context.Context, context.CancelFunc) { return context.WithTimeout(ctx, timeout) }
-	path := blob.Join(t.Prefix, blob.ProbeDir, uuid.NewString())
+	if !rep.OK && rep.Error == "" {
+		rep.Error = "destination test failed"
+	}
+	return rep
+}
+
+// kindText holds the per-kind wording of the probe steps.
+type kindText struct {
+	noun, container, tag, canDelete string
+}
+
+var kindTexts = map[string]kindText{
+	blob.KindAzureBlob: {noun: "blob", container: "container", tag: "blob index tag",
+		canDelete: "WARNING: the credential can delete blobs (probe deleted). Remove the delete permission"},
+	blob.KindS3: {noun: "object", container: "bucket", tag: "object tag",
+		canDelete: "WARNING: the credential can delete objects (probe deleted). Remove s3:DeleteObject / s3:DeleteObjectVersion from its policy"},
+	blob.KindNFS: {noun: "file", container: "directory", tag: "tags sidecar file",
+		canDelete: "WARNING: Olympos can delete files on this export (probe deleted). Filesystems cannot refuse deletes per operation; protect backups with storage snapshots / WORM"},
+}
+
+// TestS3 checks the endpoint (reachable, TLS, bucket exists), then runs the
+// probe (write, read, tag, delete refused).
+func (p *Prober) TestS3(ctx context.Context, t blob.S3Target) Report {
+	rep := Report{Steps: []Step{}}
+	s3, err := blob.OpenS3(t, p.Storage)
+	if err != nil {
+		rep.add(StepEndpoint, false, "%s", err.Error())
+		rep.Error = err.Error()
+		return rep
+	}
+	c, cancel := context.WithTimeout(ctx, p.timeout())
+	err = s3.CheckBucket(c)
+	cancel()
+	if err != nil {
+		rep.add(StepEndpoint, false, "%s: %s", s3.Endpoint(), err.Error())
+		rep.Error = "S3 endpoint check failed: " + err.Error()
+		return rep
+	}
+	tlsText := "TLS verified"
+	if strings.HasPrefix(s3.Endpoint(), "http://") {
+		tlsText = "plain HTTP (no TLS)"
+	}
+	style := "virtual-hosted-style"
+	if t.PathStyle {
+		style = "path-style"
+	}
+	rep.add(StepEndpoint, true, "%s reachable (%s, %s); bucket %s exists", s3.Endpoint(), tlsText, style, t.Bucket)
+	p.probe(ctx, &rep, s3, t.Prefix, kindTexts[blob.KindS3])
+	if !rep.OK && rep.Error == "" {
+		rep.Error = "destination test failed"
+	}
+	return rep
+}
+
+// TestFS checks the path (inside a mount, exists or creatable, writable),
+// then runs the probe. Deleting the probe normally succeeds on a
+// filesystem: the report then has CanDelete (a warning), never silently.
+func (p *Prober) TestFS(ctx context.Context, t blob.FSTarget) Report {
+	rep := Report{Steps: []Step{}}
+	f, err := blob.OpenFS(t, p.Storage)
+	if err != nil {
+		rep.add(StepPath, false, "%s", err.Error())
+		rep.Error = err.Error()
+		return rep
+	}
+	created, err := f.EnsureDir()
+	if err != nil {
+		rep.add(StepPath, false, "%s", err.Error())
+		rep.Error = "destination path: " + err.Error()
+		return rep
+	}
+	state := "exists"
+	if created {
+		state = "created"
+	}
+	m := f.Mount()
+	rep.add(StepPath, true, "%s inside mount %s (%s); directory %s and writable", f.Dir(), m.Name, m.Path, state)
+	p.probe(ctx, &rep, f, t.Prefix, kindTexts[blob.KindNFS])
+	if !rep.OK && rep.Error == "" {
+		rep.Error = "destination test failed"
+	}
+	return rep
+}
+
+// probe writes {prefix}/.olympos-probe/<uuid>, reads it back, sets and reads
+// a tag, then attempts to delete it and expects a refusal. It sets rep.OK
+// from write, read, tag and any earlier step.
+func (p *Prober) probe(ctx context.Context, rep *Report, st probeStore, prefix string, kt kindText) {
+	now := p.now()
+	op := func() (context.Context, context.CancelFunc) { return context.WithTimeout(ctx, p.timeout()) }
+	path := blob.Join(prefix, blob.ProbeDir, uuid.NewString())
 	rep.ProbePath = path
 	body := []byte("olympos destination probe " + now.UTC().Format(time.RFC3339) + "\n")
 
 	c, cancel := op()
-	_, err = az.Upload(c, path, bytes.NewReader(body), "text/plain", nil)
+	_, err := st.Upload(c, path, bytes.NewReader(body), "text/plain", nil)
 	cancel()
 	if err != nil {
 		rep.add(StepWrite, false, "%s", err.Error())
 		rep.add(StepRead, false, "skipped")
 		rep.add(StepTag, false, "skipped")
 		rep.add(StepDeleteRefused, false, "skipped")
-		rep.Error = "cannot write to the container"
-		return rep
+		rep.Error = "cannot write to the " + kt.container
+		return
 	}
 	rep.add(StepWrite, true, "wrote %s (%d bytes)", path, len(body))
 
 	c, cancel = op()
-	got, err := az.Download(c, path, 4096)
+	got, err := st.Download(c, path, 4096)
 	cancel()
 	switch {
 	case err != nil:
@@ -158,13 +266,13 @@ func (p *Prober) Test(ctx context.Context, t blob.Target) Report {
 
 	tagVal := now.UTC().Format("20060102T150405Z")
 	c, cancel = op()
-	err = az.SetTags(c, path, map[string]string{"olympos-probe": tagVal})
+	err = st.SetTags(c, path, map[string]string{"olympos-probe": tagVal})
 	cancel()
 	if err != nil {
 		rep.add(StepTag, false, "set tag: %s", err.Error())
 	} else {
 		c, cancel = op()
-		tags, err := az.GetTags(c, path)
+		tags, err := st.GetTags(c, path)
 		cancel()
 		switch {
 		case err != nil:
@@ -172,12 +280,12 @@ func (p *Prober) Test(ctx context.Context, t blob.Target) Report {
 		case tags["olympos-probe"] != tagVal:
 			rep.add(StepTag, false, "tag olympos-probe not read back")
 		default:
-			rep.add(StepTag, true, "set and read blob index tag olympos-probe")
+			rep.add(StepTag, true, "set and read %s olympos-probe", kt.tag)
 		}
 	}
 
 	c, cancel = op()
-	refused, err := az.ProbeDeleteRefused(c, path)
+	refused, err := st.ProbeDeleteRefused(c, path)
 	cancel()
 	switch {
 	case err != nil:
@@ -186,19 +294,20 @@ func (p *Prober) Test(ctx context.Context, t blob.Target) Report {
 		rep.add(StepDeleteRefused, true, "delete refused, as expected")
 	default:
 		rep.CanDelete = true
-		rep.add(StepDeleteRefused, false, "WARNING: the credential can delete blobs (probe deleted). Remove the delete permission")
+		rep.add(StepDeleteRefused, false, "%s", kt.canDelete)
 	}
 
-	rep.OK = sasOK
+	rep.OK = true
 	for _, s := range []string{StepWrite, StepRead, StepTag} {
 		if st := rep.step(s); st == nil || !st.OK {
 			rep.OK = false
 		}
 	}
-	if !rep.OK && rep.Error == "" {
-		rep.Error = "destination test failed"
+	for _, s := range rep.Steps {
+		if (s.Name == StepEndpoint || s.Name == StepPath) && !s.OK {
+			rep.OK = false
+		}
 	}
-	return rep
 }
 
 func names(ps []string) string {

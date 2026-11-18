@@ -14,6 +14,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
 	"github.com/google/uuid"
+
+	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
 // Azurite in Docker for blob tests. Skipped when Docker is unavailable
@@ -37,6 +39,7 @@ func TestMain(m *testing.M) {
 	if azStarted {
 		_ = exec.Command("docker", "rm", "-f", azuriteName).Run()
 	}
+	testutil.StopMinIO()
 	os.Exit(code)
 }
 

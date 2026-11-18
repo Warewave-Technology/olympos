@@ -25,10 +25,13 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
 
-// Auth options (SPEC §10.3: exactly these two).
+// Auth options. azure_blob: exactly managed_identity and sas_token (SPEC
+// §10.3); s3: access_key; nfs: none.
 const (
 	AuthManagedIdentity = "managed_identity"
 	AuthSAS             = "sas_token"
+	AuthAccessKey       = "access_key"
+	AuthNone            = "none"
 )
 
 // ProbeDir is the folder (under the destination prefix) that holds probe
@@ -306,42 +309,24 @@ func Describe(err error) string {
 	return secrets.RedactString(urlQueryRe.ReplaceAllString(err.Error(), "$1?"+secrets.Redacted))
 }
 
-// LoadSAS returns the plaintext SAS of a credentials row: envelope-opened
-// (AAD "credentials:<id>") or resolved from Key Vault at use time. The
-// caller should secrets.Zero the result.
+// LoadSAS returns the plaintext SAS of a credentials row (see LoadSecret).
+// The caller should secrets.Zero the result.
 func LoadSAS(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *secrets.Envelope, credID uuid.UUID) ([]byte, error) {
-	var kind, vault, name, kekVersion string
-	var ct, dek []byte
-	err := q.QueryRow(ctx, `SELECT kind, keyvault_name, secret_name, ciphertext, wrapped_dek, kek_version FROM credentials WHERE id = $1`, credID).
-		Scan(&kind, &vault, &name, &ct, &dek, &kekVersion)
-	if err != nil {
-		return nil, fmt.Errorf("load SAS credential: %w", store.NotFound(err))
-	}
-	switch kind {
-	case "stored":
-		b, err := env.Open(ctx, secrets.Sealed{Ciphertext: ct, WrappedDEK: dek, KEKVersion: kekVersion}, []byte("credentials:"+credID.String()))
-		if err != nil {
-			return nil, fmt.Errorf("open stored SAS: %w", err)
-		}
-		return b, nil
-	case "keyvault_ref":
-		b, err := kv.GetSecret(ctx, vault, name)
-		if err != nil {
-			return nil, fmt.Errorf("resolve SAS from kv://%s/%s: %w", vault, name, err)
-		}
-		return b, nil
-	}
-	return nil, fmt.Errorf("unknown credential kind %q", kind)
+	return LoadSecret(ctx, q, kv, env, credID, "SAS")
 }
 
 // LoadTarget reads a destinations row and, for SAS auth, its token.
 func LoadTarget(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *secrets.Envelope, id uuid.UUID) (Target, error) {
 	var t Target
 	var credID *uuid.UUID
-	err := q.QueryRow(ctx, `SELECT name, account, container, prefix, auth, endpoint_override, sas_credential_id FROM destinations WHERE id = $1`, id).
-		Scan(&t.Name, &t.Account, &t.Container, &t.Prefix, &t.Auth, &t.EndpointOverride, &credID)
+	var kind string
+	err := q.QueryRow(ctx, `SELECT kind, name, account, container, prefix, auth, endpoint_override, sas_credential_id FROM destinations WHERE id = $1`, id).
+		Scan(&kind, &t.Name, &t.Account, &t.Container, &t.Prefix, &t.Auth, &t.EndpointOverride, &credID)
 	if err != nil {
 		return Target{}, fmt.Errorf("load destination: %w", store.NotFound(err))
+	}
+	if kind != KindAzureBlob {
+		return Target{}, fmt.Errorf("destination %q is of kind %s, not %s", t.Name, kind, KindAzureBlob)
 	}
 	if t.Auth == AuthSAS {
 		if credID == nil {
@@ -355,32 +340,4 @@ func LoadTarget(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *
 		secrets.Zero(b)
 	}
 	return t, nil
-}
-
-// AzureResolver opens Writers for destinations rows.
-type AzureResolver struct {
-	DB   *store.DB
-	KV   secrets.KeyVault
-	Env  *secrets.Envelope
-	Cred azcore.TokenCredential
-	Now  func() time.Time
-}
-
-// NewResolver returns the Azure Blob resolver for destinations rows.
-func NewResolver(db *store.DB, kv secrets.KeyVault, env *secrets.Envelope, cred azcore.TokenCredential) Resolver {
-	return &AzureResolver{DB: db, KV: kv, Env: env, Cred: cred}
-}
-
-// ForDestination implements Resolver. The SAS (if any) is loaded at use
-// time and lives only inside the returned client.
-func (r *AzureResolver) ForDestination(ctx context.Context, destinationID uuid.UUID) (Writer, error) {
-	t, err := LoadTarget(ctx, r.DB, r.KV, r.Env, destinationID)
-	if err != nil {
-		return nil, err
-	}
-	now := time.Now()
-	if r.Now != nil {
-		now = r.Now()
-	}
-	return Open(t, r.Cred, now)
 }

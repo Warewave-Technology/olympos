@@ -11,6 +11,10 @@ import (
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		postgres.SetDumpDir(d.Cfg.Backup.PgDumpDir)
+		storage, err := storageOptions(d.Cfg)
+		if err != nil {
+			return Wiring{}, err
+		}
 		creds := &backup.Credentials{KV: d.KV, Envelope: d.Envelope}
 		log := d.Log.With("component", "backup")
 
@@ -21,7 +25,7 @@ func init() {
 		sched := &backup.Scheduler{DB: d.DB, Log: log.With("loop", "scheduler"), DeadMansSwitchURL: d.Cfg.DeadMansSwitch.URL}
 		worker := &backup.Worker{
 			DB: d.DB, Log: log.With("loop", "worker"), Dialer: d.Gateway, Creds: creds,
-			Blobs:  blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred),
+			Blobs:  blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage)),
 			Global: d.Cfg.Backup.GlobalConcurrency, PerCluster: d.Cfg.Backup.PerClusterConcurrency,
 		}
 		return Wiring{
