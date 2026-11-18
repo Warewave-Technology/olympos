@@ -31,6 +31,8 @@ type Config struct {
 	// namespace globs not scanned.
 	SensitiveData        bool
 	SensitiveDataExclude []string
+	// SecretsInventory: opt-in, metadata-only Secret inventory (F3).
+	SecretsInventory bool
 }
 
 // ConfigFromEnv reads OLYMPOS_* variables.
@@ -46,6 +48,7 @@ func ConfigFromEnv() (Config, error) {
 		BenchNamespace:   envOr("OLYMPOS_BENCH_NAMESPACE", "olympos-bench"),
 		HealthAddr:       envOr("OLYMPOS_HEALTH_ADDR", "127.0.0.1:8081"),
 		SensitiveData:    os.Getenv("OLYMPOS_SENSITIVE_DATA") != "false",
+		SecretsInventory: os.Getenv("OLYMPOS_SECRETS_INVENTORY") == "true",
 	}
 	if v, ok := os.LookupEnv("OLYMPOS_SENSITIVE_DATA_EXCLUDE"); ok {
 		c.SensitiveDataExclude = []string{}

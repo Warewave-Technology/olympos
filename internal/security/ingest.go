@@ -43,6 +43,8 @@ type Ingester struct {
 	Log *slog.Logger
 	// SystemNamespaces are excluded from the default-deny check (globs).
 	SystemNamespaces []string
+	// ReportUnmanaged raises secret.unmanaged for Secrets no operator owns.
+	ReportUnmanaged bool
 	// OnNewImages is called after a report added digests never seen before.
 	OnNewImages func()
 
@@ -93,6 +95,10 @@ func (in *Ingester) Report(ctx context.Context, clusterID uuid.UUID, r *pb.Resou
 	case *pb.ResourceReport_Images:
 		return in.ingest(ctx, clusterID, "images", v.Images, func(tx pgx.Tx) (bool, error) {
 			return in.images(ctx, tx, clusterID, v.Images)
+		})
+	case *pb.ResourceReport_SecretInventory:
+		return in.ingest(ctx, clusterID, "secret-inventory", v.SecretInventory, func(tx pgx.Tx) (bool, error) {
+			return false, in.secretInventory(ctx, tx, clusterID, v.SecretInventory)
 		})
 	case *pb.ResourceReport_SensitiveData:
 		return in.ingest(ctx, clusterID, "sensitive-data", v.SensitiveData, func(tx pgx.Tx) (bool, error) {

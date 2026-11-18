@@ -139,6 +139,13 @@ type Server struct {
 		TrivyCacheDir    string   `yaml:"trivyCacheDir"`
 		TrivyDBRepo      string   `yaml:"trivyDBRepo"`
 		SystemNamespaces []string `yaml:"systemNamespaces"`
+		// SecretsInventory: findings of the opt-in Secret inventory (F3).
+		// ReportUnmanaged (default true) raises secret.unmanaged (info) for
+		// Secrets not owned by External Secrets / Vault Secrets Operator /
+		// sealed-secrets / cert-manager.
+		SecretsInventory struct {
+			ReportUnmanaged *bool `yaml:"reportUnmanaged"`
+		} `yaml:"secretsInventory"`
 	} `yaml:"security"`
 }
 

@@ -82,6 +82,7 @@ message Capabilities {
   int32 bench_max_parallel = 2;
   int32 max_tunnels = 3;
   repeated string bench_allowlist = 4;
+  bool secrets_inventory = 5; // opt-in Secret inventory (F3)
 }
 
 // ---- inventory ----
@@ -154,7 +155,37 @@ message ResourceReport {
     NetworkPolicyReport network_policies = 2;
     ImageReport images = 3;
     SensitiveDataReport sensitive_data = 4;
+    SecretInventoryReport secret_inventory = 5;
   }
+}
+
+// ---- opt-in Secret inventory (F3) ----
+// Metadata-only: the agent lists Secrets as PartialObjectMetadata and reads
+// key names from managedFields. These messages MUST NOT carry a value or
+// annotations (kubectl's last-applied-configuration holds the data);
+// enforced by proto_test.go.
+
+message ObjectOwner {
+  string api_version = 1;
+  string kind = 2;
+  string name = 3;
+}
+
+message K8sSecret {
+  string namespace = 1;
+  string name = 2;
+  string type = 3;                 // inferred (keys, SA annotation, helm label); "" unknown
+  repeated string keys = 4;        // key NAMES from managedFields
+  bool keys_unknown = 5;           // no managedFields: never read instead
+  map<string, string> labels = 6;
+  repeated ObjectOwner owners = 7;
+  int64 created_unix = 8;
+  repeated string referenced_by = 9; // e.g. Deployment/web, ServiceAccount/default (names only)
+}
+
+message SecretInventoryReport {
+  repeated K8sSecret secrets = 1;
+  bool truncated = 2;
 }
 
 // ---- sensitive data in ConfigMaps (F2) ----

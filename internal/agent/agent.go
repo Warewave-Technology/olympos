@@ -162,7 +162,7 @@ func (a *Agent) session(ctx context.Context) error {
 	a.sendMu.Unlock()
 	_, leaf := a.id.get()
 
-	caps := &pb.Capabilities{MaxTunnels: int32(a.cfg.MaxTunnels)}
+	caps := &pb.Capabilities{MaxTunnels: int32(a.cfg.MaxTunnels), SecretsInventory: a.cfg.SecretsInventory}
 	if a.Bench != nil && a.cfg.BenchEnabled {
 		caps.BenchEnabled = true
 		caps.BenchMaxParallel = int32(a.cfg.BenchMaxParallel)

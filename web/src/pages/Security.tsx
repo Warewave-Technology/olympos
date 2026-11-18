@@ -7,13 +7,14 @@ import { useCan } from '../auth/me';
 import { age, clockTime, plural, shortDigest, shortText } from '../lib/format';
 import { securityRoute } from '../router';
 import { SensitiveDataTab, useSensitiveData } from '../ui/SensitiveDataTab';
+import { SecretsTab, useSecretInventory } from '../ui/SecretsTab';
 import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 import { DataTable, type Column } from '../ui/DataTable';
 import { Badge, EmptyState, Modal, QueryView, Tabs, sentence, useToast } from '../ui/kit';
 import { Select } from '../ui/Select';
 import { PageHead, SeverityBadge } from '../ui/status';
 
-type Tab = 'images' | 'kyverno' | 'netpol' | 'sensitive';
+type Tab = 'images' | 'kyverno' | 'netpol' | 'sensitive' | 'secrets';
 type Sev = '' | 'critical' | 'high';
 type StatusFilter = '' | 'attention' | 'scanned' | 'waiting';
 type KyFilter = 'failing' | 'not_ready' | 'all';
@@ -350,6 +351,8 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
   const kyQ = useQuery({ queryKey: ['kyverno', { cluster: cq }], queryFn: () => api.get<ItemList<KyvernoPolicy>>('/security/kyverno', { cluster: cq }) });
   const npQ = useQuery({ queryKey: ['netpol', { cluster: cq }], queryFn: () => api.get<ItemList<NetpolNamespace>>('/security/netpol', { cluster: cq }) });
   const sdQ = useSensitiveData(cq);
+  const ksQ = useSecretInventory(cq);
+  const ksFindings = (ksQ.data?.items ?? []).filter((x) => x.findings.some((f) => f !== 'secret.unmanaged')).length;
   const sdItems = sdQ.data?.items ?? [];
 
   const all = imagesQ.data?.items ?? [];
@@ -445,6 +448,7 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
           { id: 'images', label: <>Images {imagesQ.data && <span className="muted small">{all.length}</span>}</> },
           { id: 'kyverno', label: <>Kyverno policies {kyFail > 0 && <Badge tone="warn">{kyFail} failing</Badge>}</> },
           { id: 'netpol', label: <>Network policies {noDeny.length > 0 && <Badge tone="warn">{noDeny.length} without default-deny</Badge>}</> },
+          { id: 'secrets', label: <>Kubernetes secrets {ksFindings > 0 && <Badge tone="info">{ksFindings} to review</Badge>}</> },
           { id: 'sensitive', label: <>Sensitive data {sdItems.length > 0 && <Badge tone={sdItems.some((f) => f.severity === 'high') ? 'crit' : 'warn'}>{sdItems.length} in ConfigMaps</Badge>}</> },
         ]}
       />
@@ -462,6 +466,7 @@ function SecurityDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ov
         />
       )}
       {tab === 'sensitive' && <SensitiveDataTab q={sdQ} oneCluster={one} />}
+      {tab === 'secrets' && <SecretsTab q={ksQ} oneCluster={one} />}
       {tab === 'netpol' && <NetpolTab q={npQ} filter={npFilter} setFilter={setNpFilter} oneCluster={one} onOpen={(n) => navigate({ to: '/security/netpol', search: { cluster: n.cluster_id, namespace: n.namespace, from } })} />}
     </>
   );

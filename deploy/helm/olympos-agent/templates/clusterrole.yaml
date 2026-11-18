@@ -1,5 +1,6 @@
 # SPEC §4.2 — MUST be exactly these rules (golden-file tested), plus the
-# read-only extras kubescape needs. No secrets, no write verbs, no exec.
+# read-only extras kubescape needs. No secrets (unless the opt-in Secret
+# inventory is on: list/watch, never get), no write verbs, no exec.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -53,6 +54,15 @@ rules:
 - apiGroups: ["apiextensions.k8s.io"]
   resources: [customresourcedefinitions]
   verbs: [get, list, watch]
+{{- if .Values.secretsInventory.enabled }}
+# Opt-in Secret inventory (F3): the agent only makes metadata-only requests
+# (PartialObjectMetadata) and reads key names from managedFields. RBAC has no
+# "metadata only" verb: this token could read values with a normal request,
+# which is why the feature is off by default (docs/security-model.md).
+- apiGroups: [""]
+  resources: [secrets]
+  verbs: [list, watch]
+{{- end }}
 - nonResourceURLs: ["/version", "/version/", "/api", "/api/*", "/apis", "/apis/*", "/openapi/*"]
   verbs: [get]
 ---

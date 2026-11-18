@@ -3021,3 +3021,10 @@ label.chk {
 .self-backup dl.kv dd {
   margin: 0;
 }
+
+/* Secret inventory key chips */
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}

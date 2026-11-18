@@ -11,7 +11,7 @@ This document is the source of truth for the implementation. Where it says **MUS
 ## 0. Principles (read first)
 
 1. **Credentials never enter the cluster.** All work that needs a credential (backups, Vault operations, image scans) runs on the **server**. The agent is discovery + a constrained tunnel.
-2. **The agent is a narrow, boring component.** Distroless, no shell, read-only RBAC, no Secret access, no listening port. It only dials out.
+2. **The agent is a narrow, boring component.** Distroless, no shell, read-only RBAC, no Secret access (except the opt-in Secret inventory: metadata-only, F3), no listening port. It only dials out.
 3. **The agent only tunnels to targets it discovered itself.** The server can never ask for an arbitrary `host:port`.
 4. **Secret values are never shown in the UI.** Users see keys, never values; values can only be replaced, through maker/checker approval.
 5. **Every sensitive action is auditable.** Append-only logs for grants, change requests, backup runs, logins.
@@ -182,7 +182,7 @@ bench:
 4. **Read-only API proxy**: lets server-side tools (kubescape, polaris) talk to the kube-apiserver with the agent's identity, `GET/LIST/WATCH` only.
 5. **kube-bench runner** (opt-in, §12.3).
 
-### 4.2 RBAC (MUST be exactly this, plus bench extras when enabled)
+### 4.2 RBAC (MUST be exactly this, plus bench extras when enabled, plus `secrets: [list, watch]` — never `get` — only with the opt-in Secret inventory, metadata-only, F3)
 
 ```yaml
 kind: ClusterRole
@@ -571,13 +571,19 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 
 ### 13.3 Images
 - Inventory from `status.containerStatuses[].imageID` (digest) + image string; dedupe by digest.
-- Scanner: `trivy image --format json` on the server, pulling via **registry credentials stored in Olympos** (`registries`, matched by host pattern). Agent never reads `imagePullSecrets`.
+- Scanner: `trivy image --format json` on the server, pulling via **registry credentials stored in Olympos** (`registries`, matched by host pattern). Agent never reads `imagePullSecrets` (the opt-in Secret inventory records their *names* only).
 - Digest without matching credential → status "Missing credential" in UI.
 - Rescan: new digests immediately; all digests daily after trivy DB update. Trivy DB mirrored by the server (supports restricted networks).
 - Event `vuln.critical` for new critical CVEs in running images.
 
 ### 13.4 TLS findings
 - Target without TLS → `tls.missing` finding.
+
+### 13.6 Kubernetes Secret inventory (opt-in, key names only)
+- Helm `secretsInventory.enabled: false` by default. Only when true the ClusterRole gets `secrets: [list, watch]` (no `get`) and the agent advertises `secrets_inventory` in `Hello`. Kubernetes RBAC has no "metadata only" permission: that token could read values with a normal request, hence opt-in (`docs/security-model.md`).
+- The agent lists/watches Secrets **only** through the metadata client (PartialObjectMetadata); key names come from `managedFields` (`f:data` / `f:stringData`), else `keys_unknown` — never a full read. Annotations are dropped (kubectl's last-applied-configuration contains the data). A test fails if any other client touches Secrets (the agent's own identity Secret excepted).
+- Reported per Secret: namespace, name, inferred type, key names, labels, owners, creation time and the workloads/ServiceAccounts that reference it — by **name** from pod specs (`env[].valueFrom.secretKeyRef.name`, `envFrom[].secretRef.name`, secret and projected volumes, `imagePullSecrets`); extends deviation #16.
+- Findings `source=k8s-secrets`: `secret.unused` (low, no reference for 7 days), `secret.unmanaged` (info, configurable: not owned by External Secrets / Vault Secrets Operator / sealed-secrets / cert-manager), `secret.legacy_sa_token` (medium). Security › *Kubernetes secrets*. Olympos does not delete Secrets.
 
 ### 13.5 Sensitive data in ConfigMaps
 - The **agent** scans ConfigMap values (informer transform on add/update, full re-scan every 6 h) with the gitleaks rules (library, embedded and versioned in the agent build) plus key-name heuristics (`password`, `passwd`, `secret`, `token`, `apikey`, `private_key`, `connection_string`, `dsn`, …). System namespaces (same list as NetworkPolicy, `sensitiveData.excludeNamespaces`) and `kube-root-ca.crt` are skipped. Values never leave the cluster and never enter the informer cache.

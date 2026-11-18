@@ -22,6 +22,7 @@ var descriptions = map[string]string{
 	AuditNewFindings:    "An audit run found new findings.",
 	VulnCritical:        "A running image has a new critical vulnerability.",
 	SensitiveDataFound:  "A ConfigMap holds what looks like a credential (one message per cluster and scan).",
+	SecretFindings:      "The Secret inventory found unused Secrets or legacy service account tokens (one message per cluster and scan).",
 	AgentOffline:        "A cluster agent has been offline for 5 minutes (configurable: agents.offlineAlertAfter).",
 	AgentOnline:         "A cluster agent is back online after an agent.offline alert.",
 	AgentFlapping:       "A cluster agent disconnected more than 5 times in 30 minutes.",

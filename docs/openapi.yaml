@@ -808,6 +808,40 @@ paths:
                         namespaces_without_default_deny: {type: integer}
                         sensitive_data: {type: integer, description: "Open sensitive-data findings (credential-like values in ConfigMaps, F2)"}
                         sensitive_data_high: {type: integer, description: "Of which matched a credential pattern"}
+  /security/secrets:
+    get:
+      tags: [security]
+      summary: Opt-in Secret inventory (F3) — names and key names only, never values.
+      parameters:
+        - {name: cluster, in: query, schema: {type: string}, description: Cluster ID or name}
+      responses:
+        "200":
+          description: Clusters with the capability and their Secrets
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  clusters: {type: array, items: {type: object, properties: {cluster_id: {type: string}, cluster_name: {type: string}, enabled: {type: boolean}}}}
+                  fix: {type: string}
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        cluster_id: {type: string}
+                        cluster_name: {type: string}
+                        namespace: {type: string}
+                        name: {type: string}
+                        type: {type: string, description: "inferred; empty when unknown"}
+                        keys: {type: array, items: {type: string}, description: key names from managedFields}
+                        keys_unknown: {type: boolean}
+                        referenced_by: {type: array, items: {type: string}}
+                        managed_by: {type: string}
+                        created_at: {type: [string, "null"], format: date-time}
+                        first_seen_at: {type: string, format: date-time}
+                        last_referenced_at: {type: [string, "null"], format: date-time}
+                        findings: {type: array, items: {type: string, enum: [secret.unused, secret.unmanaged, secret.legacy_sa_token]}}
   /security/kyverno/policy:
     get:
       tags: [security]

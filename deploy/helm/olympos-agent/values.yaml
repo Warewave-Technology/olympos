@@ -30,6 +30,14 @@ sensitiveData:
   enabled: true
   excludeNamespaces: [kube-system, kube-public, kube-node-lease, olympos-system, olympos-bench]
 
+# Opt-in Secret inventory (F3): lists Secrets with their KEY NAMES only
+# (metadata-only requests; key names from managedFields; values never
+# requested). Kubernetes RBAC has no "metadata only" permission: enabling
+# this grants list/watch on secrets, and a stolen agent token could read
+# values with a normal request. Off by default.
+secretsInventory:
+  enabled: false
+
 bench:
   # kube-bench exception (SPEC §12.3). Renders the olympos-bench namespace,
   # its RBAC and the Kyverno PolicyException only when true.

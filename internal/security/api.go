@@ -40,6 +40,7 @@ func (a *API) Routes(r chi.Router) {
 	r.Get("/security/kyverno/policy", a.getKyvernoPolicy)
 	r.Get("/security/netpol", a.listNetpol)
 	r.Get("/security/netpol/namespace", a.getNetpolNamespace)
+	r.Get("/security/secrets", a.listSecrets)
 	r.Get("/registries", a.listRegistries)
 	r.Post("/registries", a.createRegistry)
 	r.Post("/registries/test", a.testRegistry)

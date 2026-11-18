@@ -88,8 +88,17 @@ longest retention. *Test destination* verifies delete is refused and warns other
   credentials (gitleaks rules + key names) inside the informer transform and keeps only metadata; the
   `SensitiveDataReport` it sends carries where a match is and which rule matched — never the value, a
   part of it or a hash (enforced by a proto test, e2e canary checks of the server's database and logs).
-- **Secrets** are never read by default. The opt-in Secret inventory (`secretsInventory.enabled`, see
-  below) is metadata-only.
+- **Secrets** are never read by default. The opt-in Secret inventory (`secretsInventory.enabled`) lists
+  them with their key names only.
+  **Kubernetes RBAC has no "metadata only" permission.** Listing Secret metadata requires `list` on
+  `secrets`, and the same token could read values with a normal request. Olympos code never requests
+  values — the agent uses only the metadata client (PartialObjectMetadata), reads key names from
+  `managedFields`, drops every annotation (kubectl's `last-applied-configuration` carries the data) and a
+  test fails the build if any other client touches Secrets — but a stolen agent token could. Therefore
+  the inventory is **opt-in and off by default**, like kube-bench. The API proxy keeps rejecting every
+  Secret path and the server never reads Secrets. Prefer server-side apply (or `kubectl create`) for
+  Secrets: client-side `kubectl apply` stores the values in an annotation that every metadata reader
+  (not only Olympos) receives.
 
 ## Residual risks / accepted trade-offs
 

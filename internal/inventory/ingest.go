@@ -83,9 +83,10 @@ func (s *Service) connected(ctx context.Context, clusterID uuid.UUID, h *pb.Hell
 		}
 		caps := h.GetCapabilities()
 		_, err = tx.Exec(ctx, `UPDATE clusters SET last_seen_at = now(), agent_version = $2,
-			bench_enabled = $3, bench_max_parallel = $4,
+			bench_enabled = $3, bench_max_parallel = $4, secrets_inventory = $6,
 			provider_override = CASE WHEN provider_override = '' THEN $5 ELSE provider_override END
-			WHERE id = $1`, clusterID, h.AgentVersion, caps.GetBenchEnabled(), caps.GetBenchMaxParallel(), normalizeOverride(h.ProviderOverride))
+			WHERE id = $1`, clusterID, h.AgentVersion, caps.GetBenchEnabled(), caps.GetBenchMaxParallel(), normalizeOverride(h.ProviderOverride),
+			caps.GetSecretsInventory())
 		if err != nil {
 			return err
 		}

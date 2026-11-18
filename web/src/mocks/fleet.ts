@@ -346,6 +346,36 @@ const byCluster = <T extends { cluster_id: string }>(list: T[], q: string | null
 
 export const fleetRoutes: [string, string, Handler][] = [
   ['GET', '/security/clusters', () => items(live().map(securitySummary))],
+  [
+    'GET',
+    '/security/secrets',
+    (r) => {
+      const cq = r.query.get('cluster');
+      const c = clusterOf(cq);
+      const cs = live().filter((x) => !c || x.id === c.id);
+      const enabledName = 'prod-aks-weu-01';
+      const now = Date.now();
+      const iso = (days: number) => new Date(now - days * 864e5).toISOString();
+      const rows = cs
+        .filter((x) => x.name === enabledName)
+        .flatMap((x) =>
+          (
+            [
+              ['payments', 'payments-db', 'Opaque', ['password', 'username'], ['Deployment/payments-api'], '', [] as string[], 200],
+              ['payments', 'stripe-legacy', 'Opaque', ['api_key'], [], '', ['secret.unused', 'secret.unmanaged'], 400],
+              ['payments', 'from-vault', 'Opaque', ['DB_URL'], ['Deployment/payments-api'], 'Vault Secrets Operator', [], 30],
+              ['ci', 'deployer-token', 'kubernetes.io/service-account-token', ['ca.crt', 'namespace', 'token'], ['ServiceAccount/deployer'], '', ['secret.legacy_sa_token'], 900],
+              ['web', 'web-tls', 'kubernetes.io/tls', ['tls.crt', 'tls.key'], ['Deployment/frontend'], 'cert-manager', [], 60],
+            ] as const
+          ).map(([ns, name, type, keys, refs, managed, findings, days]) => ({
+            cluster_id: x.id, cluster_name: x.name, namespace: ns, name, type, keys: [...keys], keys_unknown: false, referenced_by: [...refs],
+            managed_by: managed, created_at: iso(days), first_seen_at: iso(Math.min(days, 20)), last_referenced_at: refs.length ? iso(0) : null, findings: [...findings],
+          })),
+        );
+      return { status: 200, body: { clusters: cs.map((x) => ({ cluster_id: x.id, cluster_name: x.name, enabled: x.name === enabledName })), items: rows,
+        fix: 'Olympos does not delete Secrets. Remove unused ones with your usual change process.' } };
+    },
+  ],
   ['GET', '/audit/clusters', () => items(live().map(auditSummary))],
   ['GET', '/backup/clusters', () => items(live().map(backupSummary))],
   [

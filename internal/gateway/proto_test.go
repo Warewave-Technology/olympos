@@ -16,7 +16,13 @@ func TestProtoHasNoCredentialFields(t *testing.T) {
 	banned := []string{"password", "secret", "token", "sas", "credential", "key", "dsn", "auth"}
 	allowed := map[string]bool{"olympos.v1.EnrollRequest.bootstrap_token": true,
 		// The name of a ConfigMap key (F2), never its value.
-		"olympos.v1.SensitiveDataItem.key": true}
+		"olympos.v1.SensitiveDataItem.key": true,
+		// Secret inventory (F3): names and key names, never values.
+		"olympos.v1.Capabilities.secrets_inventory":  true,
+		"olympos.v1.ResourceReport.secret_inventory": true,
+		"olympos.v1.SecretInventoryReport.secrets":   true,
+		"olympos.v1.K8sSecret.keys":                  true,
+		"olympos.v1.K8sSecret.keys_unknown":          true}
 	fd := pb.File_olympos_v1_gateway_proto
 	msgs := fd.Messages()
 	var walk func(m protoreflect.MessageDescriptor)
@@ -52,6 +58,10 @@ func TestSensitiveDataReportCarriesNoValues(t *testing.T) {
 	want := map[string][]string{
 		"SensitiveDataItem":   {"namespace", "config_map", "key", "rule_id", "rule_description", "confidence", "value_length"},
 		"SensitiveDataReport": {"rules_version", "config_maps_scanned", "items"},
+		// F3: no values, no annotations.
+		"K8sSecret":             {"namespace", "name", "type", "keys", "keys_unknown", "labels", "owners", "created_unix", "referenced_by"},
+		"ObjectOwner":           {"api_version", "kind", "name"},
+		"SecretInventoryReport": {"secrets", "truncated"},
 	}
 	for name, fields := range want {
 		m := pb.File_olympos_v1_gateway_proto.Messages().ByName(protoreflect.Name(name))

@@ -17,7 +17,9 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -27,11 +29,16 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 )
+
+// keepSecretRefs: stripped pods keep the names of the Secrets they use
+// (only when the Secret inventory is on).
+var keepSecretRefs atomic.Bool
 
 const (
 	resendInterval    = 10 * time.Minute
@@ -47,6 +54,14 @@ func init() {
 			newNetpolReporter(shared, a.log),
 			newImageReporter(shared, a.log),
 		)
+		if cfg.SecretsInventory {
+			mc, err := metadata.NewForConfig(rc)
+			if err != nil {
+				a.log.Error("secret inventory disabled: metadata client", "err", err)
+			} else {
+				a.Reporters = append(a.Reporters, newSecretReporter(mc, a.kube, shared, cfg.SensitiveDataExclude, a.log))
+			}
+		}
 		if cfg.SensitiveData {
 			if r, err := newSensitiveReporter(a.kube, cfg.SensitiveDataExclude, a.log); err != nil {
 				a.log.Error("sensitive data reporter disabled", "err", err)
@@ -176,6 +191,12 @@ func stripPod(obj any) (any, error) {
 			Name: p.Name, Namespace: p.Namespace, UID: p.UID, ResourceVersion: p.ResourceVersion,
 			Labels: p.Labels, OwnerReferences: p.OwnerReferences,
 		},
+	}
+	if keepSecretRefs.Load() {
+		// Opt-in Secret inventory (F3): the NAMES of referenced Secrets only.
+		if refs := PodSecretRefs(p); len(refs) > 0 {
+			out.Annotations = map[string]string{annSecretRefs: strings.Join(refs, ",")}
+		}
 	}
 	for _, c := range p.Spec.Containers {
 		out.Spec.Containers = append(out.Spec.Containers, corev1.Container{Name: c.Name, Image: c.Image})

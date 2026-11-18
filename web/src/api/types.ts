@@ -717,6 +717,27 @@ export interface SecurityClusterSummary {
   sensitive_data?: number;
   sensitive_data_high?: number;
 }
+/** GET /security/secrets: opt-in Secret inventory (names and key names only). */
+export interface SecretRow {
+  cluster_id: string;
+  cluster_name: string;
+  namespace: string;
+  name: string;
+  type: string;
+  keys: string[];
+  keys_unknown: boolean;
+  referenced_by: string[];
+  managed_by: string;
+  created_at: string | null;
+  first_seen_at: string;
+  last_referenced_at: string | null;
+  findings: string[];
+}
+export interface SecretInventory {
+  clusters: { cluster_id: string; cluster_name: string; enabled: boolean }[];
+  items: SecretRow[];
+  fix: string;
+}
 export interface AuditClusterRun {
   tool: AuditTool | string;
   run_id: string;

@@ -20,7 +20,8 @@ func init() {
 			Runner: &security.TrivyCLI{Bin: d.Cfg.Security.TrivyBin, CacheDir: d.Cfg.Security.TrivyCacheDir, DBRepo: d.Cfg.Security.TrivyDBRepo},
 			Link:   d.PublicLink,
 		}
-		ing := &security.Ingester{DB: d.DB, Log: log, SystemNamespaces: d.Cfg.Security.SystemNamespaces, OnNewImages: sc.Poke}
+		ing := &security.Ingester{DB: d.DB, Log: log, SystemNamespaces: d.Cfg.Security.SystemNamespaces, OnNewImages: sc.Poke,
+			ReportUnmanaged: d.Cfg.Security.SecretsInventory.ReportUnmanaged == nil || *d.Cfg.Security.SecretsInventory.ReportUnmanaged}
 		// Chain any Report hook installed by another module.
 		prev := d.Gateway.Hooks.Report
 		d.Gateway.Hooks.Report = func(ctx context.Context, clusterID uuid.UUID, r *pb.ResourceReport) error {

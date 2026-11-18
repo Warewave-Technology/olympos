@@ -24,6 +24,8 @@ const (
 	SourceTransfer   = "transfer"
 	// SourceSensitiveData: credentials in ConfigMaps, scanned on the agent (F2).
 	SourceSensitiveData = "sensitive-data"
+	// SourceK8sSecrets: the opt-in Secret inventory (F3).
+	SourceK8sSecrets = "k8s-secrets"
 )
 
 // Finding is one open or resolved finding.

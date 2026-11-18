@@ -99,6 +99,38 @@ func TestAgentClusterRoleGolden(t *testing.T) {
 	}
 }
 
+// F3: the opt-in Secret inventory adds exactly secrets list/watch (no get)
+// and nothing else; off by default (the default golden has no secrets).
+func TestAgentSecretsInventoryRBAC(t *testing.T) {
+	cr := find(render(t, "--set", "secretsInventory.enabled=true"), "ClusterRole", "olympos-agent-olympos-system")
+	got, _ := yaml.Marshal(map[string]any{"rules": cr["rules"]})
+	golden := "testdata/agent-clusterrole-secrets.golden.yaml"
+	if *update {
+		_ = os.WriteFile(golden, got, 0o644)
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("agent ClusterRole (secretsInventory) differs from golden. Got:\n%s", got)
+	}
+	n := 0
+	for _, r := range rules(t, cr) {
+		for _, res := range r.Resources {
+			if res == "secrets" {
+				n++
+				if strings.Join(r.Verbs, ",") != "list,watch" || len(r.ResourceNames) != 0 {
+					t.Fatalf("secrets rule must be list/watch only: %+v", r)
+				}
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("secrets rules: %d", n)
+	}
+}
+
 func TestAgentIdentitySecretOnly(t *testing.T) {
 	docs := render(t)
 	role := find(docs, "Role", "olympos-agent-identity")
