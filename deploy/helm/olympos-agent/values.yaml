@@ -31,6 +31,15 @@ bench:
   # Image is pinned by digest inside the agent binary; this is used only for
   # the Kyverno PolicyException image match.
   imagePattern: "docker.io/aquasec/kube-bench:*@sha256:*"
+  # Kyverno exceptions for the kube-bench pods (only needed when Kyverno
+  # policies would block them in the olympos-bench namespace).
+  kyverno:
+    # Kyverno ≤ 1.19 with legacy kyverno.io policies: a kyverno.io/v2
+    # PolicyException for all policies. Kyverno 1.20 rejects this kind.
+    legacyException: false
+    # Kyverno ≥ 1.17 CEL policies: policies.kyverno.io/v1 exceptions must
+    # name each policy, e.g. [{name: require-run-as-nonroot, kind: ValidatingPolicy}].
+    policyRefs: []
 
 resources:
   requests: {cpu: 50m, memory: 64Mi}

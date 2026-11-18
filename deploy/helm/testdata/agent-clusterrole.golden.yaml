@@ -48,6 +48,17 @@ rules:
   - list
   - watch
 - apiGroups:
+  - policies.kyverno.io
+  resources:
+  - validatingpolicies
+  - namespacedvalidatingpolicies
+  - imagevalidatingpolicies
+  - namespacedimagevalidatingpolicies
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - wgpolicyk8s.io
   resources:
   - policyreports

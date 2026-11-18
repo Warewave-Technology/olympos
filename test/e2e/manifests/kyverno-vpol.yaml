@@ -1,0 +1,18 @@
+apiVersion: policies.kyverno.io/v1
+kind: ValidatingPolicy
+metadata:
+  name: require-app-label
+spec:
+  validationActions: [Audit]
+  matchConstraints:
+    resourceRules:
+    - apiGroups: [""]
+      apiVersions: [v1]
+      operations: [CREATE, UPDATE]
+      resources: [pods]
+  matchConditions:
+  - name: lab-only
+    expression: "object.metadata.namespace == 'lab'"
+  validations:
+  - expression: "has(object.metadata.labels) && 'team' in object.metadata.labels"
+    message: "label team is required"

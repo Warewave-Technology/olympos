@@ -2,6 +2,7 @@ package security
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"sort"
@@ -294,5 +295,42 @@ func TestIngestImages(t *testing.T) {
 	_ = db.QueryRow(ctx, `SELECT count(*) FROM image_usage WHERE cluster_id = $1`, c2).Scan(&n)
 	if n != 1 {
 		t.Errorf("c2 usage = %d", n)
+	}
+}
+
+func TestIngestKyvernoKinds(t *testing.T) {
+	ctx := context.Background()
+	db := testutil.DB(t)
+	c := mkCluster(t, db, "k20", nil)
+	in := &Ingester{DB: db, Log: quiet}
+	pols := []*pb.KyvernoPolicy{
+		{Kind: "ClusterPolicy", Name: "require-team", Mode: "Audit", Ready: true},
+		{Kind: "ValidatingPolicy", Name: "require-team", Mode: "Enforce", Rules: []string{"label team is required"}, Ready: true},
+		{Kind: "NamespacedValidatingPolicy", Namespace: "shop", Name: "limits", Mode: "Audit", Ready: true},
+		{Kind: "MutatingPolicy", Name: "not-reported", Mode: "Audit"},
+	}
+	res := []*pb.KyvernoResult{{Policy: "require-team", Result: "fail", ResourceKind: "Pod", ResourceNamespace: "lab", ResourceName: "web-1"}}
+	if err := in.Report(ctx, c, kyvernoReport(true, pols, res...)); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.Query(ctx, `SELECT kind, namespace, name, mode, fail_count FROM kyverno_policies WHERE cluster_id = $1 ORDER BY kind, name`, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var kind, ns, name, mode string
+		var n int
+		_ = rows.Scan(&kind, &ns, &name, &mode, &n)
+		got = append(got, fmt.Sprintf("%s %s/%s %s %d", kind, ns, name, mode, n))
+	}
+	want := []string{
+		"ClusterPolicy /require-team Audit 1",
+		"NamespacedValidatingPolicy shop/limits Audit 0",
+		"ValidatingPolicy /require-team Enforce 1",
+	}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("policies:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

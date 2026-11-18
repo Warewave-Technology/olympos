@@ -301,6 +301,8 @@ func newTestKyverno(t *testing.T, apis []*metav1.APIResourceList, objs ...runtim
 	listKinds := map[schema.GroupVersionResource]string{
 		gvrClusterPolicy: "ClusterPolicyList", gvrPolicy: "PolicyList",
 		gvrPolicyReport: "PolicyReportList", gvrClusterPolicyReport: "ClusterPolicyReportList",
+		gvrValidatingPolicy: "ValidatingPolicyList", gvrNSValidatingPolicy: "NamespacedValidatingPolicyList",
+		gvrImageVPolicy: "ImageValidatingPolicyList", gvrNSImageVPolicy: "NamespacedImageValidatingPolicyList",
 	}
 	dyn := dynfake.NewSimpleDynamicClientWithCustomListKinds(runtime.NewScheme(), listKinds, objs...)
 	r := newKyvernoReporter(disc, dyn, quietLog)
@@ -411,5 +413,59 @@ func TestTruncateKeepsUTF8(t *testing.T) {
 	s := truncate("aé", 2)
 	if s != "a" {
 		t.Errorf("truncate = %q", s)
+	}
+}
+
+// Kyverno 1.20: only the CEL policy API (plus reports) is served.
+var celKyvernoAPIs = []*metav1.APIResourceList{
+	{GroupVersion: "policies.kyverno.io/v1", APIResources: []metav1.APIResource{
+		{Name: "validatingpolicies"}, {Name: "namespacedvalidatingpolicies", Namespaced: true},
+		{Name: "imagevalidatingpolicies"}, {Name: "namespacedimagevalidatingpolicies", Namespaced: true},
+		{Name: "mutatingpolicies"}}},
+	{GroupVersion: "wgpolicyk8s.io/v1alpha2", APIResources: []metav1.APIResource{{Name: "policyreports", Namespaced: true}, {Name: "clusterpolicyreports"}}},
+}
+
+func TestKyvernoCELPolicies(t *testing.T) {
+	objs := []runtime.Object{
+		u(map[string]any{"apiVersion": "policies.kyverno.io/v1", "kind": "ValidatingPolicy",
+			"metadata": map[string]any{"name": "require-team-label"},
+			"spec": map[string]any{"validationActions": []any{"Deny"}, "validations": []any{
+				map[string]any{"expression": "has(object.metadata.labels.team)", "message": "label team is required"},
+				map[string]any{"expression": "true"},
+			}},
+			"status": map[string]any{"conditionStatus": map[string]any{"ready": true}}}),
+		u(map[string]any{"apiVersion": "policies.kyverno.io/v1", "kind": "NamespacedValidatingPolicy",
+			"metadata": map[string]any{"name": "limits", "namespace": "shop"},
+			"spec":     map[string]any{"validationActions": []any{"Audit", "Warn"}},
+			"status":   map[string]any{"conditionStatus": map[string]any{"ready": false}}}),
+		u(map[string]any{"apiVersion": "policies.kyverno.io/v1", "kind": "ImageValidatingPolicy",
+			"metadata": map[string]any{"name": "signed-images"},
+			"spec":     map[string]any{"validationActions": []any{"Audit"}}}),
+		u(map[string]any{"apiVersion": "wgpolicyk8s.io/v1alpha2", "kind": "PolicyReport",
+			"metadata": map[string]any{"name": "r1", "namespace": "lab"},
+			"scope":    map[string]any{"kind": "Pod", "name": "web-1", "namespace": "lab"},
+			"results": []any{map[string]any{"policy": "require-team-label", "result": "fail", "message": "label team is required"}}}),
+	}
+	r, _ := newTestKyverno(t, celKyvernoAPIs, objs...)
+	rep := firstReport(t, r).GetKyverno()
+	if rep == nil || !rep.Installed {
+		t.Fatalf("Kyverno 1.20 (CEL policies only) must count as installed: %v", rep)
+	}
+	got := map[string]*pb.KyvernoPolicy{}
+	for _, p := range rep.Policies {
+		got[p.Kind+"/"+p.Namespace+"/"+p.Name] = p
+	}
+	vp := got["ValidatingPolicy//require-team-label"]
+	if vp == nil || vp.Mode != "Enforce" || !vp.Ready || len(vp.Rules) != 2 || vp.Rules[0] != "label team is required" || vp.Rules[1] != "validation-2" {
+		t.Fatalf("ValidatingPolicy: %+v", vp)
+	}
+	if np := got["NamespacedValidatingPolicy/shop/limits"]; np == nil || np.Mode != "Audit" || np.Ready {
+		t.Fatalf("NamespacedValidatingPolicy: %+v", np)
+	}
+	if ip := got["ImageValidatingPolicy//signed-images"]; ip == nil || ip.Mode != "Audit" {
+		t.Fatalf("ImageValidatingPolicy: %+v", ip)
+	}
+	if len(rep.Results) != 1 || rep.Results[0].ResourceName != "web-1" {
+		t.Fatalf("results: %v", rep.Results)
 	}
 }

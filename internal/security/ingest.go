@@ -143,6 +143,27 @@ func kyvernoResourceRef(x *pb.KyvernoResult) string {
 	return strings.Join(parts, "/")
 }
 
+// kyvernoKinds are the policy kinds the agent reports.
+var kyvernoKinds = map[string]bool{
+	"ClusterPolicy": true, "Policy": true, "ValidatingPolicy": true, "NamespacedValidatingPolicy": true,
+	"ImageValidatingPolicy": true, "NamespacedImageValidatingPolicy": true,
+}
+
+// policyKind validates the reported kind; older agents send none, so it is
+// inferred from the namespace (legacy kinds). Unknown kinds are dropped.
+func policyKind(p *pb.KyvernoPolicy) string {
+	if p.Kind == "" {
+		if p.Namespace == "" {
+			return "ClusterPolicy"
+		}
+		return "Policy"
+	}
+	if kyvernoKinds[p.Kind] {
+		return p.Kind
+	}
+	return ""
+}
+
 // policyMatches reports whether a report result belongs to a policy. Kyverno
 // writes the bare name for ClusterPolicies and either "ns/name" or the bare
 // name (in the resource's namespace) for namespaced Policies.
@@ -179,14 +200,15 @@ func (in *Ingester) kyverno(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID,
 	if _, err := tx.Exec(ctx, `DELETE FROM kyverno_policies WHERE cluster_id = $1`, clusterID); err != nil {
 		return err
 	}
-	seen := map[[2]string]bool{}
+	seen := map[[3]string]bool{}
 	b := &pgx.Batch{}
 	total := 0
 	for _, p := range policies {
-		if p.Name == "" || seen[[2]string{p.Namespace, p.Name}] {
+		kind := policyKind(p)
+		if p.Name == "" || kind == "" || seen[[3]string{kind, p.Namespace, p.Name}] {
 			continue
 		}
-		seen[[2]string{p.Namespace, p.Name}] = true
+		seen[[3]string{kind, p.Namespace, p.Name}] = true
 		mode := p.Mode
 		if mode != "Enforce" {
 			mode = "Audit"
@@ -202,8 +224,8 @@ func (in *Ingester) kyverno(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID,
 		for _, r := range p.Rules {
 			rules = append(rules, clean(r, 253))
 		}
-		b.Queue(`INSERT INTO kyverno_policies (cluster_id, namespace, name, mode, rules, ready, fail_count, seen_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, now())`, clusterID, clean(p.Namespace, 253), clean(p.Name, 253), mode, rules, p.Ready, n)
+		b.Queue(`INSERT INTO kyverno_policies (cluster_id, kind, namespace, name, mode, rules, ready, fail_count, seen_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())`, clusterID, kind, clean(p.Namespace, 253), clean(p.Name, 253), mode, rules, p.Ready, n)
 	}
 	if b.Len() > 0 {
 		if err := tx.SendBatch(ctx, b).Close(); err != nil {

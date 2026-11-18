@@ -1334,6 +1334,7 @@ components:
       properties:
         cluster_id: {type: string}
         cluster_name: {type: string}
+        kind: {type: string, enum: [ClusterPolicy, Policy, ValidatingPolicy, NamespacedValidatingPolicy, ImageValidatingPolicy, NamespacedImageValidatingPolicy]}
         namespace: {type: string, description: empty = ClusterPolicy}
         name: {type: string}
         mode: {type: string, enum: [Enforce, Audit], description: Enforce when any validate rule (or namespace override) enforces}

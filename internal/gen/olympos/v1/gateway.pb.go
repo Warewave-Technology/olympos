@@ -1286,12 +1286,16 @@ func (*ResourceReport_NetworkPolicies) isResourceReport_Report() {}
 func (*ResourceReport_Images) isResourceReport_Report() {}
 
 type KyvernoPolicy struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Namespace     string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"` // empty for ClusterPolicy
-	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	Mode          string                 `protobuf:"bytes,3,opt,name=mode,proto3" json:"mode,omitempty"` // Enforce | Audit
-	Rules         []string               `protobuf:"bytes,4,rep,name=rules,proto3" json:"rules,omitempty"`
-	Ready         bool                   `protobuf:"varint,5,opt,name=ready,proto3" json:"ready,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	Namespace string                 `protobuf:"bytes,1,opt,name=namespace,proto3" json:"namespace,omitempty"` // empty for cluster-scoped kinds
+	Name      string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	Mode      string                 `protobuf:"bytes,3,opt,name=mode,proto3" json:"mode,omitempty"` // Enforce | Audit
+	Rules     []string               `protobuf:"bytes,4,rep,name=rules,proto3" json:"rules,omitempty"`
+	Ready     bool                   `protobuf:"varint,5,opt,name=ready,proto3" json:"ready,omitempty"`
+	// ClusterPolicy | Policy (kyverno.io/v1, legacy) or ValidatingPolicy |
+	// NamespacedValidatingPolicy | ImageValidatingPolicy |
+	// NamespacedImageValidatingPolicy (policies.kyverno.io/v1, Kyverno ≥ 1.17).
+	Kind          string `protobuf:"bytes,6,opt,name=kind,proto3" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1359,6 +1363,13 @@ func (x *KyvernoPolicy) GetReady() bool {
 		return x.Ready
 	}
 	return false
+}
+
+func (x *KyvernoPolicy) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
 }
 
 type KyvernoResult struct {
@@ -2465,13 +2476,14 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\akyverno\x18\x01 \x01(\v2\x19.olympos.v1.KyvernoReportH\x00R\akyverno\x12L\n" +
 	"\x10network_policies\x18\x02 \x01(\v2\x1f.olympos.v1.NetworkPolicyReportH\x00R\x0fnetworkPolicies\x121\n" +
 	"\x06images\x18\x03 \x01(\v2\x17.olympos.v1.ImageReportH\x00R\x06imagesB\b\n" +
-	"\x06report\"\x81\x01\n" +
+	"\x06report\"\x95\x01\n" +
 	"\rKyvernoPolicy\x12\x1c\n" +
 	"\tnamespace\x18\x01 \x01(\tR\tnamespace\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x12\n" +
 	"\x04mode\x18\x03 \x01(\tR\x04mode\x12\x14\n" +
 	"\x05rules\x18\x04 \x03(\tR\x05rules\x12\x14\n" +
-	"\x05ready\x18\x05 \x01(\bR\x05ready\"\x82\x02\n" +
+	"\x05ready\x18\x05 \x01(\bR\x05ready\x12\x12\n" +
+	"\x04kind\x18\x06 \x01(\tR\x04kind\"\x82\x02\n" +
 	"\rKyvernoResult\x12\x16\n" +
 	"\x06policy\x18\x01 \x01(\tR\x06policy\x12\x12\n" +
 	"\x04rule\x18\x02 \x01(\tR\x04rule\x12\x16\n" +

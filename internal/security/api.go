@@ -332,6 +332,7 @@ func (a *API) scanImage(w http.ResponseWriter, r *http.Request) {
 type KyvernoPolicy struct {
 	ClusterID   uuid.UUID `json:"cluster_id"`
 	ClusterName string    `json:"cluster_name"`
+	Kind        string    `json:"kind"`
 	Namespace   string    `json:"namespace"`
 	Name        string    `json:"name"`
 	Mode        string    `json:"mode"`
@@ -359,10 +360,10 @@ func (a *API) listKyverno(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := a.DB.Query(ctx, `
-		SELECT p.cluster_id, c.name, p.namespace, p.name, p.mode, p.rules, p.fail_count, p.ready
+		SELECT p.cluster_id, c.name, p.kind, p.namespace, p.name, p.mode, p.rules, p.fail_count, p.ready
 		FROM kyverno_policies p JOIN clusters c ON c.id = p.cluster_id
 		WHERE p.cluster_id = ANY($1)
-		ORDER BY p.fail_count DESC, c.name, p.namespace, p.name`, ids)
+		ORDER BY p.fail_count DESC, c.name, p.kind, p.namespace, p.name`, ids)
 	if err != nil {
 		httpx.Internal(w, r, a.Log, err)
 		return
@@ -370,7 +371,7 @@ func (a *API) listKyverno(w http.ResponseWriter, r *http.Request) {
 	items := []KyvernoPolicy{}
 	for rows.Next() {
 		var p KyvernoPolicy
-		if err := rows.Scan(&p.ClusterID, &p.ClusterName, &p.Namespace, &p.Name, &p.Mode, &p.RuleNames, &p.FailCount, &p.Ready); err != nil {
+		if err := rows.Scan(&p.ClusterID, &p.ClusterName, &p.Kind, &p.Namespace, &p.Name, &p.Mode, &p.RuleNames, &p.FailCount, &p.Ready); err != nil {
 			rows.Close()
 			httpx.Internal(w, r, a.Log, err)
 			return

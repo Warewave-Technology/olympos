@@ -62,9 +62,9 @@ kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
 
-# Kyverno 1.20 stopped executing legacy kyverno.io/v1 policies (SPEC §13.1
-# watches those); 1.19 is the last release that runs them.
-KYVERNO_CHART=3.9.2
+# Kyverno 1.20 (chart 3.10) runs only policies.kyverno.io CEL policies.
+# KYVERNO_CHART=3.9.2 (1.19) also runs the legacy kyverno.io ClusterPolicy.
+KYVERNO_CHART=${KYVERNO_CHART:-3.10.0}
 if ! helm -n kyverno list -o json 2>/dev/null | grep -q "kyverno-$KYVERNO_CHART"; then
   log "installing kyverno chart $KYVERNO_CHART"
   helm -n kyverno uninstall kyverno --wait >/dev/null 2>&1 || true
@@ -74,7 +74,11 @@ if ! helm -n kyverno list -o json 2>/dev/null | grep -q "kyverno-$KYVERNO_CHART"
     --set admissionController.replicas=1 --set backgroundController.replicas=1 \
     --set cleanupController.enabled=false --set reportsController.replicas=1 >/dev/null
 fi
-kubectl apply -f test/e2e/manifests/kyverno-policy.yaml >/dev/null
+kubectl apply -f test/e2e/manifests/kyverno-vpol.yaml >/dev/null
+case "$KYVERNO_CHART" in
+  3.10.*|3.1[1-9].*) kubectl delete -f test/e2e/manifests/kyverno-policy.yaml --ignore-not-found >/dev/null 2>&1 || true ;;
+  *) kubectl apply -f test/e2e/manifests/kyverno-policy.yaml >/dev/null ;;
+esac
 
 log "deploying olympos-server (dev mode, local key vault)"
 helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \

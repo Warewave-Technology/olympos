@@ -205,7 +205,7 @@ export function SecurityPage() {
       {tab === 'kyverno' && (
         <section className="card" aria-label="Kyverno policies">
           <KyvernoTable q={kyQ} />
-          <div className="card-foot">Read from ClusterPolicy / Policy and PolicyReports by the agent. Failures are recorded as findings (source kyverno).</div>
+          <div className="card-foot">Read by the agent from ClusterPolicy / Policy (kyverno.io), ValidatingPolicy and ImageValidatingPolicy kinds (policies.kyverno.io) and PolicyReports. Failures are recorded as findings (source kyverno).</div>
         </section>
       )}
       {tab === 'netpol' && (
@@ -222,7 +222,7 @@ export function SecurityPage() {
 
 function KyvernoTable({ q, top }: { q: ReturnType<typeof useQuery<ItemList<KyvernoPolicy>>>; top?: boolean }) {
   return (
-    <QueryView q={q} what="Kyverno policies" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No Kyverno policies found">Either Kyverno is not installed on the clusters in your scope, or it has no ClusterPolicy/Policy yet.</EmptyState>}>
+    <QueryView q={q} what="Kyverno policies" isEmpty={(d) => d.items.length === 0} empty={<EmptyState title="No Kyverno policies found">Either Kyverno is not installed on the clusters in your scope, or it has no validation policies yet.</EmptyState>}>
       {(d) => {
         const list = top ? [...d.items].filter((p) => p.fail_count > 0).sort((a, b) => b.fail_count - a.fail_count).slice(0, 5) : d.items;
         if (top && list.length === 0) return <EmptyState title="No violations">Every policy passes in the latest PolicyReports.</EmptyState>;
@@ -232,6 +232,7 @@ function KyvernoTable({ q, top }: { q: ReturnType<typeof useQuery<ItemList<Kyver
               <thead>
                 <tr>
                   <th>Policy</th>
+                  {!top && <th>Kind</th>}
                   {!top && <th>Cluster</th>}
                   {!top && <th>Namespace</th>}
                   <th>Mode</th>
@@ -241,7 +242,7 @@ function KyvernoTable({ q, top }: { q: ReturnType<typeof useQuery<ItemList<Kyver
               </thead>
               <tbody>
                 {list.map((p) => (
-                  <tr key={p.cluster_id + p.namespace + p.name}>
+                  <tr key={p.cluster_id + (p.kind ?? '') + p.namespace + p.name}>
                     <td className="mono">
                       {p.name}
                       {!p.ready && (
@@ -251,6 +252,7 @@ function KyvernoTable({ q, top }: { q: ReturnType<typeof useQuery<ItemList<Kyver
                         </>
                       )}
                     </td>
+                    {!top && <td className="muted">{p.kind || (p.namespace ? 'Policy' : 'ClusterPolicy')}</td>}
                     {!top && <td className="mono">{p.cluster_name}</td>}
                     {!top && <td className={p.namespace ? 'mono' : 'muted'}>{p.namespace || 'cluster-wide'}</td>}
                     <td>{p.mode === 'Enforce' ? <Badge tone="ok">Enforce</Badge> : <Badge tone="info">Audit</Badge>}</td>

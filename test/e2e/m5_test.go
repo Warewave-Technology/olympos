@@ -114,21 +114,32 @@ func TestM5Security(t *testing.T) {
 	})
 
 	t.Run("kyverno", func(t *testing.T) {
-		eventually(t, 5*time.Minute, "kyverno policy reported with failures", func() (bool, string) {
+		// Kyverno 1.20 runs only CEL policies; the lab applies a ValidatingPolicy
+		// always and the legacy ClusterPolicy only with Kyverno <= 1.19.
+		legacy := strings.TrimSpace(run(t, "kubectl", "get", "clusterpolicies.kyverno.io", "-o", "name", "--ignore-not-found")) != ""
+		// Existing pods are only evaluated by background scans; touch one so
+		// admission reports are produced quickly.
+		run(t, "kubectl", "-n", "lab", "annotate", "pod", "orders-pg-0", "olympos.io/e2e-touch="+fmt.Sprint(time.Now().Unix()), "--overwrite")
+		eventually(t, 5*time.Minute, "kyverno policies reported with failures", func() (bool, string) {
 			var ps struct {
 				Items []struct {
+					Kind      string `json:"kind"`
 					Name      string `json:"name"`
 					Mode      string `json:"mode"`
 					FailCount int    `json:"fail_count"`
 				} `json:"items"`
 			}
 			admin.must("GET", "/security/kyverno?cluster="+labClusterID, nil, &ps, 200)
+			vpol, cpol := false, !legacy
 			for _, p := range ps.Items {
-				if p.Name == "require-team-label" {
-					return p.Mode == "Audit" && p.FailCount > 0, fmt.Sprintf("%+v", p)
+				if p.Kind == "ValidatingPolicy" && p.Name == "require-app-label" && p.Mode == "Audit" && p.FailCount > 0 {
+					vpol = true
+				}
+				if p.Kind == "ClusterPolicy" && p.Name == "require-team-label" && p.FailCount > 0 {
+					cpol = true
 				}
 			}
-			return false, fmt.Sprintf("%+v", ps.Items)
+			return vpol && cpol, fmt.Sprintf("%+v", ps.Items)
 		})
 	})
 }

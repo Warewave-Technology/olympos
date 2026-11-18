@@ -518,6 +518,8 @@ export interface ImageDetail extends Image {
 export interface KyvernoPolicy {
   cluster_id: string;
   cluster_name: string;
+  /** ClusterPolicy | Policy (legacy kyverno.io) or a policies.kyverno.io CEL kind. */
+  kind?: string;
   namespace: string;
   name: string;
   mode: 'Enforce' | 'Audit';

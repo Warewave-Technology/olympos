@@ -23,14 +23,39 @@ import (
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 )
 
-// Kyverno resources (SPEC §4.2 RBAC: kyverno.io and wgpolicyk8s.io, read-only).
+// Kyverno resources (SPEC §4.2 RBAC, read-only): legacy kyverno.io/v1
+// policies, the CEL-based policies.kyverno.io/v1 validation policies
+// (Kyverno ≥ 1.17; 1.20 no longer runs the legacy kinds) and the
+// wgpolicyk8s.io reports both write to.
 var (
 	gvrClusterPolicy       = schema.GroupVersionResource{Group: "kyverno.io", Version: "v1", Resource: "clusterpolicies"}
 	gvrPolicy              = schema.GroupVersionResource{Group: "kyverno.io", Version: "v1", Resource: "policies"}
+	gvrValidatingPolicy    = schema.GroupVersionResource{Group: "policies.kyverno.io", Version: "v1", Resource: "validatingpolicies"}
+	gvrNSValidatingPolicy  = schema.GroupVersionResource{Group: "policies.kyverno.io", Version: "v1", Resource: "namespacedvalidatingpolicies"}
+	gvrImageVPolicy        = schema.GroupVersionResource{Group: "policies.kyverno.io", Version: "v1", Resource: "imagevalidatingpolicies"}
+	gvrNSImageVPolicy      = schema.GroupVersionResource{Group: "policies.kyverno.io", Version: "v1", Resource: "namespacedimagevalidatingpolicies"}
 	gvrPolicyReport        = schema.GroupVersionResource{Group: "wgpolicyk8s.io", Version: "v1alpha2", Resource: "policyreports"}
 	gvrClusterPolicyReport = schema.GroupVersionResource{Group: "wgpolicyk8s.io", Version: "v1alpha2", Resource: "clusterpolicyreports"}
-	kyvernoGVRs            = []schema.GroupVersionResource{gvrClusterPolicy, gvrPolicy, gvrPolicyReport, gvrClusterPolicyReport}
+
+	// policyKinds maps each policy resource to the kind reported upstream.
+	policyKinds = map[schema.GroupVersionResource]string{
+		gvrClusterPolicy: "ClusterPolicy", gvrPolicy: "Policy",
+		gvrValidatingPolicy: "ValidatingPolicy", gvrNSValidatingPolicy: "NamespacedValidatingPolicy",
+		gvrImageVPolicy: "ImageValidatingPolicy", gvrNSImageVPolicy: "NamespacedImageValidatingPolicy",
+	}
+	policyGVRs  = []schema.GroupVersionResource{gvrClusterPolicy, gvrPolicy, gvrValidatingPolicy, gvrNSValidatingPolicy, gvrImageVPolicy, gvrNSImageVPolicy}
+	kyvernoGVRs = append(append([]schema.GroupVersionResource{}, policyGVRs...), gvrPolicyReport, gvrClusterPolicyReport)
 )
+
+// anyPolicy reports whether any Kyverno policy resource is served.
+func anyPolicy(present map[schema.GroupVersionResource]bool) bool {
+	for _, g := range policyGVRs {
+		if present[g] {
+			return true
+		}
+	}
+	return false
+}
 
 const kyvernoRecheck = 5 * time.Minute
 
@@ -137,7 +162,7 @@ func (r *kyvernoReporter) ensure(ctx context.Context) error {
 		r.cancel()
 	}
 	r.present, r.cancel, r.listers = present, nil, map[schema.GroupVersionResource]cache.GenericLister{}
-	if !present[gvrClusterPolicy] && !present[gvrPolicy] {
+	if !anyPolicy(present) {
 		r.mu.Unlock()
 		r.log.Info("kyverno not installed")
 		r.changed.poke()
@@ -188,7 +213,7 @@ func stripUnstructured(obj any) (any, error) {
 func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 	r.mu.Lock()
 	listers, known := r.listers, r.present != nil
-	installed := r.present[gvrClusterPolicy] || r.present[gvrPolicy]
+	installed := anyPolicy(r.present)
 	r.mu.Unlock()
 	if !known {
 		// Discovery has not succeeded yet: do not claim "not installed",
@@ -216,9 +241,16 @@ func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 		}
 		return out
 	}
-	for _, g := range []schema.GroupVersionResource{gvrClusterPolicy, gvrPolicy} {
+	for _, g := range policyGVRs {
 		for _, u := range list(g) {
-			rep.Policies = append(rep.Policies, KyvernoPolicyToPB(u))
+			var p *pb.KyvernoPolicy
+			if g.Group == "kyverno.io" {
+				p = KyvernoPolicyToPB(u)
+			} else {
+				p = CELPolicyToPB(u)
+			}
+			p.Kind = policyKinds[g]
+			rep.Policies = append(rep.Policies, p)
 		}
 	}
 	for _, g := range []schema.GroupVersionResource{gvrClusterPolicyReport, gvrPolicyReport} {
@@ -228,6 +260,9 @@ func (r *kyvernoReporter) build(context.Context) (*pb.ResourceReport, error) {
 	}
 	sort.Slice(rep.Policies, func(i, j int) bool {
 		a, b := rep.Policies[i], rep.Policies[j]
+		if a.Kind != b.Kind {
+			return a.Kind < b.Kind
+		}
 		if a.Namespace != b.Namespace {
 			return a.Namespace < b.Namespace
 		}
@@ -322,6 +357,42 @@ func KyvernoPolicyToPB(u *unstructured.Unstructured) *pb.KyvernoPolicy {
 		}
 	} else if ready, found, _ := unstructured.NestedBool(u.Object, "status", "ready"); found {
 		out.Ready = ready
+	}
+	return out
+}
+
+// CELPolicyToPB summarizes a policies.kyverno.io/v1 (Image)ValidatingPolicy
+// or its namespaced variant. spec.validationActions lists Deny, Audit and/or
+// Warn; Deny can block admission, so it maps to Enforce, anything else to
+// Audit. Validations have no names: the reported rules are their messages
+// (or "validation-N").
+func CELPolicyToPB(u *unstructured.Unstructured) *pb.KyvernoPolicy {
+	out := &pb.KyvernoPolicy{Namespace: u.GetNamespace(), Name: u.GetName(), Mode: "Audit", Ready: true}
+	actions, _, _ := unstructured.NestedStringSlice(u.Object, "spec", "validationActions")
+	for _, a := range actions {
+		if strings.EqualFold(a, "Deny") {
+			out.Mode = "Enforce"
+		}
+	}
+	vals, _, _ := unstructured.NestedSlice(u.Object, "spec", "validations")
+	for i, raw := range vals {
+		name := fmt.Sprintf("validation-%d", i+1)
+		if v, ok := raw.(map[string]any); ok {
+			if m := strings.TrimSpace(str(v["message"])); m != "" {
+				name = truncate(m, 120)
+			}
+		}
+		out.Rules = append(out.Rules, name)
+	}
+	// Readiness: status.conditionStatus.ready, else conditions[type=Ready].
+	if ready, found, _ := unstructured.NestedBool(u.Object, "status", "conditionStatus", "ready"); found {
+		out.Ready = ready
+	} else if conds, found, _ := unstructured.NestedSlice(u.Object, "status", "conditions"); found {
+		for _, raw := range conds {
+			if c, ok := raw.(map[string]any); ok && c["type"] == "Ready" {
+				out.Ready = c["status"] == "True"
+			}
+		}
 	}
 	return out
 }

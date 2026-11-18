@@ -200,6 +200,9 @@ rules:
 - apiGroups: ["kyverno.io"]
   resources: [clusterpolicies, policies]
   verbs: [get, list, watch]
+- apiGroups: ["policies.kyverno.io"]   # Kyverno ≥ 1.17 CEL policies (1.20 runs only these)
+  resources: [validatingpolicies, namespacedvalidatingpolicies, imagevalidatingpolicies, namespacedimagevalidatingpolicies]
+  verbs: [get, list, watch]
 - apiGroups: ["wgpolicyk8s.io"]
   resources: [policyreports, clusterpolicyreports]
   verbs: [get, list, watch]
@@ -208,7 +211,7 @@ rules:
   verbs: [get, list, watch]      # needed by kubescape
 ```
 - **No `secrets`, no `configmaps` write, no `pods/exec`, no `create` anywhere** (except bench namespace, §12.3).
-- Kubescape needs a few more read-only resources (e.g. `serviceaccounts`, `podsecuritypolicies` legacy, `mutating/validatingwebhookconfigurations`). Add read-only verbs for these; never Secrets.
+- Kubescape and Polaris need a few more read-only resources (e.g. `serviceaccounts`, `configmaps` (read), `podsecuritypolicies` legacy, `mutating/validatingwebhookconfigurations`). Add read-only verbs for these; never Secrets.
 
 ### 4.3 Runtime
 - Distroless static image, `runAsNonRoot`, `readOnlyRootFilesystem`, all capabilities dropped, seccomp `RuntimeDefault`.
@@ -538,7 +541,7 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 1. **Job spec is compiled into the agent.** Server can only send `RunBench{run_id, node_name, benchmark}`. Agent validates `node_name` exists and `benchmark` is in an allowlist.
 2. Image `aquasec/kube-bench` **pinned by digest** in the agent build; optional cosign verification.
 3. Pod: `hostPID: true`, host paths mounted **read-only** (`/etc/kubernetes`, `/var/lib/kubelet`, `/var/lib/etcd` if present, `/etc/systemd`, `/usr/bin` for binaries), no added capabilities, `nodeName` set, tolerations for control-plane taints, `ttlSecondsAfterFinished: 300`, `activeDeadlineSeconds: 600`.
-4. Namespace `olympos-bench` with PSA label `pod-security.kubernetes.io/enforce: privileged`; `olympos-system` stays `restricted`. If Kyverno CRDs exist, chart installs a `PolicyException` limited to that namespace + image.
+4. Namespace `olympos-bench` with PSA label `pod-security.kubernetes.io/enforce: privileged`; `olympos-system` stays `restricted`. If Kyverno policies would block the bench pods, the chart renders a `PolicyException` limited to that namespace (+ image) — opt-in, see §13.1.
 5. RBAC for this (Role in `olympos-bench`: `jobs` create/get/list/delete, `pods` get/list, `pods/log` get) is **rendered only when `bench.enabled=true`**. Agent advertises the capability in `Hello`.
 6. Parallelism ≤ `bench.maxParallel`.
 7. Result: agent reads pod log (kube-bench `--json`), streams via `BenchResultChunk`, deletes Job.
@@ -550,7 +553,8 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 ## 13. Security
 
 ### 13.1 Kyverno
-- Agent watches `ClusterPolicy`/`Policy` (name, mode `Enforce|Audit`, rules) and `PolicyReport`/`ClusterPolicyReport` results. Failures → findings (`source=kyverno`).
+- Agent watches `ClusterPolicy`/`Policy` (legacy `kyverno.io/v1`, Kyverno ≤ 1.19) and the CEL policies of `policies.kyverno.io/v1` — `ValidatingPolicy`, `NamespacedValidatingPolicy`, `ImageValidatingPolicy`, `NamespacedImageValidatingPolicy` (Kyverno ≥ 1.17; 1.20 no longer runs the legacy kinds) — with kind, name, mode `Enforce|Audit` (CEL: `validationActions` containing `Deny` → Enforce) and rules, plus `PolicyReport`/`ClusterPolicyReport` results. Failures → findings (`source=kyverno`). Discovery decides which APIs are watched; either set alone counts as "Kyverno installed".
+- The kube-bench Kyverno exception (§12.3.4) is opt-in per API: `kyverno.io/v2` for legacy policies, `policies.kyverno.io/v1` (requires explicit policy refs) for CEL policies.
 
 ### 13.2 NetworkPolicy
 - Finding `netpol.no_default_deny` for each namespace without a policy that selects all pods (`podSelector: {}`) with `policyTypes` including Ingress and no ingress rules. System namespaces excluded by configurable list.

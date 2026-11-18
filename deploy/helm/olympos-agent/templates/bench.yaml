@@ -39,7 +39,7 @@ subjects:
 - kind: ServiceAccount
   name: olympos-agent
   namespace: {{ .Release.Namespace }}
-{{- if .Capabilities.APIVersions.Has "kyverno.io/v2/PolicyException" }}
+{{- if .Values.bench.kyverno.legacyException }}
 ---
 apiVersion: kyverno.io/v2
 kind: PolicyException
@@ -63,5 +63,21 @@ spec:
     - key: "{{`{{ request.object.spec.containers[].image }}`}}"
       operator: AllIn
       value: [{{ .Values.bench.imagePattern | quote }}]
+{{- end }}
+{{- with .Values.bench.kyverno.policyRefs }}
+---
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: olympos-kube-bench
+  namespace: {{ $.Values.bench.namespace }}
+spec:
+  policyRefs: {{- toYaml . | nindent 2 }}
+  matchConditions:
+  - name: olympos-kube-bench-pods
+    expression: >-
+      object.metadata.namespace == {{ $.Values.bench.namespace | quote }} &&
+      has(object.metadata.labels) && 'app.kubernetes.io/name' in object.metadata.labels &&
+      object.metadata.labels['app.kubernetes.io/name'] == 'olympos-bench'
 {{- end }}
 {{- end }}

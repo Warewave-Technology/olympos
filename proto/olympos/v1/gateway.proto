@@ -148,11 +148,15 @@ message ResourceReport {
 }
 
 message KyvernoPolicy {
-  string namespace = 1; // empty for ClusterPolicy
+  string namespace = 1; // empty for cluster-scoped kinds
   string name = 2;
   string mode = 3;      // Enforce | Audit
   repeated string rules = 4;
   bool ready = 5;
+  // ClusterPolicy | Policy (kyverno.io/v1, legacy) or ValidatingPolicy |
+  // NamespacedValidatingPolicy | ImageValidatingPolicy |
+  // NamespacedImageValidatingPolicy (policies.kyverno.io/v1, Kyverno ≥ 1.17).
+  string kind = 6;
 }
 
 message KyvernoResult {

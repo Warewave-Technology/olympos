@@ -158,3 +158,22 @@ func TestAgentBindingSubject(t *testing.T) {
 		t.Fatalf("binding subject %v", s)
 	}
 }
+
+func TestBenchKyvernoExceptionsOptIn(t *testing.T) {
+	docs := render(t, "--set", "bench.enabled=true")
+	for _, d := range docs {
+		if d["kind"] == "PolicyException" {
+			t.Fatalf("PolicyException rendered without opt-in: %v", d["apiVersion"])
+		}
+	}
+	docs = render(t, "--set", "bench.enabled=true", "--set", "bench.kyverno.policyRefs[0].name=p", "--set", "bench.kyverno.policyRefs[0].kind=ValidatingPolicy")
+	found := false
+	for _, d := range docs {
+		if d["kind"] == "PolicyException" && d["apiVersion"] == "policies.kyverno.io/v1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("policies.kyverno.io/v1 PolicyException missing")
+	}
+}
