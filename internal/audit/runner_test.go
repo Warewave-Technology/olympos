@@ -16,7 +16,7 @@ func TestKubescapeInvocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"scan", "framework", "nsa,cis-aks-t1.2.0,mitre", "--format", "json", "--format-version", "v2",
+	want := []string{"scan", "framework", "nsa,cis-aks-t1.8.0,mitre", "--format", "json", "--format-version", "v2",
 		"--output", "/tmp/x/kubescape.json", "--keep-local"}
 	if inv.Bin != "/opt/kubescape" || !reflect.DeepEqual(inv.Args, want) {
 		t.Fatalf("got %s %v", inv.Bin, inv.Args)
@@ -33,15 +33,29 @@ func TestKubescapeInvocation(t *testing.T) {
 		}
 	}
 	inv, _ = KubescapeInvocation("kubescape", nil, "onprem", "k", "/w")
-	if inv.Args[2] != "nsa,cis-v1.23-t1.0.1,mitre" {
+	if inv.Args[2] != "nsa,cis-v1.12.0,mitre" {
 		t.Errorf("default frameworks: %v", inv.Args[2])
 	}
 	inv, _ = KubescapeInvocation("kubescape", []string{"cis"}, "aws", "k", "/w")
-	if inv.Args[2] != "cis-eks-t1.2.0" {
+	if inv.Args[2] != "cis-eks-t1.8.0" {
 		t.Errorf("eks cis: %v", inv.Args[2])
 	}
 	if _, err := KubescapeInvocation("kubescape", []string{"allcontrols"}, "", "k", "/w"); err == nil {
 		t.Error("unknown framework accepted")
+	}
+}
+
+// The installed kubescape's list wins over the fallback names.
+func TestPickCISFromInstalledList(t *testing.T) {
+	avail := []string{"NSA", "MITRE", "cis-aks-t1.2.0", "cis-aks-t1.8.0", "cis-eks-t1.7.0", "cis-v1.10.0", "cis-v1.12.0", "cis-v1.9.0"}
+	for provider, want := range map[string]string{"azure": "cis-aks-t1.8.0", "aws": "cis-eks-t1.7.0", "onprem": "cis-v1.12.0", "gcp": "cis-v1.12.0"} {
+		if got := pickCIS(avail, provider); got != want {
+			t.Errorf("%s: %s, want %s", provider, got, want)
+		}
+	}
+	inv, _ := KubescapeInvocation("kubescape", []string{"cis"}, "onprem", "k", "/w", "cis-v1.13.0", "cis-v1.12.0")
+	if inv.Args[2] != "cis-v1.13.0" {
+		t.Errorf("installed list not used: %v", inv.Args[2])
 	}
 }
 

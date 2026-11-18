@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -43,25 +44,115 @@ type Invocation struct {
 	OutputFile string
 }
 
+// Fallback CIS framework names (kubescape 4.0). The names change between
+// kubescape releases, so the installed binary's list is preferred
+// (ListKubescapeFrameworks) and these are used only when it is unavailable.
+var cisFallback = map[string]string{
+	inventory.ProviderAzure: "cis-aks-t1.8.0",
+	inventory.ProviderAWS:   "cis-eks-t1.8.0",
+	inventory.ProviderGCP:   "cis-gke-v1.9.0",
+	"":                      "cis-v1.12.0",
+}
+
+// cisPrefix is the framework-name prefix per provider ("cis-v" = generic).
+func cisPrefix(provider string) string {
+	switch provider {
+	case inventory.ProviderAzure:
+		return "cis-aks-"
+	case inventory.ProviderAWS:
+		return "cis-eks-"
+	case inventory.ProviderGCP:
+		return "cis-gke-"
+	}
+	return "cis-v"
+}
+
+// pickCIS returns the newest available CIS framework for the provider.
+func pickCIS(available []string, provider string) string {
+	if len(available) == 0 {
+		if fb, ok := cisFallback[provider]; ok {
+			return fb
+		}
+		return cisFallback[""]
+	}
+	prefix, best := cisPrefix(provider), ""
+	for _, f := range available {
+		if strings.HasPrefix(strings.ToLower(f), prefix) && (best == "" || versionLess(best, f)) {
+			best = f
+		}
+	}
+	if best == "" && prefix != "cis-v" {
+		return pickCIS(available, "") // managed provider without its own CIS
+	}
+	if best != "" {
+		return best
+	}
+	if fb, ok := cisFallback[provider]; ok {
+		return fb
+	}
+	return cisFallback[""]
+}
+
+// versionLess compares the numbers in two framework names (cis-v1.10.0 < cis-v1.12.0).
+func versionLess(a, b string) bool {
+	na, nb := nums(a), nums(b)
+	for i := 0; i < len(na) && i < len(nb); i++ {
+		if na[i] != nb[i] {
+			return na[i] < nb[i]
+		}
+	}
+	return len(na) < len(nb)
+}
+
+func nums(s string) []int {
+	var out []int
+	n, in := 0, false
+	for _, c := range s {
+		if c >= '0' && c <= '9' {
+			n, in = n*10+int(c-'0'), true
+			continue
+		}
+		if in {
+			out = append(out, n)
+			n, in = 0, false
+		}
+	}
+	if in {
+		out = append(out, n)
+	}
+	return out
+}
+
 // kubescapeFramework maps the schedule's framework choice to a kubescape
-// framework name. "cis" depends on the provider: kubescape ships separate
-// CIS frameworks for AKS and EKS, and a generic one otherwise.
-func kubescapeFramework(fw, provider string) string {
+// framework name. "cis" depends on the provider and on the frameworks the
+// installed kubescape ships (available; may be nil).
+func kubescapeFramework(fw, provider string, available []string) string {
 	switch fw {
 	case "nsa":
 		return "nsa"
 	case "mitre":
 		return "mitre"
 	case "cis":
-		switch provider {
-		case inventory.ProviderAzure:
-			return "cis-aks-t1.2.0"
-		case inventory.ProviderAWS:
-			return "cis-eks-t1.2.0"
-		}
-		return "cis-v1.23-t1.0.1"
+		return pickCIS(available, provider)
 	}
 	return ""
+}
+
+// ListKubescapeFrameworks asks the installed kubescape for its frameworks.
+func ListKubescapeFrameworks(ctx context.Context, bin string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin, "list", "frameworks", "--format", "json")
+	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=" + os.TempDir(), "KS_SKIP_UPDATE_CHECK=true", "DO_NOT_TRACK=1"}
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("kubescape list frameworks: %w", err)
+	}
+	var names []string
+	if err := json.Unmarshal(out, &names); err != nil {
+		return nil, fmt.Errorf("kubescape list frameworks: %w", err)
+	}
+	return names, nil
 }
 
 // KubescapeInvocation builds:
@@ -77,14 +168,14 @@ func kubescapeFramework(fw, provider string) string {
 // environment disables update checks and telemetry. Kubescape downloads its
 // framework definitions at scan time unless artifacts are pre-seeded in
 // the image (KS_* cache dir); restricted networks should bake them in.
-func KubescapeInvocation(bin string, frameworks []string, provider, kubeconfig, workDir string) (Invocation, error) {
+func KubescapeInvocation(bin string, frameworks []string, provider, kubeconfig, workDir string, available ...string) (Invocation, error) {
 	if len(frameworks) == 0 {
 		frameworks = Frameworks
 	}
 	var fws []string
 	seen := map[string]bool{}
 	for _, f := range frameworks {
-		name := kubescapeFramework(strings.ToLower(strings.TrimSpace(f)), provider)
+		name := kubescapeFramework(strings.ToLower(strings.TrimSpace(f)), provider, available)
 		if name == "" {
 			return Invocation{}, fmt.Errorf("unknown kubescape framework %q", f)
 		}

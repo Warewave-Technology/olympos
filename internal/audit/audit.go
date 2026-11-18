@@ -57,7 +57,10 @@ type Service struct {
 	Gateway      Gateway
 	Blob         blob.Resolver // nil: raw reports are not stored
 	KubescapeBin string
-	PolarisBin   string
+
+	ksMu       sync.Mutex
+	ksFws      []string // cached `kubescape list frameworks`
+	PolarisBin string
 	// Exec runs a tool (default ExecTool).
 	Exec        Exec
 	ToolTimeout time.Duration
@@ -335,7 +338,7 @@ func (s *Service) execTool(ctx context.Context, rc runContext) outcome {
 	var inv Invocation
 	switch rc.Tool {
 	case ToolKubescape:
-		inv, err = KubescapeInvocation(s.KubescapeBin, rc.Frameworks, rc.Provider, proxy.Kubeconfig, proxy.Dir())
+		inv, err = KubescapeInvocation(s.KubescapeBin, rc.Frameworks, rc.Provider, proxy.Kubeconfig, proxy.Dir(), s.kubescapeFrameworks(ctx)...)
 		if err != nil {
 			return failed(err.Error())
 		}
@@ -651,4 +654,20 @@ func (s *Service) failQueued(ctx context.Context, id uuid.UUID, tool, reason str
 		metrics.AuditRuns.WithLabelValues(tool, "failed").Inc()
 	}
 	return err
+}
+
+// kubescapeFrameworks returns (and caches) the installed kubescape's
+// framework names; nil if the binary cannot list them (fallback table).
+func (s *Service) kubescapeFrameworks(ctx context.Context) []string {
+	s.ksMu.Lock()
+	defer s.ksMu.Unlock()
+	if s.ksFws == nil {
+		fws, err := ListKubescapeFrameworks(ctx, s.KubescapeBin)
+		if err != nil {
+			s.Log.Warn("kubescape frameworks unknown; using built-in names", "err", err)
+			return nil
+		}
+		s.ksFws = fws
+	}
+	return s.ksFws
 }
