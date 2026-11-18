@@ -184,8 +184,8 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	if err := json.Unmarshal(download(t, az, strings.TrimSuffix(pgRun.BlobPath, ".zip")+".manifest.json"), &man); err != nil {
 		t.Fatal(err)
 	}
-	if man["sha256"] != pgRun.SHA256 {
-		t.Fatalf("manifest sha256 %v != run %s", man["sha256"], pgRun.SHA256)
+	if mb, _ := man["blob"].(map[string]any); mb["sha256"] != pgRun.SHA256 || man["engine"] != "postgresql" {
+		t.Fatalf("manifest %v does not match run sha256 %s", man, pgRun.SHA256)
 	}
 	tags, err := az.ServiceClient().NewContainerClient("backups").NewBlobClient(pgRun.BlobPath).GetTags(ctx, nil)
 	if err != nil {

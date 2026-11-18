@@ -10,6 +10,57 @@ az storage blob download --auth-mode login --account-name <account> --container-
 sha256sum backup.<ext>   # must match "sha256" in <run_id>.manifest.json
 ```
 
+## PostgreSQL
+
+### What a backup contains
+
+`<run_id>.zip` (stored, not re-compressed — `pg_dump -Fc` output is already compressed):
+
+| Entry | Content |
+|---|---|
+| `globals.sql` | `pg_dumpall --globals-only` (roles, tablespaces). Role passwords are included as hashes. |
+| `<db>.dump` | `pg_dump -Fc` of one database (custom format, restore with `pg_restore`) |
+
+The manifest records the server version and the pg_dump version used (`server_version`, `tool_version`).
+Use `pg_restore` with a major version ≥ the dump's.
+
+### Restore
+
+```bash
+unzip backup.zip -d restore/
+# 1. Roles and tablespaces (review first: it may contain roles you do not want on the new server).
+psql "host=<new-host> user=postgres dbname=postgres sslmode=verify-full" -f restore/globals.sql
+# 2. Each database.
+createdb -h <new-host> -U postgres orders
+pg_restore -h <new-host> -U postgres -d orders --no-owner --role=<owner> -j 4 restore/orders.dump
+# Inspect without restoring:
+pg_restore --list restore/orders.dump | head
+```
+
+Restoring into the original server: add `--clean --if-exists` to `pg_restore`, ideally into a new database
+that you then swap in by renaming. Dry-run (`olympos-tier=test`) blobs contain globals plus schema only.
+
+## Vault / OpenBao (raft)
+
+### What a backup contains
+
+`<run_id>.snap`: the raw output of `GET /v1/sys/storage/raft/snapshot`, encrypted by Vault's barrier. It can
+only be restored into a cluster that can be unsealed with the **same unseal/recovery keys**.
+
+### Restore
+
+```bash
+export VAULT_ADDR=https://vault.example:8200
+# Needs a token with sys/storage/raft/snapshot-force (break-glass root token, see runbooks/vault-break-glass.md).
+vault operator raft snapshot restore -force backup.snap     # OpenBao: bao operator raft snapshot restore -force
+vault operator unseal   # if the cluster seals after restore
+vault token revoke -self
+```
+
+After a restore the Olympos AppRole and policy are those of the snapshot time. If the AppRole's secret_id was
+rotated since, run *Vaults › Configure* again. Expect `vault-drift` findings for every version written after
+the snapshot (they are now "missing"), which is correct: review and resolve them.
+
 ## ClickHouse
 
 ### What a backup contains
