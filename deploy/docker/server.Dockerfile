@@ -19,7 +19,9 @@ RUN go mod download
 COPY . .
 COPY --from=web /web/dist ./web/dist
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
-    -o /out/olympos-server ./cmd/olympos-server
+    -o /out/olympos-server ./cmd/olympos-server && \
+    CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath -ldflags "-s -w" \
+    -o /out/olympos-sh ./cmd/olympos-sh
 
 FROM debian:bookworm-slim AS tools
 ARG PG_VERSIONS TARGETARCH
@@ -58,6 +60,8 @@ RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64)
 FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=tools /out/ /
 COPY --from=build /out/olympos-server /olympos-server
+# Not a shell: an exec-only shim so pg_dumpall can find pg_dump (popen).
+COPY --from=build /out/olympos-sh /bin/sh
 ENV LD_LIBRARY_PATH=/lib PATH=/usr/local/bin:/usr/bin:/bin
 USER 65532:65532
 EXPOSE 8080 8443 9090

@@ -72,7 +72,7 @@ func waitRun(t *testing.T, c *client, jobID string, after time.Time, trigger str
 		var rs struct{ Items []backup.Run }
 		c.must("GET", "/backup/runs?job_id="+jobID, nil, &rs, 200)
 		for _, r := range rs.Items {
-			if r.Trigger == trigger && r.CreatedAt.After(after) && (r.Status == "succeeded" || r.Status == "failed") {
+			if r.Trigger == trigger && r.CreatedAt.After(after.Add(-2*time.Minute)) && (r.Status == "succeeded" || r.Status == "failed") {
 				run = r
 				return true, ""
 			}

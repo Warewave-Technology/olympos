@@ -23,7 +23,9 @@ func TestM5Security(t *testing.T) {
 		eventually(t, 3*time.Minute, "postgres image inventoried", func() (bool, string) {
 			var is struct {
 				Items []struct {
-					Digest, Repo, ScanStatus string
+					Digest     string `json:"digest"`
+					Repo       string `json:"repo"`
+					ScanStatus string `json:"scan_status"`
 				} `json:"items"`
 			}
 			admin.must("GET", "/images?cluster="+labClusterID+"&q=postgres", nil, &is, 200)
@@ -39,7 +41,9 @@ func TestM5Security(t *testing.T) {
 			ScanStatus string `json:"scan_status"`
 			ScanError  string `json:"scan_error"`
 			Usage      []struct {
-				Namespace, WorkloadKind, WorkloadName string
+				Namespace    string `json:"namespace"`
+				WorkloadKind string `json:"workload_kind"`
+				WorkloadName string `json:"workload_name"`
 			} `json:"usage"`
 			Vulns []map[string]any `json:"vulns"`
 		}
