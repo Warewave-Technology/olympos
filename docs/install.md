@@ -64,6 +64,11 @@ olympos:
     name: kv-platform-weu
     kekName: olympos-kek
     hmacSecretName: olympos-hmac
+    # Who besides global admins may enter kv:// references (backup credentials), and for which
+    # clusters. Without rules only global admins can. Olympos' own secrets are never referenceable.
+    # references:
+    #   - {ref: "kv-platform-weu/dev-*", scope: "env=dev"}
+    #   - {ref: "kv-platform-weu/prod-*", scope: "env=prod"}
     managedIdentityClientID: <managed identity client id>
   # database: by default the chart runs a bundled PostgreSQL 16 in the same namespace
   # (postgresql.bundled=true). For an external one: postgresql.bundled=false and

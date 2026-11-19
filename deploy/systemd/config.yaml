@@ -25,6 +25,8 @@ olympos:
     name: ""                                           # CHANGE: Key Vault name
     kekName: olympos-kek
     hmacSecretName: olympos-hmac
+    # references:                                      # kv:// refs non-admins may enter (glob + cluster scope)
+    #   - {ref: "kv-platform-weu/dev-*", scope: "env=dev"}
     managedIdentityClientID: ""                        # Azure VM user-assigned identity (IMDS)
   # Olympos' own database: the local PostgreSQL over the Unix socket, peer
   # auth, database and role "olympos" (docs/install-systemd.md §2).

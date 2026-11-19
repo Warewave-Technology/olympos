@@ -220,6 +220,9 @@ func Run(cfgPath string) error {
 	if err := targettls.Configure(cfg.TargetTLS.CABundleFile, cfg.TargetTLS.SystemRoots); err != nil {
 		return err
 	}
+	if err := configureRefPolicy(cfg); err != nil {
+		return err
+	}
 	d.Envelope = &secrets.Envelope{KV: d.KV}
 	hk, err := d.KV.GetSecret(ctx, cfg.KeyVault.Name, cfg.KeyVault.HMACSecretName)
 	if errors.Is(err, secrets.ErrSecretNotFound) && cfg.DevMode {
@@ -555,4 +558,20 @@ func agentSets() []string {
 		}
 	}
 	return out
+}
+
+// configureRefPolicy reserves Olympos' own Key Vault secrets and loads the
+// rules for references users enter (security review #2).
+func configureRefPolicy(cfg *config.Server) error {
+	reserved := []secrets.Ref{{Vault: cfg.KeyVault.Name, Secret: cfg.KeyVault.HMACSecretName}, {Vault: cfg.KeyVault.Name, Secret: cfg.KeyVault.KEKName}}
+	for _, ref := range []string{cfg.Database.DSNRef, cfg.Entra.ClientSecretRef, cfg.Slack.BotTokenRef} {
+		if r, err := secrets.ParseRef(ref); err == nil {
+			reserved = append(reserved, r)
+		}
+	}
+	rules := make([]secrets.RefRule, len(cfg.KeyVault.References))
+	for i, r := range cfg.KeyVault.References {
+		rules[i] = secrets.RefRule{Ref: r.Ref, Scope: r.Scope}
+	}
+	return secrets.ConfigureRefPolicy(rules, reserved, nil)
 }

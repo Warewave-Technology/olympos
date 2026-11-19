@@ -14,6 +14,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/apitest"
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/secrets"
 	"github.com/Warewave-Technology/olympos/internal/server"
 )
 
@@ -35,7 +36,58 @@ func newAPI(t *testing.T) *apiEnv {
 	a.prod = seed(t, a.e.DB, "prod-aks", map[string]string{"env": "prod"}, "online")
 	a.dev = seed(t, a.e.DB, "dev-kind", map[string]string{"env": "dev"}, "online")
 	a.dialer.connected[a.prod.ClusterID] = true
+	// Prod operators may reference kv-test secrets (security review #2).
+	if err := secrets.ConfigureRefPolicy([]secrets.RefRule{{Ref: "kv-test/*", Scope: "env=prod"}}, []secrets.Ref{{Vault: "kv-test", Secret: "olympos-hmac"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = secrets.ConfigureRefPolicy(nil, nil, nil) })
 	return a
+}
+
+// Security review #2: a Key Vault reference is resolved with Olympos'
+// identity, so who may enter one is limited, and Olympos' own secrets are
+// never resolved for a user.
+func TestKeyVaultReferencePolicy(t *testing.T) {
+	a := newAPI(t)
+	e := a.e
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	devOp := e.Login(e.Principal("dev", "Member", "operator@env=dev"))
+	admin := e.Login(e.Principal("root", "Member", "admin"))
+	job := func(target string, dest uuid.UUID, ref string) map[string]any {
+		return map[string]any{"target_id": target, "destination_id": dest, "cron": "0 2 * * *",
+			"credential": map[string]any{"source": "keyvault_ref", "ref": ref, "username": "backup"}}
+	}
+	var verr struct{ Fields map[string]string }
+	for _, c := range []struct {
+		name string
+		as   *apitest.Client
+		in   map[string]any
+		want string
+	}{
+		{"dev operator, no rule for dev", devOp, job(a.dev.TargetID, a.dev.DestID, "kv://kv-test/pg"), "not allowed"},
+		{"prod operator, other vault", op, job(a.prod.TargetID, a.prod.DestID, "kv://kv-corp/prod-db-password"), "not allowed"},
+		{"prod operator, Olympos HMAC key", op, job(a.prod.TargetID, a.prod.DestID, "kv://kv-test/olympos-hmac"), "used by Olympos itself"},
+		{"admin, AppRole secret_id", admin, job(a.prod.TargetID, a.prod.DestID, "kv://kv-test/olympos-vault-0b1d-secret-id"), "used by Olympos itself"},
+	} {
+		verr.Fields = nil
+		if code := c.as.Do("POST", "/api/v1/backup/jobs", c.in, &verr); code != http.StatusUnprocessableEntity || !strings.Contains(verr.Fields["credential.ref"], c.want) {
+			t.Errorf("%s: %d %+v", c.name, code, verr.Fields)
+		}
+	}
+	if code := admin.Do("POST", "/api/v1/backup/jobs", job(a.dev.TargetID, a.dev.DestID, "kv://kv-corp/dev-db"), nil); code != http.StatusCreated {
+		t.Fatalf("global admin may reference any other secret: %d", code)
+	}
+	if code := op.Do("POST", "/api/v1/backup/jobs", job(a.prod.TargetID, a.prod.DestID, "kv://KV-TEST/pg"), nil); code != http.StatusCreated {
+		t.Fatalf("rule match (case-insensitive): %d", code)
+	}
+
+	// A stored reference to a now-reserved secret is not resolved at use.
+	if err := e.KV.SetSecret(context.Background(), "kv-test", "olympos-hmac", []byte("k")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := secrets.ResolveUserRef(context.Background(), e.KV, "kv://kv-test/olympos-hmac"); err != secrets.ErrRefReserved {
+		t.Fatalf("reserved resolve: %v", err)
+	}
 }
 
 func TestJobsAPI(t *testing.T) {

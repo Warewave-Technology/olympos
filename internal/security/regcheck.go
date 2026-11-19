@@ -112,7 +112,7 @@ func (a *API) testRegistry(w http.ResponseWriter, r *http.Request) {
 		case "stored":
 			pass = []byte(in.Password.Value)
 		case "keyvault_ref":
-			b, err := secrets.Resolve(r.Context(), a.Envelope.KV, in.Password.Ref)
+			b, err := secrets.ResolveUserRef(r.Context(), a.Envelope.KV, in.Password.Ref)
 			if err != nil {
 				httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "error": "Key Vault reference could not be resolved"})
 				return

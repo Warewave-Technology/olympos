@@ -163,7 +163,7 @@ func ResolveCredential(ctx context.Context, q store.Querier, env *secrets.Envelo
 	case "stored":
 		pw, err = env.Open(ctx, secrets.Sealed{Ciphertext: ct, WrappedDEK: wdek, KEKVersion: kekVer}, CredentialAAD(id))
 	case "keyvault_ref":
-		pw, err = kv.GetSecret(ctx, vault, secret)
+		pw, err = secrets.ResolveUserRef(ctx, kv, secrets.Ref{Vault: vault, Secret: secret}.String())
 	default:
 		err = fmt.Errorf("unknown credential kind %q", kind)
 	}

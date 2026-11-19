@@ -291,7 +291,9 @@ func defaultAuth(kind string) string {
 func validateSecretSource(f map[string]string, field string, in *SecretSourceInput) {
 	switch in.Source {
 	case "keyvault_ref":
-		if _, err := secrets.ParseRef(strings.TrimSpace(in.Ref)); err != nil {
+		// Destination endpoints are global-admin only (canAdmin); Olympos'
+		// own secrets are still refused (security review #2).
+		if _, err := secrets.CheckUserRef(strings.TrimSpace(in.Ref), secrets.RefUse{GlobalAdmin: true}); err != nil {
 			f[field+".ref"] = err.Error()
 		}
 		if in.Value != "" {
@@ -453,7 +455,7 @@ func (a *API) resolveSecret(ctx context.Context, field string, in *SecretSourceI
 	case "stored":
 		return norm(in.Value), nil
 	case "keyvault_ref":
-		b, err := secrets.Resolve(ctx, a.KV, strings.TrimSpace(in.Ref))
+		b, err := secrets.ResolveUserRef(ctx, a.KV, strings.TrimSpace(in.Ref))
 		if err != nil {
 			if errors.Is(err, secrets.ErrSecretNotFound) {
 				return "", map[string]string{field + ".ref": "secret not found in Key Vault"}

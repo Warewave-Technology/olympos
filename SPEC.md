@@ -398,7 +398,7 @@ sessions(id, principal_id, created_at, last_seen_at, expires_at, csrf_token)
 ## 9. Secret handling (MUST)
 
 - **Envelope encryption** for anything stored: random 256-bit DEK per record, AES-256-GCM; DEK wrapped with Key Vault key `kekName` (`wrapKey`/`unwrapKey`). Store `wrapped_dek` + `kek_version`.
-- **Key Vault references** (`kv://<vault>/<secret>`) are resolved at use time with Managed Identity and never persisted.
+- **Key Vault references** (`kv://<vault>/<secret>`) are resolved at use time with Managed Identity and never persisted. Because Olympos' identity can read the whole vault, references users enter are limited (security review v0.1 #2): Olympos' own secrets (HMAC key, DSN, OIDC client secret, Slack token, AppRole `secret_id`s) are never resolved for a user; global admins may reference any other secret; everyone else only what a `keyVault.references` rule (glob on `<vault>/<secret>` + cluster label scope) allows for the target's cluster.
 - Plaintext secrets live only in memory, for the shortest time; zero byte slices after use where practical.
 - **Logging**: a redaction layer; credentials, tokens, SAS, Vault tokens and change values MUST never be logged or returned by the API. Add a test that greps logs in integration tests for known fake secrets.
 - **HMAC fingerprints** (for change requests): `HMAC-SHA256(hmac_key, value)` → display first 12 hex chars as `hm:xxxx·xxxx·xxxx`. `hmac_key` from Key Vault. Never a plain hash.

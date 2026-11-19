@@ -59,6 +59,11 @@ type Server struct {
 		LocalDir       string `yaml:"localDir"`
 		// ManagedIdentityClientID selects the user-assigned identity.
 		ManagedIdentityClientID string `yaml:"managedIdentityClientID"`
+		// References lets users other than global admins enter kv://
+		// references: each rule allows a glob on <vault>/<secret> for
+		// clusters matching a label selector (security review #2). Without
+		// rules only global admins may enter references.
+		References []RefRule `yaml:"references"`
 	} `yaml:"keyVault"`
 
 	// Database: Olympos' own PostgreSQL. Default: the local server on the
@@ -289,4 +294,11 @@ func (c *Server) GatewayHost() string {
 		h = h[:i]
 	}
 	return strings.Trim(h, "[]")
+}
+
+// RefRule allows Key Vault references matching Ref (glob on
+// <vault>/<secret>) for clusters matching Scope (label selector; "" = all).
+type RefRule struct {
+	Ref   string `yaml:"ref"`
+	Scope string `yaml:"scope"`
 }

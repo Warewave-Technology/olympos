@@ -28,8 +28,10 @@ type CredentialInput struct {
 	Password string `json:"password,omitempty"`
 }
 
-// Validate returns per-field errors (keys prefixed with prefix).
-func (c *CredentialInput) Validate(prefix string) map[string]string {
+// Validate returns per-field errors (keys prefixed with prefix). use says
+// who enters a Key Vault reference and for which cluster (security review
+// #2: a reference is resolved with Olympos' identity).
+func (c *CredentialInput) Validate(prefix string, use secrets.RefUse) map[string]string {
 	f := map[string]string{}
 	if c.Source == "" {
 		c.Source = SourceKeyVault
@@ -39,7 +41,7 @@ func (c *CredentialInput) Validate(prefix string) map[string]string {
 	}
 	switch c.Source {
 	case SourceKeyVault:
-		if _, err := secrets.ParseRef(c.Ref); err != nil {
+		if _, err := secrets.CheckUserRef(c.Ref, use); err != nil {
 			f[prefix+"ref"] = err.Error()
 		}
 		if c.Password != "" {
@@ -128,7 +130,7 @@ func (cs *Credentials) Resolve(ctx context.Context, q store.Querier, id uuid.UUI
 	}
 	switch kind {
 	case SourceKeyVault:
-		b, err := secrets.Resolve(ctx, cs.KV, secrets.Ref{Vault: vault, Secret: name}.String())
+		b, err := secrets.ResolveUserRef(ctx, cs.KV, secrets.Ref{Vault: vault, Secret: name}.String())
 		if err != nil {
 			return Credential{}, fmt.Errorf("resolve key vault reference %s: %w", secrets.Ref{Vault: vault, Secret: name}, err)
 		}
@@ -148,7 +150,7 @@ func (cs *Credentials) Resolve(ctx context.Context, q store.Querier, id uuid.UUI
 func (cs *Credentials) FromInput(ctx context.Context, in CredentialInput) (Credential, error) {
 	switch in.Source {
 	case SourceKeyVault:
-		b, err := secrets.Resolve(ctx, cs.KV, in.Ref)
+		b, err := secrets.ResolveUserRef(ctx, cs.KV, in.Ref)
 		if err != nil {
 			return Credential{}, fmt.Errorf("resolve key vault reference: %w", err)
 		}

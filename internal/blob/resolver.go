@@ -181,7 +181,7 @@ func LoadSecret(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *
 		}
 		return b, nil
 	case "keyvault_ref":
-		b, err := kv.GetSecret(ctx, vault, name)
+		b, err := secrets.ResolveUserRef(ctx, kv, secrets.Ref{Vault: vault, Secret: name}.String())
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s from kv://%s/%s: %w", what, vault, name, err)
 		}

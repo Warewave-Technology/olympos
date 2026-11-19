@@ -22,6 +22,7 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/gateway"
 	"github.com/Warewave-Technology/olympos/internal/httpx"
 	"github.com/Warewave-Technology/olympos/internal/schedule"
+	"github.com/Warewave-Technology/olympos/internal/secrets"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
 
@@ -135,6 +136,16 @@ func (a *API) targetScope(ctx context.Context, s *authz.Subject, targetID string
 	}
 	allowed, visible, err := httpx.CanCluster(ctx, a.DB, s, clusterID, p)
 	return clusterID, status, engine, visible, allowed, err
+}
+
+// refUse describes who enters a Key Vault reference for a target on
+// clusterID (security review #2).
+func (a *API) refUse(ctx context.Context, s *authz.Subject, clusterID uuid.UUID) (secrets.RefUse, error) {
+	var labels map[string]string
+	if err := a.DB.QueryRow(ctx, `SELECT labels FROM clusters WHERE id = $1`, clusterID).Scan(&labels); err != nil {
+		return secrets.RefUse{}, err
+	}
+	return secrets.RefUse{GlobalAdmin: s.CanGlobal(authz.PermAdmin), Labels: labels}, nil
 }
 
 func (a *API) checkRefs(ctx context.Context, in *JobInput, fields map[string]string) error {
@@ -307,7 +318,12 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if in.Credential != nil {
-		for k, v := range in.Credential.Validate("credential.") {
+		use, err := a.refUse(ctx, httpx.Subject(r), clusterID)
+		if err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		for k, v := range in.Credential.Validate("credential.", use) {
 			fields[k] = v
 		}
 	} else if engine != "" && needsCredential(engine) {
@@ -438,7 +454,12 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 		changed = append(changed, "notify_channel_id")
 	}
 	if in.Credential != nil {
-		for k, v := range in.Credential.Validate("credential.") {
+		use, err := a.refUse(ctx, httpx.Subject(r), j.Target.ClusterID)
+		if err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		for k, v := range in.Credential.Validate("credential.", use) {
 			fields[k] = v
 		}
 		changed = append(changed, "credential")
@@ -704,7 +725,12 @@ func (a *API) testConnection(w http.ResponseWriter, r *http.Request) {
 		fields["target_id"] = "target is gone"
 	}
 	if in.Credential != nil {
-		for k, v := range in.Credential.Validate("credential.") {
+		use, err := a.refUse(ctx, httpx.Subject(r), clusterID)
+		if err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		for k, v := range in.Credential.Validate("credential.", use) {
 			fields[k] = v
 		}
 	} else if in.CredentialID != nil {

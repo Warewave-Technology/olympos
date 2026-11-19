@@ -565,7 +565,9 @@ func ValidatePattern(p string) (string, string) {
 func validateSecret(src *SecretSource, allowNone bool) string {
 	switch src.Source {
 	case "keyvault_ref":
-		if _, err := secrets.ParseRef(src.Ref); err != nil {
+		// Registry endpoints are global-admin only (requireAdmin); Olympos'
+		// own secrets are still refused (security review #2).
+		if _, err := secrets.CheckUserRef(src.Ref, secrets.RefUse{GlobalAdmin: true}); err != nil {
 			return err.Error()
 		}
 		if src.Value != "" {
