@@ -163,7 +163,7 @@ jobs:
             dpkg --compare-versions "$deb" lt "$base-1" || { echo "$deb does not sort before $base-1"; exit 1; }
           fi
           echo "packages: version $want, $(wc -l < SHA256SUMS-${{ matrix.arch }}) checksums"
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         if: env.SIGN == 'true'
         with: {subject-path: "dist/*.tar.gz\ndist/*.deb\ndist/*.rpm"}
       - uses: actions/upload-artifact@v4
