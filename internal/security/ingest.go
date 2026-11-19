@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/Warewave-Technology/olympos/internal/activity"
 	"github.com/Warewave-Technology/olympos/internal/findings"
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 	"github.com/Warewave-Technology/olympos/internal/notify"
@@ -138,7 +139,38 @@ func (in *Ingester) sensitiveData(ctx context.Context, tx pgx.Tx, clusterID uuid
 	if err != nil || newCount == 0 {
 		return err
 	}
+	if err := recordNewFindings(ctx, tx, findings.SourceSensitiveData, clusterID, notify.SensitiveDataFound); err != nil {
+		return err
+	}
 	return in.emitSensitiveFound(ctx, tx, clusterID, current, newCount)
+}
+
+// recordNewFindings writes one activity row per finding opened in the last
+// minute (F9: messages are grouped, the activity log keeps every item).
+func recordNewFindings(ctx context.Context, tx pgx.Tx, source string, clusterID uuid.UUID, action string) error {
+	rows, err := tx.Query(ctx, `SELECT control_id, resource_ref, severity FROM findings WHERE source = $1 AND cluster_id = $2
+		AND status = 'open' AND first_seen_at > now() - interval '1 minute'`, source, clusterID)
+	if err != nil {
+		return err
+	}
+	type f struct{ control, ref, sev string }
+	var list []f
+	for rows.Next() {
+		var x f
+		if err := rows.Scan(&x.control, &x.ref, &x.sev); err != nil {
+			rows.Close()
+			return err
+		}
+		list = append(list, x)
+	}
+	rows.Close()
+	for _, x := range list {
+		if err := activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: action, ObjectType: "finding", ObjectID: x.ref,
+			ClusterID: &clusterID, Details: map[string]any{"source": source, "control_id": x.control, "severity": x.sev}}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // emitSensitiveFound sends one sensitive_data.found per cluster and scan

@@ -13,8 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Warewave-Technology/olympos/internal/activity"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/schedule"
@@ -220,7 +222,11 @@ func (s *Scanner) Drain(ctx context.Context) error {
 	}
 	wg.Wait()
 	close(errc)
-	return <-errc
+	if err := <-errc; err != nil {
+		return err
+	}
+	// End of the scan run: one grouped vuln.critical per cluster (F9).
+	return s.flushCritical(context.WithoutCancel(ctx))
 }
 
 // claim takes one pending in-use image (SKIP LOCKED, so concurrent workers
@@ -457,19 +463,22 @@ func (s *Scanner) saveResults(ctx context.Context, digest, repo string, vulns []
 	})
 }
 
+// emitCritical records new critical CVEs of a digest scan for every cluster
+// running the image (F9): one activity row per item now, one grouped
+// vuln.critical per cluster when the scan run ends (flushCritical).
 func (s *Scanner) emitCritical(ctx context.Context, tx pgx.Tx, digest, repo string, tags []string, newCrit map[string]Vuln) error {
-	rows, err := tx.Query(ctx, `SELECT DISTINCT c.name FROM image_usage u JOIN clusters c ON c.id = u.cluster_id WHERE u.digest = $1 ORDER BY 1`, digest)
+	rows, err := tx.Query(ctx, `SELECT DISTINCT u.cluster_id FROM image_usage u WHERE u.digest = $1`, digest)
 	if err != nil {
 		return err
 	}
-	var clusters []string
+	var clusters []uuid.UUID
 	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
 			rows.Close()
 			return err
 		}
-		clusters = append(clusters, n)
+		clusters = append(clusters, id)
 	}
 	rows.Close()
 	if len(clusters) == 0 {
@@ -484,31 +493,107 @@ func (s *Scanner) emitCritical(ctx context.Context, tx pgx.Tx, digest, repo stri
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	link := "/security?image=" + digest
-	if s.Link != nil {
-		link = s.Link(link)
-	}
-	for _, id := range ids {
-		v := newCrit[id]
-		fix := v.FixedIn
-		if fix == "" {
-			fix = "no fix yet"
-		}
-		if err := notify.Emit(ctx, tx, notify.Event{
-			Type:  notify.VulnCritical,
-			Key:   notify.VulnCritical + ":" + digest + ":" + id,
-			Title: fmt.Sprintf("Critical %s in %s", id, image),
-			Link:  link,
-			Fields: map[string]string{
-				"image": image, "digest": shortDigest(digest), "cve": id, "package": v.Package + " " + v.Installed,
-				"fixed_in": fix, "clusters": strings.Join(clusters, ", "),
-			},
-			Payload: map[string]any{"digest": digest, "cve_id": id},
-		}); err != nil {
-			return err
+	for _, cid := range clusters {
+		cid := cid
+		for _, id := range ids {
+			v := newCrit[id]
+			tag, err := tx.Exec(ctx, `INSERT INTO pending_vuln_alerts (cluster_id, digest, image, cve_id, package, fixed_in)
+				VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT DO NOTHING`, cid, digest, image, id, strings.TrimSpace(v.Package+" "+v.Installed), v.FixedIn)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() == 0 {
+				continue // already alerted (a CVE that disappeared and came back)
+			}
+			if err := activity.Record(ctx, tx, activity.Entry{ActorKind: "system", Action: notify.VulnCritical, ObjectType: "image", ObjectID: digest,
+				ClusterID: &cid, Details: map[string]any{"cve_id": id, "image": image, "package": v.Package, "fixed_in": v.FixedIn}}); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// flushCritical sends one vuln.critical per cluster for the CVEs collected
+// during the scan run: counts, the top 5 and a link (F9).
+func (s *Scanner) flushCritical(ctx context.Context) error {
+	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `DELETE FROM pending_vuln_alerts WHERE sent_at < now() - interval '180 days'`); err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `UPDATE pending_vuln_alerts p SET sent_at = now() FROM clusters c
+			WHERE c.id = p.cluster_id AND p.sent_at IS NULL
+			RETURNING p.cluster_id, c.name, p.digest, p.image, p.cve_id, p.package, p.fixed_in`)
+		if err != nil {
+			return err
+		}
+		type item struct{ digest, image, cve, pkg, fix string }
+		by := map[uuid.UUID][]item{}
+		names := map[uuid.UUID]string{}
+		for rows.Next() {
+			var cid uuid.UUID
+			var name string
+			var it item
+			if err := rows.Scan(&cid, &name, &it.digest, &it.image, &it.cve, &it.pkg, &it.fix); err != nil {
+				rows.Close()
+				return err
+			}
+			by[cid] = append(by[cid], it)
+			names[cid] = name
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for cid, items := range by {
+			sort.Slice(items, func(i, j int) bool {
+				if (items[i].fix != "") != (items[j].fix != "") {
+					return items[i].fix != "" // fixable first
+				}
+				if items[i].cve != items[j].cve {
+					return items[i].cve > items[j].cve // newest CVE ids first
+				}
+				return items[i].image < items[j].image
+			})
+			images := map[string]bool{}
+			payload := make([]map[string]any, 0, len(items))
+			for _, it := range items {
+				images[it.digest] = true
+				payload = append(payload, map[string]any{"digest": it.digest, "cve_id": it.cve})
+			}
+			var top []string
+			for _, it := range items[:min(5, len(items))] {
+				fix := it.fix
+				if fix == "" {
+					fix = "no fix yet"
+				}
+				top = append(top, fmt.Sprintf("%s in %s (%s, fixed in %s)", it.cve, it.image, it.pkg, fix))
+			}
+			link := "/security?cluster=" + cid.String()
+			if s.Link != nil {
+				link = s.Link(link)
+			}
+			if err := notify.Emit(ctx, tx, notify.Event{
+				Type:  notify.VulnCritical,
+				Key:   notify.VulnCritical + ":" + cid.String() + ":" + uuid.NewString(),
+				Title: fmt.Sprintf("%s in %s on %s", countNoun(len(items), "new critical CVE"), countNoun(len(images), "running image"), names[cid]),
+				Link:  link,
+				Fields: map[string]string{"cluster": names[cid], "new": fmt.Sprint(len(items)), "images": fmt.Sprint(len(images)),
+					"top": strings.Join(top, "; ")},
+				Payload: map[string]any{"cluster_id": cid.String(), "items": payload},
+			}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func countNoun(n int, noun string) string {
+	if n == 1 {
+		return "1 " + noun
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 func shortDigest(d string) string {

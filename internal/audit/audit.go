@@ -628,7 +628,16 @@ func (s *Service) finish(ctx context.Context, rc runContext, out outcome) error 
 			return err
 		}
 		if newCount > 0 {
-			return notify.Emit(pctx, tx, NewFindingsEvent(rc.Run, rc.NotifyID, newCount, resolvedCount, out.score))
+			// F9: one message per cluster and run, with the 5 most severe new findings.
+			top, err := topNewFindings(pctx, tx, rc.ID, 5)
+			if err != nil {
+				return err
+			}
+			e := NewFindingsEvent(rc.Run, rc.NotifyID, newCount, resolvedCount, out.score)
+			if len(top) > 0 {
+				e.Fields["top"] = strings.Join(top, "; ")
+			}
+			return notify.Emit(pctx, tx, e)
 		}
 		return nil
 	})
@@ -661,6 +670,26 @@ func NewFindingsEvent(r Run, channel *uuid.UUID, newCount, resolved int, score *
 		Payload: map[string]any{"run_id": r.ID.String(), "cluster_id": r.ClusterID.String(), "new_findings": newCount,
 			"resolved_findings": resolved},
 	}
+}
+
+// topNewFindings are the most severe findings first seen in run.
+func topNewFindings(ctx context.Context, q store.Querier, run uuid.UUID, n int) ([]string, error) {
+	rows, err := q.Query(ctx, `SELECT control_id, title, resource_ref FROM findings WHERE first_seen_run_id = $1
+		ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4 END, control_id
+		LIMIT $2`, run, n)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var c, title, ref string
+		if err := rows.Scan(&c, &title, &ref); err != nil {
+			return nil, err
+		}
+		out = append(out, fmt.Sprintf("%s %s (%s)", c, title, ref))
+	}
+	return out, rows.Err()
 }
 
 // openFindings returns the open findings for refs (kept open on partial runs).

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"sort"
@@ -155,20 +156,66 @@ func (e *scanEnv) status(t *testing.T, digest string) (string, string) {
 	return st, msg
 }
 
+// criticalKeys lists "vuln.critical:<digest>:<cve>" for every item of the
+// grouped vuln.critical messages (F9: one message per cluster and run).
 func (e *scanEnv) criticalKeys(t *testing.T) []string {
 	t.Helper()
-	rows, err := e.db.Query(context.Background(), `SELECT idempotency_key FROM outbox WHERE event_type = 'vuln.critical' ORDER BY 1`)
+	rows, err := e.db.Query(context.Background(), `SELECT payload FROM outbox WHERE event_type = 'vuln.critical'`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	var out []string
 	for rows.Next() {
-		var k string
-		_ = rows.Scan(&k)
-		out = append(out, k)
+		var p struct {
+			Items []struct {
+				Digest string `json:"digest"`
+				CVE    string `json:"cve_id"`
+			} `json:"items"`
+		}
+		var b []byte
+		_ = rows.Scan(&b)
+		_ = json.Unmarshal(b, &p)
+		for _, it := range p.Items {
+			out = append(out, "vuln.critical:"+it.Digest+":"+it.CVE)
+		}
 	}
+	sort.Strings(out)
 	return out
+}
+
+// F9: a scan run with 40 new critical CVEs in 3 images sends exactly one
+// message for the cluster; every item is in the activity log.
+func TestCriticalEventsGrouped(t *testing.T) {
+	ctx := context.Background()
+	e := newScanEnv(t)
+	e.report(t, use("a:1", dg1, "web", "Deployment", "a", "a"), use("b:1", dg2, "web", "Deployment", "b", "b"), use("c:1", dg3, "web", "Deployment", "c", "c"))
+	n := 0
+	e.runner.out = func(string) ([]byte, error) {
+		return fixture(func(rep map[string]any) {
+			var vs []any
+			for i := 0; i < 14 && n < 40; i++ {
+				n++
+				vs = append(vs, map[string]any{"VulnerabilityID": fmt.Sprintf("CVE-2026-%04d", n), "PkgName": "libx", "InstalledVersion": "1",
+					"FixedVersion": "2", "Severity": "CRITICAL", "Title": "t"})
+			}
+			rep["Results"] = []any{map[string]any{"Target": "x", "Class": "os-pkgs", "Type": "alpine", "Vulnerabilities": vs}}
+		})
+	}
+	if err := e.scanner.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var msgs, acts int
+	_ = e.db.QueryRow(ctx, `SELECT count(*) FROM outbox WHERE event_type = 'vuln.critical'`).Scan(&msgs)
+	_ = e.db.QueryRow(ctx, `SELECT count(*) FROM activity_log WHERE action = 'vuln.critical'`).Scan(&acts)
+	if msgs != 1 || len(e.criticalKeys(t)) != 40 || acts != 40 {
+		t.Fatalf("messages %d, items %d, activity rows %d", msgs, len(e.criticalKeys(t)), acts)
+	}
+	var title string
+	_ = e.db.QueryRow(ctx, `SELECT payload->>'title' FROM outbox WHERE event_type = 'vuln.critical'`).Scan(&title)
+	if title != "40 new critical CVEs in 3 running images on prod-1" {
+		t.Fatalf("title %q", title)
+	}
 }
 
 func TestScannerCredentialsAndStatuses(t *testing.T) {

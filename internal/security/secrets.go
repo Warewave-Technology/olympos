@@ -108,6 +108,9 @@ func (in *Ingester) secretInventory(ctx context.Context, tx pgx.Tx, clusterID uu
 	if err != nil || newCount == 0 {
 		return err
 	}
+	if err := recordNewFindings(ctx, tx, findings.SourceK8sSecrets, clusterID, notify.SecretFindings); err != nil {
+		return err
+	}
 	var cname string
 	if err := tx.QueryRow(ctx, `SELECT name FROM clusters WHERE id = $1`, clusterID).Scan(&cname); err != nil {
 		return err
