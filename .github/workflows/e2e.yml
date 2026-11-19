@@ -62,6 +62,13 @@ jobs:
       - if: steps.rel.outputs.tag != ''
         env: {FROM: "${{ steps.rel.outputs.tag }}"}
         run: ./test/e2e/upgrade.sh "$FROM"
+      - name: Pods and server logs
+        if: failure()
+        run: |
+          export KUBECONFIG=test/e2e/.work/kubeconfig
+          kubectl -n olympos get pods -o wide || true
+          kubectl -n olympos describe pods -l app.kubernetes.io/name=olympos-server | tail -60 || true
+          kubectl -n olympos logs deploy/olympos --tail=200 || true
 
   systemd:
     runs-on: ubuntu-24.04
