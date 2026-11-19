@@ -32,9 +32,13 @@ jobs:
       - uses: helm/kind-action@v1
         with: {install_only: true}
       - run: ./test/e2e/run.sh
-      - name: Server logs
+      - name: Pods, events and server logs
         if: failure()
-        run: KUBECONFIG=test/e2e/.work/kubeconfig kubectl -n olympos logs deploy/olympos --tail=500 || true
+        run: |
+          export KUBECONFIG=test/e2e/.work/kubeconfig
+          kubectl -n olympos get pods -o wide || true
+          kubectl -n olympos get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl -n olympos logs deploy/olympos --tail=500 || true
 
   upgrade:
     # Latest release -> HEAD on the same database (F13). Skipped until the
