@@ -29,6 +29,26 @@ jobs:
         if: failure()
         run: KUBECONFIG=test/e2e/.work/kubeconfig kubectl -n olympos logs deploy/olympos --tail=500 || true
 
+  upgrade:
+    # Latest release -> HEAD on the same database (F13). Skipped until the
+    # first v* release (v0.1.0-rc.1) exists.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v5
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v4
+      - uses: helm/kind-action@v1
+        with: {install_only: true}
+      - id: rel
+        env: {GH_TOKEN: "${{ github.token }}"}
+        run: echo "tag=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName' 2>/dev/null)" >> "$GITHUB_OUTPUT"
+      - if: steps.rel.outputs.tag != ''
+        env: {FROM: "${{ steps.rel.outputs.tag }}"}
+        run: ./test/e2e/upgrade.sh "$FROM"
+
   systemd:
     runs-on: ubuntu-24.04
     timeout-minutes: 45

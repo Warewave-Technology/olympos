@@ -73,7 +73,7 @@ jobs:
       - name: Lab state is never tracked
         run: ./scripts/check-untracked-work.sh
       - name: gitleaks (full history)
-        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --redact --no-banner --exit-code 1 .
+        run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --config .gitleaks.toml --redact --no-banner --exit-code 1 .
 
   web:
     runs-on: ubuntu-24.04

@@ -1,0 +1,20 @@
+# gitleaks configuration (F12): the default rules plus an allowlist for test
+# fixtures that are not secrets. Full-history scan of 2026-11-19: 10 matches,
+# all listed here; nothing to rotate, no history rewrite needed.
+title = "olympos"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Test fixtures: intentional canaries (fake AWS key, PEM, JWT) and MinIO test credentials"
+paths = [
+  '''internal/agent/sensitive_test\.go''',
+  '''test/e2e/m5_sensitive_test\.go''',
+  '''internal/audit/testdata/kubescape-failure\.log''',
+  '''internal/blob/s3_test\.go''',
+]
+
+[[allowlists]]
+description = "Azurite's well-known public development account key (documented by Microsoft)"
+regexes = ['''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''']

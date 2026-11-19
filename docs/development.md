@@ -43,6 +43,23 @@ untagged tests and `scripts/check-release-binary.sh` (symbol and string check).
 API with dev login: `e := apitest.New(t, apitest.Options{Modules: ...}); c := e.Login(e.Principal("ada", "Member", "operator@env=prod"))`.
 `e.LogBuf` holds redacted logs for canary-secret checks.
 
+## Migrations
+
+`internal/store/migrations/NNNNN_name.sql` (goose, embedded in the binary, applied at start-up and by
+`olympos-server migrate`). Numbers have gaps (00004, 00006, 00009–00011 were folded into others before the
+first release); renumbering is not needed. Rules:
+
+- A new migration takes a number **strictly greater** than the latest one on `main`
+  (`scripts/check-migrations.sh origin/main`, run in CI for pull requests). goose runs without
+  `allow-missing`: an older number added later would make `Up` fail on every database that is already past
+  it ("missing migrations"), so a late, lower number is never silently skipped or applied out of order.
+- Every file has `-- +goose Up` and `-- +goose Down`. `Down` exists for development; production never
+  migrates down.
+- The server refuses to start on a schema newer than the binary (no downgrades); restore the dump taken
+  before the upgrade instead.
+- Upgrade test (`e2e.yml`, job `upgrade`): install the latest `v*` release, create data, upgrade to `HEAD`,
+  run the smoke tests.
+
 ## Lab
 
 Kind runs on OrbStack's Docker. **Never touch other kube contexts**: e2e uses its own kubeconfig
