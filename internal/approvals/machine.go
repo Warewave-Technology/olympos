@@ -75,6 +75,7 @@ const (
 	FailApplyError   = "apply_error"   // Vault refused or was unreachable
 	FailApplyUnknown = "apply_unknown" // reconciled: Vault has no trace of the write; open a new request
 	FailConflict     = "conflict"      // reconciled: the secret changed in a way Olympos did not write
+	FailUnverified   = "unverified"    // the outcome could not be read for applyGiveUp; values discarded
 )
 
 // ErrInvalidTransition is returned for a transition the machine does not allow
@@ -478,9 +479,21 @@ type Applied struct {
 
 // SafeError is an apply failure whose message is safe to store and show
 // (never contains values, tokens or raw Vault responses).
-type SafeError struct{ Msg string }
+type SafeError struct {
+	Msg string
+	// Unknown: the write may or may not have reached Vault (timeout,
+	// transport error, 5xx). The request stays 'applying' and the
+	// reconciler settles it from the KV metadata (security review #5).
+	Unknown bool
+}
 
 func (e *SafeError) Error() string { return e.Msg }
+
+// OutcomeUnknown reports whether err leaves the Vault state unknown.
+func OutcomeUnknown(err error) bool {
+	var se *SafeError
+	return errors.As(err, &se) && se.Unknown
+}
 
 // SafeMessage returns the user-visible failure text for err.
 func SafeMessage(err error) string {

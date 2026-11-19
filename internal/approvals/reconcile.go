@@ -2,6 +2,7 @@ package approvals
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -38,6 +39,11 @@ const (
 	clockSkew = time.Minute
 )
 
+// applyGiveUp: a request whose outcome cannot be read this long (vault
+// unreachable, removed, or its cluster revoked) is closed as 'unverified',
+// which discards its sealed values (security review #8). Variable for tests.
+var applyGiveUp = 24 * time.Hour
+
 // ReconcileApplying settles requests left in 'applying' (the outcome of the
 // Vault call was never recorded) from the KV metadata. Run by the vaults
 // maintenance leader every minute:
@@ -47,7 +53,8 @@ const (
 //     nothing changed and a new request can retry;
 //   - anything else: failed, conflict.
 //
-// A vault that cannot be read leaves the request in 'applying'.
+// A vault that cannot be read leaves the request in 'applying' for up to
+// applyGiveUp, then it fails as 'unverified'.
 func (a *API) ReconcileApplying(ctx context.Context) (int, error) {
 	if a.Inspector == nil {
 		return 0, nil
@@ -77,7 +84,14 @@ func (a *API) ReconcileApplying(ctx context.Context) (int, error) {
 	}
 	n := 0
 	for _, d := range list {
-		if err := a.reconcileOne(ctx, d.id, d.vaultID, d.at); err != nil {
+		err := a.reconcileOne(ctx, d.id, d.vaultID, d.at)
+		if errors.Is(err, errVaultBusy) {
+			continue // an apply holds the vault; it records its own outcome
+		}
+		if err != nil && time.Since(d.at) > applyGiveUp {
+			err = a.giveUp(ctx, d.id, d.vaultID, err)
+		}
+		if err != nil {
 			a.Log.Warn("change request still applying: vault state unknown", "cr_id", d.id, "vault_id", d.vaultID, "err", err)
 			continue
 		}
@@ -86,8 +100,23 @@ func (a *API) ReconcileApplying(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// reconcileOne takes the vault lock before it reads the metadata, so a
+// write still in flight is either finished (and visible) or recorded by its
+// apply first (security review #6).
 func (a *API) reconcileOne(ctx context.Context, crID, vaultID uuid.UUID, applyingAt time.Time) error {
-	v, err := LoadVault(ctx, a.DB, vaultID)
+	sess, err := lockVaultSession(ctx, a.DB, vaultID)
+	if err != nil {
+		return err
+	}
+	defer sess.Unlock()
+	var st string
+	if err := sess.conn.QueryRow(ctx, `SELECT status FROM change_requests WHERE id = $1`, crID).Scan(&st); err != nil {
+		return err
+	}
+	if Status(st) != StatusApplying {
+		return nil // settled by its apply while we waited
+	}
+	v, err := LoadVault(ctx, sess.conn, vaultID)
 	if err != nil {
 		return err
 	}
@@ -123,11 +152,26 @@ func (a *API) reconcileOne(ctx context.Context, crID, vaultID uuid.UUID, applyin
 		applyErr = &SafeError{Msg: "Olympos could not record the outcome of the write, and the vault shows changes Olympos " +
 			"cannot attribute to this request. Review the secret versions in the vault."}
 	}
-	return store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
-		if err := LockVault(ctx, tx, vaultID); err != nil {
-			return err
-		}
+	return sess.Tx(ctx, func(tx pgx.Tx) error {
 		return a.finishApply(ctx, tx, crID, v, done, applyErr, code, len(plan), true)
+	})
+}
+
+// giveUp closes a request whose outcome could not be read for applyGiveUp.
+func (a *API) giveUp(ctx context.Context, crID, vaultID uuid.UUID, cause error) error {
+	v, err := loadVaultAny(ctx, a.DB, vaultID)
+	if err != nil {
+		return err
+	}
+	plan, err := planShape(ctx, a.DB, crID)
+	if err != nil {
+		return err
+	}
+	a.Log.Error("change request outcome could not be verified; closing it", "cr_id", crID, "vault_id", vaultID, "err", cause)
+	applyErr := &SafeError{Msg: fmt.Sprintf("Olympos could not read the vault for %s to learn whether this change was written. "+
+		"The request is closed and its values discarded. Check the secret versions in the vault.", applyGiveUp)}
+	return store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
+		return a.finishApply(ctx, tx, crID, v, nil, applyErr, FailUnverified, len(plan), true)
 	})
 }
 

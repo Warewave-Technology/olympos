@@ -505,3 +505,129 @@ func TestTerminalTriggerScrubs(t *testing.T) {
 		e.assertScrubbed(cr.ID)
 	}
 }
+
+// holdVaultLock takes the vault's session lock on its own connection, as a
+// concurrent apply would.
+func holdVaultLock(t *testing.T, db *store.DB, vault uuid.UUID) func() {
+	t.Helper()
+	conn, err := db.Acquire(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Exec(context.Background(), `SELECT pg_advisory_lock(hashtextextended('olympos-vault:' || $1::text, 0))`, vault); err != nil {
+		t.Fatal(err)
+	}
+	return func() {
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock_all()`)
+		conn.Release()
+	}
+}
+
+// Security review #3: callers who may not decide never wait for the vault
+// lock, and a waiting approval gives its connection back and ends with 409:
+// parallel approvals cannot drain the pool.
+func TestApproveCannotDrainPool(t *testing.T) {
+	defer approvals.SetTimingsForTest(time.Second, 24*time.Hour)()
+	e := newEnv(t)
+	maker := e.Login(e.Principal("ada", "Member", "vault-maker"))
+	viewer := e.Login(e.Principal("vic", "Member", "viewer"))
+	approver := e.Login(e.Principal("bob", "Member", "vault-approver"))
+	cr := e.open(maker, e.prod)
+	release := holdVaultLock(t, e.DB, e.prod)
+	defer release()
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	codes := make([]int, 40)
+	for i := range codes {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i], _ = viewer.Raw("POST", "/api/v1/change-requests/"+cr.ID.String()+"/approve", map[string]any{})
+		}(i)
+	}
+	wg.Wait()
+	for _, c := range codes {
+		if c != http.StatusForbidden {
+			t.Fatalf("viewer approve: %v", codes)
+		}
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("viewer approvals waited for the lock: %s", time.Since(start))
+	}
+	// Several approvers wait at once; the pool still serves other requests.
+	errs := make(chan int, 6)
+	for i := 0; i < 6; i++ {
+		go func() {
+			code, _ := approver.Raw("POST", "/api/v1/change-requests/"+cr.ID.String()+"/approve", map[string]any{})
+			errs <- code
+		}()
+	}
+	time.Sleep(200 * time.Millisecond)
+	if code := e.do(viewer, "GET", "/api/v1/change-requests/"+cr.ID.String(), nil, nil); code != http.StatusOK {
+		t.Fatalf("read while approvals wait: %d", code)
+	}
+	for i := 0; i < 6; i++ {
+		if code := <-errs; code != http.StatusConflict {
+			t.Fatalf("approve while the vault is busy: %d", code)
+		}
+	}
+	if n := atomic.LoadInt32(&e.applier.calls); n != 0 {
+		t.Fatalf("applied while the vault was locked: %d", n)
+	}
+}
+
+type failingInspector struct{}
+
+func (failingInspector) KVMetadata(context.Context, uuid.UUID, string, string) (*approvals.KVMeta, error) {
+	return nil, context.DeadlineExceeded
+}
+
+// Security review #5, #6, #8: an unknown outcome stays 'applying' with its
+// values sealed; the reconciler skips a vault another apply holds; after
+// the give-up age the request fails as 'unverified' and is scrubbed.
+func TestUnknownOutcomeIsReconciled(t *testing.T) {
+	defer approvals.SetTimingsForTest(500*time.Millisecond, time.Hour)()
+	e := newEnv(t)
+	ctx := context.Background()
+	maker := e.Login(e.Principal("ada", "Member", "vault-maker"))
+	approver := e.Login(e.Principal("bob", "Member", "vault-approver"))
+	cr := e.open(maker, e.prod)
+	e.applier.fail = &approvals.SafeError{Msg: "timed out writing secret/app/db", Unknown: true}
+	if code := e.do(approver, "POST", "/api/v1/change-requests/"+cr.ID.String()+"/approve", map[string]any{}, nil); code != http.StatusOK {
+		t.Fatalf("approve: %d", code)
+	}
+	status := func() (string, string) {
+		var st, code string
+		_ = e.DB.QueryRow(ctx, `SELECT status, failure_code FROM change_requests WHERE id = $1`, cr.ID).Scan(&st, &code)
+		return st, code
+	}
+	if st, _ := status(); st != "applying" {
+		t.Fatalf("unknown outcome must stay applying: %s", st)
+	}
+	if s, _ := e.sealedCount(cr.ID); s == 0 {
+		t.Fatal("values scrubbed before the outcome is known")
+	}
+	e.api.Inspector = failingInspector{}
+	if _, err := e.DB.Exec(ctx, `UPDATE change_requests SET applying_at = now() - interval '2 hours' WHERE id = $1`, cr.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	release := holdVaultLock(t, e.DB, e.prod)
+	if n, err := e.api.ReconcileApplying(ctx); err != nil || n != 0 {
+		t.Fatalf("reconciled under another apply's lock: %d %v", n, err)
+	}
+	release()
+	if st, _ := status(); st != "applying" {
+		t.Fatalf("settled without the lock: %s", st)
+	}
+
+	if n, err := e.api.ReconcileApplying(ctx); err != nil || n != 1 {
+		t.Fatalf("give up: %d %v", n, err)
+	}
+	if st, code := status(); st != "failed" || code != approvals.FailUnverified {
+		t.Fatalf("after give-up: %s %s", st, code)
+	}
+	e.assertScrubbed(cr.ID)
+	e.assertNoCanary()
+}

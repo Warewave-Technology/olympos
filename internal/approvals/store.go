@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/store"
@@ -32,14 +33,23 @@ type kvMount struct {
 	Managed bool   `json:"managed"`
 }
 
+// loadVaultAny is LoadVault including revoked clusters (closing requests).
+func loadVaultAny(ctx context.Context, q store.Querier, id uuid.UUID) (VaultInfo, error) {
+	return loadVault(ctx, q, id, true)
+}
+
 // LoadVault returns the vault with its cluster labels.
 func LoadVault(ctx context.Context, q store.Querier, id uuid.UUID) (VaultInfo, error) {
+	return loadVault(ctx, q, id, false)
+}
+
+func loadVault(ctx context.Context, q store.Querier, id uuid.UUID, revoked bool) (VaultInfo, error) {
 	var v VaultInfo
 	var ns, svc string
 	var mounts []byte
 	err := q.QueryRow(ctx, `SELECT v.id, t.cluster_id, c.name, c.labels, t.namespace, t.service, v.provider, v.status, v.kv_mounts
 		FROM vaults v JOIN targets t ON t.id = v.target_id JOIN clusters c ON c.id = t.cluster_id
-		WHERE v.id = $1 AND c.status <> 'revoked'`, id).
+		WHERE v.id = $1 AND ($2 OR c.status <> 'revoked')`, id, revoked).
 		Scan(&v.ID, &v.ClusterID, &v.ClusterName, &v.Labels, &ns, &svc, &v.Provider, &v.Status, &mounts)
 	if err != nil {
 		return v, store.NotFound(err)
@@ -63,32 +73,82 @@ const VaultLockSQL = `SELECT pg_advisory_xact_lock(hashtextextended('olympos-vau
 
 // Session-level form of VaultLockSQL (same key).
 const (
-	vaultSessionLockSQL = `SELECT pg_advisory_lock(hashtextextended('olympos-vault:' || $1::text, 0))`
-	vaultUnlockSQL      = `SELECT pg_advisory_unlock(hashtextextended('olympos-vault:' || $1::text, 0))`
+	vaultTryLockSQL = `SELECT pg_try_advisory_lock(hashtextextended('olympos-vault:' || $1::text, 0))`
+	vaultUnlockSQL  = `SELECT pg_advisory_unlock(hashtextextended('olympos-vault:' || $1::text, 0))`
 )
 
-// lockVaultSession holds the vault lock on a dedicated connection across the
-// two apply transactions and the Vault call (session-level and transaction-
-// level advisory locks on the same key exclude each other). A lost server
-// drops the connection and with it the lock.
-func lockVaultSession(ctx context.Context, db *store.DB, vaultID uuid.UUID) (func(), error) {
-	conn, err := db.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := conn.Exec(ctx, vaultSessionLockSQL, vaultID); err != nil {
-		conn.Release()
-		return nil, err
-	}
-	return func() {
-		uctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := conn.Exec(uctx, vaultUnlockSQL, vaultID); err != nil {
-			// Do not return a connection that may still hold the lock.
-			_ = conn.Conn().Close(uctx)
+// errVaultBusy: another change to the vault is being applied.
+var errVaultBusy = errors.New("another change to this vault is being applied; try again in a moment")
+
+// vaultLockWait bounds how long an approval waits for the vault lock.
+var vaultLockWait = 15 * time.Second
+
+// vaultSession holds the vault lock on a dedicated connection across the
+// two apply transactions and the Vault call. Both transactions run on that
+// connection (advisory locks are re-entrant within a session), so a lock
+// holder never needs a second pool connection; session-level and
+// transaction-level locks on the same key from other sessions exclude each
+// other. A lost server drops the connection and with it the lock.
+type vaultSession struct {
+	conn    *pgxpool.Conn
+	vaultID uuid.UUID
+}
+
+// lockVaultSession takes the vault lock without queueing on it: it polls
+// pg_try_advisory_lock and gives the connection back between attempts, so
+// waiting approvals cannot drain the pool (security review #3). It returns
+// errVaultBusy after vaultLockWait.
+func lockVaultSession(ctx context.Context, db *store.DB, vaultID uuid.UUID) (*vaultSession, error) {
+	deadline := time.Now().Add(vaultLockWait)
+	for {
+		actx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		conn, err := db.Acquire(actx)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		var ok bool
+		if err := conn.QueryRow(ctx, vaultTryLockSQL, vaultID).Scan(&ok); err != nil {
+			conn.Release()
+			return nil, err
+		}
+		if ok {
+			return &vaultSession{conn: conn, vaultID: vaultID}, nil
 		}
 		conn.Release()
-	}, nil
+		if time.Now().After(deadline) {
+			return nil, errVaultBusy
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+// Tx runs fn in a transaction on the locked connection.
+func (s *vaultSession) Tx(ctx context.Context, fn func(tx pgx.Tx) error) error {
+	tx, err := s.conn.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck // no-op after commit
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// Unlock releases the lock and the connection.
+func (s *vaultSession) Unlock() {
+	uctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := s.conn.Exec(uctx, vaultUnlockSQL, s.vaultID); err != nil {
+		// Do not return a connection that may still hold the lock.
+		_ = s.conn.Conn().Close(uctx)
+	}
+	s.conn.Release()
 }
 
 // LockVault takes VaultLockSQL in tx.

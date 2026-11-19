@@ -153,10 +153,13 @@ func writeError(ref string, w approvals.Write, err error) error {
 		return &approvals.SafeError{Msg: fmt.Sprintf("Vault denied the write on %s (HTTP 403)", ref)}
 	case code == 404:
 		return &approvals.SafeError{Msg: fmt.Sprintf("%s does not exist or its latest version is deleted", ref)}
+	case code >= 500:
+		// The write may have been committed before the error.
+		return &approvals.SafeError{Msg: fmt.Sprintf("Vault failed on the write on %s (HTTP %d)", ref, code), Unknown: true}
 	case code != 0:
 		return &approvals.SafeError{Msg: fmt.Sprintf("Vault rejected the write on %s (HTTP %d)", ref, code)}
 	case errors.Is(err, context.DeadlineExceeded):
-		return &approvals.SafeError{Msg: fmt.Sprintf("timed out writing %s", ref)}
+		return &approvals.SafeError{Msg: fmt.Sprintf("timed out writing %s", ref), Unknown: true}
 	}
-	return &approvals.SafeError{Msg: fmt.Sprintf("could not reach the vault to write %s", ref)}
+	return &approvals.SafeError{Msg: fmt.Sprintf("could not reach the vault to write %s", ref), Unknown: true}
 }

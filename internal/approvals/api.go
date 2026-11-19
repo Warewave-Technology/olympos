@@ -359,19 +359,32 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 	var vaultID uuid.UUID
 	var pa *pendingApply
 	expired := false
+	// Read-only check first: only someone who may decide this request ever
+	// waits for the vault lock (security review #3).
+	vaultID, ok = a.precheckDecide(w, r, sub, id)
+	if !ok {
+		return
+	}
+	tx1 := func(fn func(tx pgx.Tx) error) error { return store.Tx(ctx, a.DB, fn) }
+	var sess *vaultSession
 	if ev == EvApprove {
 		// The vault lock is held from transaction 1 until the outcome is
-		// recorded, so drift never sees a half-recorded write.
-		if err := a.DB.QueryRow(ctx, `SELECT vault_id FROM change_requests WHERE id = $1`, id).Scan(&vaultID); err == nil {
-			unlock, err := lockVaultSession(ctx, a.DB, vaultID)
-			if err != nil {
-				httpx.Internal(w, r, a.Log, err)
-				return
-			}
-			defer unlock()
+		// recorded, so drift never sees a half-recorded write. Both
+		// transactions run on the locked connection.
+		var err error
+		sess, err = lockVaultSession(ctx, a.DB, vaultID)
+		if errors.Is(err, errVaultBusy) {
+			httpx.Error(w, http.StatusConflict, err.Error())
+			return
 		}
+		if err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+		defer sess.Unlock()
+		tx1 = func(fn func(tx pgx.Tx) error) error { return sess.Tx(ctx, fn) }
 	}
-	err := store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
+	err := tx1(func(tx pgx.Tx) error {
 		c, err := lockCR(ctx, tx, id)
 		if errors.Is(err, errNotFound) {
 			httpx.NotFound(w)
@@ -380,7 +393,11 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 		if err != nil {
 			return err
 		}
-		vaultID = c.VaultID
+		if c.VaultID != vaultID {
+			// A request never moves between vaults; refuse rather than
+			// write under the wrong lock (security review #7).
+			return fmt.Errorf("change request %s: vault changed under the lock", c.ID)
+		}
 		v, err := LoadVault(ctx, tx, c.VaultID)
 		if errors.Is(err, store.ErrNotFound) || err == nil && !sub.Can(authz.PermRead, v.Labels) {
 			httpx.NotFound(w)
@@ -412,6 +429,9 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 			return a.rejectTx(ctx, r, tx, c, v, actor, in.Comment)
 		}
 		pa, err = a.approveTx(ctx, r, tx, c, v, actor, in.Comment)
+		if pa != nil {
+			pa.sess = sess
+		}
 		return err
 	})
 	if errors.Is(err, errHandled) {
@@ -437,6 +457,49 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, ev Event) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, cr)
+}
+
+// precheckDecide authorizes a decision without locks: unknown or invisible
+// requests are 404, a decision the caller may not take is refused, and any
+// read error is a 500 (never "carry on without the lock"). Expired pending
+// requests pass, so the locked path expires them.
+func (a *API) precheckDecide(w http.ResponseWriter, r *http.Request, sub *authz.Subject, id uuid.UUID) (uuid.UUID, bool) {
+	ctx := r.Context()
+	var vaultID, makerID uuid.UUID
+	var st string
+	var expiresAt time.Time
+	err := a.DB.QueryRow(ctx, `SELECT vault_id, maker_principal_id, status, expires_at FROM change_requests WHERE id = $1`, id).
+		Scan(&vaultID, &makerID, &st, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.NotFound(w)
+		return uuid.Nil, false
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return uuid.Nil, false
+	}
+	v, err := LoadVault(ctx, a.DB, vaultID)
+	if errors.Is(err, store.ErrNotFound) || err == nil && !sub.Can(authz.PermRead, v.Labels) {
+		httpx.NotFound(w)
+		return uuid.Nil, false
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return uuid.Nil, false
+	}
+	maker, err := authz.GetPrincipal(ctx, a.DB, makerID)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return uuid.Nil, false
+	}
+	if err := CheckDecide(sub, maker, v.Labels, Status(st), expiresAt, a.now()); err != nil {
+		var de *DenyError
+		if !(errors.As(err, &de) && de.Reason == ReasonExpired && Status(st) == StatusPending) {
+			writeDeny(w, err)
+			return uuid.Nil, false
+		}
+	}
+	return vaultID, true
 }
 
 func (a *API) rejectTx(ctx context.Context, r *http.Request, tx pgx.Tx, c lockedCR, v VaultInfo, actor uuid.UUID, comment string) error {
@@ -468,6 +531,7 @@ type pendingApply struct {
 	v     VaultInfo
 	items []Item
 	plan  []Write
+	sess  *vaultSession // transaction 2 runs on the locked connection
 }
 
 // approveTx is transaction 1: it records the approval and moves the request
@@ -538,15 +602,27 @@ func (a *API) apply(ctx context.Context, p *pendingApply) bool {
 			return len(applied) > 0
 		}
 	}
+	if OutcomeUnknown(applyErr) {
+		// Leave it 'applying': the values stay sealed until the reconciler
+		// reads the vault and records what happened.
+		a.Log.Warn("change request outcome unknown; the reconciler will settle it", "cr_id", p.crID, "err", applyErr)
+		return len(applied) > 0
+	}
 	code := ""
 	if applyErr != nil {
 		code = FailApplyError
 	}
 	fctx, fcancel := context.WithTimeout(ctx, 30*time.Second)
 	defer fcancel()
-	err := store.Tx(fctx, a.DB, func(tx pgx.Tx) error {
+	finish := func(tx pgx.Tx) error {
 		return a.finishApply(fctx, tx, p.crID, p.v, applied, applyErr, code, len(p.plan), false)
-	})
+	}
+	var err error
+	if p.sess != nil {
+		err = p.sess.Tx(fctx, finish)
+	} else {
+		err = store.Tx(fctx, a.DB, finish)
+	}
 	if err != nil {
 		a.Log.Error("change request outcome not recorded; the reconciler will settle it", "cr_id", p.crID, "err", err)
 	}
