@@ -13,9 +13,13 @@ CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -tags "${GO_TAGS:-}" \
   -o "dist/linux_$arch/olympos-server" ./cmd/olympos-server
 [ -x "dist/tools/linux_$arch/trivy" ] || scripts/fetch-tools.sh "$arch"
 NFPM=${NFPM:-nfpm}
+# nfpm expands variables in arch and version only, not in contents paths.
+cfg=$(mktemp)
+sed "s/\${ARCH}/$arch/g" deploy/systemd/nfpm.yaml > "$cfg"
 for p in deb rpm; do
-  VERSION=$version ARCH=$arch $NFPM pkg -f deploy/systemd/nfpm.yaml -p "$p" -t dist/
+  VERSION=$version ARCH=$arch $NFPM pkg -f "$cfg" -p "$p" -t dist/
 done
+rm -f "$cfg"
 name=olympos-server_${version}_linux_${arch}
 stage=$(mktemp -d)
 mkdir -p "$stage/$name/tools" "$stage/$name/systemd"

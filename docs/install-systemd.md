@@ -61,7 +61,7 @@ Download the package for your architecture from the release, **verify it** (see 
 "Verifying releases": `cosign verify-blob` with the `.sigstore.json` bundle), then:
 
 ```bash
-sudo apt install ./olympos-server_0.1.0_amd64.deb      # Ubuntu / Debian
+sudo apt install ./olympos-server_0.1.0-1_amd64.deb      # Ubuntu / Debian
 sudo dnf install ./olympos-server-0.1.0-1.x86_64.rpm   # Rocky / Alma
 ```
 

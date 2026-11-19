@@ -164,12 +164,12 @@ cosign verify ghcr.io/warewave-technology/charts/olympos-server:0.1.0 --certific
 helm install olympos oci://ghcr.io/warewave-technology/charts/olympos-server --version 0.1.0 -n olympos --create-namespace -f values.yaml
 
 # Packages and tarballs (bundle next to each file)
-cosign verify-blob olympos-server_0.1.0_amd64.deb --bundle olympos-server_0.1.0_amd64.deb.sigstore.json \
+cosign verify-blob olympos-server_0.1.0-1_amd64.deb --bundle olympos-server_0.1.0-1_amd64.deb.sigstore.json \
   --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
 sha256sum -c SHA256SUMS-amd64 --ignore-missing
 
 # Build provenance (GitHub attestation)
-gh attestation verify olympos-server_0.1.0_amd64.deb --repo Warewave-Technology/olympos
+gh attestation verify olympos-server_0.1.0-1_amd64.deb --repo Warewave-Technology/olympos
 ```
 
 Pin images by digest in production (`image.digest` in the chart values).

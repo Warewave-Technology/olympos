@@ -77,7 +77,7 @@ jobs:
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
           GO_TAGS=dev ./scripts/package.sh 0.0.0-ci amd64
-      - run: sudo ./test/systemd/smoke.sh dist/olympos-server_0.0.0-ci_amd64.deb
+      - run: sudo ./test/systemd/smoke.sh dist/olympos-server_*_amd64.deb
       - name: Journal
         if: failure()
         run: sudo journalctl -u olympos-server --no-pager -n 300 || true
