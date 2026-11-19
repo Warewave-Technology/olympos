@@ -16,8 +16,11 @@ NFPM=${NFPM:-nfpm}
 # nfpm expands variables in arch and version only, not in contents paths.
 cfg=$(mktemp)
 sed "s/\${ARCH}/$arch/g" deploy/systemd/nfpm.yaml > "$cfg"
+base=${version%%-*}
+pre=""
+[ "$base" = "$version" ] || pre=${version#*-}
 for p in deb rpm; do
-  VERSION=$version ARCH=$arch $NFPM pkg -f "$cfg" -p "$p" -t dist/
+  VERSION=$base PRERELEASE=$pre ARCH=$arch $NFPM pkg -f "$cfg" -p "$p" -t dist/
 done
 rm -f "$cfg"
 name=olympos-server_${version}_linux_${arch}

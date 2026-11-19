@@ -4,6 +4,10 @@ name: olympos-server
 arch: ${ARCH}
 platform: linux
 version: ${VERSION}
+# Set by scripts/package.sh from "<x.y.z>-<pre>"; written as x.y.z~pre so
+# dpkg and rpm sort a release candidate before its final release.
+prerelease: ${PRERELEASE}
+version_schema: none
 release: "1"
 section: admin
 priority: optional
