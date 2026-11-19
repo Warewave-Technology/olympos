@@ -32,6 +32,10 @@ First public release.
 ### Security
 - No password crosses a non-TLS connection in `e2e-tls` mode (PostgreSQL only with SCRAM-SHA-256).
 - Dev login and the local key vault exist only in development builds.
+- Target TLS names are pinned (changes need an admin) and targets trust only configured CAs.
+- Key Vault references users enter are limited by `keyVault.references`; Olympos' own secrets are never
+  referenceable.
+- Findings of the independent review fixed or accepted: [docs/security-review-v0.1.md](docs/security-review-v0.1.md).
 
 [Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.1.0
