@@ -52,8 +52,9 @@ export function SensitiveDataTab({ q, oneCluster }: { q: ReturnType<typeof useSe
       </div>
       <div className="card-body stack-sm">
         <p className="muted small">
-          The agent scans ConfigMap values with the gitleaks rules and key names such as <span className="mono">password</span> or <span className="mono">token</span>. Values never leave the cluster: Olympos only knows where a match is and which rule matched.
-          For each row: <b>move this value to a Secret or Vault and remove it from the ConfigMap.</b> Olympos never edits or deletes ConfigMaps; a row resolves by itself once the key is gone.
+          The agent scans ConfigMap values with the gitleaks rules and key names such as <span className="mono">password</span> or <span className="mono">token</span>. Values never leave the cluster: Olympos only knows
+          where a match is and which rule matched. For each row: <b>move this value to a Secret or Vault and remove it from the ConfigMap.</b> Olympos never edits or deletes ConfigMaps; a row resolves by itself once the
+          key is gone.
         </p>
       </div>
       <DataTable

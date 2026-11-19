@@ -22,6 +22,9 @@ type SelfView struct {
 	Configured bool     `json:"configured"`
 	Job        *SelfJob `json:"job"`
 	Runs       []*Run   `json:"runs"`
+	// Restore: commands for the latest successful run (F19,
+	// docs/restore-olympos.md).
+	Restore *RestoreGuide `json:"restore"`
 }
 
 type selfInput struct {
@@ -74,7 +77,21 @@ func LoadSelfView(ctx context.Context, q store.Querier) (*SelfView, error) {
 		}
 		v.Runs = append(v.Runs, run)
 	}
-	return v, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for _, run := range v.Runs {
+		if run.Status == "succeeded" && run.Trigger != "test" {
+			g, err := LoadRestoreGuide(ctx, q, run.ID)
+			if err != nil {
+				return nil, err
+			}
+			v.Restore = g
+			break
+		}
+	}
+	return v, nil
 }
 
 // putSelf creates or updates the olympos-self job (admin). There is no

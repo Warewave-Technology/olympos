@@ -651,7 +651,16 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, run)
+	// F19: ready-to-copy restore commands for a successful run.
+	guide, err := LoadRestoreGuide(r.Context(), a.DB, id)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, struct {
+		*Run
+		Restore *RestoreGuide `json:"restore"`
+	}{run, guide})
 }
 
 // TestConnectionInput is the body of POST /backup/test-connection.

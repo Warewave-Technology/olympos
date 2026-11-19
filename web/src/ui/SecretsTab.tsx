@@ -26,8 +26,8 @@ function EnableHelp() {
       </p>
       <pre className="code">helm upgrade olympos-agent … --reuse-values --set secretsInventory.enabled=true</pre>
       <p className="muted small">
-        Kubernetes RBAC has no “metadata only” permission: turning this on grants the agent <span className="mono">list</span> and <span className="mono">watch</span> on Secrets. Olympos only makes metadata-only requests and reads key names from
-        managedFields, but a stolen agent token could read values with a normal request. That is why it is opt-in.
+        Kubernetes RBAC has no “metadata only” permission: turning this on grants the agent <span className="mono">list</span> and <span className="mono">watch</span> on Secrets. Olympos only makes metadata-only requests
+        and reads key names from managedFields, but a stolen agent token could read values with a normal request. That is why it is opt-in.
       </p>
     </div>
   );

@@ -354,7 +354,7 @@ paths:
     get:
       tags: [backups]
       responses:
-        "200": {description: Run, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
+        "200": {description: "Run; restore = ready-to-copy restore commands for a successful run (F19), else null", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}}}]}}}}
   /backup/test-connection:
     post:
       tags: [backups]
@@ -1343,6 +1343,13 @@ components:
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
         estimated_monthly_cost: {type: [number, "null"], description: "estimated_monthly_bytes / GiB x cluster egress_rate_per_gb (when set)"}
         created_at: {type: string, format: date-time}
+    RestoreGuide:
+      type: [object, "null"]
+      properties:
+        doc: {type: string, description: "docs/restore.md anchor or docs/restore-olympos.md"}
+        steps:
+          type: array
+          items: {type: object, properties: {title: {type: string}, commands: {type: string}, note: {type: string}}}
     SelfBackup:
       type: object
       properties:
@@ -1362,6 +1369,7 @@ components:
               notify_channel_id: {type: [string, "null"]}
               created_at: {type: string, format: date-time}
         runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}}
+        restore: {$ref: "#/components/schemas/RestoreGuide"}
     BackupRun:
       type: object
       properties:

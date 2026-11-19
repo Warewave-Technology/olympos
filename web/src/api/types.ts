@@ -328,6 +328,14 @@ export interface BackupRun {
   /** Optional (openapi extension): dry-run checklist steps. */
   steps?: { name: string; ok: boolean; detail: string }[];
 }
+/** Ready-to-copy restore commands of one successful run (F19). */
+export interface RestoreGuide {
+  doc: string;
+  steps: { title: string; commands: string; note?: string }[];
+}
+export interface BackupRunDetail extends BackupRun {
+  restore: RestoreGuide | null;
+}
 /** GET /backup/self: the built-in olympos-self job (Olympos' own database). */
 export interface SelfBackup {
   configured: boolean;
@@ -343,6 +351,8 @@ export interface SelfBackup {
     created_at: string;
   } | null;
   runs: BackupRun[];
+  /** Restore commands for the latest successful run. */
+  restore?: RestoreGuide | null;
 }
 export interface SelfBackupInput {
   destination_id?: string;

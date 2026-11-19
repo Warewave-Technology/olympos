@@ -31,3 +31,17 @@ describe('olympos-self backup', () => {
     expect(await within(card).findByText(/ago ·/, {}, T)).toBeTruthy();
   });
 });
+
+describe('restore commands (F19)', () => {
+  it('a successful run shows ready-to-copy restore commands', async () => {
+    const user = userEvent.setup();
+    renderApp('/backups?cluster=all&tab=runs');
+    const table = await screen.findByRole('table', { name: 'Backup runs' }, T);
+    const row = (await within(table).findAllByRole('row', { name: /^Restore commands and details of/ }, T))[0];
+    await user.click(row);
+    const dialog = await screen.findByRole('dialog', {}, T);
+    expect(await within(dialog).findByText('Download the backup and its manifest', {}, T)).toBeTruthy();
+    expect(within(dialog).getAllByText(/pg_restore -h <new-host>/).length).toBeGreaterThan(0);
+    expect(within(dialog).getAllByRole('button', { name: /Copy/ }).length).toBeGreaterThan(0);
+  });
+});

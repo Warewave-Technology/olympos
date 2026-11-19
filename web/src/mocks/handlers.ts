@@ -108,6 +108,17 @@ function runFor(id: string): BackupRun | undefined {
   return r;
 }
 
+function restoreGuide(blob: string, doc: string) {
+  return {
+    doc,
+    steps: [
+      { title: 'Download the backup and its manifest', commands: `az storage blob download --auth-mode login --account-name 'stolympos' --container-name 'backups' \\\n  --name '${blob}' --file backup.zip`, note: 'Human access to backup storage is break-glass (PIM).' },
+      { title: 'Verify it', commands: "echo '<sha256>  backup.zip' | sha256sum -c -" },
+      { title: 'Restore into a new PostgreSQL', commands: 'unzip backup.zip -d restore/\nfor f in restore/*.dump; do\n  db=$(basename "$f" .dump)\n  createdb -h <new-host> -U postgres "$db"\n  pg_restore -h <new-host> -U postgres -d "$db" --no-owner -j 4 "$f"\ndone' },
+    ],
+  };
+}
+
 // The built-in olympos-self job starts unconfigured (Dashboard: Needs attention).
 const selfBackup: SelfBackup = { configured: false, job: null, runs: [] };
 
@@ -491,6 +502,7 @@ const routes: [string, string, Handler][] = [
       if (!selfBackup.job) return { status: 409, body: { error: 'choose a destination for the Olympos self-backup first' } };
       const now = new Date().toISOString();
       selfBackup.runs.unshift({ id: db.uuid(), job_id: selfBackup.job.id, target_service: 'olympos-db', cluster_name: 'olympos', engine: 'postgresql', trigger: 'manual', status: 'succeeded', scheduled_for: null, tier: 'daily', started_at: now, finished_at: now, bytes: 4_812_331, wire_bytes: 4_812_331, blob_path: 'olympos/olympos/olympos/olympos-db/postgresql/x.zip', sha256: '', error: '' });
+      selfBackup.restore = restoreGuide('olympos/olympos/olympos/olympos-db/postgresql/x.zip', 'docs/restore-olympos.md');
       return ok({ run_id: selfBackup.runs[0].id }, 202);
     },
   ],
@@ -505,7 +517,8 @@ const routes: [string, string, Handler][] = [
   ],
   ['GET', '/backup/runs/:id', (_r, p) => {
     const x = runFor(p.id);
-    return x ? ok(x) : notFound();
+    if (!x) return notFound();
+    return ok({ ...x, restore: x.status === 'succeeded' && x.trigger !== 'test' ? restoreGuide(x.blob_path || `olympos/${x.cluster_name}/${x.target_service}/${x.engine}/${x.id}.zip`, 'docs/restore.md#postgresql') : null });
   }],
   [
     'POST',

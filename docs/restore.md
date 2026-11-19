@@ -1,6 +1,7 @@
 # Restoring backups
 
-Restore is manual in v1 (SPEC §10.4). Every backup blob comes with a `{run_id}.manifest.json` written by the
+Restore is manual in v1 (SPEC §10.4). The details of every successful run in *Backups* (click the run) show
+these commands already filled in for that run: download from its destination, checksum, restore. Every backup blob comes with a `{run_id}.manifest.json` written by the
 server (sha256, size, engine, versions, timestamps). Blob data-plane access for humans is break-glass only
 (PIM, SPEC §10.3.1). Download the backup and check it before restoring:
 
@@ -172,7 +173,8 @@ manifest | jq -r '.databases[].tables[] | [.kind, .name, .data_format // "-", .r
 
 ### Everything at once
 
-Restores every database of the backup under its original name (the target databases must not exist).
+Restores every database of the backup under its original name (the target databases must not exist). Save it
+as `restore-clickhouse.sh`: the restore commands shown for each run in *Backups* call it by that name.
 Review it first, in particular for `[HIDDEN]` secrets and replicated tables.
 
 ```bash

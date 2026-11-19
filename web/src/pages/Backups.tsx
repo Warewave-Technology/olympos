@@ -12,6 +12,7 @@ import { PageHead, RunBadge, TlsBadge } from '../ui/status';
 import { Select } from '../ui/Select';
 import { DataTable, type Column } from '../ui/DataTable';
 import { SelfBackupCard } from '../ui/SelfBackupCard';
+import { BackupRunDialog } from '../ui/BackupRunDialog';
 import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
@@ -470,21 +471,27 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
     { id: 'dur', header: 'Duration', align: 'num', sortValue: (r) => between(r.started_at, r.finished_at), defaultDir: 'desc', cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))) },
     { id: 'result', header: 'Result', sortValue: (r) => r.status, cell: (r) => <RunBadge run={r} /> },
   ];
+  const [open, setOpen] = useState<string | null>(null);
   return (
-    <DataTable
-      label={compact ? 'Recent runs' : 'Backup runs'}
-      what="backup runs"
-      rows={q.data ? (clusterName ? q.data.items.filter((r) => r.cluster_name === clusterName) : q.data.items).slice(0, show ?? limit) : undefined}
-      loading={q.isPending}
-      error={q.isError ? q.error : undefined}
-      onRetry={() => q.refetch()}
-      rowKey={(r) => r.id}
-      columns={columns}
-      pageSize={compact ? false : 25}
-      stickyHeader={!compact}
-      initialSort={{ id: 'started', dir: 'desc' }}
-      resetKey={status}
-      empty={<EmptyState title={status ? `No ${status} runs` : 'No runs yet'}>{status ? 'Try another filter.' : 'Runs appear here once a job runs on its schedule, or when you start a dry run or a manual run.'}</EmptyState>}
-    />
+    <>
+      {open && <BackupRunDialog id={open} onClose={() => setOpen(null)} />}
+      <DataTable
+        label={compact ? 'Recent runs' : 'Backup runs'}
+        onRowClick={(r) => setOpen(r.id)}
+        rowLabel={(r) => `${r.status === 'succeeded' ? 'Restore commands and details' : 'Details'} of the ${r.target_service} run of ${relDateTime(r.started_at ?? r.scheduled_for)}`}
+        what="backup runs"
+        rows={q.data ? (clusterName ? q.data.items.filter((r) => r.cluster_name === clusterName) : q.data.items).slice(0, show ?? limit) : undefined}
+        loading={q.isPending}
+        error={q.isError ? q.error : undefined}
+        onRetry={() => q.refetch()}
+        rowKey={(r) => r.id}
+        columns={columns}
+        pageSize={compact ? false : 25}
+        stickyHeader={!compact}
+        initialSort={{ id: 'started', dir: 'desc' }}
+        resetKey={status}
+        empty={<EmptyState title={status ? `No ${status} runs` : 'No runs yet'}>{status ? 'Try another filter.' : 'Runs appear here once a job runs on its schedule, or when you start a dry run or a manual run.'}</EmptyState>}
+      />
+    </>
   );
 }
