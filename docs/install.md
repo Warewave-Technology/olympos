@@ -109,6 +109,23 @@ connected to, so more replicas would work only sometimes: the chart refuses `rep
 `/readyz` not ready until the older one is gone. `experimental.multiReplica: true` lifts both checks and
 is unsupported.
 
+## Restricted networks
+
+Olympos works without internet egress from the server:
+
+- **kubescape**: the frameworks, controls, exceptions and control inputs are downloaded when the image and
+  the packages are built (`/usr/share/olympos/kubescape-artifacts`) and scans run with
+  `--use-artifacts-from`, so no call to the ARMO API is made. They are as recent as the Olympos release; to
+  refresh them in between, run `kubescape download artifacts --output <dir>` on a connected host, copy the
+  directory in (a volume in Helm, any path for systemd) and set `audit.kubescapeArtifacts: <dir>`.
+- **trivy**: the vulnerability DB is pulled from an OCI registry; mirror `ghcr.io/aquasecurity/trivy-db`
+  (and `trivy-java-db`) into your registry and set `security.trivyDBRepo: <your-registry>/trivy-db`. The
+  server updates the DB at most once an hour and keeps scanning with the last one while the mirror is
+  unreachable.
+- **Images and charts**: mirror `ghcr.io/warewave-technology/*` and use `OLYMPOS_AGENT_INSTALL_SETS` to make
+  the generated agent install command point at the mirror.
+- **Entra ID, Key Vault, backup storage** need private endpoints (see §1 and §4).
+
 ## Verifying releases
 
 Every release (tag `v*`) is built by `.github/workflows/release.yml` and signed keyless with cosign through

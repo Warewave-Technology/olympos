@@ -54,6 +54,10 @@ RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64)
     curl -fsSLO https://github.com/kubescape/kubescape/releases/download/v${KUBESCAPE_VERSION}/checksums.sha256; \
     grep " kubescape_${KUBESCAPE_VERSION}_linux_${a}$" checksums.sha256 | sha256sum -c -; \
     install -m 0755 kubescape_${KUBESCAPE_VERSION}_linux_${a} /out/usr/local/bin/kubescape
+# Frameworks, controls, exceptions and control inputs at build time: scans
+# need no egress to the ARMO API (F14, restricted networks).
+RUN /out/usr/local/bin/kubescape download artifacts --output /out/usr/share/olympos/kubescape-artifacts && \
+    test -s /out/usr/share/olympos/kubescape-artifacts/controls-inputs.json
 RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64); \
     curl -fsSLO https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/polaris_${POLARIS_VERSION}_linux_${a}.tar.gz; \
     curl -fsSLO https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/checksums.txt; \

@@ -28,6 +28,9 @@ contents:
   - src: dist/tools/linux_${ARCH}/polaris
     dst: /usr/lib/olympos/bin/polaris
     file_info: {mode: 0755}
+  - src: dist/tools/kubescape-artifacts/
+    dst: /usr/share/olympos/kubescape-artifacts
+    type: tree
   - src: deploy/systemd/olympos-server.service
     dst: /usr/lib/systemd/system/olympos-server.service
   - src: deploy/systemd/sysusers.conf

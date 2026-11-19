@@ -58,6 +58,8 @@ type Service struct {
 	Gateway      Gateway
 	Blob         blob.Resolver // nil: raw reports are not stored
 	KubescapeBin string
+	// KubescapeArtifacts: frameworks/controls baked in at build time (F14).
+	KubescapeArtifacts string
 
 	ksMu       sync.Mutex
 	ksFws      []string // cached `kubescape list frameworks`
@@ -355,6 +357,7 @@ func (s *Service) execTool(ctx context.Context, rc runContext) outcome {
 	switch rc.Tool {
 	case ToolKubescape:
 		inv, err = KubescapeInvocation(s.KubescapeBin, rc.Frameworks, rc.Provider, proxy.Kubeconfig, proxy.Dir(), s.kubescapeFrameworks(ctx)...)
+		inv = WithKubescapeArtifacts(inv, s.KubescapeArtifacts)
 		if err != nil {
 			return failed(err.Error())
 		}
@@ -728,6 +731,11 @@ func (s *Service) failQueued(ctx context.Context, id uuid.UUID, tool, reason str
 func (s *Service) kubescapeFrameworks(ctx context.Context) []string {
 	s.ksMu.Lock()
 	defer s.ksMu.Unlock()
+	if s.ksFws == nil && s.KubescapeArtifacts != "" {
+		if fws, err := KubescapeArtifactFrameworks(s.KubescapeArtifacts); err == nil && len(fws) > 0 {
+			s.ksFws = fws // offline: the artifacts baked into the image
+		}
+	}
 	if s.ksFws == nil {
 		fws, err := ListKubescapeFrameworks(ctx, s.KubescapeBin)
 		if err != nil {

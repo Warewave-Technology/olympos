@@ -18,8 +18,8 @@ func init() {
 		svc := &audit.Service{
 			DB: d.DB, Log: log, Gateway: d.Gateway,
 			Blob:         blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage)),
-			KubescapeBin: d.Cfg.Audit.KubescapeBin,
-			PolarisBin:   d.Cfg.Audit.PolarisBin,
+			KubescapeBin: d.Cfg.Audit.KubescapeBin, KubescapeArtifacts: d.Cfg.Audit.KubescapeArtifacts,
+			PolarisBin: d.Cfg.Audit.PolarisBin,
 		}
 		svc.InstallHooks(&d.Gateway.Hooks)
 		return Wiring{

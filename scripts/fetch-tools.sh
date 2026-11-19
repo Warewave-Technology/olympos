@@ -26,4 +26,18 @@ grep " polaris_${POLARIS_VERSION}_linux_${arch}.tar.gz$" checksums.txt | sha256s
 tar -xzf "polaris_${POLARIS_VERSION}_linux_${arch}.tar.gz" polaris
 cd - >/dev/null
 install -m 0755 "$tmp/trivy" "$tmp/kubescape" "$tmp/polaris" "$out/"
-echo "tools for linux/$arch in $out"
+# kubescape artifacts (JSON, arch-independent; F14): downloaded with a
+# kubescape for the build host.
+art=dist/tools/kubescape-artifacts
+if [ ! -s "$art/controls-inputs.json" ]; then
+  host=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
+  ks="$tmp/kubescape"
+  if [ "$host" != "$arch" ] || [ "$(uname -s)" != Linux ]; then
+    ks="$tmp/kubescape-host"
+    curl -fsSL -o "$ks" "https://github.com/kubescape/kubescape/releases/download/v${KUBESCAPE_VERSION}/kubescape_${KUBESCAPE_VERSION}_linux_${host}"
+    grep " kubescape_${KUBESCAPE_VERSION}_linux_${host}$" "$tmp/checksums.sha256" | awk '{print $1}' | sed "s#\$#  $ks#" | sha256sum -c -
+    chmod +x "$ks"
+  fi
+  "$ks" download artifacts --output "$art" >/dev/null
+fi
+echo "tools for linux/$arch in $out, kubescape artifacts in $art"

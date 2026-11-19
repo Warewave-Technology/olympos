@@ -146,3 +146,29 @@ func TestRedact(t *testing.T) {
 		t.Errorf("over-redacted: %s", out)
 	}
 }
+
+// F14: baked-in artifacts are used when present (air-gapped), and their
+// framework names are listed without asking the ARMO API.
+func TestKubescapeArtifacts(t *testing.T) {
+	inv, _ := KubescapeInvocation("kubescape", []string{"nsa"}, "onprem", "k", "/w")
+	if got := WithKubescapeArtifacts(inv, t.TempDir()); len(got.Args) != len(inv.Args) {
+		t.Fatalf("empty dir must not be used: %v", got.Args)
+	}
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"controls-inputs.json": `{}`, "exceptions.json": `[]`, "attack-tracks.json": `[]`,
+		"nsa.json": `{"name":"NSA","controls":[]}`, "cis-v1.12.0.json": `{"name":"cis-v1.12.0","controls":[{}]}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := WithKubescapeArtifacts(inv, dir)
+	if strings.Join(got.Args[len(got.Args)-2:], " ") != "--use-artifacts-from "+dir || len(inv.Args) == len(got.Args) {
+		t.Fatalf("args: %v", got.Args)
+	}
+	fws, err := KubescapeArtifactFrameworks(dir)
+	if err != nil || strings.Join(fws, ",") != "NSA,cis-v1.12.0" {
+		t.Fatalf("frameworks: %v %v", fws, err)
+	}
+}

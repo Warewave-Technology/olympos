@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -197,6 +198,58 @@ func KubescapeInvocation(bin string, frameworks []string, provider, kubeconfig, 
 		},
 		OutputFile: out,
 	}, nil
+}
+
+// DefaultKubescapeArtifacts is where the image and the packages put the
+// kubescape frameworks, controls, exceptions and control inputs downloaded
+// at build time (F14: no download at scan time, works air-gapped).
+const DefaultKubescapeArtifacts = "/usr/share/olympos/kubescape-artifacts"
+
+// WithKubescapeArtifacts makes kubescape load its artifacts from dir
+// (--use-artifacts-from) when dir holds them; otherwise kubescape downloads
+// them at scan time (needs egress to the ARMO API).
+func WithKubescapeArtifacts(inv Invocation, dir string) Invocation {
+	if dir == "" {
+		return inv
+	}
+	if _, err := os.Stat(filepath.Join(dir, "controls-inputs.json")); err != nil {
+		return inv
+	}
+	inv.Args = append(append([]string(nil), inv.Args...), "--use-artifacts-from", dir)
+	return inv
+}
+
+// KubescapeArtifactFrameworks lists the framework names in an artifacts
+// directory (each framework is <name>.json with a "name" field).
+func KubescapeArtifactFrameworks(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		n := e.Name()
+		if e.IsDir() || !strings.HasSuffix(n, ".json") {
+			continue
+		}
+		switch n {
+		case "attack-tracks.json", "controls-inputs.json", "exceptions.json", "allcontrols.json":
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, n))
+		if err != nil {
+			return nil, err
+		}
+		var fw struct {
+			Name     string            `json:"name"`
+			Controls []json.RawMessage `json:"controls"`
+		}
+		if json.Unmarshal(b, &fw) == nil && fw.Name != "" && fw.Controls != nil {
+			names = append(names, fw.Name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // PolarisInvocation builds:

@@ -131,7 +131,10 @@ type Server struct {
 
 	Audit struct {
 		KubescapeBin string `yaml:"kubescapeBin"`
-		PolarisBin   string `yaml:"polarisBin"`
+		// KubescapeArtifacts: frameworks/controls downloaded at build time
+		// (default /usr/share/olympos/kubescape-artifacts; F14, air-gapped).
+		KubescapeArtifacts string `yaml:"kubescapeArtifacts"`
+		PolarisBin         string `yaml:"polarisBin"`
 	} `yaml:"audit"`
 
 	Security struct {
@@ -214,6 +217,7 @@ func (c *Server) defaults() {
 		c.Backup.S3PartSizeMiB = 32
 	}
 	def(&c.Audit.KubescapeBin, "kubescape")
+	def(&c.Audit.KubescapeArtifacts, "/usr/share/olympos/kubescape-artifacts")
 	def(&c.Audit.PolarisBin, "polaris")
 	def(&c.Security.TrivyBin, "trivy")
 	def(&c.Security.TrivyCacheDir, "/var/cache/trivy")
