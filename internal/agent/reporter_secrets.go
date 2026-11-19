@@ -125,10 +125,15 @@ func SecretKeysFromManagedFields(mf []metav1.ManagedFieldsEntry) (keys []string,
 
 // stripSecret keeps names, labels, owners and creation time; key names move
 // to an annotation; managedFields and every other annotation go.
+// Transforms may run more than once on the same (already stripped) object:
+// they must be idempotent.
 func stripSecret(obj any) (any, error) {
 	m, ok := obj.(*metav1.PartialObjectMetadata)
 	if !ok {
 		return obj, nil
+	}
+	if len(m.ManagedFields) == 0 && (m.Annotations[annKeys] != "" || m.Annotations[annKeysUnknown] != "") {
+		return m, nil // already stripped
 	}
 	keys, known, typeSet := SecretKeysFromManagedFields(m.ManagedFields)
 	ann := map[string]string{}
@@ -173,6 +178,8 @@ func stripServiceAccount(obj any) (any, error) {
 	out := &corev1.ServiceAccount{TypeMeta: sa.TypeMeta, ObjectMeta: metav1.ObjectMeta{Name: sa.Name, Namespace: sa.Namespace, UID: sa.UID, ResourceVersion: sa.ResourceVersion}}
 	if len(refs) > 0 {
 		out.Annotations = map[string]string{annSecretRefs: strings.Join(refs, ",")}
+	} else if v := sa.Annotations[annSecretRefs]; v != "" {
+		out.Annotations = map[string]string{annSecretRefs: v} // already stripped
 	}
 	return out, nil
 }

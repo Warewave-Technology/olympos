@@ -61,6 +61,30 @@ func secretMeta(ns, name string, fields string, ann map[string]string) *metav1.P
 	return m
 }
 
+// client-go may apply a transform again to an already stripped object.
+func TestSecretTransformsIdempotent(t *testing.T) {
+	keepSecretRefs.Store(true)
+	defer keepSecretRefs.Store(false)
+	m := secretMeta("shop", "db", `{"f:data":{"f:password":{}}}`, map[string]string{"kubectl.kubernetes.io/last-applied-configuration": "x"})
+	once, _ := stripSecret(m)
+	twice, _ := stripSecret(once)
+	if twice.(*metav1.PartialObjectMetadata).Annotations[annKeys] != `["password"]` {
+		t.Fatalf("keys lost on a second transform: %v", twice)
+	}
+	p := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "p"}, Spec: corev1.PodSpec{ImagePullSecrets: []corev1.LocalObjectReference{{Name: "regcred"}}}}
+	p1, _ := stripPod(p)
+	p2, _ := stripPod(p1)
+	if p2.(*corev1.Pod).Annotations[annSecretRefs] != "regcred" {
+		t.Fatalf("refs lost on a second transform: %v", p2)
+	}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Namespace: "shop", Name: "sa"}, Secrets: []corev1.ObjectReference{{Name: "tok"}}}
+	s1, _ := stripServiceAccount(sa)
+	s2, _ := stripServiceAccount(s1)
+	if s2.(*corev1.ServiceAccount).Annotations[annSecretRefs] != "tok" {
+		t.Fatalf("SA refs lost on a second transform: %v", s2)
+	}
+}
+
 func TestSecretInventoryReporter(t *testing.T) {
 	const canary = "CANARY-secret-value-in-annotation"
 	scheme := metafake.NewTestScheme()

@@ -194,8 +194,11 @@ func stripPod(obj any) (any, error) {
 	}
 	if keepSecretRefs.Load() {
 		// Opt-in Secret inventory (F3): the NAMES of referenced Secrets only.
+		// Transforms may run again on the stripped pod: keep what it has.
 		if refs := PodSecretRefs(p); len(refs) > 0 {
 			out.Annotations = map[string]string{annSecretRefs: strings.Join(refs, ",")}
+		} else if v := p.Annotations[annSecretRefs]; v != "" {
+			out.Annotations = map[string]string{annSecretRefs: v}
 		}
 	}
 	for _, c := range p.Spec.Containers {

@@ -127,4 +127,4 @@ fi
 
 log "running e2e tests"
 OLYMPOS_E2E_KUBECONFIG=$KUBECONFIG OLYMPOS_E2E_URL=http://127.0.0.1:28080 \
-  go test -tags e2e -count=1 -timeout 30m -v ./test/e2e/... 2>&1 | tee "$WORK/e2e.log"
+  go test -tags e2e -count=1 -timeout 30m -v ${E2E_RUN:+-run "$E2E_RUN"} ./test/e2e/... 2>&1 | tee "$WORK/e2e.log"
