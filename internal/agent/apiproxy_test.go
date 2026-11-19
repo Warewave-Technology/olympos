@@ -41,6 +41,17 @@ func TestAPIProxyReadOnly(t *testing.T) {
 		{"GET", "/api/v1/namespaces/x/pods/p/portforward", nil, 403},
 		{"GET", "/api/v1/namespaces/x/services/s/proxy/", nil, 403},
 		{"GET", "/api/v1/pods", map[string]string{"Upgrade": "websocket", "Connection": "Upgrade"}, 403},
+		// Legacy watch prefix and other spellings (F11).
+		{"GET", "/api/v1/watch/secrets", nil, 403},
+		{"GET", "/api/v1/watch/namespaces/x/secrets", nil, 403},
+		{"GET", "/api/v1/watch/namespaces/x/secrets/s", nil, 403},
+		{"GET", "/api/v1/namespaces/x/Secrets", nil, 403},
+		{"GET", "/api/v1/namespaces/x/%252Fsecrets", nil, 403},
+		{"GET", "/api/v1/namespaces/x/pods/%2e%2e/secrets", nil, 403},
+		{"GET", "/apis/example.io/v1/secrets", nil, 403},
+		{"GET", "/api/v1/namespaces/x/pods", map[string]string{"X-HTTP-Method-Override": "DELETE"}, 403},
+		{"GET", "/api/v1/namespaces/x/configmaps", nil, 200},
+		{"GET", "/api/v1/namespaces/x/secretproviderclasses", nil, 200},
 	}
 	for _, c := range cases {
 		req := httptest.NewRequest(c.method, "http://proxy"+c.path, nil)

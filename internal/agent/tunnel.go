@@ -132,11 +132,15 @@ func (d *discovery) resolve(t *pb.Target) (string, error) {
 
 // ---------------------------------------------------------------- API proxy
 
-// secretPath matches Secret resources in the core API, namespaced or not.
-var secretPath = regexp.MustCompile(`^/api/v1/(namespaces/[^/]+/)?secrets(/|$)`)
+// secretPath matches a "secrets" path segment anywhere: the core API
+// (namespaced or not), the legacy /api/v1/watch/... prefix and any API
+// group or aggregated API. Case-insensitive, after normalization. With the
+// opt-in Secret inventory the agent's token can list/watch Secrets, so this
+// filter is what keeps values out of the proxy.
+var secretPath = regexp.MustCompile(`(?i)(^|/)secrets(/|$)`)
 
 // forbiddenSub blocks subresources that execute or forward, even via GET.
-var forbiddenSub = regexp.MustCompile(`/(exec|attach|portforward|proxy)(/|$)`)
+var forbiddenSub = regexp.MustCompile(`(?i)/(exec|attach|portforward|proxy)(/|$)`)
 
 // APIProxyHandler returns the read-only kube-apiserver proxy handler.
 // Exported for tests.
@@ -160,12 +164,18 @@ func APIProxyHandler(upstream *url.URL, transport http.RoundTripper) http.Handle
 			http.Error(w, "olympos api proxy: read-only (GET only)", http.StatusForbidden)
 			return
 		}
+		if r.Header.Get("X-HTTP-Method-Override") != "" || r.Header.Get("X-HTTP-Method") != "" {
+			http.Error(w, "olympos api proxy: method overrides are not allowed", http.StatusForbidden)
+			return
+		}
 		if r.Header.Get("Upgrade") != "" || strings.Contains(strings.ToLower(r.Header.Get("Connection")), "upgrade") {
 			http.Error(w, "olympos api proxy: upgrades are not allowed", http.StatusForbidden)
 			return
 		}
 		p := path(r.URL)
-		if secretPath.MatchString(p) {
+		// Checked on the normalized path and once more decoded: the API
+		// server decodes the path once, a proxy in between might again.
+		if secretPath.MatchString(p) || secretPath.MatchString(twiceDecoded(p)) {
 			http.Error(w, "olympos api proxy: secrets are not readable", http.StatusForbidden)
 			return
 		}
@@ -175,6 +185,14 @@ func APIProxyHandler(upstream *url.URL, transport http.RoundTripper) http.Handle
 		}
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// twiceDecoded decodes and normalizes an already normalized path once more.
+func twiceDecoded(p string) string {
+	if dp, err := url.PathUnescape(p); err == nil {
+		return path(&url.URL{Path: dp, RawPath: dp})
+	}
+	return p
 }
 
 // path normalizes the request path so "//api/v1/../v1/secrets" tricks fail.
