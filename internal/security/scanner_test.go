@@ -191,7 +191,10 @@ func TestCriticalEventsGrouped(t *testing.T) {
 	e := newScanEnv(t)
 	e.report(t, use("a:1", dg1, "web", "Deployment", "a", "a"), use("b:1", dg2, "web", "Deployment", "b", "b"), use("c:1", dg3, "web", "Deployment", "c", "c"))
 	n := 0
+	var mu sync.Mutex // the scanner scans images in parallel
 	e.runner.out = func(string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
 		return fixture(func(rep map[string]any) {
 			var vs []any
 			for i := 0; i < 14 && n < 40; i++ {
