@@ -56,13 +56,18 @@ RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64)
     install -m 0755 kubescape_${KUBESCAPE_VERSION}_linux_${a} /out/usr/local/bin/kubescape
 # Frameworks, controls, exceptions and control inputs at build time: scans
 # need no egress to the ARMO API (F14, restricted networks).
+# kubescape creates the tree 0700; COPY would carry that onto /usr/share and
+# hide zoneinfo from the nonroot user.
 RUN /out/usr/local/bin/kubescape download artifacts --output /out/usr/share/olympos/kubescape-artifacts && \
-    test -s /out/usr/share/olympos/kubescape-artifacts/controls-inputs.json
+    test -s /out/usr/share/olympos/kubescape-artifacts/controls-inputs.json && \
+    chmod -R u=rwX,go=rX /out/usr/share
 RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64); \
     curl -fsSLO https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/polaris_${POLARIS_VERSION}_linux_${a}.tar.gz; \
     curl -fsSLO https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/checksums.txt; \
     grep " polaris_${POLARIS_VERSION}_linux_${a}.tar.gz$" checksums.txt | sha256sum -c -; \
     tar -xzf polaris_${POLARIS_VERSION}_linux_${a}.tar.gz polaris && install -m 0755 polaris /out/usr/local/bin/polaris
+# Every directory COPY lays over the base must stay readable for 65532.
+RUN bad=$(find /out -type d ! -perm -0555); test -z "$bad" || { echo "not world-readable: $bad"; exit 1; }
 
 FROM gcr.io/distroless/base-debian12:nonroot
 COPY --from=tools /out/ /

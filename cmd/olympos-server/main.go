@@ -11,6 +11,9 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	// Schedules take IANA zones; hosts without (readable) zoneinfo must not
+	// reject them.
+	_ "time/tzdata"
 
 	"github.com/Warewave-Technology/olympos/internal/app"
 	"github.com/Warewave-Technology/olympos/internal/devbuild"

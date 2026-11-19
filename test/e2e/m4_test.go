@@ -85,6 +85,11 @@ func TestM4Audit(t *testing.T) {
 		t.Skip("needs TestM1EnrollInventoryDiscovery")
 	}
 	admin := login(t, devAdminOID, "Lab Admin")
+	// F14: the baked-in kubescape artifacts must be readable by the nonroot
+	// user, or scans silently fall back to downloading them.
+	if logs := run(t, "kubectl", "-n", "olympos", "logs", "deploy/olympos", "--tail=-1"); strings.Contains(logs, "kubescape artifacts unreadable") {
+		t.Fatal("server cannot read the baked-in kubescape artifacts")
+	}
 
 	t.Run("polaris", func(t *testing.T) {
 		r := runAudit(t, admin, auditSchedule(t, admin, "polaris", nil), 10*time.Minute)

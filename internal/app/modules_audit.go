@@ -1,6 +1,11 @@
 package app
 
 import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+
 	"github.com/Warewave-Technology/olympos/internal/audit"
 	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/server"
@@ -20,6 +25,11 @@ func init() {
 			Blob:         blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage)),
 			KubescapeBin: d.Cfg.Audit.KubescapeBin, KubescapeArtifacts: d.Cfg.Audit.KubescapeArtifacts,
 			PolarisBin: d.Cfg.Audit.PolarisBin,
+		}
+		if dir := d.Cfg.Audit.KubescapeArtifacts; dir != "" {
+			if _, err := os.Stat(filepath.Join(dir, "controls-inputs.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				log.Warn("kubescape artifacts unreadable; kubescape will download them at scan time", "dir", dir, "err", err)
+			}
 		}
 		svc.InstallHooks(&d.Gateway.Hooks)
 		return Wiring{

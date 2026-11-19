@@ -43,6 +43,12 @@ func TestM7AgentNetworkCut(t *testing.T) {
 		admin.must("GET", "/findings?status=open&cluster="+labClusterID+"&limit=1000", nil, &fs, 200)
 		return len(fs.Items)
 	}
+	// TestM6 restarts the server: wait for the agent's new session before
+	// taking the baseline.
+	eventually(t, 2*time.Minute, "agent reconnected after the server restart", func() (bool, string) {
+		out := psql(fmt.Sprintf(`SELECT status = 'online' AND last_seen_at > now() - interval '20 seconds' FROM clusters WHERE id = '%s'`, labClusterID))
+		return out == "t", out
+	})
 	offline0, online0 := events("agent.offline"), events("agent.online")
 	open0 := openFindings()
 

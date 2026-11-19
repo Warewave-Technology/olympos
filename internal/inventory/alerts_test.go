@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -83,5 +84,45 @@ func TestAgentAlertDebounce(t *testing.T) {
 	}
 	if n := outboxCount(t, db, "agent.flapping"); n != 1 {
 		t.Fatalf("agent.flapping events: %d", n)
+	}
+}
+
+// After a restart the server waits for agents to reconnect, and an outage
+// that began while it was down is counted from its start: no burst of
+// agent.offline/agent.online for every cluster after maintenance.
+func TestOfflineAfterServerRestart(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	var id uuid.UUID
+	if err := db.QueryRow(ctx, `INSERT INTO clusters (name, status, last_seen_at) VALUES ('c1', 'online', now() - interval '1 hour') RETURNING id`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	status := func() string {
+		var st string
+		_ = db.QueryRow(ctx, `SELECT status FROM clusters WHERE id = $1`, id).Scan(&st)
+		return st
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	fresh := &Service{DB: db, Log: log, Started: time.Now(), OfflineAlertAfter: 20 * time.Second}
+	if err := fresh.CheckOffline(ctx); err != nil || status() != "online" {
+		t.Fatalf("marked offline during the reconnect grace: %v %s", err, status())
+	}
+
+	up := &Service{DB: db, Log: log, Started: time.Now().Add(-2 * time.Minute), OfflineAlertAfter: 5 * time.Minute}
+	if err := up.CheckOffline(ctx); err != nil || status() != "offline" {
+		t.Fatalf("offline: %v %s", err, status())
+	}
+	if n := outboxCount(t, db, "agent.offline"); n != 0 {
+		t.Fatalf("alerted at once for an outage seen for 2 minutes: %d", n)
+	}
+	if _, err := db.Exec(ctx, `UPDATE clusters SET offline_since = now() - interval '6 minutes' WHERE id = $1`, id); err != nil {
+		t.Fatal(err)
+	}
+	if err := up.CheckOffline(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := outboxCount(t, db, "agent.offline"); n != 1 {
+		t.Fatalf("agent.offline events: %d", n)
 	}
 }

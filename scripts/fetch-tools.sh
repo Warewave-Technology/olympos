@@ -40,4 +40,5 @@ if [ ! -s "$art/controls-inputs.json" ]; then
   fi
   "$ks" download artifacts --output "$art" >/dev/null
 fi
+chmod -R u=rwX,go=rX "$art"
 echo "tools for linux/$arch in $out, kubescape artifacts in $art"

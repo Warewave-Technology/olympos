@@ -30,6 +30,12 @@ type Service struct {
 	// first seen or changes.
 	OnTargetUpsert []func(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, t *pb.Target) error
 
+	// Started is when this server came up. Agents need up to
+	// gateway.OfflineAfter to reconnect after a restart, so the offline
+	// monitor waits that long and counts an outage from Started at the
+	// earliest: a server that was down does not alert for every cluster.
+	Started time.Time
+
 	// Alert debounce (F18). Zero values use the defaults below.
 	OfflineAlertAfter   time.Duration
 	FlappingDisconnects int
@@ -215,6 +221,9 @@ func (s *Service) RunOfflineMonitor(ctx context.Context) {
 
 // CheckOffline is one pass of the offline monitor.
 func (s *Service) CheckOffline(ctx context.Context) error {
+	if !s.Started.IsZero() && time.Since(s.Started) < gateway.OfflineAfter {
+		return nil
+	}
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		type c struct {
 			id   uuid.UUID
@@ -232,8 +241,12 @@ func (s *Service) CheckOffline(ctx context.Context) error {
 			}
 			return out, rows.Err()
 		}
-		rows, err := tx.Query(ctx, `UPDATE clusters SET status = 'offline', offline_since = last_seen_at, offline_alerted = false
-			WHERE status = 'online' AND last_seen_at < now() - $1::interval RETURNING id, name`, interval(gateway.OfflineAfter))
+		var started *time.Time
+		if !s.Started.IsZero() {
+			started = &s.Started
+		}
+		rows, err := tx.Query(ctx, `UPDATE clusters SET status = 'offline', offline_since = GREATEST(last_seen_at, $2::timestamptz), offline_alerted = false
+			WHERE status = 'online' AND last_seen_at < now() - $1::interval RETURNING id, name`, interval(gateway.OfflineAfter), started)
 		if err != nil {
 			return err
 		}
