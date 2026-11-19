@@ -1,6 +1,6 @@
 module github.com/Warewave-Technology/olympos
 
-go 1.27.1
+go 1.27.4
 
 require (
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.24.0
@@ -155,7 +155,7 @@ require (
 	github.com/tetratelabs/wazero v1.9.0 // indirect
 	github.com/therootcompany/xz v1.0.1 // indirect
 	github.com/tinylib/msgp v1.6.4 // indirect
-	github.com/ulikunitz/xz v0.5.12 // indirect
+	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/wasilibs/go-re2 v1.9.0 // indirect
 	github.com/wasilibs/wazero-helpers v0.0.0-20240620070341-3dff1577cd52 // indirect
 	github.com/x448/float16 v0.8.4 // indirect

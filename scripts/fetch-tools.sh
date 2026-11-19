@@ -31,11 +31,12 @@ install -m 0755 "$tmp/trivy" "$tmp/kubescape" "$tmp/polaris" "$out/"
 art=dist/tools/kubescape-artifacts
 if [ ! -s "$art/controls-inputs.json" ]; then
   host=$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')
-  ks="$tmp/kubescape"
-  if [ "$host" != "$arch" ] || [ "$(uname -s)" != Linux ]; then
+  os=$(uname -s | tr '[:upper:]' '[:lower:]')
+  ks="$out/kubescape"
+  if [ "$host" != "$arch" ] || [ "$os" != linux ]; then
     ks="$tmp/kubescape-host"
-    curl -fsSL -o "$ks" "https://github.com/kubescape/kubescape/releases/download/v${KUBESCAPE_VERSION}/kubescape_${KUBESCAPE_VERSION}_linux_${host}"
-    grep " kubescape_${KUBESCAPE_VERSION}_linux_${host}$" "$tmp/checksums.sha256" | awk '{print $1}' | sed "s#\$#  $ks#" | sha256sum -c -
+    curl -fsSL -o "$ks" "https://github.com/kubescape/kubescape/releases/download/v${KUBESCAPE_VERSION}/kubescape_${KUBESCAPE_VERSION}_${os}_${host}"
+    grep " kubescape_${KUBESCAPE_VERSION}_${os}_${host}$" "$tmp/checksums.sha256" | awk '{print $1}' | sed "s#\$#  $ks#" | sha256sum -c -
     chmod +x "$ks"
   fi
   "$ks" download artifacts --output "$art" >/dev/null
