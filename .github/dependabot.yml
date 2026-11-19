@@ -26,3 +26,8 @@ updates:
     schedule: {interval: weekly}
     groups:
       docker-minor-patch: {update-types: [minor, patch]}
+    # The web build's Node major moves together with CI (setup-node) and
+    # CONTRIBUTING, deliberately: Node 25+ images no longer ship corepack.
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
