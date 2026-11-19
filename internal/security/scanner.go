@@ -346,6 +346,7 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 	}
 	scannedBy, note := "digest", ""
 	out, err := s.Runner.Scan(ctx, repo+"@"+digest, auth)
+	s.recordPull(ctx, reg, err)
 	if err != nil {
 		if ctx.Err() != nil {
 			return requeue()
@@ -366,6 +367,7 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 				"This digest is not in %s: the image was built or retagged locally (e.g. kind node images), and it has no tag to scan instead.", host))
 		}
 		out, err = s.Runner.Scan(ctx, repo+":"+tag, auth)
+		s.recordPull(ctx, reg, err)
 		if err != nil {
 			if ctx.Err() != nil {
 				return requeue()
@@ -390,6 +392,27 @@ func (s *Scanner) scanOne(ctx context.Context, regs []RegistryRef, digest, repo 
 	}
 	metrics.ImageScans.WithLabelValues("scanned").Inc()
 	return nil
+}
+
+// recordPull stores the last pull through a registry entry (F10). A
+// "not found" is a successful pull from the registry's point of view.
+func (s *Scanner) recordPull(ctx context.Context, reg *RegistryRef, err error) {
+	if reg == nil || ctx.Err() != nil {
+		return
+	}
+	var se *ScanError
+	ok := err == nil || errors.As(err, &se) && se.NotFound
+	reason := ""
+	if !ok {
+		reason = truncateStr("trivy: "+err.Error(), 300)
+		if errors.As(err, &se) && se.Auth {
+			reason = "the registry rejected the credential"
+		}
+	}
+	if _, uerr := s.DB.Exec(ctx, `UPDATE registries SET last_pull_at = now(), last_pull_ok = $2, last_pull_error = $3 WHERE id = $1`,
+		reg.ID, ok, reason); uerr != nil {
+		s.Log.Warn("record registry pull", "registry", reg.HostPattern, "err", uerr)
+	}
 }
 
 // saveResults replaces an image's vulnerabilities, keeping first_seen_at of

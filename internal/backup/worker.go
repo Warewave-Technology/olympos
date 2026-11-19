@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -256,7 +257,9 @@ type outcome struct {
 	status string // succeeded | failed | missed
 	err    string // already scrubbed
 	// quiet: no notification (a failed attempt that is retried, F18).
-	quiet    bool
+	quiet bool
+	// steps: dry-run checklist (F10), stored with the run.
+	steps    []Step
 	bytes    int64
 	wire     int64
 	blobPath string
@@ -296,9 +299,10 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	if err != nil {
 		return finished{}, err
 	}
+	steps, _ := json.Marshal(nonNilSteps(o.steps))
 	tag, err := tx.Exec(ctx, `UPDATE backup_runs SET status = $2, finished_at = now(), bytes = $3, wire_bytes = $4, blob_path = $5,
-		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END WHERE id = $1 AND finished_at IS NULL`,
-		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier)
+		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9 WHERE id = $1 AND finished_at IS NULL`,
+		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier, steps)
 	if err != nil {
 		return finished{}, err
 	}
@@ -357,6 +361,81 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// Step is one line of the dry-run checklist (F10).
+type Step struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
+}
+
+func nonNilSteps(s []Step) []Step {
+	if s == nil {
+		return []Step{}
+	}
+	return s
+}
+
+// dryRunSteps turns a dry run's outcome into the checklist the wizard shows:
+// each stage that ran, with its result; stages after a failure are left out.
+func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
+	var out []Step
+	add := func(name string, ok bool, detail string) { out = append(out, Step{Name: name, OK: ok, Detail: detail}) }
+	target := "the target"
+	if job != nil {
+		target = job.Target.Namespace + "/" + job.Target.Service
+	}
+	failed := o.status != "succeeded"
+	if o.err == errAgentOffline || strings.HasPrefix(o.err, errAgentDisconnected) {
+		add("agent", false, "The cluster's agent is not connected")
+		return out
+	}
+	add("agent", true, "Agent connected; tunnel to "+target)
+	if failed && strings.HasPrefix(o.err, "credential") {
+		add("credential", false, o.err)
+		return out
+	}
+	add("credential", true, "Credential resolved")
+	if failed && strings.HasPrefix(o.err, "open destination") {
+		add("destination", false, o.err)
+		return out
+	}
+	if failed && !strings.HasPrefix(o.err, "upload") {
+		add("engine", false, o.err)
+		return out
+	}
+	detail := "Connected and dumped the schema"
+	if rr != nil && rr.ServerVersion != "" {
+		detail += " · server " + rr.ServerVersion
+	}
+	if rr != nil && rr.ToolVersion != "" {
+		detail += " · " + rr.ToolVersion
+	}
+	if rr != nil && rr.TLS != nil {
+		if *rr.TLS {
+			detail += " · TLS verified"
+		} else {
+			detail += " · no TLS"
+		}
+	}
+	add("engine", true, detail)
+	if failed && strings.HasPrefix(o.err, "upload manifest") {
+		add("upload", true, fmt.Sprintf("Wrote %s", humanBytes(o.bytes)))
+		add("manifest", false, o.err)
+		return out
+	}
+	if failed {
+		add("upload", false, o.err)
+		return out
+	}
+	dest := "the destination"
+	if job != nil && job.DestinationName != "" {
+		dest = job.DestinationName
+	}
+	add("upload", true, fmt.Sprintf("Wrote %s to %s (%s on the wire)", humanBytes(o.bytes), dest, humanBytes(o.wire)))
+	add("manifest", true, "Manifest with checksum written")
+	return out
+}
+
 // runRow is what Execute needs from backup_runs.
 type runRow struct {
 	id           uuid.UUID
@@ -387,6 +466,9 @@ func (w *Worker) Execute(ctx context.Context, runID uuid.UUID) {
 	go w.heartbeat(hbCtx, runID)
 	o, rr, job := w.perform(ctx, &r)
 	stopHB()
+	if r.trigger == "test" {
+		o.steps = dryRunSteps(o, rr, job)
+	}
 
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()

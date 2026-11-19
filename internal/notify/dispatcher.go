@@ -176,6 +176,17 @@ func (d *Dispatcher) process(ctx context.Context, tx pgx.Tx, it outboxRow) error
 			continue
 		}
 		err := d.send(ctx, ch, msg)
+		// F10: the channel's last delivery (time + result) for the UI.
+		if !errors.Is(err, ErrSinkNotConfigured) {
+			reason := ""
+			if err != nil {
+				reason = sanitizeError(err.Error())
+			}
+			if _, uerr := tx.Exec(ctx, `UPDATE notification_channels SET last_delivery_at = now(), last_delivery_ok = $2, last_delivery_error = $3 WHERE id = $1`,
+				ch.ID, err == nil, reason); uerr != nil {
+				return uerr
+			}
+		}
 		if err == nil {
 			delivered = append(delivered, ch.ID)
 			continue

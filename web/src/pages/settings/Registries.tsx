@@ -8,6 +8,7 @@ import { Badge, EmptyState, Field, FormError, Modal, aria, fieldError, useAction
 import { Select } from '../../ui/Select';
 import { SettingsLayout } from './SettingsLayout';
 import { DataTable } from '../../ui/DataTable';
+import { LastResultCell } from '../../ui/status';
 
 type Source = 'keyvault_ref' | 'stored' | 'managed_identity';
 interface RegistriesResponse {
@@ -66,6 +67,7 @@ export function RegistriesPage() {
             { id: 'host', header: 'Host pattern', sortValue: (r) => r.host_pattern, className: 'mono', cell: (r) => r.host_pattern },
             { id: 'cred', header: 'Credential', sortValue: (r) => r.credential_source || 'anonymous', cell: credCell },
             { id: 'images', header: 'Images', align: 'num', sortValue: (r) => r.images, defaultDir: 'desc', cell: (r) => r.images },
+            { id: 'pull', header: 'Last pull', sortValue: (r) => r.last_pull_at ?? null, defaultDir: 'desc', cell: (r) => <LastResultCell at={r.last_pull_at} ok={r.last_pull_ok} error={r.last_pull_error} /> },
             {
               id: 'actions',
               header: 'Actions',

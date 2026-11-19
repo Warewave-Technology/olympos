@@ -5,6 +5,7 @@ import type { Channel, ItemList, Routes } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, QueryView, aria, fieldError, useToast } from '../../ui/kit';
 import { SettingsLayout } from './SettingsLayout';
+import { LastResultCell } from '../../ui/status';
 
 /** Settings › Notifications: Slack channels and event routing (SPEC §14). */
 export function SettingsNotificationsPage() {
@@ -95,6 +96,7 @@ function NotificationsSection({ routesQ, chanQ, canRoute }: { routesQ: ReturnTyp
                   <th>Channel</th>
                   <th>Events routed here</th>
                   <th>Slack ID</th>
+                  <th>Last delivery</th>
                   <th>
                     <span className="sr-only">Actions</span>
                   </th>
@@ -106,6 +108,9 @@ function NotificationsSection({ routesQ, chanQ, canRoute }: { routesQ: ReturnTyp
                     <td className="mono">{c.name}</td>
                     <td className="wrap">{c.routes.length ? c.routes.map((r) => <Chip key={r}>{r}</Chip>) : <span className="muted">nothing routed yet</span>}</td>
                     <td className="mono muted">{c.slack_channel_id}</td>
+                    <td>
+                      <LastResultCell at={c.last_delivery_at} ok={c.last_delivery_ok} error={c.last_delivery_error} okText="Delivered" />
+                    </td>
                     <td className="actions">
                       {canRoute && (
                         <>

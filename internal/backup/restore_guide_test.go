@@ -57,3 +57,37 @@ func TestRestoreGuide(t *testing.T) {
 		t.Errorf("olympos-self doc: %s", g.Doc)
 	}
 }
+
+// F10: a dry run's checklist lists each stage that ran with its result.
+func TestDryRunSteps(t *testing.T) {
+	yes := true
+	job := &Job{DestinationName: "lab-azurite"}
+	job.Target.Namespace, job.Target.Service = "shop", "orders-pg"
+	names := func(s []Step) string {
+		var b strings.Builder
+		for _, x := range s {
+			if x.OK {
+				b.WriteString("+" + x.Name + " ")
+			} else {
+				b.WriteString("-" + x.Name + " ")
+			}
+		}
+		return strings.TrimSpace(b.String())
+	}
+	ok := dryRunSteps(outcome{status: "succeeded", bytes: 2048, wire: 900}, &RunResult{ServerVersion: "16.4", TLS: &yes}, job)
+	if names(ok) != "+agent +credential +engine +upload +manifest" || !strings.Contains(ok[2].Detail, "TLS verified") || !strings.Contains(ok[3].Detail, "lab-azurite") {
+		t.Fatalf("success: %+v", ok)
+	}
+	for _, tc := range []struct{ err, want string }{
+		{errAgentOffline, "-agent"},
+		{"credential: kv://x not found", "+agent -credential"},
+		{"open destination: 403", "+agent +credential -destination"},
+		{"connect: password authentication failed", "+agent +credential -engine"},
+		{"upload: 503", "+agent +credential +engine -upload"},
+		{"upload manifest: 409", "+agent +credential +engine +upload -manifest"},
+	} {
+		if got := names(dryRunSteps(outcome{status: "failed", err: tc.err}, nil, job)); got != tc.want {
+			t.Errorf("%s: %s, want %s", tc.err, got, tc.want)
+		}
+	}
+}

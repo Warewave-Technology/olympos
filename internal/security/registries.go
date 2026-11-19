@@ -15,14 +15,18 @@ import (
 // Registry is a registry row joined with its credential metadata. It never
 // carries a secret value.
 type Registry struct {
-	ID               uuid.UUID  `json:"id"`
-	HostPattern      string     `json:"host_pattern"`
-	Username         string     `json:"username"`
-	CredentialSource string     `json:"credential_source"` // "" (anonymous) | keyvault_ref | stored
-	CredentialRef    string     `json:"credential_ref"`    // kv://... for keyvault_ref only
-	Images           int        `json:"images"`
-	CreatedAt        time.Time  `json:"created_at"`
-	CredentialID     *uuid.UUID `json:"-"`
+	ID               uuid.UUID `json:"id"`
+	HostPattern      string    `json:"host_pattern"`
+	Username         string    `json:"username"`
+	CredentialSource string    `json:"credential_source"` // "" (anonymous) | keyvault_ref | stored
+	CredentialRef    string    `json:"credential_ref"`    // kv://... for keyvault_ref only
+	Images           int       `json:"images"`
+	CreatedAt        time.Time `json:"created_at"`
+	// Last pull through this entry (F10); nil = not yet.
+	LastPullAt    *time.Time `json:"last_pull_at"`
+	LastPullOK    *bool      `json:"last_pull_ok"`
+	LastPullError string     `json:"last_pull_error"`
+	CredentialID  *uuid.UUID `json:"-"`
 }
 
 // Ref returns the matching view of the registry.
@@ -33,7 +37,7 @@ func (r Registry) Ref() RegistryRef {
 // ListRegistries returns every registry ordered by pattern.
 func ListRegistries(ctx context.Context, q store.Querier) ([]Registry, error) {
 	rows, err := q.Query(ctx, `
-		SELECT r.id, r.host_pattern, r.created_at, r.credential_id, COALESCE(c.kind, ''), COALESCE(c.username, ''),
+		SELECT r.id, r.host_pattern, r.created_at, r.last_pull_at, r.last_pull_ok, r.last_pull_error, r.credential_id, COALESCE(c.kind, ''), COALESCE(c.username, ''),
 		       COALESCE(c.keyvault_name, ''), COALESCE(c.secret_name, '')
 		FROM registries r LEFT JOIN credentials c ON c.id = r.credential_id
 		ORDER BY r.host_pattern`)
@@ -45,7 +49,7 @@ func ListRegistries(ctx context.Context, q store.Querier) ([]Registry, error) {
 	for rows.Next() {
 		var r Registry
 		var vault, secret string
-		if err := rows.Scan(&r.ID, &r.HostPattern, &r.CreatedAt, &r.CredentialID, &r.CredentialSource, &r.Username, &vault, &secret); err != nil {
+		if err := rows.Scan(&r.ID, &r.HostPattern, &r.CreatedAt, &r.LastPullAt, &r.LastPullOK, &r.LastPullError, &r.CredentialID, &r.CredentialSource, &r.Username, &vault, &secret); err != nil {
 			return nil, err
 		}
 		if r.CredentialSource == "keyvault_ref" {

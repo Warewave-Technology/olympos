@@ -75,3 +75,14 @@ export function OpBadge({ op }: { op: string }) {
 export function crLabel(cr: Pick<ChangeRequest, 'id' | 'number'>): string {
   return cr.number || `CR-${cr.id.slice(0, 8)}`;
 }
+
+/** Time + result of the last attempt (registry pull, channel delivery); "Not yet" before the first (F10). */
+export function LastResultCell({ at, ok, error, okText = 'OK' }: { at?: string | null; ok?: boolean | null; error?: string; okText?: string }) {
+  if (!at) return <span className="muted">Not yet</span>;
+  return (
+    <span title={error || undefined}>
+      {ok ? <Badge tone="ok">{okText}</Badge> : <Badge tone="crit">Failed</Badge>} <span className="muted small">{age(at)} ago</span>
+      {!ok && error && <div className="muted small wrap">{error}</div>}
+    </span>
+  );
+}

@@ -343,8 +343,8 @@ export const destinationMounts: DestinationMount[] = [
 ];
 
 export const channels: Channel[] = [
-  { id: uuid(), kind: 'slack', name: '#infra-backups', slack_channel_id: 'C0123ABCD', routes: ['backup.failed', 'backup.missed'], created_at: iso(60 * D) },
-  { id: uuid(), kind: 'slack', name: '#vault-approvals', slack_channel_id: 'C0456EFGH', routes: ['cr.opened', 'cr.expired', 'vault.unmanaged_write'], created_at: iso(60 * D) },
+  { id: uuid(), kind: 'slack', name: '#infra-backups', slack_channel_id: 'C0123ABCD', routes: ['backup.failed', 'backup.missed'], created_at: iso(60 * D), last_delivery_at: iso(2 * H), last_delivery_ok: true, last_delivery_error: '' },
+  { id: uuid(), kind: 'slack', name: '#vault-approvals', slack_channel_id: 'C0456EFGH', routes: ['cr.opened', 'cr.expired', 'vault.unmanaged_write'], created_at: iso(60 * D), last_delivery_at: iso(5 * H), last_delivery_ok: false, last_delivery_error: 'slack: not_in_channel' },
   { id: uuid(), kind: 'slack', name: '#infra-audit', slack_channel_id: 'C0789IJKL', routes: ['audit.new_findings', 'vuln.critical'], created_at: iso(60 * D) },
   { id: uuid(), kind: 'slack', name: '#platform-access', slack_channel_id: 'C0ABCMNOP', routes: ['grant.changed', 'grant.stale', 'agent.offline', 'sas.expiring'], created_at: iso(60 * D) },
 ];
@@ -985,7 +985,7 @@ export const netpol: NetpolNamespace[] = [
   });
 }
 export const registries: Registry[] = [
-  { id: uuid(), host_pattern: 'acr.contoso.io', username: '', credential_source: 'managed_identity', credential_ref: '', images: 118, created_at: iso(50 * D) },
+  { id: uuid(), host_pattern: 'acr.contoso.io', username: '', credential_source: 'managed_identity', credential_ref: '', images: 118, created_at: iso(50 * D), last_pull_at: iso(H), last_pull_ok: true, last_pull_error: '' },
   { id: uuid(), host_pattern: 'ghcr.io/contoso/*', username: 'olympos-scan', credential_source: 'keyvault_ref', credential_ref: 'kv://kv-platform-weu/ghcr-pull-token', images: 41, created_at: iso(50 * D) },
   { id: uuid(), host_pattern: 'quay.io/legacy/*', username: 'robot$legacy', credential_source: 'stored', credential_ref: '', images: 3, created_at: iso(40 * D) },
 ];

@@ -176,6 +176,10 @@ export interface Channel {
   slack_channel_id: string;
   routes: string[];
   created_at: string;
+  /** Last delivery attempt (null = not yet). */
+  last_delivery_at?: string | null;
+  last_delivery_ok?: boolean | null;
+  last_delivery_error?: string;
 }
 export interface Route {
   event_type: string;
@@ -791,6 +795,10 @@ export interface Registry {
   credential_ref: string;
   images: number;
   created_at: string;
+  /** Last pull through this entry (null = not yet). */
+  last_pull_at?: string | null;
+  last_pull_ok?: boolean | null;
+  last_pull_error?: string;
 }
 export interface UnmatchedRegistry {
   host: string;

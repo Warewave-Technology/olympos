@@ -54,6 +54,10 @@ type ChannelView struct {
 	SlackChannelID string    `json:"slack_channel_id"`
 	Routes         []string  `json:"routes"`
 	CreatedAt      time.Time `json:"created_at"`
+	// Last delivery attempt to the channel (F10); nil = not yet.
+	LastDeliveryAt    *time.Time `json:"last_delivery_at"`
+	LastDeliveryOK    *bool      `json:"last_delivery_ok"`
+	LastDeliveryError string     `json:"last_delivery_error"`
 }
 
 // ChannelInput is the create/patch body.
@@ -78,7 +82,7 @@ var slackChannelRe = regexp.MustCompile(`^[CGD][A-Z0-9]{6,20}$`)
 
 func canWrite(r *http.Request) bool { return httpx.Subject(r).CanGlobal(authz.PermOperate) }
 
-const channelSelect = `SELECT c.id, c.kind, c.name, c.slack_channel_id, c.created_at,
+const channelSelect = `SELECT c.id, c.kind, c.name, c.slack_channel_id, c.created_at, c.last_delivery_at, c.last_delivery_ok, c.last_delivery_error,
 	COALESCE(array_agg(r.event_type ORDER BY r.event_type) FILTER (WHERE r.event_type IS NOT NULL), '{}')
 	FROM notification_channels c LEFT JOIN notification_routes r ON r.channel_id = c.id`
 
@@ -87,7 +91,7 @@ func scanChannels(rows pgx.Rows) ([]ChannelView, error) {
 	out := []ChannelView{}
 	for rows.Next() {
 		var c ChannelView
-		if err := rows.Scan(&c.ID, &c.Kind, &c.Name, &c.SlackChannelID, &c.CreatedAt, &c.Routes); err != nil {
+		if err := rows.Scan(&c.ID, &c.Kind, &c.Name, &c.SlackChannelID, &c.CreatedAt, &c.LastDeliveryAt, &c.LastDeliveryOK, &c.LastDeliveryError, &c.Routes); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

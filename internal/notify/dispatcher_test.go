@@ -245,6 +245,14 @@ func TestDispatchRetryBackoff(t *testing.T) {
 	if s.LastError == "" || strings.Contains(s.LastError, "SECRETSIG123") {
 		t.Fatalf("last_error must be set and redacted: %q", s.LastError)
 	}
+	// F10: each channel records its last delivery (time + result, redacted).
+	var okA, okB bool
+	var errB string
+	_ = db.QueryRow(ctx, `SELECT last_delivery_ok FROM notification_channels WHERE id = $1`, a).Scan(&okA)
+	_ = db.QueryRow(ctx, `SELECT last_delivery_ok, last_delivery_error FROM notification_channels WHERE id = $1`, b).Scan(&okB, &errB)
+	if !okA || okB || errB == "" || strings.Contains(errB, "SECRETSIG123") {
+		t.Fatalf("last delivery: a=%v b=%v %q", okA, okB, errB)
+	}
 	// Not due yet: nothing claimed.
 	if n, _ := d.DispatchOnce(ctx); n != 0 {
 		t.Fatalf("claimed %d events before next_attempt_at", n)
