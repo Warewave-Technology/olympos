@@ -28,7 +28,9 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 1. **Cluster ↛ credentials.** No credential, SAS or Blob key is ever sent to an agent
    (`internal/gateway/proto_test.go` scans every proto field). Work needing credentials runs on the
    server and reaches targets through the tunnel, speaking TLS end-to-end (`e2e-tls`, default): the
-   agent sees ciphertext only. `compressed` mode trades that for egress cost; enabling it always opens
+   agent sees ciphertext only. Exception: a PostgreSQL target without TLS is backed up with SCRAM-SHA-256
+   only (no password crosses the agent), so the agent sees the data in the clear; the target gets the
+   `tls.missing` finding. `compressed` mode trades that for egress cost; enabling it always opens
    the `transfer.compressed_mode` finding.
 2. **Server ↛ arbitrary hosts in a cluster.** `OpenTunnel` carries a `target_id`, never `host:port`.
    The agent looks it up in its *own* discovered set (annotated Services) and refuses anything else.
@@ -36,7 +38,8 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
    tests and the e2e (`TestM1TunnelRealAgent`).
 3. **Agent is narrow.** Distroless, non-root, read-only root FS, no capabilities, seccomp
    RuntimeDefault, no listening port (health is localhost, probed by exec). RBAC is read-only and has
-   no Secrets (golden-file test `deploy/helm/chart_test.go`); its single writable object is its own
+   no Secrets unless the opt-in Secret inventory is enabled (`list`/`watch`, see below; golden-file test
+   `deploy/helm/chart_test.go`); its single writable object is its own
    identity Secret (resourceNames-restricted). The kube-bench exception is opt-in, in its own PSA
    `privileged` namespace, with a Job spec compiled into the agent and a pinned image digest.
 4. **Read-only API proxy** for kubescape/polaris: the agent injects its own ServiceAccount token,
@@ -95,8 +98,8 @@ longest retention. *Test destination* verifies delete is refused and warns other
   `binaryData` and `stringData`, container `env[].value`, `last-applied-configuration` and
   `managedFields` are replaced (security review v0.1 #4). Keep credentials out of ConfigMaps and env
   literals regardless — that is what *Sensitive data* reports.
-- **Secrets** are never read by default. The opt-in Secret inventory (`secretsInventory.enabled`) lists
-  them with their key names only.
+- **Secrets** are never read by default, except the agent's own identity Secret. The opt-in Secret
+  inventory (`secretsInventory.enabled`) lists them with their key names only.
   **Kubernetes RBAC has no "metadata only" permission.** Listing Secret metadata requires `list` on
   `secrets`, and the same token could read values with a normal request. Olympos code never requests
   values — the agent uses only the metadata client (PartialObjectMetadata), reads key names from

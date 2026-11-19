@@ -22,6 +22,19 @@ All notable changes to this project are documented here. The format follows
 
 First public release.
 
+### Upgrade notes
+For anyone upgrading from a build before v0.1.0-rc.1. These changes came from the security review
+(`docs/security-review-v0.1.md`) and can stop backups until the setting is made:
+1. **Targets no longer trust public CAs.** Add the CA to `targetTLS.caBundleFile`, or set
+   `targetTLS.systemRoots: true`. The error message names the setting.
+2. **`kv://` references need a rule for non-global-admin users.** Add a `keyVault.references` rule
+   (glob on `<vault>/<secret>` plus cluster label scope); without one, only global admins can enter them.
+3. **TLS names are pinned.** When a target's `olympos.io/tls-server-name` annotation changes, the target
+   keeps the pinned name until an admin of the cluster accepts the new one (*Needs attention* →
+   "TLS name changed", then *Backups*).
+4. **One server replica.** The Helm chart refuses `replicas > 1` unless `experimental.multiReplica: true`
+   (unsupported; multi-replica is planned for v0.2).
+
 ### Added
 - Cluster inventory through a read-only, outbound-only agent (enrollment with one-time tokens, mTLS, pinned
   internal CA); dashboard with versions, providers, end-of-life and Needs attention.

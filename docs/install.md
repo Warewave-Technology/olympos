@@ -168,11 +168,19 @@ helm install olympos oci://ghcr.io/warewave-technology/charts/olympos-server --v
 # Packages and tarballs (bundle next to each file)
 cosign verify-blob olympos-server_0.1.0-1_amd64.deb --bundle olympos-server_0.1.0-1_amd64.deb.sigstore.json \
   --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
-sha256sum -c SHA256SUMS-amd64 --ignore-missing
+
+# Checksum of exactly the file you downloaded (same for the .rpm and the tarball)
+f=olympos-server_0.1.0-1_amd64.deb   # olympos-server-0.1.0-1.x86_64.rpm, olympos-server_0.1.0_linux_amd64.tar.gz
+grep " $f\$" SHA256SUMS-amd64 > check.sha256 && sha256sum -c --strict check.sha256
 
 # Build provenance (GitHub attestation)
 gh attestation verify olympos-server_0.1.0-1_amd64.deb --repo Warewave-Technology/olympos
 ```
+
+The checksum step must print `<file>: OK`. Anything else, or no output at all, means the file was not verified:
+do not install it. Checking the whole `SHA256SUMS` file while skipping missing files is not enough: that
+succeeds when none of the listed files is present (with a renamed download, for example). On macOS,
+`sha256sum` (macOS 14+) works the same way.
 
 Pin images by digest in production (`image.digest` in the chart values).
 

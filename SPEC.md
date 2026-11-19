@@ -11,11 +11,11 @@ This document is the source of truth for the implementation. Where it says **MUS
 ## 0. Principles (read first)
 
 1. **Credentials never enter the cluster.** All work that needs a credential (backups, Vault operations, image scans) runs on the **server**. The agent is discovery + a constrained tunnel.
-2. **The agent is a narrow, boring component.** Distroless, no shell, read-only RBAC, no Secret access (except the opt-in Secret inventory: metadata-only, F3), no listening port. It only dials out.
+2. **The agent is a narrow, boring component.** Distroless, no shell, read-only RBAC, no Secret access except its own identity Secret and the opt-in Secret inventory (metadata only, F3; off by default; `list` on `secrets` would let a stolen agent token read values), no listening port. It only dials out.
 3. **The agent only tunnels to targets it discovered itself.** The server can never ask for an arbitrary `host:port`.
 4. **Secret values are never shown in the UI.** Users see keys, never values; values can only be replaced, through maker/checker approval.
 5. **Every sensitive action is auditable.** Append-only logs for grants, change requests, backup runs, logins.
-6. **The server is the only writer to backup storage.** Nothing in a cluster ever gets a Blob credential; the server cannot delete backups (retention is done by Blob lifecycle rules).
+6. **The server is the only writer to backup storage.** Nothing in a cluster ever gets a Blob credential; the server cannot delete backups (retention is done by Blob lifecycle rules; on NFS a file system cannot enforce this, so the destination shows a permanent warning, see `docs/spec-changes.md` #13).
 7. **Simple to install and operate.** One Helm chart for the server, one for the agent. Sensible defaults; dangerous features opt-in.
 8. **Tech terms and UI copy in English.**
 

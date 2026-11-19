@@ -72,6 +72,8 @@ jobs:
         with: {go-version-file: go.mod}
       - name: Lab state is never tracked
         run: ./scripts/check-untracked-work.sh
+      - name: Docs have no checks that pass without checking
+        run: ./scripts/check-docs.sh
       - name: gitleaks (full history)
         run: go run github.com/zricethezav/gitleaks/v8@v8.30.1 git --config .gitleaks.toml --redact --no-banner --exit-code 1 .
 

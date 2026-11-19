@@ -19,6 +19,8 @@ on:
       - deploy/**
       - scripts/package.sh
       - scripts/fetch-tools.sh
+      - scripts/release-notes.sh
+      - CHANGELOG.md
       - go.mod
       - go.sum
   pull_request:
@@ -28,6 +30,8 @@ on:
       - deploy/**
       - scripts/package.sh
       - scripts/fetch-tools.sh
+      - scripts/release-notes.sh
+      - CHANGELOG.md
       - go.mod
       - go.sum
   workflow_dispatch:
@@ -137,11 +141,19 @@ jobs:
           cd dist
           v=${VERSION#v}; base=${v%%-*}; pre=""; [ "$base" = "$v" ] || pre=${v#*-}
           want=$base${pre:+~$pre}-1
-          # Strict: every listed file exists and matches (no --ignore-missing).
-          sha256sum -c SHA256SUMS-${{ matrix.arch }}
+          sums=SHA256SUMS-${{ matrix.arch }}
+          # The command from docs/install.md "Verifying releases", verbatim.
+          verify() { grep " $1\$" $sums > check.sha256 && sha256sum -c --strict check.sha256; }
           for f in *.tar.gz *.deb *.rpm; do
-            grep -q "  $f\$" SHA256SUMS-${{ matrix.arch }} || { echo "$f missing from SHA256SUMS"; exit 1; }
+            out=$(verify "$f") && [ "$out" = "$f: OK" ] || { echo "documented check does not pass for $f: $out"; exit 1; }
           done
+          # ... and fails when it checked nothing: a renamed download, a missing line.
+          f=$(ls *.deb); mv "$f" renamed.deb
+          if verify "$f" >/dev/null 2>&1; then echo "documented check passed for a missing file"; exit 1; fi
+          mv renamed.deb "$f"
+          if verify not-in-sums.deb >/dev/null 2>&1; then echo "documented check passed with no matching line"; exit 1; fi
+          rm -f check.sha256
+          sha256sum -c --strict $sums
           if ls | grep -q '~'; then echo "asset names must not contain ~ (GitHub renames them)"; exit 1; fi
           sudo apt-get update -qq && sudo apt-get install -y -qq rpm >/dev/null
           deb=$(dpkg-deb -f *.deb Version); rpmv=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' *.rpm 2>/dev/null)
@@ -172,6 +184,13 @@ jobs:
       - uses: azure/setup-helm@v4
       - uses: sigstore/cosign-installer@v3
         if: env.SIGN == 'true'
+      - name: Release notes (upgrade notes from CHANGELOG.md)
+        run: |
+          set -euo pipefail
+          tag=$VERSION
+          # Dry run: the notes the next release (newest CHANGELOG version) would get.
+          [ "$PUBLISH" = true ] || tag=v$(grep -m1 -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md | tr -d '#[] ')
+          ./scripts/release-notes.sh "$tag" | tee release-notes.md
       - name: Package; on a tag push, push (OCI) and sign
         run: |
           set -euo pipefail
@@ -197,11 +216,14 @@ jobs:
     needs: [images, packages, charts]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with: {path: out, merge-multiple: true}
       - name: GitHub release
         env: {GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
         run: |
+          set -euo pipefail
+          ./scripts/release-notes.sh "$GITHUB_REF_NAME" > release-notes.md
           prerelease=$([[ "$GITHUB_REF_NAME" == *-* ]] && echo --prerelease || true)
           gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" \
-            --notes "See CHANGELOG.md. Verify: docs/install.md#verifying-releases" $prerelease out/*
+            --notes-file release-notes.md $prerelease out/*

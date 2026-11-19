@@ -19,9 +19,10 @@ E2E_CPUS=4 ./test/e2e/run.sh                  # the same on 4 CPUs, like a CI ru
 ```
 
 Pull requests that touch the release inputs (`deploy/`, `scripts/package.sh`, `scripts/fetch-tools.sh`,
-`go.mod`, `.dockerignore`, `release.yml`) run `release.yml` as a dry run: images for both architectures,
-packages, charts and the checks a user's verification would do (strict `SHA256SUMS`, package versions),
-without pushing or signing anything.
+`scripts/release-notes.sh`, `CHANGELOG.md`, `go.mod`, `.dockerignore`, `release.yml`) run `release.yml` as a dry run: images for both architectures,
+packages, charts, the release notes and the checks a user's verification would do (the documented checksum
+command, package versions), without pushing or signing anything. Behaviour changes an upgrading user must
+act on go under *Upgrade notes* in the version's CHANGELOG section; a release without them fails.
 
 Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`.
 
