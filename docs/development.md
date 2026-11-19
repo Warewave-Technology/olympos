@@ -64,3 +64,19 @@ first release); renumbering is not needed. Rules:
 
 Kind runs on OrbStack's Docker. **Never touch other kube contexts**: e2e uses its own kubeconfig
 (`test/e2e/.work/kubeconfig`). See `test/e2e/README.md`.
+
+## Repository settings
+
+Settings that live in GitHub, not in the code (v0.1.0 final checklist C). Set with `gh api`; check with the
+same calls without `-X`.
+
+| Setting | State | Set on | How |
+|---|---|---|---|
+| Private vulnerability reporting (SECURITY.md links to it) | on | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/private-vulnerability-reporting` |
+| Secret scanning | on | 2026-11-20 | `gh api -X PATCH repos/Warewave-Technology/olympos` with `security_and_analysis.secret_scanning.status=enabled` |
+| Secret scanning push protection | on | 2026-11-20 | same call, `secret_scanning_push_protection` |
+| Dependabot alerts | on | before 2026-11-20 | `repos/…/vulnerability-alerts` (204 = on) |
+| Dependabot security updates | on | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/automated-security-fixes` |
+| Dependabot version updates | weekly, minor/patch grouped | 2026-11-20 | `.github/dependabot.yml` (gomod, npm `web/`, github-actions, docker `deploy/docker/`) |
+
+Branch protection, tag rulesets and OpenSSF Scorecard (checklist C2, C5, C6) are not set yet.
