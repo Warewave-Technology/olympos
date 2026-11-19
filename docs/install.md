@@ -148,7 +148,9 @@ Olympos works without internet egress from the server:
 
 Every release (tag `v*`) is built by `.github/workflows/release.yml` and signed keyless with cosign through
 GitHub's OIDC identity: images, binaries, tarballs, `.deb`/`.rpm` and both Helm charts. Each artifact has an
-SBOM (SPDX and CycloneDX) and SLSA provenance. Verify before installing (`v0.1.0` as an example):
+SBOM (SPDX and CycloneDX) and SLSA provenance. Signatures and GitHub attestations are made only while the
+repository is public (keyless signing writes to the public Rekor log); a release from the private repository
+carries the SBOMs and `SHA256SUMS-<arch>` only. Verify before installing (`v0.1.0` as an example):
 
 ```bash
 ID='^https://github.com/Warewave-Technology/olympos/.github/workflows/release.yml@refs/tags/v'

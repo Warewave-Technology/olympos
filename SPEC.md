@@ -707,7 +707,7 @@ GET    /api/v1/activity
 - [ ] Maker cannot approve own CR, admin included (test).
 - [ ] Sealed values nulled after terminal state (test).
 - [ ] No secret strings in logs (integration test with canaries).
-- [ ] Images distroless, non-root, read-only FS; SBOM + cosign signature.
+- [ ] Images distroless, non-root, read-only FS; SBOM + cosign signature (signatures and attestations only while the repository is public, see `docs/spec-changes.md` F7).
 - [ ] Root token never persisted (code review + grep test).
 - [ ] Olympos Vault policy has no `read` on `<mount>/data/*` (e2e: reading a value with the Olympos token returns 403).
 - [ ] No Blob credential or SAS appears in any agent message (proto review + test).
