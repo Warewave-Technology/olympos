@@ -80,6 +80,10 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
+          # GitHub turns "~" in asset names into "."; name the files that way
+          # now so SHA256SUMS and the signature bundles match the downloads.
+          # The version inside the package keeps "~" (pre-releases sort first).
+          for f in *~*; do [ -e "$f" ] && mv "$f" "${f//\~/.}"; done
           for f in *.tar.gz *.deb *.rpm; do
             syft "$f" -o spdx-json="$f.spdx.json" -o cyclonedx-json="$f.cdx.json"
             if [ "$SIGN" = true ]; then cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"; fi
