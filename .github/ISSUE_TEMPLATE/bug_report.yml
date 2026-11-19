@@ -1,0 +1,22 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: "**Security issues: do not file them here.** Use a private advisory (see SECURITY.md)."
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: What you did, what you expected, what you saw.}
+    validations: {required: true}
+  - type: textarea
+    id: repro
+    attributes: {label: How to reproduce}
+    validations: {required: true}
+  - type: input
+    id: version
+    attributes: {label: Versions, description: "olympos-server version, agent image tag, Kubernetes version, install mode (Helm or systemd)"}
+    validations: {required: true}
+  - type: textarea
+    id: logs
+    attributes: {label: Logs, description: "Relevant server/agent log lines. Logs are redacted, but check them for anything sensitive before posting.", render: text}
