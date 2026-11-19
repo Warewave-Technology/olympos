@@ -209,9 +209,7 @@ func TestM3VaultMakerChecker(t *testing.T) {
 			"cron": "0 4 * * *", "timezone": "UTC", "enabled": true}, &j, 201)
 		jobID = j.ID.String()
 	}
-	start := time.Now()
-	admin.must("POST", "/backup/jobs/"+jobID+"/run", map[string]any{"trigger": "manual"}, nil, 202)
-	snap := waitRun(t, admin, jobID, start, "manual")
+	snap := runAndWait(t, admin, jobID, "manual")
 	if !strings.HasSuffix(snap.BlobPath, ".snap") || snap.Bytes < 1000 {
 		t.Fatalf("snapshot run: %+v", snap)
 	}

@@ -65,19 +65,16 @@ func labTarget(t *testing.T, c *client, service string) inventory.Target {
 	return inventory.Target{}
 }
 
-func waitRun(t *testing.T, c *client, jobID string, after time.Time, trigger string) backup.Run {
+// runAndWait starts a run of the job and waits for that run (by ID; a
+// time window would also match an earlier run, e.g. before an upgrade).
+func runAndWait(t *testing.T, c *client, jobID, trigger string) backup.Run {
 	t.Helper()
+	var queued backup.Run
+	c.must("POST", "/backup/jobs/"+jobID+"/run", map[string]any{"trigger": trigger}, &queued, 202)
 	var run backup.Run
-	eventually(t, 5*time.Minute, trigger+" run of "+jobID, func() (bool, string) {
-		var rs struct{ Items []backup.Run }
-		c.must("GET", "/backup/runs?job_id="+jobID, nil, &rs, 200)
-		for _, r := range rs.Items {
-			if r.Trigger == trigger && r.CreatedAt.After(after.Add(-2*time.Minute)) && (r.Status == "succeeded" || r.Status == "failed") {
-				run = r
-				return true, ""
-			}
-		}
-		return false, fmt.Sprintf("%d runs", len(rs.Items))
+	eventually(t, 5*time.Minute, trigger+" run "+queued.ID.String(), func() (bool, string) {
+		c.must("GET", "/backup/runs/"+queued.ID.String(), nil, &run, 200)
+		return run.Status == "succeeded" || run.Status == "failed", run.Status
 	})
 	if run.Status != "succeeded" {
 		t.Fatalf("%s run failed: %s", trigger, run.Error)
@@ -154,16 +151,12 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	}
 	pgJob := ensureJob(t, admin, pg.ID, destID, pgCred, map[string]any{"databases": []string{"orders"}})
 
-	start := time.Now()
-	admin.must("POST", "/backup/jobs/"+pgJob+"/run", map[string]any{"trigger": "test"}, nil, 202)
-	dry := waitRun(t, admin, pgJob, start, "test")
+	dry := runAndWait(t, admin, pgJob, "test")
 	if dry.Tier != "test" {
 		t.Errorf("dry run tier %q", dry.Tier)
 	}
 	admin.must("PATCH", "/backup/jobs/"+pgJob, map[string]any{"enabled": true}, nil, 200)
-	start = time.Now()
-	admin.must("POST", "/backup/jobs/"+pgJob+"/run", map[string]any{"trigger": "manual"}, nil, 202)
-	pgRun := waitRun(t, admin, pgJob, start, "manual")
+	pgRun := runAndWait(t, admin, pgJob, "manual")
 	if pgRun.WireBytes == 0 || pgRun.Bytes == 0 || len(pgRun.SHA256) != 64 {
 		t.Fatalf("run accounting: %+v", pgRun)
 	}
@@ -221,9 +214,7 @@ func TestM2BackupsPostgresAndClickHouse(t *testing.T) {
 	runSQL(t, "metrics-ch", "CREATE TABLE IF NOT EXISTS metrics.events (d Date, v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY d")
 	runSQL(t, "metrics-ch", "INSERT INTO metrics.events SELECT toDate('2026-10-01') + number % 60, number FROM numbers(10000)")
 	chJob := ensureJob(t, admin, ch.ID, destID, chCred, map[string]any{"databases": []string{"metrics"}})
-	start = time.Now()
-	admin.must("POST", "/backup/jobs/"+chJob+"/run", map[string]any{"trigger": "manual"}, nil, 202)
-	chRun := waitRun(t, admin, chJob, start, "manual")
+	chRun := runAndWait(t, admin, chJob, "manual")
 	chZip := download(t, az, chRun.BlobPath)
 	zr, err = zip.NewReader(bytes.NewReader(chZip), int64(len(chZip)))
 	if err != nil {

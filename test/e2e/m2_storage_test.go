@@ -5,7 +5,6 @@ package e2e
 import (
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 )
@@ -85,9 +84,7 @@ func TestM2StorageS3AndNFS(t *testing.T) {
 
 	for _, d := range []map[string]any{s3, nfs} {
 		job := ensureJobTo(t, admin, pg.ID, d["id"].(string), cred)
-		start := time.Now()
-		admin.must("POST", "/backup/jobs/"+job+"/run", map[string]any{"trigger": "manual"}, nil, 202)
-		r := waitRun(t, admin, job, start, "manual")
+		r := runAndWait(t, admin, job, "manual")
 		if !strings.Contains(r.BlobPath, "/orders-pg/postgresql/") || len(r.SHA256) != 64 || r.Bytes == 0 {
 			t.Fatalf("%v run: %+v", d["kind"], r)
 		}
