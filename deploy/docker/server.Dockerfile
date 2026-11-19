@@ -5,7 +5,7 @@
 
 ARG PG_VERSIONS="13 14 15 16 17"
 
-FROM --platform=$BUILDPLATFORM node:22-bookworm-slim AS web
+FROM --platform=$BUILDPLATFORM node:26-bookworm-slim AS web
 WORKDIR /web
 RUN corepack enable
 COPY web/ ./
