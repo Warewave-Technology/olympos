@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with: {go-version-file: go.mod}
       - uses: azure/setup-helm@v4
       - name: pg_dump 16/17 (PGDG)
@@ -68,7 +68,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: {fetch-depth: 0}
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with: {go-version-file: go.mod}
       - name: Lab state is never tracked
         run: ./scripts/check-untracked-work.sh
