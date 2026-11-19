@@ -27,6 +27,16 @@ OLYMPOS_E2E_KUBECONFIG=$KUBECONFIG OLYMPOS_E2E_URL=http://127.0.0.1:28080 \
 echo "==> upgrading to HEAD"
 helm upgrade olympos deploy/helm/olympos-server -n olympos -f test/e2e/server-values.yaml --wait --timeout 5m
 kubectl -n olympos rollout status deploy/olympos --timeout=180s
+# The agents reconnect to the new server on their own schedule; tests that
+# open a tunnel need the new session (a recent last_seen_at may still be the
+# old one).
+psql() { kubectl -n olympos exec statefulset/olympos-postgresql -- psql -U olympos -d olympos -Atc "$1"; }
+since=$(psql "SELECT now()")
+for i in $(seq 60); do
+  [ "$(psql "SELECT coalesce(bool_and(last_seen_at > '$since'), false) FROM clusters WHERE status <> 'revoked'")" = t ] && break
+  [ "$i" = 60 ] && { echo "agents did not reconnect after the upgrade"; exit 1; }
+  sleep 3
+done
 OLYMPOS_E2E_KUBECONFIG=$KUBECONFIG OLYMPOS_E2E_URL=http://127.0.0.1:28080 \
   go test -tags e2e -count=1 -v -run 'TestM1EnrollInventoryDiscovery|TestM2BackupsPostgresAndClickHouse' ./test/e2e/
 echo "==> upgrade $from -> HEAD passed"

@@ -15,7 +15,13 @@ OLYMPOS_REQUIRE_DB=1 go test -tags dev ./...  # unit + integration (dev build)
 make test-release                             # release build: no dev login, no local key vault
 cd web && pnpm install && pnpm lint && pnpm test
 ./test/e2e/run.sh                             # kind e2e (see test/e2e/README.md)
+E2E_CPUS=4 ./test/e2e/run.sh                  # the same on 4 CPUs, like a CI runner
 ```
+
+Pull requests that touch the release inputs (`deploy/`, `scripts/package.sh`, `scripts/fetch-tools.sh`,
+`go.mod`, `.dockerignore`, `release.yml`) run `release.yml` as a dry run: images for both architectures,
+packages, charts and the checks a user's verification would do (strict `SHA256SUMS`, package versions),
+without pushing or signing anything.
 
 Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`.
 

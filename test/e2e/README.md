@@ -24,5 +24,10 @@ where the legacy `ClusterPolicy` runs as well, so both agent code paths are exer
 
 ```bash
 SKIP_BUILD=1 ./test/e2e/run.sh   # reuse images
+E2E_CPUS=4 ./test/e2e/run.sh     # nodes limited to 4 CPUs, like a GitHub runner
 ./test/e2e/run.sh down           # delete the cluster
 ```
+
+Go sizes some things by the CPU count it sees (pgxpool's default pool is max(4, CPUs)), so a workstation
+with many cores can hide bugs that CI shows. `E2E_CPUS` pins the kind node containers to that many CPUs;
+running without it resets them to all CPUs.

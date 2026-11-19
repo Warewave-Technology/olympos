@@ -4,9 +4,37 @@ name: release
 # CycloneDX), cosign keyless signatures (GitHub OIDC), SLSA provenance, the
 # Helm charts as signed OCI artifacts, and a GitHub release. Verify with the
 # commands in docs/install.md "Verifying releases".
+#
+# Pull requests and main pushes that touch the release inputs run the same
+# jobs as a dry run (version v0.0.0-dryrun): everything is built and checked,
+# nothing is pushed, signed or published. A release path that only runs on a
+# tag is a release path nobody has tested.
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+    paths:
+      - .github/workflows/release.yml
+      - .dockerignore
+      - deploy/**
+      - scripts/package.sh
+      - scripts/fetch-tools.sh
+      - go.mod
+      - go.sum
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .dockerignore
+      - deploy/**
+      - scripts/package.sh
+      - scripts/fetch-tools.sh
+      - go.mod
+      - go.sum
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
 
 permissions:
   contents: write      # GitHub release
@@ -16,11 +44,15 @@ permissions:
 
 env:
   REGISTRY: ghcr.io/warewave-technology
+  PUBLISH: ${{ github.ref_type == 'tag' && 'true' || 'false' }}
+  VERSION: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.0.0-dryrun' }}
   # Keyless signatures go to the public Rekor log (repository, workflow, tag,
   # digests) and GitHub attestations need Enterprise Cloud for private
-  # repositories: both run only while the repository is public. SBOMs,
+  # repositories: both run only for a tag of a public repository. SBOMs,
   # checksums and the registry's buildx provenance are produced either way.
-  SIGN: ${{ github.event.repository.private && 'false' || 'true' }}
+  SIGN: ${{ github.ref_type == 'tag' && !github.event.repository.private && 'true' || 'false' }}
+  CERT_ID: ^https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/v
+  CERT_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
   images:
@@ -36,18 +68,22 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
+        if: env.PUBLISH == 'true'
         with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
       - uses: sigstore/cosign-installer@v3
         if: env.SIGN == 'true'
       - uses: anchore/sbom-action/download-syft@v0
-      - name: Build, push, sign, attest
-        env: {VERSION: "${{ github.ref_name }}"}
+        if: env.PUBLISH == 'true'
+      - name: Build (both architectures); on a tag push, sign, attest
         run: |
           set -euo pipefail
           for c in server agent; do
             img=$REGISTRY/olympos-$c:${VERSION#v}
+            out=(--output type=cacheonly)
+            [ "$PUBLISH" != true ] || out=(--provenance=mode=max --sbom=true --push)
             docker buildx build --platform linux/amd64,linux/arm64 -f deploy/docker/$c.Dockerfile \
-              --build-arg VERSION=$VERSION --provenance=mode=max --sbom=true -t $img --push .
+              --build-arg VERSION=$VERSION -t $img "${out[@]}" .
+            [ "$PUBLISH" = true ] || continue
             digest=$(docker buildx imagetools inspect $img --format '{{json .Manifest}}' | jq -r .digest)
             ref=$REGISTRY/olympos-$c@$digest
             syft $ref -o spdx-json=sbom-$c.spdx.json -o cyclonedx-json=sbom-$c.cdx.json
@@ -55,10 +91,13 @@ jobs:
               cosign sign --yes $ref
               cosign attest --yes --type spdxjson --predicate sbom-$c.spdx.json $ref
               cosign attest --yes --type cyclonedx --predicate sbom-$c.cdx.json $ref
+              # The commands in docs/install.md must work on what we just made.
+              cosign verify $ref --certificate-identity-regexp "$CERT_ID" --certificate-oidc-issuer "$CERT_ISSUER" >/dev/null
             fi
             echo "$c=$digest" >> digests.txt
           done
       - uses: actions/upload-artifact@v4
+        if: env.PUBLISH == 'true'
         with: {name: image-sboms, path: "sbom-*.json\ndigests.txt"}
 
   packages:
@@ -75,8 +114,8 @@ jobs:
       - name: Binary, tarball, .deb, .rpm (release build)
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
-          ./scripts/package.sh "${GITHUB_REF_NAME#v}" ${{ matrix.arch }}
-      - name: SBOMs and signatures
+          ./scripts/package.sh "${VERSION#v}" ${{ matrix.arch }}
+      - name: SBOMs, signatures, checksums
         run: |
           set -euo pipefail
           cd dist
@@ -86,13 +125,37 @@ jobs:
           for f in *~*; do [ -e "$f" ] && mv "$f" "${f//\~/.}"; done
           for f in *.tar.gz *.deb *.rpm; do
             syft "$f" -o spdx-json="$f.spdx.json" -o cyclonedx-json="$f.cdx.json"
-            if [ "$SIGN" = true ]; then cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"; fi
+            if [ "$SIGN" = true ]; then
+              cosign sign-blob --yes --bundle "$f.sigstore.json" "$f"
+              cosign verify-blob "$f" --bundle "$f.sigstore.json" --certificate-identity-regexp "$CERT_ID" --certificate-oidc-issuer "$CERT_ISSUER"
+            fi
           done
           sha256sum *.tar.gz *.deb *.rpm > SHA256SUMS-${{ matrix.arch }}
+      - name: Check the artifacts as a user would see them
+        run: |
+          set -euo pipefail
+          cd dist
+          v=${VERSION#v}; base=${v%%-*}; pre=""; [ "$base" = "$v" ] || pre=${v#*-}
+          want=$base${pre:+~$pre}-1
+          # Strict: every listed file exists and matches (no --ignore-missing).
+          sha256sum -c SHA256SUMS-${{ matrix.arch }}
+          for f in *.tar.gz *.deb *.rpm; do
+            grep -q "  $f\$" SHA256SUMS-${{ matrix.arch }} || { echo "$f missing from SHA256SUMS"; exit 1; }
+          done
+          if ls | grep -q '~'; then echo "asset names must not contain ~ (GitHub renames them)"; exit 1; fi
+          sudo apt-get update -qq && sudo apt-get install -y -qq rpm >/dev/null
+          deb=$(dpkg-deb -f *.deb Version); rpmv=$(rpm -qp --qf '%{VERSION}-%{RELEASE}' *.rpm 2>/dev/null)
+          [ "$deb" = "$want" ] || { echo "deb version $deb, want $want"; exit 1; }
+          [ "$rpmv" = "$want" ] || { echo "rpm version $rpmv, want $want"; exit 1; }
+          if [ -n "$pre" ]; then
+            dpkg --compare-versions "$deb" lt "$base-1" || { echo "$deb does not sort before $base-1"; exit 1; }
+          fi
+          echo "packages: version $want, $(wc -l < SHA256SUMS-${{ matrix.arch }}) checksums"
       - uses: actions/attest-build-provenance@v2
         if: env.SIGN == 'true'
         with: {subject-path: "dist/*.tar.gz\ndist/*.deb\ndist/*.rpm"}
       - uses: actions/upload-artifact@v4
+        if: env.PUBLISH == 'true'
         with:
           name: packages-${{ matrix.arch }}
           path: |
@@ -109,20 +172,28 @@ jobs:
       - uses: azure/setup-helm@v4
       - uses: sigstore/cosign-installer@v3
         if: env.SIGN == 'true'
-      - name: Package, push (OCI), sign
+      - name: Package; on a tag push, push (OCI) and sign
         run: |
           set -euo pipefail
-          v=${GITHUB_REF_NAME#v}
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          [ "$SIGN" != true ] || echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          v=${VERSION#v}
+          if [ "$PUBLISH" = true ]; then
+            echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
+            [ "$SIGN" != true ] || echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u "${{ github.actor }}" --password-stdin
+          fi
           for c in olympos-server olympos-agent; do
+            helm lint deploy/helm/$c
             helm package deploy/helm/$c --version "$v" --app-version "$v" -d charts/
+            [ "$PUBLISH" = true ] || continue
             out=$(helm push charts/$c-$v.tgz oci://$REGISTRY/charts 2>&1); echo "$out"
             digest=$(echo "$out" | awk '/Digest:/ {print $2}')
-            [ "$SIGN" != true ] || cosign sign --yes $REGISTRY/charts/$c@$digest
+            if [ "$SIGN" = true ]; then
+              cosign sign --yes $REGISTRY/charts/$c@$digest
+              cosign verify $REGISTRY/charts/$c@$digest --certificate-identity-regexp "$CERT_ID" --certificate-oidc-issuer "$CERT_ISSUER" >/dev/null
+            fi
           done
 
   publish:
+    if: github.ref_type == 'tag'
     needs: [images, packages, charts]
     runs-on: ubuntu-24.04
     steps:

@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Scheduler leaders held their advisory lock on a pool connection; on a host with 4 CPUs (pgxpool's default
+  pool size) they took the whole pool and the server never became ready. Locks now use their own
+  connections; the pool has at least 16 connections unless the DSN sets `pool_max_conns`.
+- Release checksums (`SHA256SUMS-<arch>`) and signature bundles name pre-release packages the way GitHub
+  stores them (`~` becomes `.`); `sha256sum -c` against v0.1.0-rc.2 found no files.
+
+### Changed
+- `release.yml` runs as a dry run on pull requests and main pushes that touch the release inputs, and
+  checks checksums and package versions strictly; signed releases verify their own signatures.
+- `E2E_CPUS=4 ./test/e2e/run.sh` runs the kind e2e on 4 CPUs, like a CI runner.
+
 ## [0.1.0] - unreleased
 
 First public release.

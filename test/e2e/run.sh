@@ -5,6 +5,7 @@
 #
 #   ./test/e2e/run.sh            # create/reuse lab, build images, deploy, test
 #   SKIP_BUILD=1 ./test/e2e/run.sh
+#   E2E_CPUS=4 ./test/e2e/run.sh # nodes limited to 4 CPUs, like a CI runner
 #   ./test/e2e/run.sh down       # delete the lab cluster
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -27,6 +28,17 @@ if ! kind get clusters | grep -qx "$CLUSTER"; then
   kind create cluster --config test/e2e/kind.yaml --kubeconfig "$KUBECONFIG"
 fi
 kubectl wait --for=condition=Ready nodes --all --timeout=180s >/dev/null
+
+# Go's runtime.NumCPU (and with it pgxpool's default pool size) follows the
+# cpuset, so a workstation with many cores hides bugs that a 4-CPU runner
+# shows. The setting sticks to the node containers: reset it when unset.
+cpus=$(docker info --format '{{.NCPU}}')
+want=${E2E_CPUS:-$cpus}
+[ "$want" -le "$cpus" ] || want=$cpus
+[ -z "${E2E_CPUS:-}" ] || log "limiting the kind nodes to $want CPUs"
+for n in $(kind get nodes --name "$CLUSTER"); do
+  docker update --cpuset-cpus "0-$((want - 1))" "$n" >/dev/null
+done
 
 if [ -z "${SKIP_BUILD:-}" ]; then
   log "building images"
