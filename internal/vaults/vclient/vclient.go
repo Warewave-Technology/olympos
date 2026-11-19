@@ -19,7 +19,6 @@ import (
 	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -50,17 +49,16 @@ type Client struct {
 // Close drops idle connections (tunnels).
 func (c *Client) Close() { c.tr.CloseIdleConnections() }
 
-var (
-	sysPoolOnce sync.Once
-	sysPool     *x509.CertPool
-)
-
-// RootCAs returns the system pool, the server-wide target CA bundle
-// (targetTLS.caBundleFile) and the per-vault PEM bundle.
+// RootCAs returns the server-wide target CA bundle (targetTLS.caBundleFile,
+// plus the system pool with targetTLS.systemRoots) and the per-vault PEM
+// bundle. With none of them nothing verifies the vault: targettls.ErrNoRoots.
 func RootCAs(bundle []byte) (*x509.CertPool, error) {
-	sysPoolOnce.Do(func() { sysPool = targettls.RootCAs() })
-	pool := sysPool.Clone()
-	if len(strings.TrimSpace(string(bundle))) > 0 && !pool.AppendCertsFromPEM(bundle) {
+	perVault := len(strings.TrimSpace(string(bundle))) > 0
+	if err := targettls.Usable(false, perVault); err != nil {
+		return nil, err
+	}
+	pool := targettls.RootCAs().Clone()
+	if perVault && !pool.AppendCertsFromPEM(bundle) {
 		return nil, errors.New("CA bundle contains no PEM certificates")
 	}
 	return pool, nil

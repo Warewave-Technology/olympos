@@ -432,10 +432,37 @@ func (s *Service) upsertTarget(ctx context.Context, tx pgx.Tx, clusterID uuid.UU
 		s.Log.Warn("target id mismatch; ignoring", "cluster_id", clusterID, "got", t.TargetId, "want", want)
 		return nil
 	}
-	_, err := tx.Exec(ctx, `INSERT INTO targets (id, cluster_id, namespace, service, port, port_name, engine, vault_provider, tls_server_name)
+	// The TLS name is pinned at first sight (security review #1): a change of
+	// the annotation is held until an admin accepts it, and the server keeps
+	// verifying the pinned name meanwhile.
+	var pinned string
+	var pending *string
+	err := tx.QueryRow(ctx, `SELECT tls_server_name, tls_server_name_pending FROM targets WHERE id = $1 FOR UPDATE`, t.TargetId).Scan(&pinned, &pending)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+	case err != nil:
+		return err
+	case t.TlsServerName == pinned && pending != nil:
+		// Annotation reverted: nothing to accept.
+		if _, err := tx.Exec(ctx, `UPDATE targets SET tls_server_name_pending = NULL, tls_server_name_changed_at = NULL WHERE id = $1`, t.TargetId); err != nil {
+			return err
+		}
+	case t.TlsServerName != pinned && (pending == nil || *pending != t.TlsServerName):
+		if _, err := tx.Exec(ctx, `UPDATE targets SET tls_server_name_pending = $2, tls_server_name_changed_at = now() WHERE id = $1`,
+			t.TargetId, t.TlsServerName); err != nil {
+			return err
+		}
+		s.Log.Warn("target TLS name changed; held for admin approval", "cluster_id", clusterID, "target", t.Namespace+"/"+t.Service,
+			"pinned", pinned, "requested", t.TlsServerName)
+		if err := activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "target.tls_name_changed", ObjectType: "target",
+			ObjectID: t.TargetId, ClusterID: &clusterID, Details: map[string]any{"pinned": pinned, "requested": t.TlsServerName}}); err != nil {
+			return err
+		}
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO targets (id, cluster_id, namespace, service, port, port_name, engine, vault_provider, tls_server_name)
 		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
 		ON CONFLICT (id) DO UPDATE SET port_name = EXCLUDED.port_name, engine = EXCLUDED.engine,
-		  vault_provider = EXCLUDED.vault_provider, tls_server_name = EXCLUDED.tls_server_name, last_seen_at = now(),
+		  vault_provider = EXCLUDED.vault_provider, last_seen_at = now(),
 		  status = CASE WHEN targets.status = 'gone' THEN
 		    -- target status is about backups only (a configured Vault is still a backup candidate)
 		    CASE WHEN EXISTS (SELECT 1 FROM backup_jobs j WHERE j.target_id = targets.id AND j.deleted_at IS NULL)

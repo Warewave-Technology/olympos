@@ -93,9 +93,10 @@ func parseOptions(raw json.RawMessage) (Options, error) {
 
 func (o Options) globals() bool { return o.Globals == nil || *o.Globals }
 
-func (o Options) rootCAs() (*x509.CertPool, error) {
+func (o Options) rootCAs(trustSystem bool) (*x509.CertPool, error) {
 	if strings.TrimSpace(o.TLSCAPEM) == "" {
-		return targettls.RootCAs(), nil // system pool + configured target CA bundle
+		// Configured target CA bundle (+ system pool when trusted).
+		return targettls.Roots(trustSystem), targettls.Usable(trustSystem, false)
 	}
 	p := x509.NewCertPool()
 	if !p.AppendCertsFromPEM([]byte(o.TLSCAPEM)) {
@@ -149,9 +150,9 @@ func (e *Engine) open(ctx context.Context, ec backup.EngineContext) (*session, e
 	if err != nil {
 		return nil, err
 	}
-	roots, err := opts.rootCAs()
-	if err != nil {
-		return nil, err
+	roots, rootsErr := opts.rootCAs(ec.TrustSystemRoots)
+	if rootsErr != nil && !errors.Is(rootsErr, targettls.ErrNoRoots) {
+		return nil, rootsErr
 	}
 	s := &session{ec: ec, opts: opts, rootCAs: roots}
 	s.tlsOK, err = ProbeTLS(ctx, ec.Dial)
@@ -160,6 +161,9 @@ func (e *Engine) open(ctx context.Context, ec backup.EngineContext) (*session, e
 	}
 	s.useTLS = ec.UseTLS && s.tlsOK
 	s.guard = ec.UseTLS && !s.tlsOK
+	if s.useTLS && rootsErr != nil {
+		return nil, rootsErr
+	}
 	return s, nil
 }
 
@@ -171,6 +175,8 @@ func (s *session) dial(ctx context.Context) (net.Conn, error) {
 	}
 	return guardAuth(c), nil
 }
+
+func (s *session) trustSystem() bool { return s.ec.TrustSystemRoots || targettls.SystemRoots() }
 
 func (s *session) serverName() string {
 	if s.ec.TLSServerName != "" {
@@ -449,13 +455,14 @@ func (s *session) sslParams(tmp string, libpqMajor int) ([][2]string, error) {
 			return nil, err
 		}
 	} else if bundle := targettls.BundleFile(); bundle != "" {
-		// libpq takes one file: system roots (if any) + the configured bundle.
+		// libpq takes one file: the configured bundle (+ system roots when
+		// trusted).
 		extra, err := os.ReadFile(bundle)
 		if err != nil {
 			return nil, fmt.Errorf("read target CA bundle: %w", err)
 		}
 		var all []byte
-		if sys := systemRootsFile(); sys != "" {
+		if sys := systemRootsFile(); sys != "" && s.trustSystem() {
 			all, _ = os.ReadFile(sys)
 			all = append(all, '\n')
 		}
@@ -463,6 +470,8 @@ func (s *session) sslParams(tmp string, libpqMajor int) ([][2]string, error) {
 		if err := os.WriteFile(root, append(all, extra...), 0o600); err != nil {
 			return nil, err
 		}
+	} else if !s.trustSystem() {
+		return nil, targettls.ErrNoRoots
 	} else if libpqMajor < 16 {
 		if root = systemRootsFile(); root == "" {
 			return nil, errors.New("no system CA bundle found for pg_dump < 16; set engine_options.tls_ca_pem")

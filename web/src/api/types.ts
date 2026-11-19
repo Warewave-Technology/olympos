@@ -132,6 +132,9 @@ export interface Target {
   engine: Engine;
   vault_provider: '' | 'hashicorp' | 'openbao';
   tls_server_name: string;
+  /** A changed olympos.io/tls-server-name waiting for an admin; null when none. */
+  tls_server_name_pending?: string | null;
+  tls_server_name_changed_at?: string | null;
   detected_version: string;
   tls_ok: boolean | null;
   status: 'candidate' | 'configured' | 'gone';
@@ -140,7 +143,7 @@ export interface Target {
 }
 
 export interface AttentionItem {
-  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'self_backup_unset' | 'self_backup_failed' | 'kek_purgeable' | 'kek_recovery_unknown';
+  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'self_backup_unset' | 'self_backup_failed' | 'kek_purgeable' | 'kek_recovery_unknown' | 'target_tls_changed';
   severity: 'crit' | 'warn';
   label: string;
   detail: string;

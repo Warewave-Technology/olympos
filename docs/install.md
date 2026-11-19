@@ -73,7 +73,8 @@ olympos:
   deadMansSwitch:
     url: https://heartbeat.example/olympos                       # strongly recommended
   targetTLS:
-    caBundleFile: /etc/olympos/target-ca/ca.crt                  # private CAs of your databases
+    caBundleFile: /etc/olympos/target-ca/ca.crt                  # CAs that issue your targets' certificates
+    # systemRoots: false   # public CAs are not trusted for targets unless set (see below)
 ingress: {enabled: true, className: nginx, host: olympos.contoso.internal, tlsSecretName: olympos-tls}
 ```
 
@@ -85,6 +86,18 @@ The gateway (`:8443`) is exposed by an internal LoadBalancer by default. Its TLS
 issued by Olympos's internal CA for the host of `agentGatewayURL` (agents pin that CA); set
 `gatewayTLSSecret` to use your own. **Do not terminate TLS for `:8443` in a proxy** — mTLS must reach
 the server.
+
+### Target certificates
+
+The server verifies every target's certificate end to end against `targetTLS.caBundleFile` (and a
+per-target CA where one is set). **Public CAs are not trusted for targets by default**: the name a
+target is verified against comes from its Service (`olympos.io/tls-server-name`), and anyone who can
+edit that Service could otherwise point it at a pod with a public certificate for a domain they own.
+Set `targetTLS.systemRoots: true` only if your targets really use publicly issued certificates.
+
+The TLS name is pinned when Olympos first sees a target. If the annotation changes later, backups and
+Vault calls keep verifying the pinned name, *Needs attention* shows "TLS name changed", and an admin of
+that cluster accepts the new name under *Backups* (or reverts the annotation).
 
 ### Olympos' own database
 

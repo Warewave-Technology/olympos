@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/targettls"
 )
 
 // Integration tests against a real ClickHouse in Docker (container
@@ -706,7 +707,16 @@ func testTLS(t *testing.T, env *chEnv) {
 
 	// Unknown CA (no ca_pem): verification must fail, never skipped.
 	noCA := env.ec(true, map[string]any{"databases": []string{"shop"}})
-	if ct, _ := (Engine{}).TestConnection(ctx, noCA); ct.OK || !strings.Contains(ct.Error, "tls") {
+	if ct, _ := (Engine{}).TestConnection(ctx, noCA); ct.OK || !strings.Contains(ct.Error, "no CA is trusted") {
+		t.Fatalf("no trusted CA should fail: %+v", ct)
+	}
+	// System roots only: the private CA is still unknown.
+	if err := targettls.Configure("", true); err != nil {
+		t.Fatal(err)
+	}
+	ct, _ = (Engine{}).TestConnection(ctx, noCA)
+	_ = targettls.Configure("", false)
+	if ct.OK || !strings.Contains(ct.Error, "tls") {
 		t.Fatalf("unknown CA should fail: %+v", ct)
 	}
 	// Wrong server name.

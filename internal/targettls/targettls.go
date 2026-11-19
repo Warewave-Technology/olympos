@@ -1,41 +1,55 @@
 // Package targettls builds the TLS configuration the server uses when it
 // speaks TLS end-to-end with a target through the tunnel (SPEC §7). It never
 // disables verification.
+//
+// Targets are in-cluster Services whose TLS name comes from an annotation,
+// so public CAs are not trusted for them by default (security review #1:
+// anyone with a public certificate for a name they own could otherwise pose
+// as a target). Only the configured bundle is, unless systemRoots is set.
 package targettls
 
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
 )
 
 var (
-	mu     sync.RWMutex
-	bundle string
-	pool   *x509.CertPool
+	mu          sync.RWMutex
+	bundle      string
+	systemRoots bool
+	pools       = map[bool]*x509.CertPool{}
 )
 
-// SetCABundleFile configures extra trusted CAs (call once at startup).
-func SetCABundleFile(path string) error {
+// ErrNoRoots means no CA is trusted for targets.
+var ErrNoRoots = errors.New("no CA is trusted for targets: set targetTLS.caBundleFile (PEM with the CAs that issue your targets' certificates), " +
+	"a per-target CA, or targetTLS.systemRoots: true")
+
+// Configure sets the extra trusted CAs and whether the system pool is
+// trusted for targets (call once at startup).
+func Configure(bundleFile string, trustSystem bool) error {
 	mu.Lock()
 	defer mu.Unlock()
-	bundle, pool = path, nil
-	if path == "" {
+	bundle, systemRoots, pools = bundleFile, trustSystem, map[bool]*x509.CertPool{}
+	if bundleFile == "" {
 		return nil
 	}
-	_, err := rootsLocked()
+	_, err := poolLocked(true)
 	return err
 }
 
-func rootsLocked() (*x509.CertPool, error) {
-	if pool != nil {
-		return pool, nil
+func poolLocked(system bool) (*x509.CertPool, error) {
+	if p := pools[system]; p != nil {
+		return p, nil
 	}
-	p, err := x509.SystemCertPool()
-	if err != nil || p == nil {
-		p = x509.NewCertPool()
+	p := x509.NewCertPool()
+	if system {
+		if sp, err := x509.SystemCertPool(); err == nil && sp != nil {
+			p = sp
+		}
 	}
 	if bundle != "" {
 		b, err := os.ReadFile(bundle)
@@ -46,20 +60,42 @@ func rootsLocked() (*x509.CertPool, error) {
 			return nil, fmt.Errorf("target CA bundle %s has no certificates", bundle)
 		}
 	}
-	pool = p
+	pools[system] = p
 	return p, nil
 }
 
-// RootCAs returns the system pool plus the configured bundle.
-func RootCAs() *x509.CertPool {
+// Roots returns the CAs trusted for a target: the configured bundle, plus
+// the system pool when targetTLS.systemRoots is set or trustSystem is true
+// (targets an admin configured by hand, such as Olympos' own database).
+func Roots(trustSystem bool) *x509.CertPool {
 	mu.Lock()
 	defer mu.Unlock()
-	p, err := rootsLocked()
+	p, err := poolLocked(trustSystem || systemRoots)
 	if err != nil {
-		sp, _ := x509.SystemCertPool()
-		return sp
+		return x509.NewCertPool()
 	}
 	return p
+}
+
+// RootCAs returns the CAs trusted for cluster targets.
+func RootCAs() *x509.CertPool { return Roots(false) }
+
+// Usable reports ErrNoRoots when nothing would verify a target and no
+// per-target CA is given.
+func Usable(trustSystem, perTargetCA bool) error {
+	mu.RLock()
+	defer mu.RUnlock()
+	if perTargetCA || trustSystem || systemRoots || bundle != "" {
+		return nil
+	}
+	return ErrNoRoots
+}
+
+// SystemRoots reports whether the system pool is trusted for cluster targets.
+func SystemRoots() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return systemRoots
 }
 
 // Config returns a client TLS config verifying serverName.

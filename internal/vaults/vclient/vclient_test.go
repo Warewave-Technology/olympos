@@ -3,6 +3,7 @@ package vclient
 import (
 	"context"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/Warewave-Technology/olympos/internal/targettls"
 )
 
 func sealHandler(hits *int32) http.Handler {
@@ -70,8 +73,20 @@ func TestEndToEndTLSVerifiesServerNameAndBundle(t *testing.T) {
 	if _, err := SealStatus(context.Background(), c2); err == nil || !strings.Contains(err.Error(), "TLS") {
 		t.Fatalf("wrong server name must fail TLS verification, got %v", err)
 	}
-	// Untrusted CA: refused.
-	c3, _ := New(Options{Dial: dialTo(addr, &dials), TLS: true, ServerName: "example.com"})
+	// No trusted CA at all (public CAs are off for targets): refused before
+	// any connection.
+	if _, err := New(Options{Dial: dialTo(addr, &dials), TLS: true, ServerName: "example.com"}); !errors.Is(err, targettls.ErrNoRoots) {
+		t.Fatalf("no CA configured must be refused, got %v", err)
+	}
+	// Untrusted CA (system pool only): refused.
+	if err := targettls.Configure("", true); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = targettls.Configure("", false) })
+	c3, err := New(Options{Dial: dialTo(addr, &dials), TLS: true, ServerName: "example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer c3.Close()
 	if _, err := SealStatus(context.Background(), c3); err == nil || !strings.Contains(err.Error(), "TLS") {
 		t.Fatalf("untrusted certificate must fail, got %v", err)

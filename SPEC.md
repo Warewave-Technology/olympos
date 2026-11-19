@@ -245,7 +245,7 @@ Annotations go on the **Service** that fronts the workload.
 | `olympos.io/backup` | `postgresql` \| `clickhouse` \| `vault` | Backup candidate |
 | `olympos.io/vault` | `hashicorp` \| `openbao` | Vault provider (Vaults page) |
 | `olympos.io/port` | port name or number | Which Service port to target (default: engine's well-known port) |
-| `olympos.io/tls-server-name` | hostname | SNI / cert name the server should verify |
+| `olympos.io/tls-server-name` | hostname | SNI / cert name the server should verify (pinned at first sight; changes need admin acceptance) |
 
 - A Vault Service can carry both `olympos.io/vault` and `olympos.io/backup: vault`.
 - **Target ID** = `sha256(cluster_uuid | namespace | service_name | port)` truncated to 16 bytes, hex. Stable across restarts.
@@ -317,7 +317,7 @@ message TunnelFrame {
 
 Rules:
 - Server → `OpenTunnel{target_id}`. Agent looks up `target_id` in **its own** discovered set; unknown → `TunnelRejected`. Agent resolves Service → endpoint, opens TCP, then calls `Tunnel` RPC with `tunnel_id` and pipes bytes.
-- The agent never inspects or terminates TLS. The server speaks TLS **end-to-end** with the target. If the target has no TLS, the target gets a `tls.missing` security finding (shown as "TLS: No" badge) and, in `e2e-tls` mode, **no password crosses a non-TLS connection**: PostgreSQL is allowed only when the server asks for SCRAM-SHA-256 (checked before the password is sent; cleartext/MD5 are refused), ClickHouse and Vault/OpenBao are refused. The error names both ways out: enable TLS on the target, or switch the cluster to `compressed`.
+- The agent never inspects or terminates TLS. The server speaks TLS **end-to-end** with the target. If the target has no TLS, the target gets a `tls.missing` security finding (shown as "TLS: No" badge) and, in `e2e-tls` mode, **no password crosses a non-TLS connection**: PostgreSQL is allowed only when the server asks for SCRAM-SHA-256 (checked before the password is sent; cleartext/MD5 are refused), ClickHouse and Vault/OpenBao are refused. The error names both ways out: enable TLS on the target, or switch the cluster to `compressed`. Target certificates are verified against the configured target CA bundle (and per-target CAs); public CAs only with `targetTLS.systemRoots`. The TLS name (`olympos.io/tls-server-name`) is pinned when the target is first seen; a later change is held until an admin of the cluster accepts it (security review v0.1 #1).
 - **Transfer mode** (per cluster, set in Settings › Clusters & agents):
   - `e2e-tls` (**default**): server ↔ target TLS end-to-end, tunnel carries ciphertext. No tunnel compression (ciphertext does not compress).
   - `compressed` (opt-in): server connects to the target **without TLS**; agent ↔ target is plaintext inside the cluster; `TunnelFrame` payloads are zstd-compressed on the mTLS gRPC stream. Intended for clusters where egress is billed (e.g. AWS). Enabling it creates a `transfer.compressed_mode` finding on that cluster (agent can see backup data in this mode). UI shows the trade-off before enabling.

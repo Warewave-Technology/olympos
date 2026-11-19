@@ -41,4 +41,5 @@ olympos:
     trivyBin: /usr/lib/olympos/bin/trivy
     trivyCacheDir: /var/lib/olympos/trivy-cache
   # targetTLS:
-  #   caBundleFile: /etc/olympos/target-ca.crt         # private CAs of your databases
+  #   caBundleFile: /etc/olympos/target-ca.crt         # CAs that issue your targets' certificates
+  #   systemRoots: false                               # public CAs for targets (off: names come from annotations)

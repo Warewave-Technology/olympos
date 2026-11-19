@@ -298,9 +298,10 @@ func (s *SelfBackup) perform(ctx context.Context, r runInfo) (outcome, *SelfJob)
 	ec := EngineContext{
 		Target: TargetInfo{ID: SelfSystem, ClusterName: selfCluster, Namespace: selfNamespace, Service: selfService,
 			Port: tt.port, Engine: "postgresql", TLSServerName: tt.host},
-		TLSServerName: tt.host,
-		UseTLS:        tt.tls,
-		Options:       opts,
+		TLSServerName:    tt.host,
+		TrustSystemRoots: true,
+		UseTLS:           tt.tls,
+		Options:          opts,
 		Dial: func(ctx context.Context) (net.Conn, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, tt.network, tt.addr)

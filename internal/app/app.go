@@ -217,7 +217,7 @@ func Run(cfgPath string) error {
 	if err := store.Migrate(ctx, d.DB); err != nil {
 		return err
 	}
-	if err := targettls.SetCABundleFile(cfg.TargetTLS.CABundleFile); err != nil {
+	if err := targettls.Configure(cfg.TargetTLS.CABundleFile, cfg.TargetTLS.SystemRoots); err != nil {
 		return err
 	}
 	d.Envelope = &secrets.Envelope{KV: d.KV}

@@ -81,10 +81,12 @@ type Server struct {
 	} `yaml:"gateway"`
 
 	// TargetTLS configures how the server verifies targets' TLS certificates
-	// (end-to-end through the tunnel). The system pool is always trusted;
-	// CABundleFile adds private CAs (PEM).
+	// (end-to-end through the tunnel). CABundleFile holds the CAs that issue
+	// target certificates (PEM). Public CAs are trusted only with
+	// SystemRoots: a target's TLS name comes from a Service annotation.
 	TargetTLS struct {
 		CABundleFile string `yaml:"caBundleFile"`
+		SystemRoots  bool   `yaml:"systemRoots"`
 	} `yaml:"targetTLS"`
 
 	Slack struct {

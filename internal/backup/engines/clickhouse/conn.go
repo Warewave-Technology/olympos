@@ -131,9 +131,14 @@ func tlsConfig(ec backup.EngineContext, opts Options) (*tls.Config, error) {
 	if name == "" {
 		return nil, errors.New("clickhouse: TLS server name is required in e2e-tls mode")
 	}
-	// System roots plus the configured target CA bundle (targetTLS).
-	pool := targettls.RootCAs().Clone()
-	if strings.TrimSpace(opts.CAPEM) != "" && !pool.AppendCertsFromPEM([]byte(opts.CAPEM)) {
+	// The configured target CA bundle (+ system roots with
+	// targetTLS.systemRoots) and the per-target ca_pem.
+	perTarget := strings.TrimSpace(opts.CAPEM) != ""
+	if err := targettls.Usable(ec.TrustSystemRoots, perTarget); err != nil {
+		return nil, err
+	}
+	pool := targettls.Roots(ec.TrustSystemRoots).Clone()
+	if perTarget && !pool.AppendCertsFromPEM([]byte(opts.CAPEM)) {
 		return nil, errors.New("clickhouse: ca_pem contains no valid certificate")
 	}
 	return &tls.Config{

@@ -46,8 +46,12 @@ type EngineContext struct {
 	// False in "compressed" mode (plaintext inside the cluster).
 	UseTLS bool
 	// TLSServerName to verify; InsecureSkipVerify is never used. RootCAs is
-	// left to the engine (system pool + optional configured bundle).
+	// left to the engine: the configured target bundle, plus the system pool
+	// with targetTLS.systemRoots or TrustSystemRoots.
 	TLSServerName string
+	// TrustSystemRoots: the target was configured by an admin, not
+	// discovered (Olympos' own database), so public CAs may vouch for it.
+	TrustSystemRoots bool
 	// Credential returns the login (database user, or AppRole for Vault).
 	Credential func(ctx context.Context) (Credential, error)
 	Options    json.RawMessage

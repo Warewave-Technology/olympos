@@ -179,3 +179,84 @@ func TestReservedClusterLabel(t *testing.T) {
 		t.Fatalf("labels after patch: %v", got.Labels)
 	}
 }
+
+// Security review #1: the TLS name is pinned at first sight; a changed
+// annotation is held (and shown) until an admin of the cluster accepts the
+// exact name, and the pinned name stays the one verified meanwhile.
+func TestTargetTLSNamePinned(t *testing.T) {
+	e := apitest.New(t, apitest.Options{})
+	ctx := context.Background()
+	admin := e.Login(e.Principal("admin", "Member", "admin"))
+	var created inventory.InstallResponse
+	admin.Do("POST", "/api/v1/clusters", map[string]any{"name": "prod", "labels": map[string]string{"env": "prod"}}, &created)
+	id := created.Cluster.ID
+	svc := &inventory.Service{DB: e.DB, Log: e.Log}
+	var hooks gateway.Hooks
+	svc.Hooks(&hooks)
+	_ = hooks.Connected(ctx, id, &pb.Hello{AgentVersion: "1.0.0"})
+	tid := targetid.Compute(id.String(), "db", "orders-pg", 5432)
+	up := func(name string) {
+		t.Helper()
+		if err := hooks.TargetUpsert(ctx, id, &pb.Target{TargetId: tid, Namespace: "db", Service: "orders-pg", Port: 5432, Engine: "postgresql", TlsServerName: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func() inventory.Target {
+		t.Helper()
+		var ts struct{ Items []inventory.Target }
+		admin.Do("GET", "/api/v1/targets", nil, &ts)
+		if len(ts.Items) != 1 {
+			t.Fatalf("targets: %+v", ts.Items)
+		}
+		return ts.Items[0]
+	}
+	attention := func() []inventory.AttentionItem {
+		var d inventory.Dashboard
+		admin.Do("GET", "/api/v1/dashboard", nil, &d)
+		var out []inventory.AttentionItem
+		for _, a := range d.Attention {
+			if a.Kind == "target_tls_changed" {
+				out = append(out, a)
+			}
+		}
+		return out
+	}
+
+	up("orders-pg.db.svc")
+	up("db.attacker.example")
+	if tg := get(); tg.TLSServerName != "orders-pg.db.svc" || tg.TLSServerNamePending == nil || *tg.TLSServerNamePending != "db.attacker.example" {
+		t.Fatalf("changed name must be held: %+v", tg)
+	}
+	if a := attention(); len(a) != 1 || !strings.Contains(a[0].Detail, "db.attacker.example") || a[0].Severity != "crit" {
+		t.Fatalf("attention: %+v", a)
+	}
+	// Reverting the annotation clears it.
+	up("orders-pg.db.svc")
+	if tg := get(); tg.TLSServerNamePending != nil || len(attention()) != 0 {
+		t.Fatalf("revert: %+v", tg)
+	}
+
+	up("pg.prod.internal")
+	scoped := e.Login(e.Principal("devadmin", "Member", "admin@env=dev"))
+	if code := scoped.Do("POST", "/api/v1/targets/"+tid+"/accept-tls-name", map[string]any{"name": "pg.prod.internal"}, nil); code != http.StatusNotFound {
+		t.Fatalf("out-of-scope admin: %d", code)
+	}
+	op := e.Login(e.Principal("op", "Member", "operator"))
+	if code := op.Do("POST", "/api/v1/targets/"+tid+"/accept-tls-name", map[string]any{"name": "pg.prod.internal"}, nil); code != http.StatusForbidden {
+		t.Fatalf("operator: %d", code)
+	}
+	if code := admin.Do("POST", "/api/v1/targets/"+tid+"/accept-tls-name", map[string]any{"name": "other.example"}, nil); code != http.StatusConflict {
+		t.Fatalf("stale name: %d", code)
+	}
+	if code := admin.Do("POST", "/api/v1/targets/"+tid+"/accept-tls-name", map[string]any{"name": "pg.prod.internal"}, nil); code != http.StatusNoContent {
+		t.Fatalf("accept: %d", code)
+	}
+	if tg := get(); tg.TLSServerName != "pg.prod.internal" || tg.TLSServerNamePending != nil {
+		t.Fatalf("accepted: %+v", tg)
+	}
+	var n int
+	_ = e.DB.QueryRow(ctx, `SELECT count(*) FROM activity_log WHERE action IN ('target.tls_name_changed','target.tls_name_accepted')`).Scan(&n)
+	if n != 3 {
+		t.Fatalf("activity rows: %d", n)
+	}
+}

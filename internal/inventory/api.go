@@ -58,6 +58,7 @@ func (a *API) Routes(r chi.Router) {
 	r.Post("/clusters/{id}/token", a.newToken)
 	r.Get("/clusters/{id}/nodes", a.listNodes)
 	r.Get("/targets", a.listTargets)
+	r.Post("/targets/{id}/accept-tls-name", a.acceptTLSName)
 }
 
 func (a *API) now() time.Time {
@@ -583,30 +584,36 @@ func (a *API) listNodes(w http.ResponseWriter, r *http.Request) {
 
 // Target is the API shape of a discovered target.
 type Target struct {
-	ID              string    `json:"id"`
-	ClusterID       uuid.UUID `json:"cluster_id"`
-	ClusterName     string    `json:"cluster_name"`
-	Namespace       string    `json:"namespace"`
-	Service         string    `json:"service"`
-	Port            int       `json:"port"`
-	PortName        string    `json:"port_name"`
-	Engine          string    `json:"engine"`
-	VaultProvider   string    `json:"vault_provider"`
-	TLSServerName   string    `json:"tls_server_name"`
-	DetectedVersion string    `json:"detected_version"`
-	TLSOK           *bool     `json:"tls_ok"`
-	Status          string    `json:"status"`
-	FirstSeenAt     time.Time `json:"first_seen_at"`
-	LastSeenAt      time.Time `json:"last_seen_at"`
+	ID            string    `json:"id"`
+	ClusterID     uuid.UUID `json:"cluster_id"`
+	ClusterName   string    `json:"cluster_name"`
+	Namespace     string    `json:"namespace"`
+	Service       string    `json:"service"`
+	Port          int       `json:"port"`
+	PortName      string    `json:"port_name"`
+	Engine        string    `json:"engine"`
+	VaultProvider string    `json:"vault_provider"`
+	TLSServerName string    `json:"tls_server_name"`
+	// TLSServerNamePending is a changed olympos.io/tls-server-name waiting
+	// for an admin; TLSServerName stays the name that is verified.
+	TLSServerNamePending   *string    `json:"tls_server_name_pending"`
+	TLSServerNameChangedAt *time.Time `json:"tls_server_name_changed_at"`
+	DetectedVersion        string     `json:"detected_version"`
+	TLSOK                  *bool      `json:"tls_ok"`
+	Status                 string     `json:"status"`
+	FirstSeenAt            time.Time  `json:"first_seen_at"`
+	LastSeenAt             time.Time  `json:"last_seen_at"`
 }
 
 // ListTargets returns targets visible to s, optionally filtered.
-func ListTargets(ctx context.Context, q store.Querier, s *authz.Subject, status, engine string) ([]Target, error) {
+func ListTargets(ctx context.Context, q store.Querier, s *authz.Subject, status, engine string, tlsPending bool) ([]Target, error) {
 	rows, err := q.Query(ctx, `SELECT t.id, t.cluster_id, c.name, c.labels, t.namespace, t.service, t.port, t.port_name, t.engine,
-		t.vault_provider, t.tls_server_name, t.detected_version, t.tls_ok, t.status, t.first_seen_at, t.last_seen_at
+		t.vault_provider, t.tls_server_name, t.tls_server_name_pending, t.tls_server_name_changed_at, t.detected_version, t.tls_ok,
+		t.status, t.first_seen_at, t.last_seen_at
 		FROM targets t JOIN clusters c ON c.id = t.cluster_id
-		WHERE ($1 = '' OR t.status = $1) AND ($2 = '' OR t.engine = $2) AND c.status <> 'revoked'
-		ORDER BY c.name, t.namespace, t.service`, status, engine)
+		WHERE ($1 = '' OR t.status = $1) AND ($2 = '' OR t.engine = $2) AND (NOT $3 OR t.tls_server_name_pending IS NOT NULL)
+		  AND c.status <> 'revoked'
+		ORDER BY c.name, t.namespace, t.service`, status, engine, tlsPending)
 	if err != nil {
 		return nil, err
 	}
@@ -616,7 +623,8 @@ func ListTargets(ctx context.Context, q store.Querier, s *authz.Subject, status,
 		var t Target
 		var labels map[string]string
 		if err := rows.Scan(&t.ID, &t.ClusterID, &t.ClusterName, &labels, &t.Namespace, &t.Service, &t.Port, &t.PortName, &t.Engine,
-			&t.VaultProvider, &t.TLSServerName, &t.DetectedVersion, &t.TLSOK, &t.Status, &t.FirstSeenAt, &t.LastSeenAt); err != nil {
+			&t.VaultProvider, &t.TLSServerName, &t.TLSServerNamePending, &t.TLSServerNameChangedAt, &t.DetectedVersion, &t.TLSOK,
+			&t.Status, &t.FirstSeenAt, &t.LastSeenAt); err != nil {
 			return nil, err
 		}
 		if s.Can(authz.PermRead, labels) {
@@ -628,13 +636,82 @@ func ListTargets(ctx context.Context, q store.Querier, s *authz.Subject, status,
 
 func (a *API) listTargets(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	ts, err := ListTargets(r.Context(), a.DB, httpx.Subject(r), q.Get("status"), q.Get("engine"))
+	ts, err := ListTargets(r.Context(), a.DB, httpx.Subject(r), q.Get("status"), q.Get("engine"), q.Get("tls_pending") == "1")
 	if err != nil {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"items": ts})
 }
+
+// acceptTLSName makes a changed olympos.io/tls-server-name the verified
+// name (security review #1). Admin on the target's cluster; the name a
+// cluster user wrote is never trusted without this.
+func (a *API) acceptTLSName(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id := chi.URLParam(r, "id")
+	var clusterID uuid.UUID
+	var pending *string
+	var pinned string
+	err := a.DB.QueryRow(r.Context(), `SELECT cluster_id, tls_server_name, tls_server_name_pending FROM targets WHERE id = $1`, id).
+		Scan(&clusterID, &pinned, &pending)
+	if errors.Is(err, pgx.ErrNoRows) {
+		httpx.NotFound(w)
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	allowed, visible, err := httpx.CanCluster(r.Context(), a.DB, s, clusterID, authz.PermAdmin)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !visible {
+		httpx.NotFound(w)
+		return
+	}
+	if !allowed {
+		httpx.Forbidden(w, "")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := httpx.Decode(r, &req); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// The caller names what they accept: a second change in between is not
+	// accepted by a stale click.
+	if pending == nil || *pending != req.Name {
+		httpx.Error(w, http.StatusConflict, "the TLS name changed again; reload and review it")
+		return
+	}
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		tag, err := tx.Exec(r.Context(), `UPDATE targets SET tls_server_name = tls_server_name_pending, tls_server_name_pending = NULL,
+			tls_server_name_changed_at = NULL WHERE id = $1 AND tls_server_name_pending = $2`, id, req.Name)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return errConflict
+		}
+		return httpx.Record(r, tx, "target.tls_name_accepted", "target", id, &clusterID, map[string]any{"from": pinned, "to": req.Name})
+	})
+	if errors.Is(err, errConflict) {
+		httpx.Error(w, http.StatusConflict, "the TLS name changed again; reload and review it")
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+var errConflict = errors.New("conflict")
 
 // ---------------------------------------------------------------- dashboard
 
@@ -843,6 +920,24 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 	}
 	rows.Close()
 
+	// A changed TLS name waits for an admin (security review #1).
+	rows, err = a.DB.Query(ctx, `SELECT t.namespace, t.service, t.tls_server_name, t.tls_server_name_pending FROM targets t
+		WHERE t.cluster_id = ANY($1) AND t.tls_server_name_pending IS NOT NULL AND t.status <> 'gone' ORDER BY t.namespace, t.service`, clusterIDs)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var ns, svc, pinned, pending string
+		if err := rows.Scan(&ns, &svc, &pinned, &pending); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out = append(out, AttentionItem{Kind: "target_tls_changed", Severity: "crit", Label: "TLS name changed",
+			Detail: fmt.Sprintf("%s/%s asks for %s; still verifying %s", ns, svc, orDefault(pending, "the default name"), orDefault(pinned, svc+"."+ns+".svc")),
+			Link:   "/backups?tls=1"})
+	}
+	rows.Close()
+
 	// Pending approvals the current user can act on (not their own).
 	if s.CanAny(authz.PermVaultApprove) {
 		rows, err := a.DB.Query(ctx, `SELECT cr.expires_at, c.labels FROM change_requests cr
@@ -922,4 +1017,11 @@ func humanDuration(d time.Duration) string {
 		return fmt.Sprintf("%d h", int(d.Hours()))
 	}
 	return fmt.Sprintf("%d d", int(d.Hours()/24))
+}
+
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
 }

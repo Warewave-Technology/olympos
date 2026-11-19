@@ -64,6 +64,8 @@ function dashboard(): Dashboard {
     ...offline.map((c) => ({ kind: 'agent_offline' as const, severity: 'crit' as const, label: 'Agent offline', detail: `${c.name} · 2 h`, link: `/settings/clusters?cluster=${c.id}` })),
     { kind: 'backup_failed', severity: 'crit', label: 'Backup failed', detail: 'metrics-ch · SAS expired', link: '/backups?tab=runs' },
   ];
+  for (const t of db.targets.filter((x) => x.tls_server_name_pending != null))
+    attention.push({ kind: 'target_tls_changed', severity: 'crit', label: 'TLS name changed', detail: `${t.namespace}/${t.service} asks for ${t.tls_server_name_pending || 'the default name'}; still verifying ${t.tls_server_name || `${t.service}.${t.namespace}.svc`}`, link: '/backups?tls=1' });
   if (!selfBackup.configured) attention.push({ kind: 'self_backup_unset', severity: 'warn', label: 'Olympos backup', detail: 'choose where the Olympos database is backed up', link: '/backups?self=1' });
   if (perms().vault_approve && waiting.length) attention.push({ kind: 'approvals', severity: 'warn', label: `${waiting.length} approvals`, detail: 'waiting for you · oldest 51 h left', link: '/approvals' });
   const eol = cs.filter((c) => c.eol);
@@ -210,7 +212,22 @@ const routes: [string, string, Handler][] = [
     (r) => {
       const st = r.query.get('status');
       const en = r.query.get('engine');
-      return items(db.targets.filter((t) => (!st || t.status === st) && (!en || t.engine === en) && t.engine !== ''));
+      const tls = r.query.get('tls_pending') === '1';
+      return items(db.targets.filter((t) => (!st || t.status === st) && (!en || t.engine === en) && (!tls || t.tls_server_name_pending != null) && t.engine !== ''));
+    },
+  ],
+  [
+    'POST',
+    '/targets/:id/accept-tls-name',
+    (r, p) => {
+      const t = db.targets.find((x) => x.id === p.id);
+      if (!t) return notFound();
+      const b = r.body as { name?: string };
+      if (t.tls_server_name_pending == null || t.tls_server_name_pending !== b.name) return { status: 409, body: { error: 'the TLS name changed again; reload and review it' } };
+      t.tls_server_name = t.tls_server_name_pending;
+      t.tls_server_name_pending = null;
+      t.tls_server_name_changed_at = null;
+      return { status: 204 };
     },
   ],
 

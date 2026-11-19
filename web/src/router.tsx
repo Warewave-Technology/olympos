@@ -55,7 +55,7 @@ export const BACKUP_TABS = ['candidates', 'jobs', 'runs'] as const;
 export const backupsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/backups',
-  validateSearch: opt((s) => ({ tab: pick(s.tab, BACKUP_TABS), cluster: str(s.cluster), self: s.self === true || s.self === 1 || s.self === '1' ? true : undefined })),
+  validateSearch: opt((s) => ({ tab: pick(s.tab, BACKUP_TABS), cluster: str(s.cluster), self: s.self === true || s.self === 1 || s.self === '1' ? true : undefined, tls: s.tls === true || s.tls === 1 || s.tls === '1' ? true : undefined })),
   component: BackupsPage,
 });
 

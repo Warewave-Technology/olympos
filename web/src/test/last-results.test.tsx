@@ -15,12 +15,13 @@ describe('last results', () => {
     expect(within(quay).getByText('Not yet')).toBeTruthy();
   });
   it('channels show the last delivery, or Not yet', async () => {
+    // Channel names also head the routing matrix (th): match the list cells.
     renderApp('/settings/notifications');
-    const ok = (await screen.findByText('#infra-backups', {}, T)).closest('tr')!;
+    const ok = (await screen.findByText('#infra-backups', { selector: 'td' }, T)).closest('tr')!;
     expect(within(ok).getByText('Delivered')).toBeTruthy();
-    const bad = screen.getByText('#vault-approvals').closest('tr')!;
+    const bad = screen.getByText('#vault-approvals', { selector: 'td' }).closest('tr')!;
     expect(within(bad).getByText('Failed')).toBeTruthy();
     expect(within(bad).getByText('slack: not_in_channel')).toBeTruthy();
-    expect(within(screen.getByText('#infra-audit').closest('tr')!).getByText('Not yet')).toBeTruthy();
+    expect(within(screen.getByText('#infra-audit', { selector: 'td' }).closest('tr')!).getByText('Not yet')).toBeTruthy();
   });
 });
