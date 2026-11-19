@@ -11,6 +11,8 @@ package agent
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"sort"
@@ -123,6 +125,19 @@ func SecretKeysFromManagedFields(mf []metav1.ManagedFieldsEntry) (keys []string,
 	return keys, known, typeSet
 }
 
+// annStripped marks objects the agent's transforms produced. Its value is a
+// random nonce per agent process, so a cluster user cannot make the
+// transforms skip an object by setting annotations (security review #10).
+const annStripped = "olympos.io/stripped"
+
+var stripNonce = func() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return hex.EncodeToString(b)
+}()
+
+func strippedByAgent(ann map[string]string) bool { return ann[annStripped] == stripNonce }
+
 // stripSecret keeps names, labels, owners and creation time; key names move
 // to an annotation; managedFields and every other annotation go.
 // Transforms may run more than once on the same (already stripped) object:
@@ -132,11 +147,11 @@ func stripSecret(obj any) (any, error) {
 	if !ok {
 		return obj, nil
 	}
-	if len(m.ManagedFields) == 0 && (m.Annotations[annKeys] != "" || m.Annotations[annKeysUnknown] != "") {
+	if strippedByAgent(m.Annotations) {
 		return m, nil // already stripped
 	}
 	keys, known, typeSet := SecretKeysFromManagedFields(m.ManagedFields)
-	ann := map[string]string{}
+	ann := map[string]string{annStripped: stripNonce}
 	if sa := m.Annotations[annSAName]; sa != "" {
 		ann[annSAName] = sa
 	}
@@ -175,11 +190,12 @@ func stripServiceAccount(obj any) (any, error) {
 		}
 	}
 	sort.Strings(refs)
-	out := &corev1.ServiceAccount{TypeMeta: sa.TypeMeta, ObjectMeta: metav1.ObjectMeta{Name: sa.Name, Namespace: sa.Namespace, UID: sa.UID, ResourceVersion: sa.ResourceVersion}}
+	out := &corev1.ServiceAccount{TypeMeta: sa.TypeMeta, ObjectMeta: metav1.ObjectMeta{Name: sa.Name, Namespace: sa.Namespace, UID: sa.UID, ResourceVersion: sa.ResourceVersion,
+		Annotations: map[string]string{annStripped: stripNonce}}}
 	if len(refs) > 0 {
-		out.Annotations = map[string]string{annSecretRefs: strings.Join(refs, ",")}
-	} else if v := sa.Annotations[annSecretRefs]; v != "" {
-		out.Annotations = map[string]string{annSecretRefs: v} // already stripped
+		out.Annotations[annSecretRefs] = strings.Join(refs, ",")
+	} else if v := sa.Annotations[annSecretRefs]; v != "" && strippedByAgent(sa.Annotations) {
+		out.Annotations[annSecretRefs] = v // already stripped
 	}
 	return out, nil
 }

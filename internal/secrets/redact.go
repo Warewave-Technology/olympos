@@ -86,6 +86,11 @@ func (h *RedactingHandler) WithGroup(name string) slog.Handler {
 }
 
 func redactAttr(a slog.Attr) slog.Attr {
+	if isSensitiveKey(a.Key) {
+		return slog.String(a.Key, Redacted)
+	}
+	// Resolve first: a LogValuer may produce a group (security review #11).
+	a.Value = a.Value.Resolve()
 	if a.Value.Kind() == slog.KindGroup {
 		g := a.Value.Group()
 		out := make([]any, len(g))
@@ -94,10 +99,7 @@ func redactAttr(a slog.Attr) slog.Attr {
 		}
 		return slog.Group(a.Key, out...)
 	}
-	if isSensitiveKey(a.Key) {
-		return slog.String(a.Key, Redacted)
-	}
-	v := a.Value.Resolve()
+	v := a.Value
 	switch v.Kind() {
 	case slog.KindString:
 		return slog.String(a.Key, RedactString(v.String()))

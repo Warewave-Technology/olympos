@@ -9,6 +9,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -104,14 +105,35 @@ func (d *discovery) resolve(t *pb.Target) (string, error) {
 	if sp == nil {
 		return "", errors.New("service port gone")
 	}
+	var slices []*discoveryv1.EndpointSlice
 	for _, o := range d.eps.List() {
-		es, ok := o.(*discoveryv1.EndpointSlice)
-		if !ok || es.Namespace != t.Namespace || es.Labels[discoveryv1.LabelServiceName] != t.Service {
+		if es, ok := o.(*discoveryv1.EndpointSlice); ok {
+			slices = append(slices, es)
+		}
+	}
+	return pickEndpoint(slices, t.Namespace, t.Service, sp.Name)
+}
+
+// endpointSliceController manages the slices of selector-based Services.
+const endpointSliceController = "endpointslice-controller.k8s.io"
+
+// pickEndpoint returns a ready endpoint of a headless Service. Only slices
+// the EndpointSlice controller made from the Service's selector count, and
+// only IP addresses that are not loopback, link-local (cloud metadata) or
+// unspecified (security review #9): a user who can write EndpointSlices in
+// the namespace must not steer the tunnel to a host name or outside the
+// cluster.
+func pickEndpoint(slices []*discoveryv1.EndpointSlice, namespace, service, portName string) (string, error) {
+	sort.Slice(slices, func(i, j int) bool { return slices[i].Name < slices[j].Name })
+	for _, es := range slices {
+		if es.Namespace != namespace || es.Labels[discoveryv1.LabelServiceName] != service ||
+			es.Labels[discoveryv1.LabelManagedBy] != endpointSliceController ||
+			es.AddressType != discoveryv1.AddressTypeIPv4 && es.AddressType != discoveryv1.AddressTypeIPv6 {
 			continue
 		}
 		port := int32(0)
 		for _, p := range es.Ports {
-			if p.Port != nil && (p.Name == nil && sp.Name == "" || p.Name != nil && *p.Name == sp.Name) {
+			if p.Port != nil && (p.Name == nil && portName == "" || p.Name != nil && *p.Name == portName) {
 				port = *p.Port
 			}
 		}
@@ -122,8 +144,12 @@ func (d *discovery) resolve(t *pb.Target) (string, error) {
 			if ep.Conditions.Ready != nil && !*ep.Conditions.Ready {
 				continue
 			}
-			if len(ep.Addresses) > 0 {
-				return net.JoinHostPort(ep.Addresses[0], strconv.Itoa(int(port))), nil
+			for _, a := range ep.Addresses {
+				ip := net.ParseIP(a)
+				if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+					continue
+				}
+				return net.JoinHostPort(ip.String(), strconv.Itoa(int(port))), nil
 			}
 		}
 	}
@@ -151,8 +177,10 @@ func APIProxyHandler(upstream *url.URL, transport http.RoundTripper) http.Handle
 			r.Out.Host = upstream.Host
 			// The agent's own ServiceAccount token is injected by transport.
 			r.Out.Header.Del("Authorization")
+			// Identity headers the API server could honour with other
+			// authenticators (requestheader front proxy) never pass.
 			for k := range r.Out.Header {
-				if strings.HasPrefix(strings.ToLower(k), "impersonate-") {
+				if lk := strings.ToLower(k); strings.HasPrefix(lk, "impersonate-") || strings.HasPrefix(lk, "x-remote-") || strings.HasPrefix(lk, "x-forwarded-") {
 					r.Out.Header.Del(k)
 				}
 			}

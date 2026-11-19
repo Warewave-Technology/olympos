@@ -391,7 +391,7 @@ func (s *Service) execTool(ctx context.Context, rc runContext) outcome {
 		details["frameworks"] = rc.Frameworks
 	}
 	out := outcome{status: "succeeded", score: n.Score, current: n.Findings, details: details}
-	out.rawPath = s.uploadRaw(ctx, rc, raw, details)
+	out.rawPath = s.uploadRaw(ctx, rc, RedactRawReport(raw), details)
 	return out
 }
 
@@ -553,6 +553,10 @@ func (s *Service) uploadRaw(ctx context.Context, rc runContext, raw []byte, deta
 	}
 	if destID == uuid.Nil || s.Blob == nil {
 		details["raw_report"] = "not stored: set settings key " + RawDestinationSetting + " to a destination id"
+		return ""
+	}
+	if raw == nil {
+		details["raw_report"] = "not stored: the report could not be redacted"
 		return ""
 	}
 	w, err := s.Blob.ForDestination(ctx, destID)

@@ -155,3 +155,40 @@ func TestSecretInventoryReporter(t *testing.T) {
 		}
 	}
 }
+
+// Security review #10: annotations a cluster user sets never make the
+// transforms skip stripping or report spoofed names; the agent's own
+// output is still stripped idempotently.
+func TestStripIgnoresSpoofedMarkers(t *testing.T) {
+	spoofed := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Name: "s", Namespace: "x", Annotations: map[string]string{
+		annKeys: `["fake"]`, annStripped: "guess",
+		"kubectl.kubernetes.io/last-applied-configuration": `{"data":{"password":"CANARY"}}`}}}
+	out, _ := stripSecret(spoofed)
+	m := out.(*metav1.PartialObjectMetadata)
+	if _, ok := m.Annotations["kubectl.kubernetes.io/last-applied-configuration"]; ok || m.Annotations[annKeys] != "" || m.Annotations[annKeysUnknown] != "true" {
+		t.Fatalf("spoofed secret kept: %+v", m.Annotations)
+	}
+	again, _ := stripSecret(m)
+	if again.(*metav1.PartialObjectMetadata).Annotations[annKeysUnknown] != "true" {
+		t.Fatal("not idempotent")
+	}
+
+	keepSecretRefs.Store(true)
+	defer keepSecretRefs.Store(false)
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "x", Annotations: map[string]string{annSecretRefs: "prod-db", annStripped: "guess"}}}
+	po, _ := stripPod(pod)
+	if v := po.(*corev1.Pod).Annotations[annSecretRefs]; v != "" {
+		t.Fatalf("spoofed pod refs: %q", v)
+	}
+	sa := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "x", Annotations: map[string]string{annSecretRefs: "prod-db"}}}
+	so, _ := stripServiceAccount(sa)
+	if v := so.(*corev1.ServiceAccount).Annotations[annSecretRefs]; v != "" {
+		t.Fatalf("spoofed SA refs: %q", v)
+	}
+	real := &corev1.ServiceAccount{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "x"}, Secrets: []corev1.ObjectReference{{Name: "tok"}}}
+	r1, _ := stripServiceAccount(real)
+	r2, _ := stripServiceAccount(r1)
+	if v := r2.(*corev1.ServiceAccount).Annotations[annSecretRefs]; v != "tok" {
+		t.Fatalf("own output not idempotent: %q", v)
+	}
+}

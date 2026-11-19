@@ -69,7 +69,7 @@ func TestSensitiveDataReporter(t *testing.T) {
 	if pem == nil || pem.Confidence != ConfidenceHigh || pem.RuleId != "private-key" {
 		t.Fatalf("private key: %v", pem)
 	}
-	if pw == nil || pw.ValueLength != int64(len(canaryPW)) {
+	if pw == nil || pw.ValueLength != lengthBucket(len(canaryPW)) || pw.ValueLength < int64(len(canaryPW)) || pw.ValueLength&(pw.ValueLength-1) != 0 {
 		t.Fatalf("password: %v", pw)
 	}
 	b, _ := proto.Marshal(rep)

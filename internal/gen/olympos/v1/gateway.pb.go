@@ -1590,7 +1590,7 @@ type SensitiveDataItem struct {
 	RuleId          string                 `protobuf:"bytes,4,opt,name=rule_id,json=ruleId,proto3" json:"rule_id,omitempty"` // gitleaks rule id, or key-name:<word>
 	RuleDescription string                 `protobuf:"bytes,5,opt,name=rule_description,json=ruleDescription,proto3" json:"rule_description,omitempty"`
 	Confidence      string                 `protobuf:"bytes,6,opt,name=confidence,proto3" json:"confidence,omitempty"`                       // high: matched a credential pattern | medium: key name only
-	ValueLength     int64                  `protobuf:"varint,7,opt,name=value_length,json=valueLength,proto3" json:"value_length,omitempty"` // bytes
+	ValueLength     int64                  `protobuf:"varint,7,opt,name=value_length,json=valueLength,proto3" json:"value_length,omitempty"` // bytes, rounded up to a power of two (8..4096)
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }

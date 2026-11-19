@@ -75,12 +75,19 @@ func TestRedaction(t *testing.T) {
 	log.Info("vault token "+canaries[2], "dsn_hint", canaries[3])
 	log.Error("slack failed", "err", errString("token "+canaries[4]+" invalid"))
 	log.With("secret_id", "CANARY-secretid").Info("x")
+	log.Info("login", "creds", groupValuer{}) // a LogValuer that resolves to a group
 	out := buf.String()
-	for _, c := range []string{"CANARY-PW-91c2", "CANARYSIGabc123", "CANARYvaulttoken", "CANARYdsnpw", "xoxb-CANARY", "CANARY-secretid"} {
+	for _, c := range []string{"CANARY-PW-91c2", "CANARYSIGabc123", "CANARYvaulttoken", "CANARYdsnpw", "xoxb-CANARY", "CANARY-secretid", "CANARY-in-group"} {
 		if strings.Contains(out, c) {
 			t.Errorf("secret %q leaked into logs:\n%s", c, out)
 		}
 	}
+}
+
+type groupValuer struct{}
+
+func (groupValuer) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("user", "u"), slog.String("password", "CANARY-in-group"))
 }
 
 type errString string

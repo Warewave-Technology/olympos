@@ -88,6 +88,13 @@ longest retention. *Test destination* verifies delete is refused and warns other
   credentials (gitleaks rules + key names) inside the informer transform and keeps only metadata; the
   `SensitiveDataReport` it sends carries where a match is and which rule matched — never the value, a
   part of it or a hash (enforced by a proto test, e2e canary checks of the server's database and logs).
+- **kubescape and polaris do see ConfigMap values.** They run on the server and read the cluster through
+  the agent's read-only API proxy, which serves ConfigMaps and pod specs (with literal `env` values) by
+  design: the controls need them. The values exist only in the tool process's memory. The raw report
+  Olympos stores (when a raw-report destination is set) is redacted first: ConfigMap/Secret `data`,
+  `binaryData` and `stringData`, container `env[].value`, `last-applied-configuration` and
+  `managedFields` are replaced (security review v0.1 #4). Keep credentials out of ConfigMaps and env
+  literals regardless — that is what *Sensitive data* reports.
 - **Secrets** are never read by default. The opt-in Secret inventory (`secretsInventory.enabled`) lists
   them with their key names only.
   **Kubernetes RBAC has no "metadata only" permission.** Listing Secret metadata requires `list` on

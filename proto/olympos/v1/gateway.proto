@@ -200,7 +200,7 @@ message SensitiveDataItem {
   string rule_id = 4;          // gitleaks rule id, or key-name:<word>
   string rule_description = 5;
   string confidence = 6;       // high: matched a credential pattern | medium: key name only
-  int64 value_length = 7;      // bytes
+  int64 value_length = 7;      // bytes, rounded up to a power of two (8..4096)
 }
 
 message SensitiveDataReport {

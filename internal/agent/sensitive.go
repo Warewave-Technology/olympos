@@ -95,8 +95,19 @@ func (s *sensitiveScanner) scan(cm *corev1.ConfigMap) []*pb.SensitiveDataItem {
 	return out
 }
 
+// lengthBucket reports a value's length as the next power of two (8, 16,
+// 32, ... 4096+): enough to tell a PIN from a key, without the exact size
+// (security review #11).
+func lengthBucket(n int) int64 {
+	b := int64(8)
+	for b < int64(n) && b < 4096 {
+		b *= 2
+	}
+	return b
+}
+
 func (s *sensitiveScanner) scanValue(key, value string) *pb.SensitiveDataItem {
-	n := int64(len(value))
+	n := lengthBucket(len(value))
 	if len(value) > maxSensitiveValue {
 		value = value[:maxSensitiveValue]
 	}

@@ -194,11 +194,13 @@ func stripPod(obj any) (any, error) {
 	}
 	if keepSecretRefs.Load() {
 		// Opt-in Secret inventory (F3): the NAMES of referenced Secrets only.
-		// Transforms may run again on the stripped pod: keep what it has.
+		// Transforms may run again on the stripped pod: keep what it has
+		// (only when the agent stripped it: the annotation is not trusted).
+		out.Annotations = map[string]string{annStripped: stripNonce}
 		if refs := PodSecretRefs(p); len(refs) > 0 {
-			out.Annotations = map[string]string{annSecretRefs: strings.Join(refs, ",")}
-		} else if v := p.Annotations[annSecretRefs]; v != "" {
-			out.Annotations = map[string]string{annSecretRefs: v}
+			out.Annotations[annSecretRefs] = strings.Join(refs, ",")
+		} else if v := p.Annotations[annSecretRefs]; v != "" && strippedByAgent(p.Annotations) {
+			out.Annotations[annSecretRefs] = v
 		}
 	}
 	for _, c := range p.Spec.Containers {

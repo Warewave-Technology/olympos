@@ -2,8 +2,19 @@ package audit
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -27,7 +38,10 @@ const maxProxyTunnels = 4
 // APIProxy is a local listener on 127.0.0.1 that forwards kube-apiserver
 // requests from a server-side tool (kubescape, polaris) through the agent's
 // read-only API proxy (SPEC §7, §12.1). It also owns a temporary kubeconfig
-// that points at the listener and carries no credentials.
+// that points at the listener; its only credential is a random token for
+// this listener, so other local processes cannot use it (security review
+// #11). The listener speaks TLS with a certificate made for this run
+// (client-go sends tokens only over TLS). No cluster credential is involved.
 //
 // Defense in depth: non-GET requests are refused here too, before anything
 // crosses the tunnel; the agent enforces the same rule (and rejects Secret
@@ -35,8 +49,10 @@ const maxProxyTunnels = 4
 type APIProxy struct {
 	// Kubeconfig is the path of the generated kubeconfig (0600, private dir).
 	Kubeconfig string
-	// URL is the listener's base URL (http://127.0.0.1:<port>).
+	// URL is the listener's base URL (https://127.0.0.1:<port>).
 	URL string
+	// CAPEM is the listener's self-signed certificate (in the kubeconfig).
+	CAPEM []byte
 
 	dir    string
 	ln     net.Listener
@@ -61,14 +77,27 @@ func StartAPIProxy(ctx context.Context, dial DialFunc, log *slog.Logger) (*APIPr
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	cert, caPEM, err := listenerCert()
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	tb := make([]byte, 32)
+	if _, err := rand.Read(tb); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("api proxy listener: %w", err)
 	}
+	ln := tls.NewListener(tcp, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	token := hex.EncodeToString(tb)
+	want := []byte("Bearer " + token)
 	ctx, cancel := context.WithCancel(ctx)
 	p := &APIProxy{dir: dir, ln: ln, cancel: cancel, done: make(chan struct{}),
-		URL: "http://" + ln.Addr().String()}
+		URL: "https://" + ln.Addr().String(), CAPEM: caPEM}
 
 	p.tr = &http.Transport{
 		DialContext:           func(dctx context.Context, _, _ string) (net.Conn, error) { return dial(dctx) },
@@ -102,6 +131,10 @@ func StartAPIProxy(ctx context.Context, dial DialFunc, log *slog.Logger) (*APIPr
 	}
 	p.srv = &http.Server{
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+				http.Error(w, "olympos api proxy: unauthorized", http.StatusUnauthorized)
+				return
+			}
 			if r.Method != http.MethodGet {
 				http.Error(w, "olympos api proxy is read-only", http.StatusForbidden)
 				return
@@ -117,7 +150,7 @@ func StartAPIProxy(ctx context.Context, dial DialFunc, log *slog.Logger) (*APIPr
 	}()
 
 	p.Kubeconfig = filepath.Join(dir, "kubeconfig")
-	if err := os.WriteFile(p.Kubeconfig, []byte(Kubeconfig(p.URL)), 0o600); err != nil {
+	if err := os.WriteFile(p.Kubeconfig, []byte(Kubeconfig(p.URL, caPEM, token)), 0o600); err != nil {
 		p.Close()
 		return nil, fmt.Errorf("write kubeconfig: %w", err)
 	}
@@ -140,13 +173,14 @@ func (p *APIProxy) Close() {
 
 // Kubeconfig renders a kubeconfig for server with no credentials at all
 // (no token, no client certificate, no exec plugin).
-func Kubeconfig(server string) string {
+func Kubeconfig(server string, caPEM []byte, token string) string {
 	return `apiVersion: v1
 kind: Config
 clusters:
 - name: olympos
   cluster:
     server: ` + server + `
+    certificate-authority-data: ` + base64.StdEncoding.EncodeToString(caPEM) + `
 contexts:
 - name: olympos
   context:
@@ -155,7 +189,27 @@ contexts:
 current-context: olympos
 users:
 - name: olympos
-  user: {}
+  user: {token: ` + token + `}
 preferences: {}
 `
+}
+
+// listenerCert makes a short-lived self-signed certificate for 127.0.0.1.
+func listenerCert() (tls.Certificate, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	tmpl := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: "olympos audit proxy"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true, IsCA: true, IPAddresses: []net.IP{net.IPv4(127, 0, 0, 1)},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		return tls.Certificate{}, nil, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), nil
 }

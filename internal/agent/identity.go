@@ -185,7 +185,12 @@ func (a *Agent) renewLoop(ctx context.Context, client pb.AgentGatewayClient) {
 		}
 		key, csr, err := newKeyAndCSR()
 		if err != nil {
-			a.log.Error("renew: key generation", "err", err)
+			a.log.Error("renew: key generation; retrying in 1m", "err", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Minute):
+			}
 			continue
 		}
 		resp, err := client.RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
@@ -199,7 +204,12 @@ func (a *Agent) renewLoop(ctx context.Context, client pb.AgentGatewayClient) {
 			continue
 		}
 		if err := a.id.set(resp.CertDer, key); err != nil {
-			a.log.Error("renew: bad certificate", "err", err)
+			a.log.Error("renew: bad certificate; retrying in 10m", "err", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Minute):
+			}
 			continue
 		}
 		_, leaf = a.id.get()
