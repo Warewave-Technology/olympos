@@ -15,12 +15,19 @@ JAR=$(mktemp)
 
 log "local PostgreSQL 16"
 apt-get update -qq && apt-get install -y -qq postgresql-16 postgresql-client-16 jq >/dev/null
+# GitHub runners ship PostgreSQL preinstalled with the service disabled, so
+# the install above neither creates nor starts a cluster there.
+pg_lsclusters -h | grep -q '^16 main ' || pg_createcluster 16 main >/dev/null
+systemctl enable --now postgresql >/dev/null
+pg_ctlcluster 16 main start 2>/dev/null || true
+for i in $(seq 30); do pg_isready -q -h /var/run/postgresql && break; sleep 1; done
+pg_isready -h /var/run/postgresql
 
 log "install $deb"
 apt-get install -y -qq "./$deb" >/dev/null
 id olympos
-sudo -u postgres createuser olympos 2>/dev/null || true
-sudo -u postgres createdb -O olympos olympos 2>/dev/null || true
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'olympos'" | grep -q 1 || sudo -u postgres createuser olympos
+sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname = 'olympos'" | grep -q 1 || sudo -u postgres createdb -O olympos olympos
 
 log "kind cluster with a PostgreSQL target"
 kind create cluster --name smoke --wait 2m >/dev/null
