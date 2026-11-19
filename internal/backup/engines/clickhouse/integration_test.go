@@ -162,13 +162,21 @@ func (e *chEnv) ec(useTLS bool, opts any) backup.EngineContext {
 func clickhouseClient(t *testing.T, stdin []byte, user, pass string, args ...string) string {
 	t.Helper()
 	full := append([]string{"exec", "-i", chContainer, "clickhouse-client", "-u", user, "--password", pass}, args...)
-	cmd := exec.Command("docker", full...)
+	// A hung client (seen once on CI) fails with the server log instead of
+	// running into the package timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "docker", full...)
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("clickhouse-client %v: %v\n%s", args, err, out)
+		logs := ""
+		if ctx.Err() != nil {
+			logs, _ = docker("logs", "--tail", "80", chContainer)
+		}
+		t.Fatalf("clickhouse-client %v: %v\n%s\n%s", args, err, out, logs)
 	}
 	return strings.TrimSpace(string(out))
 }

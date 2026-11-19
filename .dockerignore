@@ -3,3 +3,4 @@ web/node_modules
 bin
 tmp
 test/e2e/.work
+dist

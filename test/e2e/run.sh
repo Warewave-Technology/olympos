@@ -89,7 +89,12 @@ if ! helm -n kyverno list -o json 2>/dev/null | grep -q "kyverno-$KYVERNO_CHART"
     --set admissionController.replicas=1 --set backgroundController.replicas=1 \
     --set cleanupController.enabled=false --set reportsController.replicas=1 >/dev/null
 fi
-kubectl apply -f test/e2e/manifests/kyverno-vpol.yaml >/dev/null
+# The admission webhook can lag the Deployment's readiness for a while.
+for i in $(seq 1 24); do
+  kubectl apply -f test/e2e/manifests/kyverno-vpol.yaml >/dev/null 2>&1 && break
+  [ "$i" = 24 ] && kubectl apply -f test/e2e/manifests/kyverno-vpol.yaml >/dev/null
+  sleep 5
+done
 case "$KYVERNO_CHART" in
   3.10.*|3.1[1-9].*) kubectl delete -f test/e2e/manifests/kyverno-policy.yaml --ignore-not-found >/dev/null 2>&1 || true ;;
   *) kubectl apply -f test/e2e/manifests/kyverno-policy.yaml >/dev/null ;;
