@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/robfig/cron/v3"
 
 	"github.com/Warewave-Technology/olympos/internal/store"
@@ -96,14 +97,19 @@ var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance,
 
 // RunLeader runs tick every interval while holding the advisory lock. Only
 // one replica holds it at a time; others retry each interval.
+//
+// The lock is held on a dedicated connection outside the pool: a session lock
+// pins its connection for as long as leadership lasts, and with one pinned
+// pool connection per leader a small pool (pgxpool's default is the CPU
+// count) is exhausted, leaving ticks and /readyz waiting forever.
 func RunLeader(ctx context.Context, db *store.DB, key int64, interval time.Duration, log *slog.Logger, tick func(ctx context.Context) error) {
 	for {
 		held := func() bool {
-			conn, err := db.Acquire(ctx)
+			conn, err := pgx.ConnectConfig(ctx, db.Config().ConnConfig.Copy())
 			if err != nil {
 				return false
 			}
-			defer conn.Release()
+			defer func() { _ = conn.Close(context.Background()) }()
 			var ok bool
 			if err := conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&ok); err != nil || !ok {
 				return false

@@ -10,6 +10,7 @@ import (
 	"embed"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -32,6 +33,9 @@ type Querier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// minPoolConns is the pool size used unless the DSN sets pool_max_conns.
+const minPoolConns = 16
+
 // Open connects and verifies the connection.
 func Open(ctx context.Context, dsn string) (*DB, error) { return OpenWithPassword(ctx, dsn, "") }
 
@@ -43,6 +47,11 @@ func OpenWithPassword(ctx context.Context, dsn, password string) (*DB, error) {
 	}
 	if password != "" {
 		cfg.ConnConfig.Password = password
+	}
+	// pgxpool defaults to max(4, CPUs) connections, too few for the web
+	// API, the agent gateway and the background loops on a small host.
+	if !strings.Contains(dsn, "pool_max_conns") && cfg.MaxConns < minPoolConns {
+		cfg.MaxConns = minPoolConns
 	}
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
