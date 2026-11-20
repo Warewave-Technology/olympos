@@ -35,6 +35,15 @@ v0.1 runs one instance: keep `replicas: 1`. During a rolling restart the new ins
 the old one has stopped (instances heartbeat every 10 seconds and count as gone after 30). See
 [Configuration](configuration.md) for the database settings.
 
+## The server stops at start: pgcrypto is not available
+
+> migrate: ERROR 00001_init.sql: … ERROR: extension "pgcrypto" is not available
+
+Olympos' schema uses the `pgcrypto` extension. On Rocky/Alma install `postgresql16-contrib` (Debian and
+Ubuntu ship it in `postgresql-16`); on Azure Database for PostgreSQL allow it in the server parameter
+`azure.extensions` (`PGCRYPTO`). `sudo -u olympos olympos-server check-config -db` reports this before the
+first start.
+
 ## Backups fail with a TLS error
 
 > no CA is trusted for targets: set targetTLS.caBundleFile (PEM with the CAs that issue your targets'

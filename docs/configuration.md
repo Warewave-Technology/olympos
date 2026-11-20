@@ -25,15 +25,19 @@ back to the default. Durations use Go syntax: `72h`, `5m`, `30m`.
 olympos-server check-config [-config FILE] [-db]
 ```
 
+On systemd, run it as the service user, `sudo -u olympos olympos-server check-config -db`: the local
+database authenticates the operating system user, so as root it fails with `role "root" does not exist`.
+
 `check-config` loads the file, applies defaults and environment overrides, and runs the validation
 below. It then checks that these files exist: `listen.tlsCertFile`, `listen.tlsKeyFile`,
 `gateway.tlsCertFile`, `gateway.tlsKeyFile`, `database.passwordFile`, `targetTLS.caBundleFile`. It loads
 the `listen` key pair, and looks up `audit.kubescapeBin`, `audit.polarisBin` and `security.trivyBin`
-on `PATH`. With `-db` it also builds the Key Vault client, resolves `database.dsnRef` and connects to the
-database. It prints `config ok` on success.
-
-`check-config` does **not** check `backup.storageCABundleFile`, the contents of `targetTLS.caBundleFile` or
-the `keyVault.references` rules. The server checks those at start and refuses to start if they are wrong.
+on `PATH`, parses the `targetTLS.caBundleFile` and `backup.storageCABundleFile` certificates and the
+`keyVault.references` rules. With
+`-db` it also builds the Key Vault client, resolves `database.dsnRef`, connects to the database and checks
+that the `pgcrypto` extension is available, reads the
+HMAC secret and wraps and unwraps a test value with the KEK, as the server does at start. Purge protection
+off is printed as a warning. It prints `config ok` on success.
 
 In Kubernetes:
 

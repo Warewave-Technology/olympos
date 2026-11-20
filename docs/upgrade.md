@@ -27,8 +27,10 @@ sudo dnf install ./olympos-server-<version>-1.x86_64.rpm     # Rocky / Alma
 ```
 
 The package restarts a running service, which migrates the database at start. To migrate separately
-first, stop the service and run `sudo olympos-server migrate`. `sudo olympos-server check-config -db`
-validates `/etc/olympos/config.yaml` and the database connection.
+first, stop the service and run `sudo -u olympos olympos-server migrate`.
+`sudo -u olympos olympos-server check-config -db` validates `/etc/olympos/config.yaml`, the database
+connection and Key Vault access. Run both as `olympos`: the local database authenticates the operating
+system user (peer), and only the `olympos` role exists.
 
 ## Agents
 

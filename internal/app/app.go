@@ -173,6 +173,19 @@ func CheckConfig(cfgPath string, db bool) error {
 			problems = append(problems, fmt.Sprintf("%s (%s): %v", what, bin, err))
 		}
 	}
+	// What the server checks at start without the network: the target and
+	// storage CA bundles' contents and the kv:// reference rules.
+	if len(problems) == 0 {
+		if err := targettls.Configure(cfg.TargetTLS.CABundleFile, cfg.TargetTLS.SystemRoots); err != nil {
+			problems = append(problems, "targetTLS: "+err.Error())
+		}
+	}
+	if err := configureRefPolicy(cfg); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if _, err := storageOptions(cfg); err != nil {
+		problems = append(problems, "backup.storageCABundleFile: "+err.Error())
+	}
 	if len(problems) > 0 {
 		return errors.New("config problems:\n  - " + strings.Join(problems, "\n  - "))
 	}
@@ -186,9 +199,63 @@ func CheckConfig(cfgPath string, db bool) error {
 		if err := d.openDatabase(ctx, 0); err != nil {
 			return err
 		}
+		err := checkDatabase(ctx, d.DB)
 		d.DB.Close()
+		if err != nil {
+			return err
+		}
+		// The Key Vault steps the server needs at start: without them it
+		// exits right after "config ok" would have been printed.
+		if err := checkKeyVault(ctx, d); err != nil {
+			return err
+		}
 	}
 	fmt.Println("config ok")
+	return nil
+}
+
+// checkDatabase checks what the first migration needs: the pgcrypto
+// extension, which some distributions ship in a separate contrib package.
+func checkDatabase(ctx context.Context, db *store.DB) error {
+	var ok bool
+	if err := db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pgcrypto')`).Scan(&ok); err != nil {
+		return fmt.Errorf("database: %w", err)
+	}
+	if !ok {
+		return errors.New("database: the pgcrypto extension is not available: install the PostgreSQL contrib package " +
+			"(Rocky/Alma: postgresql16-contrib) or, on Azure Database for PostgreSQL, allow PGCRYPTO in azure.extensions")
+	}
+	return nil
+}
+
+// checkKeyVault reads the HMAC secret and wraps and unwraps a test value with
+// the KEK, as the server does at start. Purge protection off is a warning:
+// the server starts and shows it under Needs attention.
+func checkKeyVault(ctx context.Context, d *Deps) error {
+	cfg := d.Cfg
+	if _, err := d.KV.GetSecret(ctx, cfg.KeyVault.Name, cfg.KeyVault.HMACSecretName); err != nil {
+		if !(errors.Is(err, secrets.ErrSecretNotFound) && cfg.DevMode) {
+			return fmt.Errorf("key vault: read the HMAC secret %s/%s: %w", cfg.KeyVault.Name, cfg.KeyVault.HMACSecretName, err)
+		}
+	}
+	env := &secrets.Envelope{KV: d.KV}
+	aad := []byte("olympos-check-config")
+	sealed, err := env.Seal(ctx, []byte("check"), aad)
+	if err == nil {
+		_, err = env.Open(ctx, sealed, aad)
+	}
+	if err != nil {
+		return fmt.Errorf("key vault: wrap and unwrap with the KEK %s/%s (needs Key Vault Crypto User): %w", cfg.KeyVault.Name, cfg.KeyVault.KEKName, err)
+	}
+	if rc, ok := d.KV.(secrets.RecoveryChecker); ok {
+		okRec, level, err := rc.KEKRecoverable(ctx)
+		switch {
+		case err != nil:
+			fmt.Fprintf(os.Stderr, "warning: could not check purge protection of the KEK: %v\n", err)
+		case !okRec:
+			fmt.Fprintf(os.Stderr, "warning: Key Vault purge protection is off (%s): enable soft delete and purge protection\n", level)
+		}
+	}
 	return nil
 }
 

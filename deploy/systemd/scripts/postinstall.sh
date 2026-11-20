@@ -20,6 +20,6 @@ if [ -d /run/systemd/system ]; then
     systemctl restart olympos-server
   else
     echo "olympos-server installed. Edit /etc/olympos/config.yaml, then:"
-    echo "  sudo olympos-server check-config -db && sudo systemctl enable --now olympos-server"
+    echo "  sudo -u olympos olympos-server check-config -db && sudo systemctl enable --now olympos-server"
   fi
 fi
