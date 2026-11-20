@@ -100,7 +100,9 @@ Start with [Getting started](docs/getting-started.md); the full map is in [docs/
 | | |
 |---|---|
 | [Getting started](docs/getting-started.md) | The local lab, step by step with screenshots |
-| [Install on Kubernetes](docs/install.md) · [on a Linux VM](docs/install-systemd.md) | Production installation |
+| [Azure prerequisites](docs/azure.md) · [Install on Kubernetes](docs/install.md) · [on a Linux VM](docs/install-systemd.md) | Production installation |
+| [Configuration](docs/configuration.md) · [Upgrading](docs/upgrade.md) · [Troubleshooting](docs/troubleshooting.md) | Running it |
+| [Access](docs/access.md) · [Findings and events](docs/findings-and-events.md) | Roles and scopes; what each finding and notification means |
 | [Security model](docs/security-model.md) · [Security review v0.1](docs/security-review-v0.1.md) | Trust boundaries, what is enforced where, accepted trade-offs |
 | [Restore](docs/restore.md) · [Restoring Olympos](docs/restore-olympos.md) | Recovering targets and Olympos itself |
 | [REST API](docs/openapi.yaml) | OpenAPI description of `/api/v1` |

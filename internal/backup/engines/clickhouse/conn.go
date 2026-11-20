@@ -28,7 +28,7 @@ const (
 // ErrNoTLS: transfer mode e2e-tls and the target has no TLS on the port.
 var ErrNoTLS = errors.New("clickhouse: this target has no TLS on this port, and the native protocol would send the password in clear, " +
 	"so Olympos refuses it in transfer mode e2e-tls. Enable TLS on the target (tcp_port_secure) and point the target at that port, " +
-	"or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters")
+	"or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters & agents")
 
 // session is one native-protocol connection to the target.
 type session struct {

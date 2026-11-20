@@ -12,16 +12,15 @@ data:
 {{- fail "postgresql.bundled=true and olympos.database.dsn/dsnRef are both set: set postgresql.bundled=false to use an external database" }}
 {{- end }}
 {{- $_ := set $o "database" (dict "dsn" (printf "postgres://olympos@%s-postgresql.%s.svc:5432/olympos?sslmode=disable" .Release.Name .Release.Namespace) "passwordFile" "/etc/olympos/db/password") }}
+{{- else if not (or .Values.olympos.database.dsnRef .Values.olympos.database.dsn) }}
+{{- fail "postgresql.bundled=false needs olympos.database.dsnRef (or dsn): the server has no database otherwise" }}
+{{- end }}
+{{- /* Sections the chart owns are merged with what the user set, never written
+       twice (a duplicate key stops the server). The listen ports must match
+       the container ports; TLS files and other keys are the user's. */}}
+{{- $_ := set $o "experimental" (merge (dict "multiReplica" .Values.experimental.multiReplica) (default (dict) $o.experimental)) }}
+{{- $_ := set $o "listen" (merge (dict "http" ":8080" "gateway" ":8443" "metrics" ":9090") (default (dict) $o.listen)) }}
+{{- if .Values.gatewayTLSSecret }}
+{{- $_ := set $o "gateway" (merge (dict "tlsCertFile" "/etc/olympos/gateway-tls/tls.crt" "tlsKeyFile" "/etc/olympos/gateway-tls/tls.key") (default (dict) $o.gateway)) }}
 {{- end }}
 {{ toYaml $o | indent 6 }}
-      experimental:
-        multiReplica: {{ .Values.experimental.multiReplica }}
-      listen:
-        http: ":8080"
-        gateway: ":8443"
-        metrics: ":9090"
-      {{- if .Values.gatewayTLSSecret }}
-      gateway:
-        tlsCertFile: /etc/olympos/gateway-tls/tls.crt
-        tlsKeyFile: /etc/olympos/gateway-tls/tls.key
-      {{- end }}

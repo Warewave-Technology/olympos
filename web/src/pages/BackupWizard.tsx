@@ -440,7 +440,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
               </dl>
               {target.tls_ok === false && (
                 <div className="note warn">
-                  This target has no TLS. Backups are allowed, but the target gets a <span className="mono">tls.missing</span> finding in Security. Enable TLS on the database and set <span className="mono">olympos.io/tls-server-name</span> to fix it.
+                  This target has no TLS. Backups are allowed, but the target gets a <span className="mono">tls.missing</span> finding and shows <i>TLS: No</i> under Backups. Enable TLS on the database and set <span className="mono">olympos.io/tls-server-name</span> to fix it.
                 </div>
               )}
               {target.status === 'gone' && <div className="note crit">The agent no longer reports this Service. Jobs referencing it are paused.</div>}

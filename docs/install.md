@@ -33,7 +33,8 @@ are required. To try Olympos first, without Azure, see [Getting started](getting
 **Soft delete and purge protection must be on.** Olympos encrypts its secrets with a KEK in Key Vault
 (envelope encryption): a dump of the Olympos database (the built-in `olympos-self` backup) is useless
 without that key. `deploy/bicep/keyvault.bicep` creates a vault with both enabled, the KEK and the role
-assignments. The server checks the KEK's recovery level at startup (needs `keys/get`, part of *Key Vault
+assignments, but no secrets; [Azure prerequisites](azure.md) walks through it, the managed identity and
+Workload Identity step by step. The server checks the KEK's recovery level at startup (needs `keys/get`, part of *Key Vault
 Crypto User*) and shows "Key Vault · purge protection is off" in *Needs attention* otherwise.
 
 ```bash
@@ -71,7 +72,7 @@ olympos:
     # references:
     #   - {ref: "kv-platform-weu/dev-*", scope: "env=dev"}
     #   - {ref: "kv-platform-weu/prod-*", scope: "env=prod"}
-    managedIdentityClientID: <managed identity client id>
+    # managedIdentityClientID: leave empty with Workload Identity (it would bypass it; see azure.md)
   # database: by default the chart runs a bundled PostgreSQL 16 in the same namespace
   # (postgresql.bundled=true). For an external one: postgresql.bundled=false and
   #   database: {dsnRef: kv://kv-platform-weu/olympos-db-dsn}
@@ -355,6 +356,8 @@ no buttons, never secret values.
 - `/metrics` on `:9090` (agents online, tunnels, backup durations/results, scheduler lag, outbox
   backlog, change requests). `/healthz`, `/readyz`.
 - Logs are JSON (slog) with a redaction layer.
-- Upgrade: `helm upgrade`. Migrations run at start-up.
-- Restore procedures: `docs/restore.md` (targets) and `docs/restore-olympos.md` (Olympos itself).
-  Vault break-glass: `docs/runbooks/vault-break-glass.md`.
+- Upgrade: read the release's upgrade notes and back up Olympos first; see [Upgrading](upgrade.md).
+  Migrations run at start-up; downgrades are refused.
+- Restore procedures: [Restoring backups](restore.md) and [Restoring Olympos](restore-olympos.md).
+  Vault break-glass: [runbook](runbooks/vault-break-glass.md).
+- When something does not work: [Troubleshooting](troubleshooting.md).

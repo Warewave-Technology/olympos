@@ -186,7 +186,7 @@ func Sanitize(err error) error {
 		// new secret values would cross the agent in clear.
 		return errors.New("this vault serves plain HTTP, but Olympos requires TLS end-to-end for vaults " +
 			"(otherwise the root token, AppRole tokens and secret values cross the agent in clear). " +
-			"Enable TLS on the vault listener, or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters")
+			"Enable TLS on the vault listener, or, accepting that risk, set this cluster's transfer mode to compressed in Settings › Clusters & agents")
 	}
 	return errors.New("could not reach vault: " + firstLine(err.Error()))
 }

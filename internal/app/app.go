@@ -400,12 +400,12 @@ func (d *Deps) checkKEKRecovery(ctx context.Context) []inventory.AttentionItem {
 	case err != nil:
 		d.Log.Warn("could not check Key Vault purge protection", "err", err)
 		return []inventory.AttentionItem{{Kind: "kek_recovery_unknown", Severity: "warn", Label: "Key Vault",
-			Detail: "could not check purge protection of the KEK (needs keys/get)", Link: "/settings"}}
+			Detail: "could not check purge protection of the KEK (needs keys/get)", Link: "/backups?self=1"}}
 	case !okRec:
 		d.Log.Error("Key Vault purge protection is off: the KEK can be purged and every Olympos backup of its own database becomes useless",
 			"recovery_level", level)
 		return []inventory.AttentionItem{{Kind: "kek_purgeable", Severity: "crit", Label: "Key Vault",
-			Detail: "purge protection is off (" + level + "): enable soft delete and purge protection", Link: "/settings"}}
+			Detail: "purge protection is off (" + level + "): enable soft delete and purge protection", Link: "/backups?self=1"}}
 	}
 	return nil
 }

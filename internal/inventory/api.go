@@ -717,7 +717,7 @@ var errConflict = errors.New("conflict")
 
 // AttentionItem is one entry of the Needs-attention strip.
 type AttentionItem struct {
-	Kind     string `json:"kind"`     // agent_offline | backup_failed | backup_missed | approvals | eol | critical_cves
+	Kind     string `json:"kind"`     // agent_offline | backup_failed | backup_missed | target_tls_changed | self_backup_failed | self_backup_unset | kek_purgeable | kek_recovery_unknown | critical_cves | approvals | eol (docs/findings-and-events.md)
 	Severity string `json:"severity"` // crit | warn
 	Label    string `json:"label"`
 	Detail   string `json:"detail"`

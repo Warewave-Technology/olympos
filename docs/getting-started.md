@@ -212,6 +212,12 @@ changed since the previous run:
 
 ![Audit](images/audit.png)
 
+Findings are kept either way. To keep each run's full report as well (redacted: no ConfigMap or Secret data,
+no literal env values), choose a destination under **Raw reports** on the same page; a global admin can set
+it. Olympos never deletes these reports, so add a lifecycle rule for `audit/` on the storage.
+
+![Raw reports](images/audit-raw-reports.png)
+
 ## 9. Look at security
 
 **Security** shows, per cluster, the running images with their CVEs (scanned by digest with Trivy on the
@@ -247,7 +253,10 @@ agent reported and explains which rule allowed or denied it.
 
 ## Next steps
 
-- Install for real: [on Kubernetes](install.md) or [on a Linux VM](install-systemd.md).
+- Install for real: [Azure prerequisites](azure.md), then [on Kubernetes](install.md) or
+  [on a Linux VM](install-systemd.md). Every setting is in [Configuration](configuration.md).
+- Who can do what: [Access](access.md). What a finding or notification means: [Findings and events](findings-and-events.md).
+- When something does not work: [Troubleshooting](troubleshooting.md).
 - How Olympos protects credentials and data: [Security model](security-model.md).
 - Restore a backup: [Restore](restore.md), and [Restoring Olympos](restore-olympos.md).
 - Re-take these screenshots after a UI change: `./test/e2e/env.sh`, then `cd web && pnpm docs-tour`.

@@ -1,0 +1,344 @@
+# Findings, Needs attention and events
+
+You see a finding, a *Needs attention* item on the Dashboard or a Slack message, and you want to know
+what it means and how to make it go away. This page lists each one, what triggers it, what to do and
+how it closes.
+
+- [Three kinds of signal](#three-kinds-of-signal)
+- [Needs attention](#needs-attention)
+- [Findings by source](#findings-by-source)
+- [Events and notifications](#events-and-notifications)
+- [Fixing at the source](#fixing-at-the-source)
+
+## Three kinds of signal
+
+| | What it is | Where you see it | How it goes away |
+|---|---|---|---|
+| **Finding** | A stored record of one problem on one resource in one cluster: source, control ID, severity, resource, title. It is `open` or `resolved`. | *Security* tabs, *Audit*, the *Vaults* list, and `GET /api/v1/findings`. | Olympos resolves it by itself once the problem is gone. |
+| **Needs attention** | A strip of links at the top of the Dashboard (*Fleet overview*). It is computed each time the Dashboard loads; nothing is stored. | Dashboard only. Each item links to the page where you fix it. | It disappears when its condition is no longer true. |
+| **Event** | A message written to the outbox when something happens (a backup failed, a CR was opened, new findings). | Slack channels you route it to under *Settings › Notifications*. Many events also leave a row in the activity log (*Audit › Platform activity*). | Events are not closed. Each is delivered once per channel. |
+
+### How findings open and resolve
+
+A finding is keyed by source, cluster, control ID and resource. Only one open finding exists per key.
+Seeing the same problem again updates its *last seen* time; it does not create a second finding.
+
+Most sources are **diffed run over run**: each run or agent report is the full current set, new keys
+open, and keys that are missing are resolved. This applies to Kubescape, Polaris, kube-bench, Kyverno,
+NetworkPolicies, sensitive data and the Secret inventory. Three sources open and resolve one finding at
+a time when a state changes: `tls`, `transfer` and `vault-drift`. The details are in each section below.
+
+Some rules hold across sources:
+
+- **Audit runs (Kubescape, Polaris, kube-bench) only diff on success.** A failed run resolves nothing.
+  In a kube-bench run, nodes whose Job failed or timed out keep their open findings.
+- **Agent reports (Kyverno, NetworkPolicies, sensitive data, Secret inventory) are diffed on every
+  report.** If an agent resends a report identical to the last one within an hour, the server skips
+  it.
+- **Resolved findings are kept**, with when they were first seen, last seen and resolved.
+
+### Acknowledge, suppress, ignore
+
+There is no way to acknowledge, snooze, suppress or accept a finding in Olympos. Its status is either
+`open` or `resolved`, and only the checks above change it. To make a finding go away, fix the cause, or
+change what is scanned:
+
+- Namespaces in `security.systemNamespaces` (server) are skipped by the NetworkPolicy, sensitive-data
+  and Secret-inventory checks. The default list is `kube-system`, `kube-public`, `kube-node-lease`,
+  `olympos-system` and `olympos-bench`.
+- The agent's `sensitiveData.excludeNamespaces` Helm value limits where it scans ConfigMaps.
+- `security.secretsInventory.reportUnmanaged: false` (server) turns off `secret.unmanaged`.
+- Kubescape, Polaris and Kyverno have their own exception mechanisms. Olympos records what the tool
+  reports.
+
+See [configuration](configuration.md) for these settings.
+
+### Severities
+
+Findings use `critical`, `high`, `medium`, `low` and `info`. The UI shows them as *Critical*, *High*,
+*Medium*, *Low* and *Info*. Lists sort the most severe first, then the newest. Needs attention items
+are either `crit` (red) or `warn` (amber), and the `crit` ones come first.
+
+## Needs attention
+
+The Dashboard shows only what you are allowed to see. Cluster items cover the clusters in your scope.
+The Olympos and Key Vault items need global read access. The approvals item needs approve rights on the
+vault's cluster.
+
+| Item as shown | Severity | Why it appears | What to do | Links to |
+|---|---|---|---|---|
+| **Agent offline** · `<cluster> · <time>` | crit | The cluster is marked offline and was last seen more than 5 minutes ago. | Check the agent pod and its outbound connection to the gateway. See [troubleshooting](troubleshooting.md). | *Settings › Clusters & agents* (that cluster) |
+| **Backup failed** · `<service> · <error>` | crit | In the last 48 hours, the latest finished run of a backup job failed. Test runs and failures marked `agent_disconnected: retrying` are left out. | Open the run, read the error and its steps, fix the cause, then run it again or wait for the next schedule. | *Backups* (that job) |
+| **Backup missed** · `<service>` | crit | In the last 48 hours, the latest run of a job was `missed`: the scheduler did not start it, or the agent stayed away past the window. | Check that the server was up and the agent connected at the scheduled time. | *Backups* (that job) |
+| **TLS name changed** · `<ns>/<svc> asks for <name>; still verifying <pinned>` | crit | A target's `olympos.io/tls-server-name` annotation no longer matches the name Olympos pinned when it first saw the target. Backups and Vault calls keep verifying the pinned name. | If you expected the change, an admin of that cluster clicks *Accept new name* under *Backups*. If not, revert the annotation and find out who edited the Service. | *Backups* (*TLS name changed* card) |
+| **Olympos backup failed** · `<error>` | crit | The latest finished run of the built-in `olympos-self` job in the last 48 hours failed. | Open the *Olympos database* card under *Backups* and check the run and its destination. | *Backups* (*Olympos database* card) |
+| **Key Vault** · `purge protection is off (<level>): enable soft delete and purge protection` | crit | When the server started, the KEK's recovery level was not recoverable with purge protection. A dump of the Olympos database is useless without that key. | Turn on soft delete and purge protection on the vault, then restart the server ([below](#key-vault-purge-protection)). | *Backups* (*Olympos database* card) |
+| **Critical CVEs** · `N new in M images` | crit | A critical CVE was first seen in the last 24 hours in an image running in your clusters. | Open *Security › Images*, sort by *Critical*, and use *Fix* (fixed-in version) to plan an image update. | *Security* |
+| **Olympos backup** · `choose where the Olympos database is backed up` | warn | The built-in `olympos-self` job has no destination yet. | An admin picks a destination on the *Olympos database* card. It runs daily at 02:30 UTC by default. | *Backups* (*Olympos database* card) |
+| **Key Vault** · `could not check purge protection of the KEK (needs keys/get)` | warn | The check at startup failed, usually because the server's identity cannot read the key's properties. | Grant the server identity `keys/get` on the key (the *Key Vault Crypto User* role includes it), then restart the server. | *Backups* (*Olympos database* card) |
+| **N approvals** · `waiting for you · oldest <time> left` | warn | Pending change requests you may approve and that you did not open yourself. *Time left* is the earliest expiry. | Review them under *Approvals* before they expire. | *Approvals* |
+| **End of life** · `N clusters on v1.x, …` | warn | At least one cluster runs a Kubernetes minor version past its upstream end of life. | Plan an upgrade. The *Version matrix* marks those versions *EOL*. | Dashboard, filtered to EOL clusters |
+
+The API names these kinds `agent_offline`, `backup_failed`, `backup_missed`, `target_tls_changed`,
+`self_backup_failed`, `kek_purgeable`, `critical_cves`, `self_backup_unset`, `kek_recovery_unknown`,
+`approvals` and `eol` (`GET /api/v1/dashboard`, field `attention`).
+
+The two Key Vault items are checked **once, at server start**. They stay on the Dashboard until the
+server restarts, even after you fix the vault.
+
+**Not in Needs attention.** Version skew (kubelet older than the API server) is a Dashboard tile,
+*Version skew*, not an item. So is the *Agent offline* count. Open findings from Security or Audit are
+not Needs attention items either; only new critical CVEs are.
+
+## Findings by source
+
+The source is the `source` field of a finding. The control ID is `control_id`. The resource is
+`resource_ref`.
+
+### `tls`: target without TLS
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `tls.missing` | medium | The last connection test or backup run of this target did not use TLS. Resource: `<namespace>/<service>:<port>`. Title: *Target ns/svc does not speak TLS*. | Enable TLS on the database and make the server trust its CA ([below](#enabling-tls-on-a-target)). | Resolved by the next connection test or backup run that connects with TLS. |
+
+Where you see it: the *TLS* column under *Backups* shows *No* for these targets (*Yes* with TLS, *Not
+probed* before the first contact). The backup wizard warns about it. There is no list of `tls`
+findings in the UI; use `GET /api/v1/findings?source=tls`.
+
+### `transfer`: compressed transfer mode
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `transfer.compressed_mode` | medium | The cluster's transfer mode is `compressed`. Backup traffic is plaintext inside the cluster and the agent can see it. Resource: `cluster`. | Switch the cluster back to `e2e-tls` under *Settings › Clusters & agents*. | Resolved when you save a mode other than `compressed`. |
+
+Where you see it: the *Transfer* column under *Settings › Clusters & agents* shows *compressed*. There is
+no list of `transfer` findings in the UI.
+
+### `vault-drift`: unmanaged Vault change
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `unmanaged-change:<vault-id>` | high | A secret has one or more versions newer than the baseline that Olympos did not write, for example after break-glass. Title: *Unmanaged change*. Resource: `<mount><path>`. Details list the versions. | Review the change. Bring the secret back under management with a reviewed change request that writes the intended value ([runbook](runbooks/vault-break-glass.md)). | Resolved when the latest version of the secret was written by Olympos, or when the secret no longer exists in the index. |
+
+Drift is checked on every index refresh of the vault. Paths with a change request still applying are
+skipped until its outcome is known. Where you see it: the *Vaults* list shows *N unmanaged changes*,
+and the secret view shows an *Unmanaged change* note.
+
+### `kubescape`
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| Kubescape control ID, e.g. `C-0017` | From the control's score factor: ≥ 9 critical · ≥ 7 high · ≥ 4 medium · > 0 low · else info | A Kubescape control failed on a resource. Resource: `<ns>/<Kind>/<name>`, or `<Kind>/<name>` for cluster-scoped objects. Title: the control name. | Follow the control's remediation in the Kubescape documentation for that ID. | Resolved by the next **successful** Kubescape run on that cluster that no longer fails it. |
+
+Where you see it: *Audit*. On a cluster's page, *New since last run*; across all clusters, *Open
+Kubescape findings*. The cluster summary counts open audit findings by severity.
+
+### `polaris`
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| Polaris check ID, e.g. `runAsRootAllowed` | Polaris `danger` → high · `warning` → medium (`ignore` is not a finding) | A Polaris check failed. Resource: `<ns>/<Kind>/<name>`, plus `/container:<name>` for container checks. Title: the Polaris message. Details carry the category. | Fix the workload spec as the Polaris check describes. | Resolved by the next successful Polaris run that no longer fails it. |
+
+Where you see it: *Audit* (run results and the per-cluster severity counts). There is no list of Polaris
+findings in the UI; use `GET /api/v1/findings?source=polaris`.
+
+### `kube-bench`
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `<benchmark>:<test number>`, e.g. `<benchmark>:4.2.1` | FAIL and scored → high · FAIL, not scored → medium (WARN, INFO and PASS are not findings) | A CIS check failed on a node. Resource: `node/<name>`. Title: the check description. Details carry the section and kube-bench's remediation. | Apply the remediation shown for the check. Open the node under *Audit* to see it, with actual and expected values. | Resolved by the next successful kube-bench run where the check passes on that node. A node whose Job failed keeps its findings. |
+
+On managed clusters, control plane sections are skipped (*control plane N/A · managed*). kube-bench is
+opt-in per cluster (agent Helm value `bench.enabled=true`).
+
+### `kyverno`
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `<policy>/<rule>` (or `<policy>`) | From the PolicyReport result; medium when missing or unknown | A resource fails a Kyverno validation rule in the latest PolicyReports. Resource: `<Kind>/<namespace>/<name>`. Title: Kyverno's message. | Fix the resource so the rule passes, or change the policy. Open the policy under *Security › Kyverno policies* to see its rules and failing resources. | Resolved on the next agent report without that failure. If Kyverno is not installed, every Kyverno finding resolves. |
+
+Only `fail` results become findings. `warn` and `error` results show on the policy page but are not
+findings.
+
+### `netpol`
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| `netpol.no_default_deny` | medium | The namespace has no ingress default-deny NetworkPolicy: no policy selects all pods with `Ingress` in `policyTypes` and no ingress rules. Resource: the namespace. Title: *Namespace ns has no default-deny ingress NetworkPolicy*. | Add a default-deny ingress policy to the namespace, then allow what is needed ([below](#adding-a-default-deny-networkpolicy)). | Resolved on the next agent report where the namespace has one, is gone, or is a system namespace. |
+
+Where you see it: *Security › Network policies* (*N without default-deny*) and the *No default-deny*
+tile.
+
+### `sensitive-data`: credentials in ConfigMaps
+
+| Control ID | Severity | Meaning | How to fix | How it closes |
+|---|---|---|---|---|
+| A gitleaks rule ID, e.g. `generic-api-key` | high (*High · pattern*) | A ConfigMap value matches a credential pattern. | Move the value to a Secret or Vault and remove it from the ConfigMap. | Resolved on the next agent report once the key is gone or no longer matches. |
+| `key-name:<word>`, e.g. `key-name:password` | medium (*Medium · key name*) | The key name suggests a credential and the value is not a placeholder. Words: `privatekey`, `connectionstring`, `password`, `passwd`, `pwd`, `secret`, `token`, `apikey`, `accesskey`, `credential`, `dsn`. | Same as above. | Same as above. |
+
+Resource: `<namespace>/<configmap>:<key>`. The value never leaves the cluster. Olympos knows only where
+a match is, which rule matched and a rounded length. Olympos never edits or deletes ConfigMaps. The
+agent scans a ConfigMap when it changes and rescans all of them every 6 hours. Where you see it:
+*Security › Sensitive data*. Agent Helm values: `sensitiveData.enabled` (default `true`) and
+`sensitiveData.excludeNamespaces`.
+
+### `k8s-secrets`: Secret inventory
+
+Only on clusters where the opt-in inventory is on (agent Helm value `secretsInventory.enabled=true`).
+
+| Control ID | Severity | UI label | Meaning | How it closes |
+|---|---|---|---|---|
+| `secret.legacy_sa_token` | medium | *Legacy SA token* | A Secret of type `kubernetes.io/service-account-token`: a long-lived token. | Resolved once the Secret is gone. |
+| `secret.unused` | low | *Unused 7+ days* | No workload or service account has referenced the Secret for more than 7 days. Helm release Secrets are skipped. | Resolved once something references it again, or it is gone. |
+| `secret.unmanaged` | info | *Only in cluster* | No secrets operator owns the Secret (External Secrets Operator, Vault Secrets Operator, Sealed Secrets, cert-manager or Helm). Off with `security.secretsInventory.reportUnmanaged: false`. | Resolved once an operator owns it, or it is gone. |
+
+Resource: `<namespace>/<name>`. To fix, remove unused Secrets and legacy tokens through your usual change
+process. Olympos does not delete Secrets. Where you see it: *Security › Kubernetes secrets*. The tab
+badge (*N to review*) leaves out *Only in cluster*.
+
+### Image CVEs (not findings)
+
+Image vulnerabilities are stored per image digest, not as findings. *Security › Images* shows *Critical*
+and *High* counts per image and the *Fix* column; the image view lists each CVE with *Fixed in*. A CVE
+disappears from an image when a rescan no longer reports it. To fix one, update the image to a version
+with the fix and redeploy. New critical CVEs drive the *Critical CVEs* item in Needs attention and the
+`vuln.critical` event.
+
+## Events and notifications
+
+Every event carries a title, a link into Olympos and a few fields. Slack messages show the title, the
+fields and an *Open in Olympos* link, never secret values.
+
+**Grouped** below means one message per cluster and scan or run, with counts and the top 5 items. The
+activity log still gets one row per item.
+
+| Event type | When it fires | Message (title · fields) | Grouped? |
+|---|---|---|---|
+| `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, and when a job is paused because its target is gone. | *Backup failed: ns/svc* · cluster, target, trigger, error. *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
+| `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away. | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
+| `backup.succeeded` | A backup run succeeded. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
+| `cr.opened` | A Vault change request was opened and waits for approval. | *Change request waiting for approval* (link only). | No |
+| `cr.approved` | A change request was approved. | *Change request approved* · Vault. | No |
+| `cr.rejected` | A change request was rejected. | *Change request rejected* · Vault. | No |
+| `cr.expired` | A pending change request passed its TTL. | *Change request expired* · Vault. | No |
+| `cr.failed` | An approved change request failed to apply. | *Change request failed to apply* · Vault. | No |
+| `vault.unmanaged_write` | The drift check found a Vault secret version that Olympos did not write. | *Unmanaged change to a vault secret* · Vault, Cluster, Secret, Version. | No: one per unmanaged version |
+| `audit.new_findings` | A successful Kubescape, Polaris or kube-bench run opened new findings. | *N new \<tool\> findings on \<cluster\>* · cluster, tool, new, resolved, score, top (5 most severe). | Yes: per cluster and run |
+| `vuln.critical` | At the end of an image scan run, for critical CVEs new to an image that is running (digest scans only). | *N new critical CVEs in M running images on \<cluster\>* · cluster, new, images, top (5, fixable first). | Yes: per cluster and scan run |
+| `sensitive_data.found` | An agent report opened new sensitive-data findings. | *N new credential-like values in ConfigMaps on \<cluster\>* · cluster, new, open, high, top (5, high first). | Yes: per cluster and scan |
+| `secret.new_findings` | A Secret inventory report opened new findings. | *N new Secret inventory findings on \<cluster\>* · cluster, new, unused, legacy SA tokens, unmanaged. | Yes: per cluster and scan (counts only, no top 5) |
+| `agent.offline` | An agent has been offline for 5 minutes (`agents.offlineAlertAfter`). | *Agent offline: \<cluster\>* · cluster, offline for. | Once per outage |
+| `agent.online` | An agent is back, **only** after an `agent.offline` message for the same outage. | *Agent back online: \<cluster\>* · cluster. | Once per outage |
+| `agent.flapping` | An agent disconnected more than 5 times in 30 minutes (`agents.flappingDisconnects`, `agents.flappingWindow`). | *Agent flapping: \<cluster\>* · cluster, disconnects. | At most once per window |
+| `grant.changed` | A role grant was added or revoked. | *Access granted: name → role (scope)* or *Access revoked: name (role)* · principal, role, scope, by. | No |
+| `grant.stale` | The daily directory sync found a grant whose Entra account is disabled or deleted. Stale grants do not authorize. | *Grant marked stale: name (role) — reason* · principal, role, reason. | No |
+| `sas.expiring` | A destination's SAS token expires within 14 days, within 3 days, or has expired. | *SAS token of destination X expires in N days*, *… expires within a day* or *… has expired: backups to it fail* · destination, expires. | One per destination, threshold and expiry |
+
+Short agent blips send nothing. A cluster counts as offline after 60 seconds of silence, but
+`agent.offline` waits for the alert delay.
+
+### Routing
+
+Nothing is routed by default. An event with no route and no channel override is dropped (outcome
+`no_route`). To receive events:
+
+1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
+   (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.
+2. *Settings › Notifications › Routing*: tick the events per channel and click *Save routing*. Each row
+   shows the event type and its description.
+
+Overrides and opt-in:
+
+- **Per-job and per-schedule channel.** A backup job (*Notify* in the backup wizard; *Default routing*
+  uses the routing table) and an audit schedule can name their own channel. That channel then replaces
+  the routing for the job's or schedule's events. If the channel was deleted, the routing table is
+  used.
+- **`backup.succeeded` is opt-in twice.** The job needs *Also notify on success*, **and** the event type
+  needs at least one route. A job's own channel does not turn it on by itself.
+
+Delivery is at least once, with retries and backoff. *Last delivery* on each channel shows the time and
+result of its most recent send. If the Slack sink is not configured, events wait instead of using up
+retries.
+
+## Fixing at the source
+
+### Enabling TLS on a target
+
+1. Turn on TLS on the database or Vault and serve a certificate for the name Olympos verifies:
+   `olympos.io/tls-server-name` on the Service, or `<service>.<namespace>.svc` without it.
+2. Make the server trust the issuing CA with `targetTLS.caBundleFile` or a per-target CA. Use
+   `targetTLS.systemRoots: true` only for publicly issued certificates
+   ([install](install.md#target-certificates)).
+3. Test the connection in the backup wizard, or wait for the next backup. `tls.missing` resolves on the
+   first connection that uses TLS.
+
+In the default `e2e-tls` mode, PostgreSQL without TLS is backed up only over SCRAM-SHA-256. ClickHouse
+and Vault/OpenBao without TLS are refused
+([troubleshooting](troubleshooting.md#a-target-without-tls-is-refused)).
+
+### Accepting a changed TLS name
+
+When *TLS name changed* appears, open *Backups*. The *TLS name changed* card lists each target with its
+*Verified name* and *Requested name*.
+
+- **Expected change:** an admin of that cluster clicks *Accept new name*. If the annotation changed
+  again since the page loaded, the server answers *the TLS name changed again; reload and review it*.
+- **Unexpected change:** set the annotation back to the verified name. The item clears on the next
+  target report from the agent. Then find out who edited the Service: anyone who can edit it can change
+  the annotation.
+
+### Key Vault purge protection
+
+```bash
+az keyvault update --name <vault> --enable-purge-protection true
+```
+
+Purge protection cannot be turned off again. Restart the Olympos server afterwards: the check runs only
+at startup. See [Restoring Olympos](restore-olympos.md) for why the KEK must survive.
+
+### Choosing the Olympos backup destination
+
+Under *Backups › Olympos database*, an admin picks a destination. The job is built in and cannot be
+deleted. Once it has a destination, *Olympos backup* leaves Needs attention. A failed run shows *Olympos
+backup failed* until a later run succeeds or 48 hours pass.
+
+### Leaving compressed mode
+
+Under *Settings › Clusters & agents*, edit the cluster, choose `e2e-tls` and save.
+`transfer.compressed_mode` resolves on save. Targets without TLS may then be refused (see above).
+
+### Bringing a Vault secret back under management
+
+Follow the [break-glass runbook](runbooks/vault-break-glass.md): review the unmanaged version, then open
+a change request that writes the intended value. Once it is applied, the latest version is Olympos' own
+and the `vault-drift` finding resolves on the next index refresh (*Refresh index* on the vault runs one
+now).
+
+### Adding a default-deny NetworkPolicy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: <namespace>
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+```
+
+Then add policies that allow the traffic the namespace needs. Open the namespace from *Security ›
+Network policies* to see its workloads and policies.
+
+### Rotating a SAS token
+
+Issue a new SAS with the same permissions (read, create, write, tag; no delete) and paste it under
+*Settings › Destinations*, or update the Key Vault secret it references. A new expiry starts a new
+series of `sas.expiring` messages.
+
+## See also
+
+- [Security model](security-model.md): what each component can see and do.
+- [Security review v0.1](security-review-v0.1.md): the review behind TLS name pinning and other checks.
+- [Getting started](getting-started.md), [install](install.md), [restore](restore.md),
+  [configuration](configuration.md), [troubleshooting](troubleshooting.md).

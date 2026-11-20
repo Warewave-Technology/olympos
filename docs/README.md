@@ -8,6 +8,8 @@ screenshot, no Azure account needed.
 | | |
 |---|---|
 | [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, run audits and image scans |
+| [Access](access.md) | Roles, scopes, granting access, guests and the first admin |
+| [Findings and events](findings-and-events.md) | What each finding, *Needs attention* item and notification means, and how to fix it |
 | [Restoring backups](restore.md) | PostgreSQL, ClickHouse and Vault/OpenBao restores, the backup format and manifests |
 | [Restoring Olympos itself](restore-olympos.md) | Recovering the server from its `olympos-self` backup |
 | [Runbook: Vault break-glass](runbooks/vault-break-glass.md) | When Olympos' Vault access is lost or must be bypassed |
@@ -16,8 +18,12 @@ screenshot, no Azure account needed.
 
 | | |
 |---|---|
+| [Azure prerequisites](azure.md) | Entra app, managed identity and Workload Identity, Key Vault and backup storage with the Bicep templates |
 | [Installing on Kubernetes](install.md) | Prerequisites (Entra ID, Key Vault, storage), the Helm charts, agents, storage hardening, notifications, verifying releases |
 | [Installing on a Linux VM](install-systemd.md) | `.deb` / `.rpm` packages, the hardened systemd unit, local PostgreSQL |
+| [Configuration](configuration.md) | Every server setting, Helm value and environment variable |
+| [Upgrading](upgrade.md) | Upgrading the server and agents, downgrades, uninstalling |
+| [Troubleshooting](troubleshooting.md) | Common problems by what you see, with the fix |
 | [Repository settings](development.md#repository-settings) | How the public repository is protected (for maintainers) |
 
 ## Understand

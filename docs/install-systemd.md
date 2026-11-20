@@ -17,7 +17,8 @@ protection**, backup storage). The VM needs:
 - inbound `:8443` from every agent (gRPC, mTLS — do not put a TLS-terminating proxy in front of it) and the UI
   port from users;
 - **Key Vault access:** on an Azure VM assign a user-assigned managed identity and set
-  `keyVault.managedIdentityClientID` (IMDS is used, as in AKS). On other hosts use a service principal with a
+  `keyVault.managedIdentityClientID` (the server then asks the VM's managed identity endpoint, IMDS, for it;
+  on AKS the server uses Workload Identity instead, see [Azure prerequisites](azure.md)). On other hosts use a service principal with a
   certificate: put `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_CERTIFICATE_PATH` (PEM, readable by the
   `olympos` user, e.g. `/etc/olympos/sp.pem` 0640 root:olympos) in `/etc/olympos/environment` and leave
   `managedIdentityClientID` empty.
