@@ -42,6 +42,10 @@ type API struct {
 	// image mirror for air-gapped installs (OLYMPOS_AGENT_INSTALL_SETS).
 	AgentSets []string
 	Now       func() time.Time
+	// OfflineAlertAfter is agents.offlineAlertAfter: an offline agent is a
+	// Needs-attention item once it was last seen longer ago than this, like
+	// the agent.offline message. Zero uses DefaultOfflineAlertAfter.
+	OfflineAlertAfter time.Duration
 	// SystemWarnings returns setup problems of the server itself (e.g. Key
 	// Vault purge protection off) for the Needs-attention strip. Optional.
 	SystemWarnings func() []AttentionItem
@@ -816,7 +820,7 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 			ago := "unknown"
 			if c.LastSeenAt != nil {
 				ago = humanDuration(now.Sub(*c.LastSeenAt))
-				if now.Sub(*c.LastSeenAt) > 5*time.Minute {
+				if now.Sub(*c.LastSeenAt) > offlineAlertAfter(a.OfflineAlertAfter) {
 					d.Attention = append(d.Attention, AttentionItem{Kind: "agent_offline", Severity: "crit", Label: "Agent offline",
 						Detail: c.Name + " · " + ago, Link: "/settings/clusters?cluster=" + c.ID.String()})
 				}

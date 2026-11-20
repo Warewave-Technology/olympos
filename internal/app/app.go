@@ -277,10 +277,11 @@ func Run(cfgPath string) error {
 		return err
 	}
 	srv.SPA = sub
-	sysWarn := d.checkKEKRecovery(ctx)
+	kek := newKEKWatch(d.KV, d.Log)
+	kek.check(ctx)
 	srv.Modules = append(srv.Modules, &inventory.API{DB: d.DB, Log: log.With("component", "inventory"), Gateway: d.Gateway, CA: d.CA,
 		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART"), AgentSets: agentSets(),
-		SystemWarnings: func() []inventory.AttentionItem { return sysWarn }})
+		OfflineAlertAfter: cfg.Agents.OfflineAlertAfter, SystemWarnings: kek.Items})
 	for _, w := range wiring {
 		srv.Modules = append(srv.Modules, w.Modules...)
 	}
@@ -343,6 +344,7 @@ func Run(cfgPath string) error {
 	}
 	start(guard.run)
 	start(d.Inventory.RunOfflineMonitor)
+	start(kek.run)
 	start(srv.CleanupSessions)
 	start(func(ctx context.Context) { d.principalSync(ctx, srv.Directory) })
 	start(d.metricsLoop)
@@ -383,30 +385,6 @@ func Run(cfgPath string) error {
 	_ = opsSrv.Shutdown(shutdown)
 	gs.GracefulStop()
 	wg.Wait()
-	return nil
-}
-
-// checkKEKRecovery warns when the KEK could be purged (F17): the Olympos
-// database dump is useless without it. Checked once at startup.
-func (d *Deps) checkKEKRecovery(ctx context.Context) []inventory.AttentionItem {
-	rc, ok := d.KV.(secrets.RecoveryChecker)
-	if !ok {
-		return nil
-	}
-	cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	okRec, level, err := rc.KEKRecoverable(cctx)
-	switch {
-	case err != nil:
-		d.Log.Warn("could not check Key Vault purge protection", "err", err)
-		return []inventory.AttentionItem{{Kind: "kek_recovery_unknown", Severity: "warn", Label: "Key Vault",
-			Detail: "could not check purge protection of the KEK (needs keys/get)", Link: "/backups?self=1"}}
-	case !okRec:
-		d.Log.Error("Key Vault purge protection is off: the KEK can be purged and every Olympos backup of its own database becomes useless",
-			"recovery_level", level)
-		return []inventory.AttentionItem{{Kind: "kek_purgeable", Severity: "crit", Label: "Key Vault",
-			Detail: "purge protection is off (" + level + "): enable soft delete and purge protection", Link: "/backups?self=1"}}
-	}
 	return nil
 }
 
