@@ -6,52 +6,6 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Added
-- *Audit › Raw reports*: choose where raw Kubescape, Polaris and kube-bench reports are kept
-  (`GET`/`PUT /api/v1/audit/settings`, global admin). Before, the `audit.raw_destination_id` setting could
-  only be set with SQL.
-
-### Fixed
-- Helm: setting `olympos.listen`, `olympos.experimental` or (with `gatewayTLSSecret`) `olympos.gateway` wrote
-  the section twice and the server did not start (duplicate YAML key). The chart now merges its own keys
-  with yours, so UI TLS (`listen.tlsCertFile`) and `gateway.extraSANs` can be set. `postgresql.bundled=false`
-  without `olympos.database.dsnRef` (or `dsn`) now fails the render instead of starting without a database.
-- UI and error messages pointed to *Security* for `tls.missing` and `transfer.compressed_mode`, and to
-  *Settings › Clusters*; the Key Vault *Needs attention* items linked to the Access page.
-- Scheduler leaders held their advisory lock on a pool connection; on a host with 4 CPUs (pgxpool's default
-  pool size) they took the whole pool and the server never became ready. Locks now use their own
-  connections; the pool has at least 16 connections unless the DSN sets `pool_max_conns`.
-- Release checksums (`SHA256SUMS-<arch>`) and signature bundles name pre-release packages the way GitHub
-  stores them (`~` becomes `.`); `sha256sum -c` against v0.1.0-rc.2 found no files.
-
-- Dashboard › Needs attention: the Key Vault items (`kek_purgeable`, `kek_recovery_unknown`) were checked
-  only at server start and stayed after the vault was fixed; the server now checks every hour and logs
-  when the result changes. The *Agent offline* item used a fixed 5 minutes; it now waits for
-  `agents.offlineAlertAfter`, like the `agent.offline` message.
-- UI: a backup run's restore commands were squeezed into a narrow column; the Jobs table showed the next run
-  in the browser's time zone next to a schedule in the job's zone (now both in the job's zone); change
-  requests showed the vault as `cluster / namespace / namespace/service`.
-
-### Documentation
-- New pages: [Configuration](docs/configuration.md) (every server setting, Helm value and environment
-  variable), [Access](docs/access.md) (roles, scopes, the first admin, guests),
-  [Findings and events](docs/findings-and-events.md) (what each finding, *Needs attention* item and
-  notification means and how to fix it), [Troubleshooting](docs/troubleshooting.md),
-  [Upgrading](docs/upgrade.md) and [Azure prerequisites](docs/azure.md) (managed identity, Workload Identity,
-  the Bicep templates).
-- `docs/install.md` set `keyVault.managedIdentityClientID` in the Helm example; with Workload Identity it
-  must stay empty (setting it bypasses Workload Identity).
-- [Getting started](docs/getting-started.md): the local lab step by step, with a screenshot for every step
-  taken by `web/scripts/docs-tour.mjs` (`pnpm docs-tour`), which also checks that the steps still work.
-- README: requirements up front (Entra ID and Azure Key Vault are required), a working try-it path
-  (`./test/e2e/env.sh`), real screenshots instead of mock data; [docs/README.md](docs/README.md) maps all docs.
-- Documentation paths in the UI (restore commands, the Olympos database card) link to the docs on GitHub.
-
-### Changed
-- `release.yml` runs as a dry run on pull requests and main pushes that touch the release inputs, and
-  checks checksums and package versions strictly; signed releases verify their own signatures.
-- `E2E_CPUS=4 ./test/e2e/run.sh` runs the kind e2e on 4 CPUs, like a CI runner.
-
 ## [0.1.0] - unreleased
 
 First public release.
@@ -68,6 +22,54 @@ For anyone upgrading from a build before v0.1.0-rc.1. These changes came from th
    "TLS name changed", then *Backups*).
 4. **One server replica.** The Helm chart refuses `replicas > 1` unless `experimental.multiReplica: true`
    (unsupported; multi-replica is planned for v0.2).
+
+### Since v0.1.0-rc.2
+For anyone testing the release candidates. Nothing here needs action when upgrading from rc.2.
+
+#### Added
+- *Audit › Raw reports*: choose where raw Kubescape, Polaris and kube-bench reports are kept
+  (`GET`/`PUT /api/v1/audit/settings`, global admin). Before, the `audit.raw_destination_id` setting could
+  only be set with SQL.
+
+#### Fixed
+- Helm: setting `olympos.listen`, `olympos.experimental` or (with `gatewayTLSSecret`) `olympos.gateway` wrote
+  the section twice and the server did not start (duplicate YAML key). The chart now merges its own keys
+  with yours, so UI TLS (`listen.tlsCertFile`) and `gateway.extraSANs` can be set. `postgresql.bundled=false`
+  without `olympos.database.dsnRef` (or `dsn`) now fails the render instead of starting without a database.
+- UI and error messages pointed to *Security* for `tls.missing` and `transfer.compressed_mode`, and to
+  *Settings › Clusters*; the Key Vault *Needs attention* items linked to the Access page.
+- Scheduler leaders held their advisory lock on a pool connection; on a host with 4 CPUs (pgxpool's default
+  pool size) they took the whole pool and the server never became ready. Locks now use their own
+  connections; the pool has at least 16 connections unless the DSN sets `pool_max_conns`.
+- Release checksums (`SHA256SUMS-<arch>`) and signature bundles name pre-release packages the way GitHub
+  stores them (`~` becomes `.`); `sha256sum -c` against v0.1.0-rc.2 found no files.
+- Dashboard › Needs attention: the Key Vault items (`kek_purgeable`, `kek_recovery_unknown`) were checked
+  only at server start and stayed after the vault was fixed; the server now checks every hour and logs
+  when the result changes. The *Agent offline* item used a fixed 5 minutes; it now waits for
+  `agents.offlineAlertAfter`, like the `agent.offline` message.
+- UI: a backup run's restore commands were squeezed into a narrow column; the Jobs table showed the next run
+  in the browser's time zone next to a schedule in the job's zone (now both in the job's zone); change
+  requests showed the vault as `cluster / namespace / namespace/service`.
+
+#### Documentation
+- New pages: [Configuration](docs/configuration.md) (every server setting, Helm value and environment
+  variable), [Access](docs/access.md) (roles, scopes, the first admin, guests),
+  [Findings and events](docs/findings-and-events.md) (what each finding, *Needs attention* item and
+  notification means and how to fix it), [Troubleshooting](docs/troubleshooting.md),
+  [Upgrading](docs/upgrade.md) and [Azure prerequisites](docs/azure.md) (managed identity, Workload Identity,
+  the Bicep templates).
+- `docs/install.md` set `keyVault.managedIdentityClientID` in the Helm example; with Workload Identity it
+  must stay empty (setting it bypasses Workload Identity).
+- [Getting started](docs/getting-started.md): the local lab step by step, with a screenshot for every step
+  taken by `web/scripts/docs-tour.mjs` (`pnpm docs-tour`), which also checks that the steps still work.
+- README: requirements up front (Entra ID and Azure Key Vault are required), a working try-it path
+  (`./test/e2e/env.sh`), real screenshots instead of mock data; [docs/README.md](docs/README.md) maps all docs.
+- Documentation paths in the UI (restore commands, the Olympos database card) link to the docs on GitHub.
+
+#### Changed
+- `release.yml` runs as a dry run on pull requests and main pushes that touch the release inputs, and
+  checks checksums and package versions strictly; signed releases verify their own signatures.
+- `E2E_CPUS=4 ./test/e2e/run.sh` runs the kind e2e on 4 CPUs, like a CI runner.
 
 ### Added
 - Cluster inventory through a read-only, outbound-only agent (enrollment with one-time tokens, mTLS, pinned
