@@ -6,18 +6,6 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-### Fixed
-- `check-config -db` printed `config ok` for a Key Vault the server could not use; the server then stopped
-  at start (`load hmac key`). It now reads the HMAC secret and wraps and unwraps with the KEK like the server,
-  checks that the `pgcrypto` extension is available, and (also without `-db`) parses the target and storage CA
-  bundles and the `keyVault.references` rules.
-- systemd: the documented `sudo olympos-server check-config -db` and `migrate` ran as root and failed against
-  the local database (`role "root" does not exist`); they are `sudo -u olympos …` now, in the package's
-  post-install message too.
-- Rocky/Alma: the install guide missed `postgresql16-contrib` (the schema needs `pgcrypto`) and used the
-  x86_64 PGDG repository package, which fails on arm64; the `.rpm` now recommends `postgresql16-contrib`. On
-  Azure Database for PostgreSQL, `pgcrypto` has to be allowed in `azure.extensions` (documented).
-
 ## [0.1.0] - unreleased
 
 First public release.
@@ -34,6 +22,22 @@ For anyone upgrading from a build before v0.1.0-rc.1. These changes came from th
    "TLS name changed", then *Backups*).
 4. **One server replica.** The Helm chart refuses `replicas > 1` unless `experimental.multiReplica: true`
    (unsupported; multi-replica is planned for v0.2).
+
+### Since v0.1.0-rc.3
+Found by installing the rc.3 packages and charts from scratch. Nothing needs action when upgrading from
+rc.3; on Rocky/Alma, install `postgresql16-contrib` if the first start failed with `pgcrypto`.
+
+#### Fixed
+- `check-config -db` printed `config ok` for a Key Vault the server could not use; the server then stopped
+  at start (`load hmac key`). It now reads the HMAC secret and wraps and unwraps with the KEK like the server,
+  checks that the `pgcrypto` extension is available, and (also without `-db`) parses the target and storage CA
+  bundles and the `keyVault.references` rules.
+- systemd: the documented `sudo olympos-server check-config -db` and `migrate` ran as root and failed against
+  the local database (`role "root" does not exist`); they are `sudo -u olympos …` now, in the package's
+  post-install message too.
+- Rocky/Alma: the install guide missed `postgresql16-contrib` (the schema needs `pgcrypto`) and used the
+  x86_64 PGDG repository package, which fails on arm64; the `.rpm` now recommends `postgresql16-contrib`. On
+  Azure Database for PostgreSQL, `pgcrypto` has to be allowed in `azure.extensions` (documented).
 
 ### Since v0.1.0-rc.2
 For anyone testing the release candidates. Nothing here needs action when upgrading from rc.2.
