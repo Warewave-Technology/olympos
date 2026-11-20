@@ -633,10 +633,10 @@ export function ServerErrorNote({ error, clusterId, clusterName }: { error: unkn
           Olympos only talks to a vault over TLS, because the root token and secret values would otherwise cross the agent in clear. Enable TLS on the vault listener, or change the transfer mode of{' '}
           {clusterId ? (
             <Link to="/settings/clusters" search={{ cluster: clusterId }}>
-              {clusterName ?? 'this cluster'} in Settings › Clusters
+              {clusterName ?? 'this cluster'} in Settings › Clusters &amp; agents
             </Link>
           ) : (
-            <Link to="/settings/clusters">the cluster in Settings › Clusters</Link>
+            <Link to="/settings/clusters">the cluster in Settings › Clusters &amp; agents</Link>
           )}
           .
         </div>

@@ -1,5 +1,7 @@
-// Olympos Key Vault: KEK (envelope encryption), HMAC key and kv:// secrets.
-// Soft delete and purge protection are ON: every Olympos backup of its own
+// Olympos Key Vault: the KEK (envelope encryption) and the server's role
+// assignments. Secrets (the HMAC key olympos-hmac, the Entra client secret,
+// kv:// secrets) are added afterwards with az keyvault secret set
+// (docs/azure.md). Soft delete and purge protection are ON: every Olympos backup of its own
 // database (olympos-self) is useless without the KEK (docs/restore-olympos.md).
 // The server warns (Dashboard › Needs attention) if purge protection is off.
 @description('Key Vault name (3-24 alphanumerics and dashes).')

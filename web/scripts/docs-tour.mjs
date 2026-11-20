@@ -357,6 +357,14 @@ const stages = {
     }
     await dump(page, 'audit done');
     await shot(page, 'audit');
+    // Keep the raw reports too (redacted), on the lab's MinIO.
+    const raw = page.getByRole('region', { name: 'Raw reports' });
+    await raw.getByRole('button', { name: 'Choose a destination' }).click();
+    await raw.getByRole('combobox', { name: 'Raw reports destination' }).click();
+    await page.getByRole('option', { name: /lab-minio/ }).click();
+    await raw.getByRole('button', { name: 'Save' }).click();
+    await raw.getByText(/^Stored on/).waitFor();
+    await shot(page, 'audit-raw-reports', raw);
   },
 
   // Security: images with CVEs, Kyverno, NetworkPolicy, sensitive data.

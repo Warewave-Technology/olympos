@@ -18,7 +18,7 @@ type Normalized struct {
 	Summary map[string]any
 }
 
-// Severity mapping (documented in docs/audit.md via the report):
+// Severity mapping (documented in docs/findings-and-events.md):
 //
 //	kubescape  scoreFactor ≥ 9 critical · ≥ 7 high · ≥ 4 medium · > 0 low · else info
 //	polaris    danger → high · warning → medium (ignore → not a finding)

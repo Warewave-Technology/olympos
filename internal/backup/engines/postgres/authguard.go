@@ -158,5 +158,5 @@ func plaintextRefusal(method string) error {
 	return fmt.Errorf("%w: this target has no TLS and asked for %s, which would expose the password on the network. "+
 		"Without TLS Olympos only logs in with SCRAM-SHA-256. Enable TLS on the target "+
 		"(or use scram-sha-256 in pg_hba.conf and reset the password), or set this cluster's transfer mode to compressed "+
-		"in Settings › Clusters, which accepts plaintext inside the cluster", ErrPlaintextPassword, method)
+		"in Settings › Clusters & agents, which accepts plaintext inside the cluster", ErrPlaintextPassword, method)
 }

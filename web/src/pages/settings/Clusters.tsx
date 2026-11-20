@@ -139,7 +139,7 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
   const save = useMutation({
     mutationFn: (body: object) => api.patch<Cluster>(`/clusters/${c.id}`, body),
     onSuccess: (r) => {
-      toast(r.transfer_mode === 'compressed' && c.transfer_mode !== 'compressed' ? `Saved. ${r.name} now uses compressed mode; a finding was added in Security.` : `Saved ${r.name}.`);
+      toast(r.transfer_mode === 'compressed' && c.transfer_mode !== 'compressed' ? `Saved. ${r.name} now uses compressed mode; the transfer.compressed_mode finding is open until you switch back.` : `Saved ${r.name}.`);
       void qc.invalidateQueries({ queryKey: ['clusters'] });
       void qc.invalidateQueries({ queryKey: ['dashboard'] });
       void qc.invalidateQueries({ queryKey: ['findings'] });
@@ -265,7 +265,7 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           </fieldset>
           {switchingToCompressed && (
             <div className="note warn" role="alert">
-              <b>Before you save:</b> in compressed mode the server connects to the database without TLS, and the agent can see backup data in plaintext inside the cluster. Saving adds the finding <span className="mono">transfer.compressed_mode</span> on this cluster; it stays in Security until you switch back to e2e-tls.
+              <b>Before you save:</b> in compressed mode the server connects to the database without TLS, and the agent can see backup data in plaintext inside the cluster. Saving adds the finding <span className="mono">transfer.compressed_mode</span> on this cluster; it stays open until you switch back to e2e-tls.
             </div>
           )}
           {c.transfer_mode === 'compressed' && mode === 'compressed' && <div className="note warn">This cluster runs in compressed mode. A finding is shown in Security until you switch back.</div>}

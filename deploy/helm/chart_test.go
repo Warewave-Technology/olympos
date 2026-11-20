@@ -9,12 +9,15 @@ import (
 	"flag"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	rbacv1 "k8s.io/api/rbac/v1"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/yaml"
+
+	"github.com/Warewave-Technology/olympos/internal/config"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
@@ -303,5 +306,56 @@ func TestServerBundledPostgreSQL(t *testing.T) {
 	}
 	if _, err := renderServer(t, "--set", "olympos.database.dsnRef=kv://kv/dsn"); err == nil {
 		t.Fatal("bundled + dsnRef must fail")
+	}
+}
+
+// The chart owns listen ports, experimental and (with gatewayTLSSecret) the
+// gateway certificate files, and merges them with what the user sets: a
+// section written twice is a duplicate key and the server does not start.
+func TestServerConfigMergesUserSections(t *testing.T) {
+	values := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(values, []byte(`gatewayTLSSecret: gw
+olympos:
+  listen: {http: ":9999", tlsCertFile: /etc/olympos/ui/tls.crt, tlsKeyFile: /etc/olympos/ui/tls.key}
+  gateway: {extraSANs: [gw.example]}
+  experimental: {multiReplica: false}
+  entra: {tenantID: 00000000-0000-0000-0000-0000000000aa, clientID: app, clientSecretRef: "kv://kv-test/oidc"}
+  keyVault: {name: kv-test}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	docs, err := renderServer(t, "-f", values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cm := find(docs, "ConfigMap", "o-config")
+	if cm == nil {
+		t.Fatal("no config ConfigMap")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(cm["data"].(map[string]any)["config.yaml"].(string)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path) // fails on a duplicate key
+	if err != nil {
+		t.Fatalf("server cannot load the rendered config: %v", err)
+	}
+	if cfg.Listen.HTTP != ":8080" || cfg.Listen.Metrics != ":9090" {
+		t.Errorf("listen ports must match the container ports: %+v", cfg.Listen)
+	}
+	if cfg.Listen.TLSCertFile != "/etc/olympos/ui/tls.crt" || cfg.Listen.TLSKeyFile != "/etc/olympos/ui/tls.key" {
+		t.Errorf("UI TLS files dropped: %+v", cfg.Listen)
+	}
+	if cfg.Gateway.TLSCertFile != "/etc/olympos/gateway-tls/tls.crt" || len(cfg.Gateway.ExtraSANs) != 1 {
+		t.Errorf("gateway: %+v", cfg.Gateway)
+	}
+}
+
+func TestServerExternalDatabaseNeedsDSN(t *testing.T) {
+	if _, err := renderServer(t, "--set", "postgresql.bundled=false"); err == nil || !strings.Contains(err.Error(), "needs olympos.database.dsnRef") {
+		t.Fatalf("external database without a DSN must fail to render: %v", err)
+	}
+	if _, err := renderServer(t, "--set", "postgresql.bundled=false", "--set", "olympos.database.dsnRef=kv://v/dsn"); err != nil {
+		t.Fatal(err)
 	}
 }
