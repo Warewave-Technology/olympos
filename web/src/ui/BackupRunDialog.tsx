@@ -6,16 +6,16 @@ import { api } from '../api/client';
 import type { BackupRunDetail, RestoreGuide } from '../api/types';
 import { between, bytes, duration, relDateTime } from '../lib/format';
 import { CopyButton, Modal, QueryView } from './kit';
+import { DocLink, WithDocLinks } from './DocLinks';
 import { RunBadge } from './status';
 
 export function RestoreSteps({ guide }: { guide: RestoreGuide }) {
   return (
     <div className="stack-sm restore-steps">
       <p className="muted small">
-        Restore is manual in v0.1: these commands are filled in for this run. Placeholders in <span className="mono">&lt;angle brackets&gt;</span> are yours to fill. Full procedure:{' '}
-        <span className="mono">{guide.doc}</span>.
+        Restore is manual in v0.1: these commands are filled in for this run. Placeholders in <span className="mono">&lt;angle brackets&gt;</span> are yours to fill. Full procedure: <DocLink path={guide.doc} />.
       </p>
-      <ol className="steps">
+      <ol className="restore-cmds">
         {guide.steps.map((s, i) => (
           <li key={i}>
             <div className="spread">
@@ -23,7 +23,11 @@ export function RestoreSteps({ guide }: { guide: RestoreGuide }) {
               <CopyButton text={s.commands} label="Copy" className="btn sm" />
             </div>
             <pre className="code">{s.commands}</pre>
-            {s.note && <p className="muted small">{s.note}</p>}
+            {s.note && (
+              <p className="muted small">
+                <WithDocLinks text={s.note} />
+              </p>
+            )}
           </li>
         ))}
       </ol>

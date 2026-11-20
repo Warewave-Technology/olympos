@@ -41,14 +41,80 @@ const TENANT = '72f988bf-86f1-41af-91ab-2d7cd011db47';
 /** Deterministic pseudo-random numbers so generated fixtures look the same on every load. */
 // kube-bench results shaped like the agent's output (a few real CIS checks, cycled).
 const BENCH_TEMPLATES: { id: string; section: string; section_text: string; node_type: string; description: string; remediation: string; expected: string; master?: boolean }[] = [
-  { id: '4.1.1', section: '4.1', section_text: 'Worker Node Configuration Files', node_type: 'node', description: 'Ensure that the kubelet service file permissions are set to 600 or more restrictive', remediation: 'Run the below command (based on the file location on your system) on each worker node.\nchmod 600 /etc/systemd/system/kubelet.service.d/10-kubeadm.conf', expected: "permissions has permissions 600, expected 600 or more restrictive" },
-  { id: '4.1.5', section: '4.1', section_text: 'Worker Node Configuration Files', node_type: 'node', description: 'Ensure that the --kubeconfig kubelet.conf file permissions are set to 600 or more restrictive', remediation: 'chmod 600 /etc/kubernetes/kubelet.conf', expected: "'permissions' is present" },
-  { id: '4.2.1', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --anonymous-auth argument is set to false', remediation: 'If using a Kubelet config file, edit the file to set `authentication: anonymous: enabled` to `false`.\nRestart the kubelet service: systemctl daemon-reload && systemctl restart kubelet.service', expected: "'--anonymous-auth' is equal to 'false'" },
-  { id: '4.2.2', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --authorization-mode argument is not set to AlwaysAllow', remediation: 'Set `authorization.mode` to Webhook in the kubelet config file, then restart the kubelet.', expected: "'--authorization-mode' does not have 'AlwaysAllow'" },
-  { id: '4.2.6', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that the --make-iptables-util-chains argument is set to true', remediation: 'Set `makeIPTablesUtilChains: true` in the kubelet config file and restart the kubelet.', expected: "'--make-iptables-util-chains' is equal to 'true'" },
-  { id: '4.2.13', section: '4.2', section_text: 'Kubelet', node_type: 'node', description: 'Ensure that a limit is set on pod PIDs', remediation: 'Decide on an appropriate level for this parameter and set it, either via the --pod-max-pids command line parameter or the PodPidsLimit configuration file setting.', expected: "'--pod-max-pids' is present" },
-  { id: '1.2.1', section: '1.2', section_text: 'API Server', node_type: 'master', description: 'Ensure that the --anonymous-auth argument is set to false', remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --anonymous-auth=false', expected: "'--anonymous-auth' is equal to 'false'", master: true },
-  { id: '1.2.16', section: '1.2', section_text: 'API Server', node_type: 'master', description: 'Ensure that the --audit-log-path argument is set', remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --audit-log-path=/var/log/apiserver/audit.log', expected: "'--audit-log-path' is present", master: true },
+  {
+    id: '4.1.1',
+    section: '4.1',
+    section_text: 'Worker Node Configuration Files',
+    node_type: 'node',
+    description: 'Ensure that the kubelet service file permissions are set to 600 or more restrictive',
+    remediation: 'Run the below command (based on the file location on your system) on each worker node.\nchmod 600 /etc/systemd/system/kubelet.service.d/10-kubeadm.conf',
+    expected: 'permissions has permissions 600, expected 600 or more restrictive',
+  },
+  {
+    id: '4.1.5',
+    section: '4.1',
+    section_text: 'Worker Node Configuration Files',
+    node_type: 'node',
+    description: 'Ensure that the --kubeconfig kubelet.conf file permissions are set to 600 or more restrictive',
+    remediation: 'chmod 600 /etc/kubernetes/kubelet.conf',
+    expected: "'permissions' is present",
+  },
+  {
+    id: '4.2.1',
+    section: '4.2',
+    section_text: 'Kubelet',
+    node_type: 'node',
+    description: 'Ensure that the --anonymous-auth argument is set to false',
+    remediation: 'If using a Kubelet config file, edit the file to set `authentication: anonymous: enabled` to `false`.\nRestart the kubelet service: systemctl daemon-reload && systemctl restart kubelet.service',
+    expected: "'--anonymous-auth' is equal to 'false'",
+  },
+  {
+    id: '4.2.2',
+    section: '4.2',
+    section_text: 'Kubelet',
+    node_type: 'node',
+    description: 'Ensure that the --authorization-mode argument is not set to AlwaysAllow',
+    remediation: 'Set `authorization.mode` to Webhook in the kubelet config file, then restart the kubelet.',
+    expected: "'--authorization-mode' does not have 'AlwaysAllow'",
+  },
+  {
+    id: '4.2.6',
+    section: '4.2',
+    section_text: 'Kubelet',
+    node_type: 'node',
+    description: 'Ensure that the --make-iptables-util-chains argument is set to true',
+    remediation: 'Set `makeIPTablesUtilChains: true` in the kubelet config file and restart the kubelet.',
+    expected: "'--make-iptables-util-chains' is equal to 'true'",
+  },
+  {
+    id: '4.2.13',
+    section: '4.2',
+    section_text: 'Kubelet',
+    node_type: 'node',
+    description: 'Ensure that a limit is set on pod PIDs',
+    remediation: 'Decide on an appropriate level for this parameter and set it, either via the --pod-max-pids command line parameter or the PodPidsLimit configuration file setting.',
+    expected: "'--pod-max-pids' is present",
+  },
+  {
+    id: '1.2.1',
+    section: '1.2',
+    section_text: 'API Server',
+    node_type: 'master',
+    description: 'Ensure that the --anonymous-auth argument is set to false',
+    remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --anonymous-auth=false',
+    expected: "'--anonymous-auth' is equal to 'false'",
+    master: true,
+  },
+  {
+    id: '1.2.16',
+    section: '1.2',
+    section_text: 'API Server',
+    node_type: 'master',
+    description: 'Ensure that the --audit-log-path argument is set',
+    remediation: 'Edit /etc/kubernetes/manifests/kube-apiserver.yaml and set --audit-log-path=/var/log/apiserver/audit.log',
+    expected: "'--audit-log-path' is present",
+    master: true,
+  },
 ];
 
 function mockBenchChecks(pass: number, fail: number, warn: number, master: boolean): BenchCheck[] {
@@ -178,18 +244,166 @@ function cluster(p: Partial<Cluster> & Pick<Cluster, 'name'>): Cluster {
 }
 
 export const clusters: Cluster[] = [
-  cluster({ name: 'prod-aks-weu-01', labels: { env: 'prod', team: 'core' }, nodes: 18, nodes_ready: 18, cpu_milli: 240_000, mem_bytes: 1.4 * 2 ** 40, zones: ['westeurope-1', 'westeurope-2', 'westeurope-3'], instance_types: [{ instance_type: 'D8s_v5', count: 12 }, { instance_type: 'E16s_v5', count: 6 }] }),
-  cluster({ name: 'prod-aks-weu-02', labels: { env: 'prod', team: 'billing' }, nodes: 14, nodes_ready: 14, cpu_milli: 112_000, mem_bytes: 448 * 2 ** 30, zones: ['westeurope-1', 'westeurope-2', 'westeurope-3'], instance_types: [{ instance_type: 'D8s_v5', count: 14 }] }),
-  cluster({ name: 'aks-neu-dr', labels: { env: 'dr' }, region: 'northeurope', api_version: 'v1.31.4', min_kubelet: 'v1.31.4', nodes: 9, cpu_milli: 72_000, mem_bytes: 288 * 2 ** 30, bench_enabled: false, zones: ['northeurope-1', 'northeurope-2'], instance_types: [{ instance_type: 'D8s_v5', count: 9 }] }),
-  cluster({ name: 'oke-fra-erp', labels: { env: 'prod', team: 'erp' }, provider: 'oracle', provider_label: 'Oracle Cloud', region: 'eu-frankfurt-1', api_version: 'v1.31.1', min_kubelet: 'v1.30.6', version_skew: true, nodes: 11, cpu_milli: 176_000, mem_bytes: 704 * 2 ** 30, zones: ['AD-1'], instance_types: [{ instance_type: 'VM.Standard.E5.Flex', count: 11 }], agent_version: '0.4.2' }),
-  cluster({ name: 'eks-fra-data', labels: { env: 'prod', team: 'data' }, provider: 'aws', provider_label: 'AWS', region: 'eu-central-1', api_version: 'v1.31.3', min_kubelet: 'v1.31.3', nodes: 12, cpu_milli: 160_000, mem_bytes: 640 * 2 ** 30, transfer_mode: 'compressed', egress_rate_per_gb: 0.09, zones: ['eu-central-1a', 'eu-central-1b'], instance_types: [{ instance_type: 'm6i.2xlarge', count: 8 }, { instance_type: 'r6i.4xlarge', count: 4 }], backup_wire_bytes_30d: 74 * GB, backup_bytes_30d: 520 * GB }),
-  cluster({ name: 'onprem-factory-01', labels: { env: 'prod', site: 'factory' }, provider: 'onprem', provider_label: 'On-prem', provider_override: 'onprem', region: '', api_version: 'v1.30.9', min_kubelet: 'v1.30.9', nodes: 5, cpu_milli: 40_000, mem_bytes: 160 * 2 ** 30, agent_version: '0.4.1', instance_types: [{ instance_type: '8 vCPU / 32 GiB', count: 5 }] }),
-  cluster({ name: 'gke-euw1-web', labels: { env: 'prod', team: 'web' }, provider: 'gcp', provider_label: 'GCP', region: 'europe-west1', api_version: 'v1.32.2', min_kubelet: 'v1.32.2', nodes: 8, cpu_milli: 64_000, mem_bytes: 256 * 2 ** 30, instance_types: [{ instance_type: 'n2-standard-8', count: 8 }] }),
+  cluster({
+    name: 'prod-aks-weu-01',
+    labels: { env: 'prod', team: 'core' },
+    nodes: 18,
+    nodes_ready: 18,
+    cpu_milli: 240_000,
+    mem_bytes: 1.4 * 2 ** 40,
+    zones: ['westeurope-1', 'westeurope-2', 'westeurope-3'],
+    instance_types: [
+      { instance_type: 'D8s_v5', count: 12 },
+      { instance_type: 'E16s_v5', count: 6 },
+    ],
+  }),
+  cluster({
+    name: 'prod-aks-weu-02',
+    labels: { env: 'prod', team: 'billing' },
+    nodes: 14,
+    nodes_ready: 14,
+    cpu_milli: 112_000,
+    mem_bytes: 448 * 2 ** 30,
+    zones: ['westeurope-1', 'westeurope-2', 'westeurope-3'],
+    instance_types: [{ instance_type: 'D8s_v5', count: 14 }],
+  }),
+  cluster({
+    name: 'aks-neu-dr',
+    labels: { env: 'dr' },
+    region: 'northeurope',
+    api_version: 'v1.31.4',
+    min_kubelet: 'v1.31.4',
+    nodes: 9,
+    cpu_milli: 72_000,
+    mem_bytes: 288 * 2 ** 30,
+    bench_enabled: false,
+    zones: ['northeurope-1', 'northeurope-2'],
+    instance_types: [{ instance_type: 'D8s_v5', count: 9 }],
+  }),
+  cluster({
+    name: 'oke-fra-erp',
+    labels: { env: 'prod', team: 'erp' },
+    provider: 'oracle',
+    provider_label: 'Oracle Cloud',
+    region: 'eu-frankfurt-1',
+    api_version: 'v1.31.1',
+    min_kubelet: 'v1.30.6',
+    version_skew: true,
+    nodes: 11,
+    cpu_milli: 176_000,
+    mem_bytes: 704 * 2 ** 30,
+    zones: ['AD-1'],
+    instance_types: [{ instance_type: 'VM.Standard.E5.Flex', count: 11 }],
+    agent_version: '0.4.2',
+  }),
+  cluster({
+    name: 'eks-fra-data',
+    labels: { env: 'prod', team: 'data' },
+    provider: 'aws',
+    provider_label: 'AWS',
+    region: 'eu-central-1',
+    api_version: 'v1.31.3',
+    min_kubelet: 'v1.31.3',
+    nodes: 12,
+    cpu_milli: 160_000,
+    mem_bytes: 640 * 2 ** 30,
+    transfer_mode: 'compressed',
+    egress_rate_per_gb: 0.09,
+    zones: ['eu-central-1a', 'eu-central-1b'],
+    instance_types: [
+      { instance_type: 'm6i.2xlarge', count: 8 },
+      { instance_type: 'r6i.4xlarge', count: 4 },
+    ],
+    backup_wire_bytes_30d: 74 * GB,
+    backup_bytes_30d: 520 * GB,
+  }),
+  cluster({
+    name: 'onprem-factory-01',
+    labels: { env: 'prod', site: 'factory' },
+    provider: 'onprem',
+    provider_label: 'On-prem',
+    provider_override: 'onprem',
+    region: '',
+    api_version: 'v1.30.9',
+    min_kubelet: 'v1.30.9',
+    nodes: 5,
+    cpu_milli: 40_000,
+    mem_bytes: 160 * 2 ** 30,
+    agent_version: '0.4.1',
+    instance_types: [{ instance_type: '8 vCPU / 32 GiB', count: 5 }],
+  }),
+  cluster({
+    name: 'gke-euw1-web',
+    labels: { env: 'prod', team: 'web' },
+    provider: 'gcp',
+    provider_label: 'GCP',
+    region: 'europe-west1',
+    api_version: 'v1.32.2',
+    min_kubelet: 'v1.32.2',
+    nodes: 8,
+    cpu_milli: 64_000,
+    mem_bytes: 256 * 2 ** 30,
+    instance_types: [{ instance_type: 'n2-standard-8', count: 8 }],
+  }),
   cluster({ name: 'aks-weu-staging', labels: { env: 'staging', team: 'core' }, nodes: 6, cpu_milli: 48_000, mem_bytes: 192 * 2 ** 30, bench_enabled: false, instance_types: [{ instance_type: 'D4s_v5', count: 6 }] }),
-  cluster({ name: 'eks-use1-ml', labels: { env: 'prod', team: 'ml', region: 'us' }, provider: 'aws', provider_label: 'AWS', region: 'us-east-1', api_version: 'v1.31.3', min_kubelet: 'v1.31.3', nodes: 16, cpu_milli: 256_000, mem_bytes: 1 * 2 ** 40, instance_types: [{ instance_type: 'g5.4xlarge', count: 4 }, { instance_type: 'm6i.4xlarge', count: 12 }] }),
-  cluster({ name: 'cce-ist-retail', labels: { env: 'prod', team: 'retail', site: 'istanbul' }, provider: 'huawei', provider_label: 'Huawei Cloud', region: 'tr-west-1', api_version: 'v1.30.6', min_kubelet: 'v1.30.6', nodes: 7, cpu_milli: 56_000, mem_bytes: 224 * 2 ** 30, instance_types: [{ instance_type: 'c7.2xlarge.4', count: 7 }] }),
-  cluster({ name: 'aks-sea-apac', labels: { env: 'prod', team: 'core', region: 'apac' }, region: 'southeastasia', nodes: 10, cpu_milli: 80_000, mem_bytes: 320 * 2 ** 30, instance_types: [{ instance_type: 'D8s_v5', count: 10 }] }),
-  cluster({ name: 'onprem-ist-lab', labels: { env: 'lab' }, provider: 'onprem', provider_label: 'On-prem', provider_override: 'onprem', region: '', api_version: 'v1.29.12', min_kubelet: 'v1.29.12', eol: true, status: 'offline', last_seen_at: iso(2 * H), nodes: 3, nodes_ready: 0, cpu_milli: 12_000, mem_bytes: 48 * 2 ** 30, agent_version: '0.3.9', bench_enabled: false, instance_types: [{ instance_type: '4 vCPU / 16 GiB', count: 3 }] }),
+  cluster({
+    name: 'eks-use1-ml',
+    labels: { env: 'prod', team: 'ml', region: 'us' },
+    provider: 'aws',
+    provider_label: 'AWS',
+    region: 'us-east-1',
+    api_version: 'v1.31.3',
+    min_kubelet: 'v1.31.3',
+    nodes: 16,
+    cpu_milli: 256_000,
+    mem_bytes: 1 * 2 ** 40,
+    instance_types: [
+      { instance_type: 'g5.4xlarge', count: 4 },
+      { instance_type: 'm6i.4xlarge', count: 12 },
+    ],
+  }),
+  cluster({
+    name: 'cce-ist-retail',
+    labels: { env: 'prod', team: 'retail', site: 'istanbul' },
+    provider: 'huawei',
+    provider_label: 'Huawei Cloud',
+    region: 'tr-west-1',
+    api_version: 'v1.30.6',
+    min_kubelet: 'v1.30.6',
+    nodes: 7,
+    cpu_milli: 56_000,
+    mem_bytes: 224 * 2 ** 30,
+    instance_types: [{ instance_type: 'c7.2xlarge.4', count: 7 }],
+  }),
+  cluster({
+    name: 'aks-sea-apac',
+    labels: { env: 'prod', team: 'core', region: 'apac' },
+    region: 'southeastasia',
+    nodes: 10,
+    cpu_milli: 80_000,
+    mem_bytes: 320 * 2 ** 30,
+    instance_types: [{ instance_type: 'D8s_v5', count: 10 }],
+  }),
+  cluster({
+    name: 'onprem-ist-lab',
+    labels: { env: 'lab' },
+    provider: 'onprem',
+    provider_label: 'On-prem',
+    provider_override: 'onprem',
+    region: '',
+    api_version: 'v1.29.12',
+    min_kubelet: 'v1.29.12',
+    eol: true,
+    status: 'offline',
+    last_seen_at: iso(2 * H),
+    nodes: 3,
+    nodes_ready: 0,
+    cpu_milli: 12_000,
+    mem_bytes: 48 * 2 ** 30,
+    agent_version: '0.3.9',
+    bench_enabled: false,
+    instance_types: [{ instance_type: '4 vCPU / 16 GiB', count: 3 }],
+  }),
 ];
 export const byName = (n: string) => clusters.find((c) => c.name === n)!;
 
@@ -244,7 +458,17 @@ export const destinations: Destination[] = [
     endpoint_override: '',
     last_test_at: iso(3 * H),
     last_test_ok: true,
-    last_test: { ok: true, can_delete: false, steps: [{ name: 'write', ok: true, detail: '' }, { name: 'read', ok: true, detail: '' }, { name: 'tag', ok: true, detail: '' }, { name: 'delete_refused', ok: true, detail: 'delete returned 403' }], sas: null },
+    last_test: {
+      ok: true,
+      can_delete: false,
+      steps: [
+        { name: 'write', ok: true, detail: '' },
+        { name: 'read', ok: true, detail: '' },
+        { name: 'tag', ok: true, detail: '' },
+        { name: 'delete_refused', ok: true, detail: 'delete returned 403' },
+      ],
+      sas: null,
+    },
     jobs: 9,
   },
   {
@@ -265,7 +489,12 @@ export const destinations: Destination[] = [
     last_test: {
       ok: true,
       can_delete: false,
-      steps: [{ name: 'write', ok: true, detail: '' }, { name: 'read', ok: true, detail: '' }, { name: 'tag', ok: true, detail: '' }, { name: 'delete_refused', ok: true, detail: 'delete returned 403' }],
+      steps: [
+        { name: 'write', ok: true, detail: '' },
+        { name: 'read', ok: true, detail: '' },
+        { name: 'tag', ok: true, detail: '' },
+        { name: 'delete_refused', ok: true, detail: 'delete returned 403' },
+      ],
       sas: { permissions: 'rcwt', expires_at: isoIn(12 * D), missing: [], extra: [], scope: 'container' },
     },
     jobs: 2,
@@ -343,8 +572,28 @@ export const destinationMounts: DestinationMount[] = [
 ];
 
 export const channels: Channel[] = [
-  { id: uuid(), kind: 'slack', name: '#infra-backups', slack_channel_id: 'C0123ABCD', routes: ['backup.failed', 'backup.missed'], created_at: iso(60 * D), last_delivery_at: iso(2 * H), last_delivery_ok: true, last_delivery_error: '' },
-  { id: uuid(), kind: 'slack', name: '#vault-approvals', slack_channel_id: 'C0456EFGH', routes: ['cr.opened', 'cr.expired', 'vault.unmanaged_write'], created_at: iso(60 * D), last_delivery_at: iso(5 * H), last_delivery_ok: false, last_delivery_error: 'slack: not_in_channel' },
+  {
+    id: uuid(),
+    kind: 'slack',
+    name: '#infra-backups',
+    slack_channel_id: 'C0123ABCD',
+    routes: ['backup.failed', 'backup.missed'],
+    created_at: iso(60 * D),
+    last_delivery_at: iso(2 * H),
+    last_delivery_ok: true,
+    last_delivery_error: '',
+  },
+  {
+    id: uuid(),
+    kind: 'slack',
+    name: '#vault-approvals',
+    slack_channel_id: 'C0456EFGH',
+    routes: ['cr.opened', 'cr.expired', 'vault.unmanaged_write'],
+    created_at: iso(60 * D),
+    last_delivery_at: iso(5 * H),
+    last_delivery_ok: false,
+    last_delivery_error: 'slack: not_in_channel',
+  },
   { id: uuid(), kind: 'slack', name: '#infra-audit', slack_channel_id: 'C0789IJKL', routes: ['audit.new_findings', 'vuln.critical'], created_at: iso(60 * D) },
   { id: uuid(), kind: 'slack', name: '#platform-access', slack_channel_id: 'C0ABCMNOP', routes: ['grant.changed', 'grant.stale', 'agent.offline', 'sas.expiring'], created_at: iso(60 * D) },
 ];
@@ -414,18 +663,56 @@ function job(t: Target, p: Partial<BackupJob>): BackupJob {
 
 export const jobs: BackupJob[] = [
   job(tByService('billing-pg'), { engine_options: { databases: ['billing'], globals: true } }),
-  job(tByService('openbao'), { notify_on_success: true, cron: '0 */6 * * *', next_run_at: isoIn(2 * H), estimated_monthly_bytes: 5 * GB, credential: { id: uuid(), source: 'keyvault_ref', ref: 'kv://kv-platform-weu/olympos-approle', username: 'approle' } }),
+  job(tByService('openbao'), {
+    notify_on_success: true,
+    cron: '0 */6 * * *',
+    next_run_at: isoIn(2 * H),
+    estimated_monthly_bytes: 5 * GB,
+    credential: { id: uuid(), source: 'keyvault_ref', ref: 'kv://kv-platform-weu/olympos-approle', username: 'approle' },
+  }),
   job(tByService('metrics-ch'), { cron: '30 3 * * *', destination: { id: destinations[1].id, name: destinations[1].name }, estimated_monthly_bytes: 74 * GB, estimated_monthly_cost: 6.66 }),
 ];
 const [jBilling, jBao, jMetrics] = jobs;
 
 export const runs: BackupRun[] = [
   run({ job_id: jBao.id, target_service: 'openbao', cluster_name: 'prod-aks-weu-01', engine: 'vault', started_at: iso(2 * H), finished_at: iso(2 * H - 11_000), bytes: 42e6, wire_bytes: 42e6 }),
-  run({ job_id: jMetrics.id, target_service: 'metrics-ch', cluster_name: 'oke-fra-erp', engine: 'clickhouse', status: 'failed', error: 'SAS expired', started_at: iso(6.5 * H), finished_at: iso(6.5 * H - 252_000), bytes: 0, wire_bytes: 0, destination_name: 'blob-neu-dr' }),
+  run({
+    job_id: jMetrics.id,
+    target_service: 'metrics-ch',
+    cluster_name: 'oke-fra-erp',
+    engine: 'clickhouse',
+    status: 'failed',
+    error: 'SAS expired',
+    started_at: iso(6.5 * H),
+    finished_at: iso(6.5 * H - 252_000),
+    bytes: 0,
+    wire_bytes: 0,
+    destination_name: 'blob-neu-dr',
+  }),
   run({ job_id: jBilling.id, target_service: 'billing-pg', cluster_name: 'prod-aks-weu-02', engine: 'postgresql', started_at: iso(8 * H), finished_at: iso(8 * H - 400_000), bytes: 3.1e9, wire_bytes: 3.1e9 }),
   run({ job_id: jBao.id, target_service: 'openbao', cluster_name: 'prod-aks-weu-01', engine: 'vault', started_at: iso(8 * H), finished_at: iso(8 * H - 10_000), bytes: 41e6, wire_bytes: 41e6 }),
-  run({ job_id: jBilling.id, target_service: 'billing-pg', cluster_name: 'prod-aks-weu-02', engine: 'postgresql', started_at: iso(32 * H), finished_at: iso(32 * H - 395_000), bytes: 3.08e9, wire_bytes: 3.08e9, tier: 'weekly' }),
-  run({ job_id: jMetrics.id, target_service: 'metrics-ch', cluster_name: 'oke-fra-erp', engine: 'clickhouse', started_at: iso(30.5 * H), finished_at: iso(30.5 * H - 610_000), bytes: 18e9, wire_bytes: 2.4e9, destination_name: 'blob-neu-dr' }),
+  run({
+    job_id: jBilling.id,
+    target_service: 'billing-pg',
+    cluster_name: 'prod-aks-weu-02',
+    engine: 'postgresql',
+    started_at: iso(32 * H),
+    finished_at: iso(32 * H - 395_000),
+    bytes: 3.08e9,
+    wire_bytes: 3.08e9,
+    tier: 'weekly',
+  }),
+  run({
+    job_id: jMetrics.id,
+    target_service: 'metrics-ch',
+    cluster_name: 'oke-fra-erp',
+    engine: 'clickhouse',
+    started_at: iso(30.5 * H),
+    finished_at: iso(30.5 * H - 610_000),
+    bytes: 18e9,
+    wire_bytes: 2.4e9,
+    destination_name: 'blob-neu-dr',
+  }),
 ];
 jBilling.last_run = runs[2];
 jBao.last_run = runs[0];
@@ -513,7 +800,22 @@ const VAULT_NAMES: [string, 'hashicorp' | 'openbao', string][] = [
   ['bao-platform', 'openbao', 'platform'],
   ['vault-ci', 'hashicorp', 'ci'],
 ];
-const PATH_POOL = ['apps/orders/db', 'apps/orders/api', 'apps/billing/stripe', 'apps/billing/db', 'apps/checkout/redis', 'platform/ci', 'platform/ingress', 'platform/registry', 'shared/smtp', 'shared/sentry', 'teams/data/warehouse', 'teams/ml/feature-store', 'teams/web/cdn', 'erp/sap'];
+const PATH_POOL = [
+  'apps/orders/db',
+  'apps/orders/api',
+  'apps/billing/stripe',
+  'apps/billing/db',
+  'apps/checkout/redis',
+  'platform/ci',
+  'platform/ingress',
+  'platform/registry',
+  'shared/smtp',
+  'shared/sentry',
+  'teams/data/warehouse',
+  'teams/ml/feature-store',
+  'teams/web/cdn',
+  'erp/sap',
+];
 const KEY_POOL = ['DB_HOST', 'DB_USER', 'DB_PASSWORD', 'API_KEY', 'API_SECRET', 'TOKEN', 'TLS_CERT', 'TLS_KEY', 'WEBHOOK_SECRET', 'DSN'];
 const generatedSecrets: Record<string, { path: string; keys: string[]; version: number; ago: number; managed: boolean }[]> = {};
 clusters.forEach((c, ci) => {
@@ -524,7 +826,10 @@ clusters.forEach((c, ci) => {
   for (const [name, provider, ns] of VAULT_NAMES) {
     if (have + made >= want) break;
     if (vaults.some((v) => v.target.cluster_id === c.id && v.target.service === name) || targets.some((t) => t.cluster_id === c.id && t.service === name)) continue;
-    const t = target({ service: name, namespace: ns, engine: '', vault_provider: provider, detected_version: provider === 'openbao' ? '2.1' : '1.18', port: 8200, tls_server_name: `${name}.${ns}.svc`, status: 'configured' }, c.name);
+    const t = target(
+      { service: name, namespace: ns, engine: '', vault_provider: provider, detected_version: provider === 'openbao' ? '2.1' : '1.18', port: 8200, tls_server_name: `${name}.${ns}.svc`, status: 'configured' },
+      c.name,
+    );
     targets.push(t);
     const offline = c.status === 'offline';
     const status: Vault['status'] = offline ? 'error' : (ci + made) % 5 === 3 ? 'discovered' : 'configured';
@@ -547,7 +852,13 @@ clusters.forEach((c, ci) => {
     if (status !== 'discovered') {
       const n = 3 + Math.floor(rnd() * 6);
       const paths = [...PATH_POOL].sort(() => rnd() - 0.5).slice(0, n);
-      generatedSecrets[v.id] = paths.map((path) => ({ path, keys: [...KEY_POOL].sort(() => rnd() - 0.5).slice(0, 2 + Math.floor(rnd() * 4)), version: 1 + Math.floor(rnd() * 9), ago: Math.floor(1 + rnd() * 60) * D, managed: rnd() > 0.08 }));
+      generatedSecrets[v.id] = paths.map((path) => ({
+        path,
+        keys: [...KEY_POOL].sort(() => rnd() - 0.5).slice(0, 2 + Math.floor(rnd() * 4)),
+        version: 1 + Math.floor(rnd() * 9),
+        ago: Math.floor(1 + rnd() * 60) * D,
+        managed: rnd() > 0.08,
+      }));
       v.secrets = paths.length;
     }
     made++;
@@ -600,10 +911,7 @@ export const secrets: Record<string, SecretDetail[]> = {
     sec('kv/', 'platform/ci', ['GHCR_TOKEN', 'COSIGN_KEY'], 3, 9 * D),
     sec('kv/', 'shared/smtp', ['SMTP_HOST', 'SMTP_PASSWORD'], 2, 60 * D),
   ],
-  [vaults[1].id]: [
-    sec('kv/', 'platform/ci', ['RUNNER_TOKEN', 'NPM_TOKEN'], 12, 1 * D, false),
-    sec('kv/', 'platform/ingress', ['TLS_KEY', 'TLS_CERT'], 5, 30 * D),
-  ],
+  [vaults[1].id]: [sec('kv/', 'platform/ci', ['RUNNER_TOKEN', 'NPM_TOKEN'], 12, 1 * D, false), sec('kv/', 'platform/ingress', ['TLS_KEY', 'TLS_CERT'], 5, 30 * D)],
 };
 // key metadata to match the mockup
 {
@@ -638,7 +946,7 @@ export const nextCrNumber = () => `CR-0${++crSeq}`;
 function cr(p: Partial<ChangeRequest> & Pick<ChangeRequest, 'maker' | 'items'>, v: Vault): ChangeRequest {
   return {
     id: uuid(),
-    vault: { id: v.id, name: v.target.service, cluster_name: v.target.cluster_name, provider: v.provider, version: v.version },
+    vault: { id: v.id, name: `${v.target.namespace}/${v.target.service}`, cluster_name: v.target.cluster_name, provider: v.provider, version: v.version },
     checker: null,
     justification: '',
     status: 'pending',
@@ -742,7 +1050,20 @@ const ksSched = uuid();
 const polSched = uuid();
 const kbSched = uuid();
 function arun(p: Partial<AuditRun> & Pick<AuditRun, 'tool'>): AuditRun {
-  return { id: uuid(), schedule_id: null, cluster_id: '', cluster_name: 'all clusters', status: 'succeeded', started_at: iso(H), finished_at: iso(H - 300_000), score: null, new_findings: 0, resolved_findings: 0, error: '', ...p };
+  return {
+    id: uuid(),
+    schedule_id: null,
+    cluster_id: '',
+    cluster_name: 'all clusters',
+    status: 'succeeded',
+    started_at: iso(H),
+    finished_at: iso(H - 300_000),
+    score: null,
+    new_findings: 0,
+    resolved_findings: 0,
+    error: '',
+    ...p,
+  };
 }
 
 /** Kubescape 4 output of a run whose schedule asked for a CIS framework the binary no longer ships. */
@@ -789,13 +1110,25 @@ export const auditRuns: AuditRun[] = [];
       );
     }
     if (c.labels.env === 'prod') {
-      auditRuns.push(arun({ tool: 'polaris', schedule_id: polSched, cluster_id: c.id, cluster_name: c.name, started_at: iso(2 * D + order * MIN), finished_at: iso(2 * D + order * MIN - 60_000), score: Math.round((84 + ((ci * 3.1) % 14)) * 10) / 10, new_findings: ci % 4 === 1 ? 3 : 0 }));
+      auditRuns.push(
+        arun({
+          tool: 'polaris',
+          schedule_id: polSched,
+          cluster_id: c.id,
+          cluster_name: c.name,
+          started_at: iso(2 * D + order * MIN),
+          finished_at: iso(2 * D + order * MIN - 60_000),
+          score: Math.round((84 + ((ci * 3.1) % 14)) * 10) / 10,
+          new_findings: ci % 4 === 1 ? 3 : 0,
+        }),
+      );
     }
     if (c.bench_enabled) {
       const managed = c.provider !== 'onprem';
       const bench = c.provider === 'azure' ? 'aks-1.7' : c.provider === 'aws' ? 'eks-1.5' : c.provider === 'gcp' ? 'gke-1.6' : 'cis-1.9';
       const nodes = Array.from({ length: Math.min(3, c.nodes) }, (_, n) => ({
-        node_name: c.provider === 'azure' ? `aks-sys-${17402 + ci}-vmss00000${n}` : c.provider === 'aws' ? `ip-10-${20 + ci}-4-${17 + n}` : `${c.name.split('-').slice(-2).join('-')}-${n === 0 && !managed ? 'cp' : 'w'}${n + 1}`,
+        node_name:
+          c.provider === 'azure' ? `aks-sys-${17402 + ci}-vmss00000${n}` : c.provider === 'aws' ? `ip-10-${20 + ci}-4-${17 + n}` : `${c.name.split('-').slice(-2).join('-')}-${n === 0 && !managed ? 'cp' : 'w'}${n + 1}`,
         cluster_name: c.name,
         benchmark: !managed ? (n === 0 ? `${bench} master` : `${bench} node`) : bench,
         state: 'done',
@@ -806,16 +1139,64 @@ export const auditRuns: AuditRun[] = [];
         message: '',
         duration_s: 36 + ((ci * 7 + n * 3) % 20),
       })).map((x) => ({ ...x, checks: mockBenchChecks(x.pass, x.fail, x.warn, !managed && x.benchmark.endsWith('master')) }));
-      auditRuns.push(arun({ tool: 'kube-bench', schedule_id: kbSched, cluster_id: c.id, cluster_name: c.name, started_at: iso(3 * D + order * MIN), finished_at: iso(3 * D + order * MIN - 120_000), score: Math.round((nodes.reduce((s, x) => s + x.pass, 0) / nodes.reduce((s, x) => s + x.pass + x.fail, 0)) * 1000) / 10, resolved_findings: ci % 3 === 0 ? 2 : 0, bench_nodes: nodes }));
+      auditRuns.push(
+        arun({
+          tool: 'kube-bench',
+          schedule_id: kbSched,
+          cluster_id: c.id,
+          cluster_name: c.name,
+          started_at: iso(3 * D + order * MIN),
+          finished_at: iso(3 * D + order * MIN - 120_000),
+          score: Math.round((nodes.reduce((s, x) => s + x.pass, 0) / nodes.reduce((s, x) => s + x.pass + x.fail, 0)) * 1000) / 10,
+          resolved_findings: ci % 3 === 0 ? 2 : 0,
+          bench_nodes: nodes,
+        }),
+      );
     }
   });
   auditRuns.sort((x, y) => (y.started_at ?? '').localeCompare(x.started_at ?? ''));
 }
 const latest = (tool: string) => auditRuns.find((r) => r.tool === tool) ?? null;
 export const auditSchedules: AuditSchedule[] = [
-  { id: ksSched, tool: 'kubescape', frameworks: ['nsa', 'cis', 'mitre'], scope_selector: 'all', cron: '0 4 * * *', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(14 * H), clusters: 11, last_run: latest('kubescape') },
-  { id: polSched, tool: 'polaris', frameworks: [], scope_selector: 'env=prod', cron: '0 5 * * 1', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(5 * D), clusters: 9, last_run: latest('polaris') },
-  { id: kbSched, tool: 'kube-bench', frameworks: [], scope_selector: 'all', cron: '0 3 * * 0', timezone: 'Europe/Istanbul', enabled: true, notify_channel_id: channels[2].id, next_run_at: isoIn(4 * D), clusters: 9, last_run: latest('kube-bench') },
+  {
+    id: ksSched,
+    tool: 'kubescape',
+    frameworks: ['nsa', 'cis', 'mitre'],
+    scope_selector: 'all',
+    cron: '0 4 * * *',
+    timezone: 'Europe/Istanbul',
+    enabled: true,
+    notify_channel_id: channels[2].id,
+    next_run_at: isoIn(14 * H),
+    clusters: 11,
+    last_run: latest('kubescape'),
+  },
+  {
+    id: polSched,
+    tool: 'polaris',
+    frameworks: [],
+    scope_selector: 'env=prod',
+    cron: '0 5 * * 1',
+    timezone: 'Europe/Istanbul',
+    enabled: true,
+    notify_channel_id: channels[2].id,
+    next_run_at: isoIn(5 * D),
+    clusters: 9,
+    last_run: latest('polaris'),
+  },
+  {
+    id: kbSched,
+    tool: 'kube-bench',
+    frameworks: [],
+    scope_selector: 'all',
+    cron: '0 3 * * 0',
+    timezone: 'Europe/Istanbul',
+    enabled: true,
+    notify_channel_id: channels[2].id,
+    next_run_at: isoIn(4 * D),
+    clusters: 9,
+    last_run: latest('kube-bench'),
+  },
 ];
 
 function finding(p: Partial<Finding> & Pick<Finding, 'control_id' | 'title' | 'cluster_name' | 'resource_ref' | 'severity'>): Finding {
@@ -825,8 +1206,24 @@ export const findings: Finding[] = [
   finding({ control_id: 'C-0057', title: 'Privileged container', severity: 'high', cluster_name: 'eks-fra-data', resource_ref: 'analytics/deploy/spark-driver' }),
   finding({ control_id: 'C-0017', title: 'Immutable root filesystem', severity: 'medium', cluster_name: 'prod-aks-weu-02', resource_ref: 'billing/deploy/invoice-api' }),
   finding({ control_id: 'C-0034', title: 'Automount SA token', severity: 'medium', cluster_name: 'oke-fra-erp', resource_ref: 'erp/sts/report-gen' }),
-  finding({ source: 'transfer', control_id: 'transfer.compressed_mode', title: 'Backups use compressed transfer mode (agent can see backup data)', severity: 'medium', cluster_name: 'eks-fra-data', resource_ref: 'cluster/eks-fra-data', first_seen_at: iso(20 * D) }),
-  finding({ source: 'vault-drift', control_id: 'vault.unmanaged_write', title: 'Unmanaged change: kv/platform/ci v12', severity: 'high', cluster_name: 'prod-aks-weu-01', resource_ref: 'openbao/kv/platform/ci', first_seen_at: iso(9 * H) }),
+  finding({
+    source: 'transfer',
+    control_id: 'transfer.compressed_mode',
+    title: 'Backups use compressed transfer mode (agent can see backup data)',
+    severity: 'medium',
+    cluster_name: 'eks-fra-data',
+    resource_ref: 'cluster/eks-fra-data',
+    first_seen_at: iso(20 * D),
+  }),
+  finding({
+    source: 'vault-drift',
+    control_id: 'vault.unmanaged_write',
+    title: 'Unmanaged change: kv/platform/ci v12',
+    severity: 'high',
+    cluster_name: 'prod-aks-weu-01',
+    resource_ref: 'openbao/kv/platform/ci',
+    first_seen_at: iso(9 * H),
+  }),
   ...(
     [
       ['prod-aks-weu-01', 'payments', 'payments-config', 'AWS_ACCESS_KEY_ID', 'aws-access-token', 'Identified a pattern that may indicate AWS credentials', 'high'],
@@ -835,8 +1232,16 @@ export const findings: Finding[] = [
       ['eks-fra-data', 'analytics', 'spark-defaults', 'spark.hadoop.fs.s3a.secret.key', 'generic-api-key', 'Detected a Generic API Key', 'high'],
     ] as const
   ).map(([cl, ns, cm, key, rule, desc, conf]) =>
-    finding({ source: 'sensitive-data', control_id: rule, title: `${desc} in ConfigMap ${ns}/${cm} (key ${key})`, severity: conf, cluster_name: cl, resource_ref: `${ns}/${cm}:${key}`,
-      details: { namespace: ns, config_map: cm, key, rule_id: rule, rule_description: desc, confidence: conf, value_length: 40, fix: 'Move this value to a Secret or Vault and remove it from the ConfigMap.' }, first_seen_at: iso(30 * H) }),
+    finding({
+      source: 'sensitive-data',
+      control_id: rule,
+      title: `${desc} in ConfigMap ${ns}/${cm} (key ${key})`,
+      severity: conf,
+      cluster_name: cl,
+      resource_ref: `${ns}/${cm}:${key}`,
+      details: { namespace: ns, config_map: cm, key, rule_id: rule, rule_description: desc, confidence: conf, value_length: 40, fix: 'Move this value to a Secret or Vault and remove it from the ConfigMap.' },
+      first_seen_at: iso(30 * H),
+    }),
   ),
 ];
 {
@@ -861,19 +1266,111 @@ export const findings: Finding[] = [
       const [id, title, sev, src] = CONTROLS[(ci * 3 + i) % CONTROLS.length];
       if (src === 'kube-bench' && !c.bench_enabled) continue;
       if (src === 'polaris' && c.labels.env !== 'prod') continue;
-      findings.push(finding({ source: src, control_id: id, title, severity: sev, cluster_name: c.name, resource_ref: src === 'kube-bench' ? `node/${c.name}-w${i + 1}` : `${NS[(ci + i) % NS.length]}/${WL[(ci * 2 + i) % WL.length]}`, first_seen_at: iso((10 + 24 * (i % 3)) * H) }));
+      findings.push(
+        finding({
+          source: src,
+          control_id: id,
+          title,
+          severity: sev,
+          cluster_name: c.name,
+          resource_ref: src === 'kube-bench' ? `node/${c.name}-w${i + 1}` : `${NS[(ci + i) % NS.length]}/${WL[(ci * 2 + i) % WL.length]}`,
+          first_seen_at: iso((10 + 24 * (i % 3)) * H),
+        }),
+      );
     }
   });
 }
 
 // ------------------------------------------------------------ security
 export const images: Image[] = [
-  { digest: 'sha256:7c1e4b2f9a0d3c5e7f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c09ab', repo: 'acr.contoso.io/erp/payments-api', tags: ['2.14.1'], clusters: 2, workloads: 6, critical: 3, high: 11, medium: 20, low: 31, scan_status: 'scanned', last_scanned_at: iso(25 * MIN), fixable: 9, registry: 'acr.contoso.io' },
-  { digest: 'sha256:a40f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b771c', repo: 'docker.io/bitnami/redis', tags: ['7.2.4'], clusters: 5, workloads: 9, critical: 2, high: 6, medium: 9, low: 14, scan_status: 'scanned', last_scanned_at: iso(25 * MIN), fixable: 4, registry: '' },
-  { digest: 'sha256:1b9d3e5f7a9c1e3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7be2f0', repo: 'quay.io/legacy/report-gen', tags: ['0.9'], clusters: 1, workloads: 1, critical: 1, high: 14, medium: 22, low: 9, scan_status: 'scanned', last_scanned_at: iso(25 * MIN), fixable: 0, registry: 'quay.io/legacy/*' },
-  { digest: 'sha256:c33a5d7f9b1d3f5a7c9e1f3b5d7a9c1e3f5b7d9a1c3e5f7b9d1a3c5e7f9b5d12', repo: 'ghcr.io/contoso/ingest-worker', tags: ['1.8.0'], clusters: 3, workloads: 12, critical: 1, high: 4, medium: 8, low: 12, scan_status: 'scanned', last_scanned_at: iso(25 * MIN), fixable: 2, registry: 'ghcr.io/contoso/*' },
-  { digest: 'sha256:e81f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f', repo: 'harbor.factory.local/mes/line-agent', tags: ['3.2'], clusters: 1, workloads: 4, critical: 0, high: 0, medium: 0, low: 0, scan_status: 'missing_credential', last_scanned_at: null, registry: '' },
-  { digest: 'sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0f1e2d3c4b5a69788796a5b4c3d2e1f00', repo: 'acr.contoso.io/platform/olympos-agent', tags: ['0.4.2'], clusters: 7, workloads: 7, critical: 0, high: 0, medium: 1, low: 2, scan_status: 'scanned', last_scanned_at: iso(25 * MIN), registry: 'acr.contoso.io' },
+  {
+    digest: 'sha256:7c1e4b2f9a0d3c5e7f1a2b4c6d8e0f1a3b5c7d9e1f2a4b6c8d0e2f4a6b8c09ab',
+    repo: 'acr.contoso.io/erp/payments-api',
+    tags: ['2.14.1'],
+    clusters: 2,
+    workloads: 6,
+    critical: 3,
+    high: 11,
+    medium: 20,
+    low: 31,
+    scan_status: 'scanned',
+    last_scanned_at: iso(25 * MIN),
+    fixable: 9,
+    registry: 'acr.contoso.io',
+  },
+  {
+    digest: 'sha256:a40f9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b771c',
+    repo: 'docker.io/bitnami/redis',
+    tags: ['7.2.4'],
+    clusters: 5,
+    workloads: 9,
+    critical: 2,
+    high: 6,
+    medium: 9,
+    low: 14,
+    scan_status: 'scanned',
+    last_scanned_at: iso(25 * MIN),
+    fixable: 4,
+    registry: '',
+  },
+  {
+    digest: 'sha256:1b9d3e5f7a9c1e3f5a7c9e1b3d5f7a9c1e3b5d7f9a1c3e5b7d9f1a3c5e7be2f0',
+    repo: 'quay.io/legacy/report-gen',
+    tags: ['0.9'],
+    clusters: 1,
+    workloads: 1,
+    critical: 1,
+    high: 14,
+    medium: 22,
+    low: 9,
+    scan_status: 'scanned',
+    last_scanned_at: iso(25 * MIN),
+    fixable: 0,
+    registry: 'quay.io/legacy/*',
+  },
+  {
+    digest: 'sha256:c33a5d7f9b1d3f5a7c9e1f3b5d7a9c1e3f5b7d9a1c3e5f7b9d1a3c5e7f9b5d12',
+    repo: 'ghcr.io/contoso/ingest-worker',
+    tags: ['1.8.0'],
+    clusters: 3,
+    workloads: 12,
+    critical: 1,
+    high: 4,
+    medium: 8,
+    low: 12,
+    scan_status: 'scanned',
+    last_scanned_at: iso(25 * MIN),
+    fixable: 2,
+    registry: 'ghcr.io/contoso/*',
+  },
+  {
+    digest: 'sha256:e81f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f',
+    repo: 'harbor.factory.local/mes/line-agent',
+    tags: ['3.2'],
+    clusters: 1,
+    workloads: 4,
+    critical: 0,
+    high: 0,
+    medium: 0,
+    low: 0,
+    scan_status: 'missing_credential',
+    last_scanned_at: null,
+    registry: '',
+  },
+  {
+    digest: 'sha256:0f1e2d3c4b5a69788796a5b4c3d2e1f0f1e2d3c4b5a69788796a5b4c3d2e1f00',
+    repo: 'acr.contoso.io/platform/olympos-agent',
+    tags: ['0.4.2'],
+    clusters: 7,
+    workloads: 7,
+    critical: 0,
+    high: 0,
+    medium: 1,
+    low: 2,
+    scan_status: 'scanned',
+    last_scanned_at: iso(25 * MIN),
+    registry: 'acr.contoso.io',
+  },
 ];
 // ...and a fleet-sized list (>= 120) with every scan state, incl. failed and unavailable.
 {
@@ -975,7 +1472,17 @@ export const netpol: NetpolNamespace[] = [
       const name = POLICIES[(ci + i * 3) % POLICIES.length];
       if (kyverno.some((p) => p.cluster_id === c.id && p.name === name)) continue;
       const fail = rnd() < 0.45 ? Math.floor(rnd() * 14) : 0;
-      kyverno.push({ cluster_id: c.id, cluster_name: c.name, kind: i % 4 === 3 ? 'ValidatingPolicy' : undefined, namespace: '', name, mode: rnd() < 0.3 ? 'Enforce' : 'Audit', rules: 1 + Math.floor(rnd() * 3), fail_count: fail, ready: !(ci === 7 && i === 0) });
+      kyverno.push({
+        cluster_id: c.id,
+        cluster_name: c.name,
+        kind: i % 4 === 3 ? 'ValidatingPolicy' : undefined,
+        namespace: '',
+        name,
+        mode: rnd() < 0.3 ? 'Enforce' : 'Audit',
+        rules: 1 + Math.floor(rnd() * 3),
+        fail_count: fail,
+        ready: !(ci === 7 && i === 0),
+      });
     }
     for (const ns of ['default', 'monitoring', 'ingress-nginx', 'apps', 'jobs', 'cert-manager']) {
       if (netpol.some((n) => n.cluster_id === c.id && n.namespace === ns)) continue;
@@ -985,7 +1492,18 @@ export const netpol: NetpolNamespace[] = [
   });
 }
 export const registries: Registry[] = [
-  { id: uuid(), host_pattern: 'acr.contoso.io', username: '', credential_source: 'managed_identity', credential_ref: '', images: 118, created_at: iso(50 * D), last_pull_at: iso(H), last_pull_ok: true, last_pull_error: '' },
+  {
+    id: uuid(),
+    host_pattern: 'acr.contoso.io',
+    username: '',
+    credential_source: 'managed_identity',
+    credential_ref: '',
+    images: 118,
+    created_at: iso(50 * D),
+    last_pull_at: iso(H),
+    last_pull_ok: true,
+    last_pull_error: '',
+  },
   { id: uuid(), host_pattern: 'ghcr.io/contoso/*', username: 'olympos-scan', credential_source: 'keyvault_ref', credential_ref: 'kv://kv-platform-weu/ghcr-pull-token', images: 41, created_at: iso(50 * D) },
   { id: uuid(), host_pattern: 'quay.io/legacy/*', username: 'robot$legacy', credential_source: 'stored', credential_ref: '', images: 3, created_at: iso(40 * D) },
 ];
@@ -1006,7 +1524,15 @@ export const grants: Grant[] = [
 ];
 export const directory = [
   { object_id: '7b3e1a2c-4d5e-4f60-8a71-9b8c7d6ec19d', display_name: 'Ayşe Kaya', upn: 'ayse.kaya@contoso.com', mail: 'ayse.kaya@contoso.com', user_type: 'Member', account_enabled: true, is_guest: false },
-  { object_id: '2f90b4c1-8e7d-4a6b-9c5d-3e2f1a0ba4b1', display_name: 'Ayşe Demir', upn: 'ayse_partner.com#EXT#@contoso.onmicrosoft.com', mail: 'ayse@partner.com', user_type: 'Guest', account_enabled: true, is_guest: true },
+  {
+    object_id: '2f90b4c1-8e7d-4a6b-9c5d-3e2f1a0ba4b1',
+    display_name: 'Ayşe Demir',
+    upn: 'ayse_partner.com#EXT#@contoso.onmicrosoft.com',
+    mail: 'ayse@partner.com',
+    user_type: 'Guest',
+    account_enabled: true,
+    is_guest: true,
+  },
   { object_id: 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d', display_name: 'Ahmet Şahin', upn: 'ahmet.sahin@contoso.com', mail: 'ahmet.sahin@contoso.com', user_type: 'Member', account_enabled: true, is_guest: false },
 ];
 
@@ -1030,7 +1556,18 @@ const A: [number, string, string, string, string, string, Record<string, unknown
 export const activity: ActivityEntry[] = [];
 {
   for (const [ago, actor, action, objectType, objectId, kind, details] of A) {
-    activity.push({ id: uuid(), at: iso(ago), actor_id: kind === 'user' ? uuid() : null, actor_name: actor, actor_kind: kind as ActivityEntry['actor_kind'], action, object_type: objectType, object_id: objectId, cluster_id: null, details });
+    activity.push({
+      id: uuid(),
+      at: iso(ago),
+      actor_id: kind === 'user' ? uuid() : null,
+      actor_name: actor,
+      actor_kind: kind as ActivityEntry['actor_kind'],
+      action,
+      object_type: objectType,
+      object_id: objectId,
+      cluster_id: null,
+      details,
+    });
   }
   // older history for cursor paging
   const filler = ['backup.succeeded', 'login.succeeded', 'backup.succeeded', 'audit.run_finished', 'vault.index_refreshed'];
@@ -1053,6 +1590,16 @@ export const activity: ActivityEntry[] = [];
 }
 
 export function record(action: string, objectType: string, objectId: string, summary: string) {
-  activity.unshift({ id: uuid(), at: new Date().toISOString(), actor_id: people.yigit.id, actor_name: people.yigit.upn, actor_kind: 'user', action, object_type: objectType, object_id: objectId, cluster_id: null, details: { summary } });
+  activity.unshift({
+    id: uuid(),
+    at: new Date().toISOString(),
+    actor_id: people.yigit.id,
+    actor_name: people.yigit.upn,
+    actor_kind: 'user',
+    action,
+    object_type: objectType,
+    object_id: objectId,
+    cluster_id: null,
+    details: { summary },
+  });
 }
-

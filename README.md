@@ -17,6 +17,24 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
+> **Status:** pre-release. `v0.1.0-rc.2` is the latest release candidate; see [CHANGELOG.md](CHANGELOG.md).
+
+## Is it for you?
+
+Olympos fits a platform team that runs several Kubernetes clusters and wants backups, Vault change control,
+audits and security findings in one self-hosted place. A production installation needs:
+
+| | |
+|---|---|
+| **Sign-in** | Microsoft Entra ID (OIDC). Access is granted per person in Olympos. |
+| **Keys and secrets** | Azure Key Vault: the key that encrypts stored credentials, and any `kv://` secret you reference. |
+| **Server** | Kubernetes ≥ 1.27 (Helm chart) or a Linux VM (`.deb`, `.rpm`, systemd), with PostgreSQL 16 (bundled by default). |
+| **Backup storage** | Azure Blob, S3 or S3-compatible (MinIO, Ceph RGW, …), or NFS. |
+| **Clusters** | Any Kubernetes. The agent needs no inbound port: it dials out to the server's gateway (`:8443`, mTLS). |
+
+Entra ID and Azure Key Vault are required in release builds; there is no other identity or key provider
+yet. To try Olympos without Azure, use the local lab below.
+
 ## Architecture
 
 ```mermaid
@@ -55,20 +73,19 @@ destinations show a permanent warning and need storage-side snapshots or WORM.
 |---|---|---|
 | ![Security](docs/images/security.png) | ![Backups](docs/images/backups.png) | ![Approvals](docs/images/approvals.png) |
 
-## Quick start (kind)
+## Try it locally
 
-Requirements: Docker, [kind](https://kind.sigs.k8s.io), Helm, Go. This builds the images, creates a two-node
-kind cluster with PostgreSQL, ClickHouse, Vault, OpenBao, Azurite and MinIO, installs the server (development
-build: local key vault, dev login) and enrolls nothing:
+A local lab with two kind clusters, databases, Vaults and backup storage, and a development build of the
+server (dev login, local key vault: no Azure needed). Requires Docker, [kind](https://kind.sigs.k8s.io),
+`kubectl`, Helm, Go and `openssl`:
 
 ```bash
-SETUP_ONLY=1 ./test/e2e/run.sh
-open http://127.0.0.1:28080/auth/dev-login?oid=00000000-0000-0000-0000-00000000ad01&name=Admin
+./test/e2e/env.sh
 ```
 
-Then *Dashboard › Add cluster*, run the generated Helm command against the lab
-(`KUBECONFIG=test/e2e/.work/kubeconfig`), and back up `orders-pg` from *Backups*. `./test/e2e/env.sh` builds a
-browsable lab with two clusters; `./test/e2e/run.sh` runs the whole e2e suite.
+Then follow **[Getting started](docs/getting-started.md)**: add both clusters, back up a database, change a
+Vault secret with a second person's approval, and run audits and image scans, with a screenshot for every
+step. `./test/e2e/env.sh down` removes the lab.
 
 ## Install
 
@@ -78,15 +95,16 @@ browsable lab with two clusters; `./test/e2e/run.sh` runs the whole e2e suite.
 
 ## Documentation
 
-| Doc | |
+Start with [Getting started](docs/getting-started.md); the full map is in [docs/README.md](docs/README.md).
+
+| | |
 |---|---|
-| [SPEC.md](SPEC.md) | The specification (source of truth) |
-| [docs/security-model.md](docs/security-model.md) | Trust boundaries and how each property is enforced |
-| [docs/restore.md](docs/restore.md) · [docs/restore-olympos.md](docs/restore-olympos.md) | Restoring targets · restoring Olympos itself |
-| [docs/runbooks/vault-break-glass.md](docs/runbooks/vault-break-glass.md) | Vault break-glass |
-| [docs/openapi.yaml](docs/openapi.yaml) | REST API |
-| [docs/development.md](docs/development.md) | Conventions, tests, migrations |
-| [docs/spec-changes.md](docs/spec-changes.md) | Decisions that changed SPEC MUSTs |
+| [Getting started](docs/getting-started.md) | The local lab, step by step with screenshots |
+| [Install on Kubernetes](docs/install.md) · [on a Linux VM](docs/install-systemd.md) | Production installation |
+| [Security model](docs/security-model.md) · [Security review v0.1](docs/security-review-v0.1.md) | Trust boundaries, what is enforced where, accepted trade-offs |
+| [Restore](docs/restore.md) · [Restoring Olympos](docs/restore-olympos.md) | Recovering targets and Olympos itself |
+| [REST API](docs/openapi.yaml) | OpenAPI description of `/api/v1` |
+| [SPEC.md](SPEC.md) | The specification |
 
 ## Development
 
@@ -94,7 +112,7 @@ browsable lab with two clusters; `./test/e2e/run.sh` runs the whole e2e suite.
 make dev-db && OLYMPOS_REQUIRE_DB=1 go test -tags dev ./...   # unit + integration (dev build)
 make test-release                                             # release build checks
 cd web && pnpm install && pnpm test && pnpm build             # SPA
-./test/e2e/run.sh                                             # kind e2e (M1–M7)
+./test/e2e/run.sh                                             # kind e2e suite
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Report vulnerabilities privately: [SECURITY.md](SECURITY.md).

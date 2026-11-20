@@ -9,9 +9,9 @@ It builds `olympos-server:e2e` / `olympos-agent:e2e`, deploys:
 | Namespace | Workload | Purpose |
 |---|---|---|
 | `olympos` | `olympos` (Helm chart, dev mode, local key vault on a PVC) | the server, UI at http://127.0.0.1:28080 |
-| `olympos` | `olympos-db`, `azurite` | Olympos's database, Blob fake |
-| `olympos-system` | `olympos-agent` (installed from the UI-generated command) | the agent |
-| `lab` | `orders-pg` (TLS, lab CA), `vault` (raft), `openbao` (dev), `metrics-ch` | annotated targets |
+| `olympos` | `olympos-postgresql`, `azurite`, `minio` | Olympos's database (the chart's bundled PostgreSQL), Blob and S3 fakes |
+| `olympos-system` | `olympos-agent` (installed by the tests from the local chart) | the agent |
+| `lab` | `orders-pg` (TLS, lab CA), `vault` and `openbao` (TLS, raft), `metrics-ch` | annotated targets |
 
 and runs `go test -tags e2e ./test/e2e/...`. Some tests run a gateway **in-process** on the host and
 point a second real agent at it through `host.docker.internal`, so they can ask the agent for arbitrary
@@ -31,3 +31,11 @@ E2E_CPUS=4 ./test/e2e/run.sh     # nodes limited to 4 CPUs, like a GitHub runner
 Go sizes some things by the CPU count it sees (pgxpool's default pool is max(4, CPUs)), so a workstation
 with many cores can hide bugs that CI shows. `E2E_CPUS` pins the kind node containers to that many CPUs;
 running without it resets them to all CPUs.
+
+## Browsable lab and screenshots
+
+`./test/e2e/env.sh` builds the same lab plus a second cluster, `olympos-edge`, enrolls no agent and resets
+Olympos to empty, for trying Olympos by hand: [docs/getting-started.md](../../docs/getting-started.md) walks
+through it. `cd web && pnpm docs-tour` then replays that guide in Chrome and writes its screenshots to
+`docs/images/` (needs a freshly reset lab).
+

@@ -13,6 +13,7 @@ import { Badge, Modal, useToast } from './kit';
 import { RestoreSteps } from './BackupRunDialog';
 import { RunBadge } from './status';
 import { Select } from './Select';
+import { DocLink } from './DocLinks';
 
 export function SelfBackupCard({ focus }: { focus?: boolean }) {
   const isAdmin = useCan('admin_global');
@@ -103,7 +104,7 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
       <div className="card-body stack-sm">
         <p className="muted small">
           Grants, the internal CA, clusters, jobs and change requests live in Olympos&apos; own PostgreSQL. This job dumps it (<span className="mono">pg_dump -Fc</span>) with the same manifest, tags and retention as
-          every backup. A dump is only usable with the same Key Vault key: keep purge protection on. See <span className="mono">docs/restore-olympos.md</span>.
+          every backup. A dump is only usable with the same Key Vault key: keep purge protection on. See <DocLink path="docs/restore-olympos.md" />.
         </p>
         {!v.configured ? (
           <>

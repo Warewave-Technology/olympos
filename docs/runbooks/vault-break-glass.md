@@ -24,7 +24,7 @@ break-glass, **outside Olympos**. Drift detection makes every such write visible
 4. **Revoke the root token immediately**: `vault token revoke <root-token>` (or `vault token revoke -self`).
 5. If the Olympos AppRole was the problem, re-run *Vaults › Configure* in Olympos (it recreates the
    policy and AppRole with a new root token used once, then discarded).
-6. In Olympos, the next index refresh (≤ 10 min, or *Refresh now*) shows a **vault-drift**
+6. In Olympos, the next index refresh (≤ 10 min, or *Refresh index*) shows a **vault-drift**
    *Unmanaged change* finding and sends `vault.unmanaged_write`. Link the incident in the activity log
    comment of the follow-up change request, then resolve the finding by bringing the secret back under
    management (a reviewed change request that writes the intended value).

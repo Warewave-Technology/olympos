@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
 import type { BackupClusterSummary, BackupJob, BackupRun, ItemList, Target } from '../api/types';
 import { useCan } from '../auth/me';
-import { describeCron } from '../lib/cron';
+import { describeCron, formatInZone } from '../lib/cron';
 import { age, between, bytes, duration, engineLabel, money, plural, relDateTime } from '../lib/format';
 import { backupsRoute } from '../router';
 import { Badge, EmptyState, QueryView, Tabs, useToast } from '../ui/kit';
@@ -87,12 +87,18 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
           </span>
         ),
     },
-    { id: 'success', header: 'Last success', sortValue: (r) => r.last_success_at, defaultDir: 'desc', cell: (r) => (r.last_success_at ? <span title={relDateTime(r.last_success_at)}>{age(r.last_success_at)} ago</span> : <span className="muted">{r.jobs ? 'Never' : '—'}</span>) },
+    {
+      id: 'success',
+      header: 'Last success',
+      sortValue: (r) => r.last_success_at,
+      defaultDir: 'desc',
+      cell: (r) => (r.last_success_at ? <span title={relDateTime(r.last_success_at)}>{age(r.last_success_at)} ago</span> : <span className="muted">{r.jobs ? 'Never' : '—'}</span>),
+    },
     { id: 'bytes', header: 'Backed up · 30 d', align: 'num', sortValue: (r) => r.bytes_30d || null, defaultDir: 'desc', cell: (r) => (r.bytes_30d ? bytes(r.bytes_30d) : '—') },
   ];
   return (
     <>
-      <PageHead title="Backups" sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster." actions={<DestinationsLink />} />
+      <PageHead title="Backups" sub="Jobs run on the server and reach targets through the agent tunnel. Credentials are never stored in a cluster or sent to the agent." actions={<DestinationsLink />} />
       {failing > 0 && (
         <div className="note crit" role="note">
           <b>{plural(failing, 'cluster')} with failed or missed runs in the last 24 hours.</b> Open a cluster to see its runs.
@@ -151,7 +157,7 @@ function BackupsDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ove
       <PageHead
         crumbs={<ScopeCrumbs area="Backups" to="/backups" scope={scope} cluster={info} />}
         title={one ? <span className="mono">{info?.name ?? scope.id}</span> : 'All clusters'}
-        sub="Jobs run from the server, through the agent tunnel. Credentials never enter the cluster."
+        sub="Jobs run on the server and reach targets through the agent tunnel. Credentials are never stored in a cluster or sent to the agent."
         actions={<DestinationsLink />}
       />
       <ClusterOfflineNote cluster={one ? info : undefined} />
@@ -162,11 +168,7 @@ function BackupsDetail({ scope, clusters }: { scope: Exclude<Scope, { mode: 'ove
         tabs={[
           {
             id: 'candidates',
-            label: (
-              <>
-                Candidates {candidates.length > 0 && <Badge tone="info">{candidates.length} new</Badge>}
-              </>
-            ),
+            label: <>Candidates {candidates.length > 0 && <Badge tone="info">{candidates.length} new</Badge>}</>,
           },
           { id: 'jobs', label: 'Jobs' },
           { id: 'runs', label: 'Runs' },
@@ -216,7 +218,8 @@ function CandidatesTab({
         isEmpty={(d) => d.items.filter((t) => t.engine && inCluster(t.cluster_id)).length === 0 && jobs.length === 0}
         empty={
           <EmptyState title={clusterName ? `No backup candidates on ${clusterName} yet` : 'No backup candidates yet'}>
-            Annotate the Service in front of a database with <span className="mono">olympos.io/backup: postgresql</span> (or <span className="mono">clickhouse</span>, <span className="mono">vault</span>). The agent reports it within a minute and it shows up here.
+            Annotate the Service in front of a database with <span className="mono">olympos.io/backup: postgresql</span> (or <span className="mono">clickhouse</span>, <span className="mono">vault</span>). The agent
+            reports it within a minute and it shows up here.
           </EmptyState>
         }
       >
@@ -345,10 +348,24 @@ function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob
       ),
     },
     { id: 'dest', header: 'Destination', sortValue: (j) => j.destination.name, className: 'mono', cell: (j) => j.destination.name },
-    { id: 'next', header: 'Next run', sortValue: (j) => (j.enabled ? j.next_run_at : null), className: 'mono', cell: (j) => (j.enabled && j.next_run_at ? relDateTime(j.next_run_at) : '—') },
+    { id: 'next', header: 'Next run', sortValue: (j) => (j.enabled ? j.next_run_at : null), className: 'mono', cell: (j) => (j.enabled && j.next_run_at ? formatInZone(j.next_run_at, j.timezone) : '—') },
     { id: 'last', header: 'Last run', sortValue: (j) => j.last_run?.status ?? null, cell: (j) => (j.last_run ? <RunBadge run={j.last_run} /> : <span className="muted">Never</span>) },
-    { id: 'bytes', header: 'Est. monthly transfer', align: 'num', sortValue: (j) => j.estimated_monthly_bytes || null, defaultDir: 'desc', cell: (j) => (j.estimated_monthly_bytes ? bytes(j.estimated_monthly_bytes) : '—') },
-    { id: 'cost', header: 'Est. cost', align: 'num', sortValue: (j) => j.estimated_monthly_cost, defaultDir: 'desc', cell: (j) => (j.estimated_monthly_cost != null ? `≈ ${money(j.estimated_monthly_cost)}` : <span className="muted">no rate</span>) },
+    {
+      id: 'bytes',
+      header: 'Est. monthly transfer',
+      align: 'num',
+      sortValue: (j) => j.estimated_monthly_bytes || null,
+      defaultDir: 'desc',
+      cell: (j) => (j.estimated_monthly_bytes ? bytes(j.estimated_monthly_bytes) : '—'),
+    },
+    {
+      id: 'cost',
+      header: 'Est. cost',
+      align: 'num',
+      sortValue: (j) => j.estimated_monthly_cost,
+      defaultDir: 'desc',
+      cell: (j) => (j.estimated_monthly_cost != null ? `≈ ${money(j.estimated_monthly_cost)}` : <span className="muted">no rate</span>),
+    },
     { id: 'status', header: 'Status', sortValue: (j) => (j.paused_reason ? 1 : !j.enabled ? 2 : j.last_run && j.last_run.status !== 'succeeded' ? 0 : 3), cell: jobStatus },
     {
       id: 'actions',
@@ -463,14 +480,25 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         <>
           <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
           {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
-          {r.attempt && r.attempt > 1 ? <span className="chip" title="Retried after the agent reconnected">attempt {r.attempt}</span> : null}
+          {r.attempt && r.attempt > 1 ? (
+            <span className="chip" title="Retried after the agent reconnected">
+              attempt {r.attempt}
+            </span>
+          ) : null}
         </>
       ),
     },
     { id: 'dest', header: 'Destination', sortValue: (r) => r.destination_name || null, cell: (r) => r.destination_name || <span className="muted">—</span> },
     { id: 'size', header: 'Size', align: 'num', sortValue: (r) => r.bytes || null, defaultDir: 'desc', cell: (r) => (r.bytes ? bytes(r.bytes) : '—') },
     { id: 'wire', header: 'On the wire', align: 'num', hidden: compact, sortValue: (r) => r.wire_bytes || null, defaultDir: 'desc', cell: (r) => (r.wire_bytes ? bytes(r.wire_bytes) : '—') },
-    { id: 'dur', header: 'Duration', align: 'num', sortValue: (r) => between(r.started_at, r.finished_at), defaultDir: 'desc', cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))) },
+    {
+      id: 'dur',
+      header: 'Duration',
+      align: 'num',
+      sortValue: (r) => between(r.started_at, r.finished_at),
+      defaultDir: 'desc',
+      cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))),
+    },
     { id: 'result', header: 'Result', sortValue: (r) => r.status, cell: (r) => <RunBadge run={r} /> },
   ];
   const [open, setOpen] = useState<string | null>(null);
@@ -492,7 +520,9 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         stickyHeader={!compact}
         initialSort={{ id: 'started', dir: 'desc' }}
         resetKey={status}
-        empty={<EmptyState title={status ? `No ${status} runs` : 'No runs yet'}>{status ? 'Try another filter.' : 'Runs appear here once a job runs on its schedule, or when you start a dry run or a manual run.'}</EmptyState>}
+        empty={
+          <EmptyState title={status ? `No ${status} runs` : 'No runs yet'}>{status ? 'Try another filter.' : 'Runs appear here once a job runs on its schedule, or when you start a dry run or a manual run.'}</EmptyState>
+        }
       />
     </>
   );
