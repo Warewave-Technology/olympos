@@ -151,6 +151,49 @@ func TestIngestAndDashboardScope(t *testing.T) {
 	}
 }
 
+// The Agent offline item waits for agents.offlineAlertAfter, like the
+// agent.offline message.
+func TestDashboardOfflineThreshold(t *testing.T) {
+	ctx := context.Background()
+	offlineItem := func(after, lastSeen time.Duration) bool {
+		e := apitest.New(t, apitest.Options{Inventory: func(a *inventory.API) { a.OfflineAlertAfter = after }})
+		admin := e.Login(e.Principal("admin", "Member", "admin"))
+		var created inventory.InstallResponse
+		if code := admin.Do("POST", "/api/v1/clusters", map[string]any{"name": "edge-1"}, &created); code != 201 {
+			t.Fatal(code)
+		}
+		if _, err := e.DB.Exec(ctx, `UPDATE clusters SET status = 'offline', last_seen_at = now() - $2::interval WHERE id = $1`,
+			created.Cluster.ID, lastSeen.String()); err != nil {
+			t.Fatal(err)
+		}
+		var d inventory.Dashboard
+		admin.Do("GET", "/api/v1/dashboard", nil, &d)
+		if d.Totals.OfflineAgents != 1 {
+			t.Fatalf("offline agents: %+v", d.Totals)
+		}
+		for _, a := range d.Attention {
+			if a.Kind == "agent_offline" {
+				return true
+			}
+		}
+		return false
+	}
+	for _, c := range []struct {
+		after, lastSeen time.Duration
+		want            bool
+	}{
+		{0, 4 * time.Minute, false}, // default 5m
+		{0, 6 * time.Minute, true},
+		{10 * time.Minute, 7 * time.Minute, false},
+		{10 * time.Minute, 11 * time.Minute, true},
+		{2 * time.Minute, 3 * time.Minute, true},
+	} {
+		if got := offlineItem(c.after, c.lastSeen); got != c.want {
+			t.Errorf("offlineAlertAfter %v, last seen %v ago: item %v, want %v", c.after, c.lastSeen, got, c.want)
+		}
+	}
+}
+
 func TestReservedClusterLabel(t *testing.T) {
 	e := apitest.New(t, apitest.Options{})
 	admin := e.Login(e.Principal("admin", "Member", "admin"))

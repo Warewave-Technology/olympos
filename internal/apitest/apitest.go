@@ -52,6 +52,9 @@ type Options struct {
 	Modules func(e *Env) []server.Module
 	// Directory overrides the principal directory (default: local DB).
 	Directory server.Directory
+	// Inventory adjusts the inventory API (dashboard, clusters) before it
+	// is mounted.
+	Inventory func(a *inventory.API)
 }
 
 // New starts the API. Logs are captured in LogBuf (redacted) for canary checks.
@@ -70,7 +73,11 @@ func New(t testing.TB, opt Options) *Env {
 	}
 	s := &server.Server{DB: db, Log: log, TenantID: TenantID, DevMode: true, InsecureCookies: true, Directory: dir,
 		SPA: fstest.MapFS{"index.html": {Data: []byte("<html>spa</html>")}}}
-	s.Modules = append(s.Modules, &inventory.API{DB: db, Log: log, Gateway: e.Gateway, CA: e.CA, GatewayURL: "gw.test:8443"})
+	inv := &inventory.API{DB: db, Log: log, Gateway: e.Gateway, CA: e.CA, GatewayURL: "gw.test:8443"}
+	if opt.Inventory != nil {
+		opt.Inventory(inv)
+	}
+	s.Modules = append(s.Modules, inv)
 	if opt.Modules != nil {
 		s.Modules = append(s.Modules, opt.Modules(e)...)
 	}

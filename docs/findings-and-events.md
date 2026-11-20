@@ -67,15 +67,15 @@ vault's cluster.
 
 | Item as shown | Severity | Why it appears | What to do | Links to |
 |---|---|---|---|---|
-| **Agent offline** · `<cluster> · <time>` | crit | The cluster is marked offline and was last seen more than 5 minutes ago. | Check the agent pod and its outbound connection to the gateway. See [troubleshooting](troubleshooting.md). | *Settings › Clusters & agents* (that cluster) |
+| **Agent offline** · `<cluster> · <time>` | crit | The cluster is marked offline and was last seen longer ago than `agents.offlineAlertAfter` (default 5 minutes), the delay of the `agent.offline` message. | Check the agent pod and its outbound connection to the gateway. See [troubleshooting](troubleshooting.md). | *Settings › Clusters & agents* (that cluster) |
 | **Backup failed** · `<service> · <error>` | crit | In the last 48 hours, the latest finished run of a backup job failed. Test runs and failures marked `agent_disconnected: retrying` are left out. | Open the run, read the error and its steps, fix the cause, then run it again or wait for the next schedule. | *Backups* (that job) |
 | **Backup missed** · `<service>` | crit | In the last 48 hours, the latest run of a job was `missed`: the scheduler did not start it, or the agent stayed away past the window. | Check that the server was up and the agent connected at the scheduled time. | *Backups* (that job) |
 | **TLS name changed** · `<ns>/<svc> asks for <name>; still verifying <pinned>` | crit | A target's `olympos.io/tls-server-name` annotation no longer matches the name Olympos pinned when it first saw the target. Backups and Vault calls keep verifying the pinned name. | If you expected the change, an admin of that cluster clicks *Accept new name* under *Backups*. If not, revert the annotation and find out who edited the Service. | *Backups* (*TLS name changed* card) |
 | **Olympos backup failed** · `<error>` | crit | The latest finished run of the built-in `olympos-self` job in the last 48 hours failed. | Open the *Olympos database* card under *Backups* and check the run and its destination. | *Backups* (*Olympos database* card) |
-| **Key Vault** · `purge protection is off (<level>): enable soft delete and purge protection` | crit | When the server started, the KEK's recovery level was not recoverable with purge protection. A dump of the Olympos database is useless without that key. | Turn on soft delete and purge protection on the vault, then restart the server ([below](#key-vault-purge-protection)). | *Backups* (*Olympos database* card) |
+| **Key Vault** · `purge protection is off (<level>): enable soft delete and purge protection` | crit | At the last check, the KEK's recovery level was not recoverable with purge protection. A dump of the Olympos database is useless without that key. | Turn on soft delete and purge protection on the vault ([below](#key-vault-purge-protection)). | *Backups* (*Olympos database* card) |
 | **Critical CVEs** · `N new in M images` | crit | A critical CVE was first seen in the last 24 hours in an image running in your clusters. | Open *Security › Images*, sort by *Critical*, and use *Fix* (fixed-in version) to plan an image update. | *Security* |
 | **Olympos backup** · `choose where the Olympos database is backed up` | warn | The built-in `olympos-self` job has no destination yet. | An admin picks a destination on the *Olympos database* card. It runs daily at 02:30 UTC by default. | *Backups* (*Olympos database* card) |
-| **Key Vault** · `could not check purge protection of the KEK (needs keys/get)` | warn | The check at startup failed, usually because the server's identity cannot read the key's properties. | Grant the server identity `keys/get` on the key (the *Key Vault Crypto User* role includes it), then restart the server. | *Backups* (*Olympos database* card) |
+| **Key Vault** · `could not check purge protection of the KEK (needs keys/get)` | warn | The last check failed, usually because the server's identity cannot read the key's properties. | Grant the server identity `keys/get` on the key (the *Key Vault Crypto User* role includes it). | *Backups* (*Olympos database* card) |
 | **N approvals** · `waiting for you · oldest <time> left` | warn | Pending change requests you may approve and that you did not open yourself. *Time left* is the earliest expiry. | Review them under *Approvals* before they expire. | *Approvals* |
 | **End of life** · `N clusters on v1.x, …` | warn | At least one cluster runs a Kubernetes minor version past its upstream end of life. | Plan an upgrade. The *Version matrix* marks those versions *EOL*. | Dashboard, filtered to EOL clusters |
 
@@ -83,8 +83,9 @@ The API names these kinds `agent_offline`, `backup_failed`, `backup_missed`, `ta
 `self_backup_failed`, `kek_purgeable`, `critical_cves`, `self_backup_unset`, `kek_recovery_unknown`,
 `approvals` and `eol` (`GET /api/v1/dashboard`, field `attention`).
 
-The two Key Vault items are checked **once, at server start**. They stay on the Dashboard until the
-server restarts, even after you fix the vault.
+The server checks the two Key Vault items at start and then **every hour**. After you fix the vault, the
+item goes away at the next check, within an hour; restarting the server checks at once. The server log
+has a line each time the result changes.
 
 **Not in Needs attention.** Version skew (kubelet older than the API server) is a Dashboard tile,
 *Version skew*, not an item. So is the *Agent offline* count. Open findings from Security or Audit are
@@ -227,7 +228,7 @@ activity log still gets one row per item.
 | `vuln.critical` | At the end of an image scan run, for critical CVEs new to an image that is running (digest scans only). | *N new critical CVEs in M running images on \<cluster\>* · cluster, new, images, top (5, fixable first). | Yes: per cluster and scan run |
 | `sensitive_data.found` | An agent report opened new sensitive-data findings. | *N new credential-like values in ConfigMaps on \<cluster\>* · cluster, new, open, high, top (5, high first). | Yes: per cluster and scan |
 | `secret.new_findings` | A Secret inventory report opened new findings. | *N new Secret inventory findings on \<cluster\>* · cluster, new, unused, legacy SA tokens, unmanaged. | Yes: per cluster and scan (counts only, no top 5) |
-| `agent.offline` | An agent has been offline for 5 minutes (`agents.offlineAlertAfter`). | *Agent offline: \<cluster\>* · cluster, offline for. | Once per outage |
+| `agent.offline` | An agent has been offline for `agents.offlineAlertAfter` (default 5 minutes). | *Agent offline: \<cluster\>* · cluster, offline for. | Once per outage |
 | `agent.online` | An agent is back, **only** after an `agent.offline` message for the same outage. | *Agent back online: \<cluster\>* · cluster. | Once per outage |
 | `agent.flapping` | An agent disconnected more than 5 times in 30 minutes (`agents.flappingDisconnects`, `agents.flappingWindow`). | *Agent flapping: \<cluster\>* · cluster, disconnects. | At most once per window |
 | `grant.changed` | A role grant was added or revoked. | *Access granted: name → role (scope)* or *Access revoked: name (role)* · principal, role, scope, by. | No |
@@ -235,7 +236,9 @@ activity log still gets one row per item.
 | `sas.expiring` | A destination's SAS token expires within 14 days, within 3 days, or has expired. | *SAS token of destination X expires in N days*, *… expires within a day* or *… has expired: backups to it fail* · destination, expires. | One per destination, threshold and expiry |
 
 Short agent blips send nothing. A cluster counts as offline after 60 seconds of silence, but
-`agent.offline` waits for the alert delay.
+`agent.offline` and the Dashboard's *Agent offline* item wait for the alert delay. The item counts it
+from when the agent was last seen. The message counts it from the later of that and the server's start,
+so a server that was down does not send one for every cluster.
 
 ### Routing
 
@@ -293,8 +296,9 @@ When *TLS name changed* appears, open *Backups*. The *TLS name changed* card lis
 az keyvault update --name <vault> --enable-purge-protection true
 ```
 
-Purge protection cannot be turned off again. Restart the Olympos server afterwards: the check runs only
-at startup. See [Restoring Olympos](restore-olympos.md) for why the KEK must survive.
+Purge protection cannot be turned off again. The Dashboard item goes away at the next hourly check;
+restart the Olympos server to check at once. See [Restoring Olympos](restore-olympos.md) for why the KEK
+must survive.
 
 ### Choosing the Olympos backup destination
 
