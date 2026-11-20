@@ -552,7 +552,7 @@ func (s *Service) uploadRaw(ctx context.Context, rc runContext, raw []byte, deta
 		}
 	}
 	if destID == uuid.Nil || s.Blob == nil {
-		details["raw_report"] = "not stored: set settings key " + RawDestinationSetting + " to a destination id"
+		details["raw_report"] = "not stored: no raw reports destination (Audit › Raw reports)"
 		return ""
 	}
 	if raw == nil {

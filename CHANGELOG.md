@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- *Audit › Raw reports*: choose where raw Kubescape, Polaris and kube-bench reports are kept
+  (`GET`/`PUT /api/v1/audit/settings`, global admin). Before, the `audit.raw_destination_id` setting could
+  only be set with SQL.
+
 ### Fixed
 - Scheduler leaders held their advisory lock on a pool connection; on a host with 4 CPUs (pgxpool's default
   pool size) they took the whole pool and the server never became ready. Locks now use their own

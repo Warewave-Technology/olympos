@@ -3,12 +3,13 @@
 import type {
   ActivityEntry,
   AuditRun,
-  BenchCheck,
   AuditSchedule,
+  AuditSettings,
   BackupJob,
   BackupRun,
-  Channel,
+  BenchCheck,
   ChangeRequest,
+  Channel,
   Cluster,
   Destination,
   DestinationMount,
@@ -564,6 +565,9 @@ export const destinations: Destination[] = [
     jobs: 0,
   },
 ];
+
+/** Audit settings: raw reports are not stored until an admin chooses a destination. */
+export const auditSettings: AuditSettings = { raw_destination: null };
 
 /** Volumes mounted into the server for NFS destinations (Helm value nfsMounts). */
 export const destinationMounts: DestinationMount[] = [

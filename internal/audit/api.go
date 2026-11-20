@@ -41,6 +41,8 @@ func (a *API) Routes(r chi.Router) {
 		r.Get("/audit/runs", a.listRuns)
 		r.Get("/audit/runs/{id}", a.getRun)
 		r.Get("/findings", a.listFindings)
+		r.Get("/audit/settings", a.getSettings)
+		r.Put("/audit/settings", a.putSettings)
 	})
 }
 
