@@ -49,9 +49,13 @@ const (
 	DefaultFlappingWindow      = 30 * time.Minute
 )
 
-func (s *Service) alertAfter() time.Duration {
-	if s.OfflineAlertAfter > 0 {
-		return s.OfflineAlertAfter
+func (s *Service) alertAfter() time.Duration { return offlineAlertAfter(s.OfflineAlertAfter) }
+
+// offlineAlertAfter is the configured agents.offlineAlertAfter, or the
+// default. The agent.offline message and the Dashboard both use it.
+func offlineAlertAfter(d time.Duration) time.Duration {
+	if d > 0 {
+		return d
 	}
 	return DefaultOfflineAlertAfter
 }

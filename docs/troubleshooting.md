@@ -89,6 +89,10 @@ az keyvault update --name <vault> --enable-purge-protection true
 *could not check purge protection of the KEK (needs keys/get)* means the server's identity cannot read the
 key's properties; grant it `keys/get` (the *Key Vault Crypto User* role includes it).
 
+The server checks again every hour, so the Dashboard item goes away within an hour of the fix (a restart
+checks at once). When the check passes again, the log says *Key Vault purge protection is on: the KEK is
+recoverable*.
+
 ## A destination's SAS token expired
 
 Olympos warns 14 and 3 days before an Azure Blob SAS token expires (`sas.expiring`) and backups to that

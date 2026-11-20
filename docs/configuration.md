@@ -195,7 +195,7 @@ Alert debounce for agent connectivity. Zero or negative values use the default.
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `agents.offlineAlertAfter` | duration | `5m` | no | `agent.offline` fires after an agent has been offline this long. |
+| `agents.offlineAlertAfter` | duration | `5m` | no | `agent.offline` fires after an agent has been offline this long. The Dashboard's *Agent offline* item uses the same delay. |
 | `agents.flappingDisconnects` | int | `5` | no | Number of disconnects within `flappingWindow` that fires `agent.flapping`. |
 | `agents.flappingWindow` | duration | `30m` | no | Window for `flappingDisconnects`. |
 

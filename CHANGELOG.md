@@ -24,6 +24,10 @@ All notable changes to this project are documented here. The format follows
 - Release checksums (`SHA256SUMS-<arch>`) and signature bundles name pre-release packages the way GitHub
   stores them (`~` becomes `.`); `sha256sum -c` against v0.1.0-rc.2 found no files.
 
+- Dashboard › Needs attention: the Key Vault items (`kek_purgeable`, `kek_recovery_unknown`) were checked
+  only at server start and stayed after the vault was fixed; the server now checks every hour and logs
+  when the result changes. The *Agent offline* item used a fixed 5 minutes; it now waits for
+  `agents.offlineAlertAfter`, like the `agent.offline` message.
 - UI: a backup run's restore commands were squeezed into a narrow column; the Jobs table showed the next run
   in the browser's time zone next to a schedule in the job's zone (now both in the job's zone); change
   requests showed the vault as `cluster / namespace / namespace/service`.
