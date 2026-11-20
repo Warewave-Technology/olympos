@@ -79,6 +79,7 @@ same calls without `-X`.
 | Dependabot security updates | on | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/automated-security-fixes` |
 | Dependabot version updates | weekly, minor/patch grouped; no Node image majors | 2026-11-20 | `.github/dependabot.yml` (gomod, npm `web/`, github-actions, docker `deploy/docker/`) |
 | Branch protection on `main` | on, admins included | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/branches/main/protection` (body below) |
+| Ruleset "release tags" | active | 2026-11-20 | `gh api -X POST repos/Warewave-Technology/olympos/rulesets` (body below) |
 
 `main` protection: a pull request is required (no approval count: a sole maintainer cannot approve their own
 pull request); the `ci` jobs `go`, `web`, `hygiene` and `image build` must pass, pinned to the GitHub Actions
@@ -95,4 +96,17 @@ required: it runs on `main` and nightly, so a failure there shows after the merg
  "restrictions": null, "required_linear_history": true, "allow_force_pushes": false, "allow_deletions": false}
 ```
 
-Tag rulesets and OpenSSF Scorecard (checklist C5, C6) are not set yet.
+Ruleset "release tags": creating, moving or deleting a `refs/tags/v*` tag is refused for everyone except
+the repository roles admin (id 5) and maintain (id 2). A `v*` tag starts the release workflow, so only
+maintainers can publish. Check the bypass roles by name with GraphQL
+(`repository.rulesets.bypassActors.repositoryRoleName`).
+
+```json
+{"name": "release tags", "target": "tag", "enforcement": "active",
+ "conditions": {"ref_name": {"include": ["refs/tags/v*"], "exclude": []}},
+ "rules": [{"type": "creation"}, {"type": "update"}, {"type": "deletion"}],
+ "bypass_actors": [{"actor_type": "RepositoryRole", "actor_id": 5, "bypass_mode": "always"},
+                   {"actor_type": "RepositoryRole", "actor_id": 2, "bypass_mode": "always"}]}
+```
+
+OpenSSF Scorecard (checklist C5) is not set up yet.
