@@ -77,6 +77,22 @@ same calls without `-X`.
 | Secret scanning push protection | on | 2026-11-20 | same call, `secret_scanning_push_protection` |
 | Dependabot alerts | on | before 2026-11-20 | `repos/…/vulnerability-alerts` (204 = on) |
 | Dependabot security updates | on | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/automated-security-fixes` |
-| Dependabot version updates | weekly, minor/patch grouped | 2026-11-20 | `.github/dependabot.yml` (gomod, npm `web/`, github-actions, docker `deploy/docker/`) |
+| Dependabot version updates | weekly, minor/patch grouped; no Node image majors | 2026-11-20 | `.github/dependabot.yml` (gomod, npm `web/`, github-actions, docker `deploy/docker/`) |
+| Branch protection on `main` | on, admins included | 2026-11-20 | `gh api -X PUT repos/Warewave-Technology/olympos/branches/main/protection` (body below) |
 
-Branch protection, tag rulesets and OpenSSF Scorecard (checklist C2, C5, C6) are not set yet.
+`main` protection: a pull request is required (no approval count: a sole maintainer cannot approve their own
+pull request); the `ci` jobs `go`, `web`, `hygiene` and `image build` must pass, pinned to the GitHub Actions
+app (id 15368) so another source cannot satisfy them; the branch does not have to be up to date; linear
+history (squash or rebase merges; the merge-commit button fails); no force pushes, no deletion. `e2e` is not
+required: it runs on `main` and nightly, so a failure there shows after the merge. Pull requests that change
+`.github/workflows/` can only be merged by a token with the `workflow` scope (the web UI, or
+`gh auth refresh -s workflow`).
+
+```json
+{"required_status_checks": {"strict": false, "checks": [{"context": "go", "app_id": 15368}, {"context": "web", "app_id": 15368},
+  {"context": "hygiene", "app_id": 15368}, {"context": "image build", "app_id": 15368}]},
+ "enforce_admins": true, "required_pull_request_reviews": {"required_approving_review_count": 0},
+ "restrictions": null, "required_linear_history": true, "allow_force_pushes": false, "allow_deletions": false}
+```
+
+Tag rulesets and OpenSSF Scorecard (checklist C5, C6) are not set yet.
