@@ -93,6 +93,9 @@ jobs:
 
   images:
     # Build only (no push) to catch Dockerfile breakage; release.yml publishes.
+    # Named apart from release.yml's "images": branch protection requires
+    # checks by name.
+    name: image build
     needs: [go, web]
     runs-on: ubuntu-24.04
     steps:
