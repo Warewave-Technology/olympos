@@ -26,7 +26,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U olympos" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: {fetch-depth: 0}
       - uses: actions/setup-go@v6
         with: {go-version-file: go.mod}
@@ -66,7 +66,7 @@ jobs:
   hygiene:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with: {fetch-depth: 0}
       - uses: actions/setup-go@v6
         with: {go-version-file: go.mod}
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-24.04
     defaults: {run: {working-directory: web}}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v4
         with: {version: 10.24.0}
       - uses: actions/setup-node@v7
@@ -96,7 +96,7 @@ jobs:
     needs: [go, web]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v3
       - run: |
           for c in server agent; do
