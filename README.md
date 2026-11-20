@@ -93,6 +93,19 @@ step. `./test/e2e/env.sh down` removes the lab.
 - Linux VM as a systemd service: [docs/install-systemd.md](docs/install-systemd.md) (`.deb`, `.rpm`, tarball).
 - Verify release signatures before installing: [docs/install.md#verifying-releases](docs/install.md#verifying-releases).
 
+## Roadmap
+
+Planned for v0.2 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+
+- More than one server replica, with tunnels forwarded between replicas ([#21](https://github.com/Warewave-Technology/olympos/issues/21))
+- Restore from the UI into a new target, with approval ([#22](https://github.com/Warewave-Technology/olympos/issues/22))
+- More than one approval for Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23))
+- S3 destinations with IAM roles instead of static keys ([#24](https://github.com/Warewave-Technology/olympos/issues/24))
+- Image scans from ACR with the server's managed identity ([#25](https://github.com/Warewave-Technology/olympos/issues/25))
+- Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
+
+Ideas and comments are welcome on the issues.
+
 ## Documentation
 
 Start with [Getting started](docs/getting-started.md); the full map is in [docs/README.md](docs/README.md).
