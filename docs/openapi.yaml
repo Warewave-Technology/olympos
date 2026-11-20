@@ -607,6 +607,20 @@ paths:
         "409": {description: Not pending}
 
   # ------------------------------------------------------------ audit (M4)
+  /audit/settings:
+    get:
+      tags: [audit]
+      summary: Where raw Kubescape, Polaris and kube-bench reports are stored (any role). `raw_destination` is null when they are not stored.
+      responses:
+        "200": {description: Settings, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSettings"}}}}
+    put:
+      tags: [audit]
+      summary: Choose the raw reports destination, or null to stop storing them (admin with scope all). Recorded as `audit.settings_changed`.
+      requestBody: {content: {application/json: {schema: {type: object, required: [raw_destination_id], properties: {raw_destination_id: {type: string, format: uuid, nullable: true}}}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/AuditSettings"}}}}
+        "403": {description: Not admin with scope all}
+        "422": {description: "Unknown destination (`fields`: raw_destination_id)"}
   /audit/schedules:
     get:
       tags: [audit]
@@ -1350,6 +1364,13 @@ components:
         steps:
           type: array
           items: {type: object, properties: {title: {type: string}, commands: {type: string}, note: {type: string}}}
+    AuditSettings:
+      type: object
+      properties:
+        raw_destination:
+          type: object
+          nullable: true
+          properties: {id: {type: string, format: uuid}, name: {type: string}, kind: {type: string, enum: [azure_blob, s3, nfs]}}
     SelfBackup:
       type: object
       properties:

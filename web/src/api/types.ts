@@ -361,6 +361,14 @@ export interface SelfBackup {
   /** Restore commands for the latest successful run. */
   restore?: RestoreGuide | null;
 }
+/** GET/PUT /audit/settings: where raw audit reports are kept. */
+export interface AuditSettings {
+  raw_destination: { id: string; name: string; kind: string } | null;
+}
+export interface AuditSettingsInput {
+  raw_destination_id: string | null;
+}
+
 export interface SelfBackupInput {
   destination_id?: string;
   cron?: string;

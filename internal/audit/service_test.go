@@ -312,7 +312,7 @@ func TestPolarisRunWithoutDestination(t *testing.T) {
 	if run.Status != "succeeded" || run.NewFindings != 3 || run.RawBlobPath != "" {
 		t.Fatalf("run %+v", run)
 	}
-	if !strings.Contains(run.Details["raw_report"].(string), RawDestinationSetting) {
+	if !strings.Contains(run.Details["raw_report"].(string), "Audit › Raw reports") {
 		t.Fatalf("details %v", run.Details)
 	}
 	ev := outboxEvents(t, db)

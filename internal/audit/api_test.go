@@ -256,3 +256,47 @@ func TestRunsAndFindingsScoped(t *testing.T) {
 		t.Fatalf("status filter %+v", fs.Items)
 	}
 }
+
+// The raw reports destination is set in the UI (Audit › Raw reports), not by
+// SQL: readable by every reader, changed only by a global admin, recorded.
+func TestRawReportsDestinationSetting(t *testing.T) {
+	a := newAPIEnv(t)
+	ctx := context.Background()
+	admin := a.e.Login(a.e.Principal("ada", "Member", "admin"))
+	scopedAdmin := a.e.Login(a.e.Principal("sia", "Member", "admin@env=prod"))
+	viewer := a.e.Login(a.e.Principal("vic", "Member", "viewer@env=prod"))
+	var dest uuid.UUID
+	if err := a.e.DB.QueryRow(ctx, `INSERT INTO destinations (name, account, container, prefix, auth) VALUES ('audit-raw', 'acct', 'raw', 'olympos', 'managed_identity') RETURNING id`).Scan(&dest); err != nil {
+		t.Fatal(err)
+	}
+
+	var s Settings
+	if code := viewer.Do("GET", "/api/v1/audit/settings", nil, &s); code != 200 || s.RawDestination != nil {
+		t.Fatalf("unset: %d %+v", code, s)
+	}
+	set := map[string]any{"raw_destination_id": dest}
+	if code, _ := viewer.Raw("PUT", "/api/v1/audit/settings", set); code != http.StatusForbidden {
+		t.Fatalf("viewer put: %d", code)
+	}
+	if code, _ := scopedAdmin.Raw("PUT", "/api/v1/audit/settings", set); code != http.StatusForbidden {
+		t.Fatalf("scoped admin put: %d", code)
+	}
+	if code, body := admin.Raw("PUT", "/api/v1/audit/settings", map[string]any{"raw_destination_id": uuid.New()}); code != http.StatusUnprocessableEntity {
+		t.Fatalf("unknown destination: %d %s", code, body)
+	}
+	if code := admin.Do("PUT", "/api/v1/audit/settings", set, &s); code != 200 || s.RawDestination == nil || s.RawDestination.ID != dest || s.RawDestination.Name != "audit-raw" || s.RawDestination.Kind != "azure_blob" {
+		t.Fatalf("set: %d %+v", code, s)
+	}
+	// The service reads the same key.
+	var v string
+	if err := a.e.DB.QueryRow(ctx, `SELECT value #>> '{}' FROM settings WHERE key = $1`, RawDestinationSetting).Scan(&v); err != nil || v != dest.String() {
+		t.Fatalf("stored %q %v", v, err)
+	}
+	if code := admin.Do("PUT", "/api/v1/audit/settings", map[string]any{"raw_destination_id": nil}, &s); code != 200 || s.RawDestination != nil {
+		t.Fatalf("clear: %d %+v", code, s)
+	}
+	var n int
+	if err := a.e.DB.QueryRow(ctx, `SELECT count(*) FROM activity_log WHERE action = 'audit.settings_changed'`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("activity rows %d %v", n, err)
+	}
+}

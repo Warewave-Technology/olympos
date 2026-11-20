@@ -614,6 +614,22 @@ const routes: [string, string, Handler][] = [
       return ok(run, 202);
     },
   ],
+  ['GET', '/audit/settings', () => ok(db.auditSettings)],
+  [
+    'PUT',
+    '/audit/settings',
+    (r) => {
+      const id = r.body?.raw_destination_id ?? null;
+      if (id === null) {
+        db.auditSettings.raw_destination = null;
+        return ok(db.auditSettings);
+      }
+      const d = db.destinations.find((x) => x.id === id);
+      if (!d) return invalid('unknown destination', { raw_destination_id: 'no destination with this id' });
+      db.auditSettings.raw_destination = { id: d.id, name: d.name, kind: d.kind };
+      return ok(db.auditSettings);
+    },
+  ],
   ['GET', '/backup/self', () => ok(selfBackup)],
   [
     'PUT',

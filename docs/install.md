@@ -338,8 +338,11 @@ storage-side job that reads the `.tags.json` sidecars or the manifests.
 
 ### Audit raw results
 
-Raw kubescape/polaris JSON is uploaded to `audit/{cluster}/{tool}/{run_id}.json` on the destination set
-in the `audit.raw_destination_id` setting. Add a lifecycle rule deleting `audit/` after 400 days.
+The full JSON of every Kubescape, Polaris and kube-bench run can be kept, redacted (ConfigMap and Secret
+data, literal env values), at `<prefix>/audit/{cluster}/{tool}/{run_id}.json`. Choose the destination in
+*Audit › Raw reports* (a global admin; `PUT /api/v1/audit/settings`). Until one is chosen only the findings
+are kept. Olympos never deletes raw reports: add a lifecycle rule deleting `audit/` after 400 days (the
+objects carry the tag `olympos-tier=audit` for tag-filtered rules).
 
 ## 5. Notifications
 
