@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- `check-config -db` printed `config ok` for a Key Vault the server could not use; the server then stopped
+  at start (`load hmac key`). It now reads the HMAC secret and wraps and unwraps with the KEK like the server,
+  checks that the `pgcrypto` extension is available, and (also without `-db`) parses the target and storage CA
+  bundles and the `keyVault.references` rules.
+- systemd: the documented `sudo olympos-server check-config -db` and `migrate` ran as root and failed against
+  the local database (`role "root" does not exist`); they are `sudo -u olympos …` now, in the package's
+  post-install message too.
+- Rocky/Alma: the install guide missed `postgresql16-contrib` (the schema needs `pgcrypto`) and used the
+  x86_64 PGDG repository package, which fails on arm64; the `.rpm` now recommends `postgresql16-contrib`. On
+  Azure Database for PostgreSQL, `pgcrypto` has to be allowed in `azure.extensions` (documented).
+
 ## [0.1.0] - unreleased
 
 First public release.

@@ -68,4 +68,4 @@ overrides:
     recommends: ["postgresql-16 | postgresql", "postgresql-client-17 | postgresql-client-16"]
   rpm:
     depends: [systemd, ca-certificates]
-    recommends: [postgresql16-server, postgresql17]
+    recommends: [postgresql16-server, postgresql16-contrib, postgresql17]

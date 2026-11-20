@@ -38,11 +38,15 @@ sudo apt install -y postgresql-16 postgresql-client-17
 
 ```bash
 # Rocky / Alma 9 (PGDG: https://www.postgresql.org/download/linux/redhat/)
-sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-$(uname -m)/pgdg-redhat-repo-latest.noarch.rpm
 sudo dnf -qy module disable postgresql
-sudo dnf install -y postgresql16-server postgresql17
+sudo dnf install -y postgresql16-server postgresql16-contrib postgresql17
 sudo /usr/pgsql-16/bin/postgresql-16-setup initdb && sudo systemctl enable --now postgresql-16
 ```
+
+On Rocky/Alma, `postgresql16-contrib` is required: Olympos' schema uses the `pgcrypto` extension, which
+Debian and Ubuntu ship in `postgresql-16` itself. Take the PGDG repository package for your architecture
+(`$(uname -m)`); the x86_64 one fails on arm64 with a GPG signature error.
 
 Create the role and database (the package creates the `olympos` system user, so install it first or create
 the role after step 3):

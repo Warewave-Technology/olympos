@@ -114,7 +114,9 @@ true`): the official `postgres` image pinned by digest, a PVC (`postgresql.size`
 NetworkPolicy that admits only the server pods, and a generated password in the Secret
 `<release>-postgresql` (kept on upgrade and uninstall). Host connections use SCRAM-SHA-256. For an
 external database (Azure Database for PostgreSQL) set `postgresql.bundled: false` and
-`olympos.database.dsnRef`.
+`olympos.database.dsnRef`. The schema needs the `pgcrypto` extension: on Azure Database for PostgreSQL
+allow it first (`az postgres flexible-server parameter set -g <rg> -s <server> --name azure.extensions
+--value PGCRYPTO`); elsewhere install the PostgreSQL contrib package.
 
 Its state (grants, the internal CA key, change requests, schedules) must survive a lost cluster: after
 installing, open **Backups › Olympos database** and choose a destination. The built-in job
