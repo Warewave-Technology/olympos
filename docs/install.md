@@ -123,7 +123,7 @@ be deleted; the Dashboard shows *Needs attention* until it has a destination. Re
 `docs/restore-olympos.md`.
 
 **v0.1 runs as a single replica.** Availability comes from Kubernetes restarting the pod; agents reconnect
-automatically. Multi-replica is planned for v0.2. A tunnel can only be opened on the replica the agent is
+automatically. Multi-replica is planned for v0.2 ([#21](https://github.com/Warewave-Technology/olympos/issues/21)). A tunnel can only be opened on the replica the agent is
 connected to, so more replicas would work only sometimes: the chart refuses `replicas > 1` and uses the
 `Recreate` strategy. Every server instance registers in the database; if a second live instance appears
 (two hosts pointed at the same database, a stuck old pod), the newer one logs an error and reports
