@@ -1,7 +1,9 @@
 # Installing Olympos
 
-Olympos is one installation per customer: a server in your Azure subscription and one agent per
-Kubernetes cluster. Agents dial out to the server; the server never connects into a cluster.
+Olympos is one installation per organization: a server (on Kubernetes, this guide, or on a
+[Linux VM](install-systemd.md)) and one agent per Kubernetes cluster. Agents dial out to the server; the
+server never connects into a cluster. Sign-in uses Microsoft Entra ID and keys live in Azure Key Vault; both
+are required. To try Olympos first, without Azure, see [Getting started](getting-started.md).
 
 ## 1. Prerequisites
 
@@ -20,7 +22,7 @@ Kubernetes cluster. Agents dial out to the server; the server never connects int
 1. Register an app (single tenant). Add redirect URI `https://olympos.contoso.internal/auth/callback`.
 2. Create a client secret and store it in Key Vault (`olympos-oidc-client-secret`).
 3. Graph application permission **`User.ReadBasic.All`** (grant admin consent) — used for the person
-   search in *Grant access* and the daily principal sync (disabled/deleted accounts → stale grants).
+   search in *Settings › Access › Grant access* and the daily principal sync (disabled/deleted accounts → stale grants).
 4. Enterprise application → Properties → **Assignment required = Yes** and assign the people who may
    sign in. This is a second gate in front of Olympos's own grants.
 5. Note the tenant ID and client ID. Olympos validates `iss`, `tid`, `aud`, `exp`, `nbf` on every token
@@ -188,10 +190,10 @@ Pin images by digest in production (`image.digest` in the chart values).
 
 In the UI: **Dashboard › Add cluster** → name, labels, kube-bench opt-in → copy the generated Helm
 command (it contains a one-time bootstrap token valid for 1 h and the server CA) and run it against the
-cluster. The cluster turns *online* within seconds. Re-issue the command from *Settings › Clusters*
+cluster. The cluster turns *online* within seconds. Show the command again from *Settings › Clusters & agents* (*Show install command*)
 if the token expired.
 
-For on-prem clusters set `--set providerOverride=onprem` (or change it later in *Settings › Clusters*).
+For on-prem clusters set `--set providerOverride=onprem` (or change it later in *Settings › Clusters & agents*).
 
 Annotate Services to be discovered (`olympos.io/backup`, `olympos.io/vault`, `olympos.io/port`,
 `olympos.io/tls-server-name`, see SPEC §5).

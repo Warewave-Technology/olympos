@@ -76,7 +76,7 @@ at start-up; a dump from an older version is upgraded, a dump from a **newer** v
 ## 4. Check
 
 - Sign in: grants are back, so the same people have the same roles.
-- *Settings › Clusters*: agents reconnect by themselves within a minute (their client certificates were
+- *Settings › Clusters & agents*: agents reconnect by themselves within a minute (their client certificates were
   issued by the restored internal CA). A cluster stays *offline* if its agent was removed meanwhile.
 - *Backups*: jobs and their schedules are back. Runs after the dump time are missing from the history,
   but their blobs are still in the destinations.

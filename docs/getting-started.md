@@ -1,0 +1,253 @@
+# Getting started: Olympos on your laptop
+
+This guide runs Olympos in a local lab and walks through what a new installation does: add clusters, back
+up a database, change a Vault secret with a second person's approval, and run audits and image scans. It
+takes about 30 minutes and needs no Azure account.
+
+The lab uses a **development build**: sign-in without Entra ID (dev login) and a local key vault instead of
+Azure Key Vault. Release builds have neither. To install Olympos for real, see
+[Installing on Kubernetes](install.md) or [Installing on a Linux VM](install-systemd.md).
+
+Every screenshot here comes from this lab, taken by `web/scripts/docs-tour.mjs`, which runs the same steps.
+
+## 1. Start the lab
+
+You need Docker, [kind](https://kind.sigs.k8s.io), `kubectl`, Helm, Go and `openssl`. The lab runs four kind
+nodes at once, so give Docker a generous memory limit. From the repository root:
+
+```bash
+./test/e2e/env.sh
+```
+
+The first run builds the server and agent images, which takes a while; later runs reuse them. It creates two
+kind clusters, each with its own kubeconfig; your current kube context is not touched:
+
+| Cluster | Runs |
+|---|---|
+| `olympos-lab` | the Olympos server, its PostgreSQL, and targets to back up: PostgreSQL `orders-pg`, ClickHouse `metrics-ch`, HashiCorp Vault and OpenBao (TLS, raft), Azurite and MinIO as backup storage, Kyverno |
+| `olympos-edge` | shop workloads: a TLS PostgreSQL `payments-pg` and deliberately old `nginx`/`redis` images |
+
+No agent is enrolled: adding the clusters is the first step below. When the script finishes it prints the
+sign-in links and the lab's generated values (Vault root tokens, the Azurite SAS) and writes them to
+`test/e2e/.work/ENV.md`. Run it again at any time to reset Olympos to empty.
+
+## 2. Sign in
+
+Open the admin's dev login: <http://127.0.0.1:28080/auth/dev-login?oid=00000000-0000-0000-0000-00000000ad01&name=Lab%20Admin>.
+In a real installation people sign in with Entra ID, and only the IDs in `bootstrapAdmins` are admins at
+first.
+
+![An empty installation](images/start-01-empty.png)
+
+The banner asks where Olympos' own database is backed up; step 4 answers it.
+
+## 3. Add your clusters
+
+Each cluster gets an agent. The agent only dials out to the server, so the cluster needs no inbound port.
+
+1. Choose **Add cluster**. Give the cluster a name and labels. Labels (`key=value`) decide who can see the
+   cluster and which audits and grants apply to it; `olympos.io/cluster=<name>` is added for you.
+   kube-bench needs a privileged Job per node, so it is off unless you tick it.
+
+   ![Add cluster](images/start-02-add-cluster.png)
+
+2. **Create install command** shows a Helm command with a one-time bootstrap token (valid for an hour,
+   usable once; the token is masked in the image below).
+
+   ![The generated install command](images/start-03-install-command.png)
+
+3. Run it against the cluster. In the lab:
+
+   ```bash
+   export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig-env
+   kubectl config use-context kind-olympos-edge
+   # paste the command from the dialog
+   ```
+
+   The dialog waits until the agent connects and shows the cluster's Kubernetes version.
+
+   ![Agent connected](images/start-04-agent-connected.png)
+
+Add the second cluster the same way: name `lab`, labels `env=lab` and `team=platform`, tick **Enable
+kube-bench**, and run its command in the `kind-olympos-lab` context. The Dashboard then shows the fleet:
+
+![Fleet overview](images/dashboard.png)
+
+In a real installation the command installs the agent chart from `oci://ghcr.io/warewave-technology/charts`;
+the lab installs the chart from the repository and the locally built image.
+
+## 4. Add a backup destination
+
+Backups go to Azure Blob, S3 (or an S3-compatible service) or NFS. Olympos writes but should not be able to
+delete: retention is enforced by the storage (lifecycle rules or object lock), so a stolen Olympos
+credential cannot erase backups.
+
+Go to **Settings › Destinations › New destination** and enter the lab's MinIO, with a key that may write but
+not delete:
+
+| Field | Lab value |
+|---|---|
+| Kind | S3 / S3-compatible |
+| Name | `lab-minio` |
+| Endpoint override | `http://minio.olympos.svc:9000` |
+| Region | `us-east-1` |
+| Bucket | `backups` |
+| Path-style addressing | on |
+| Access key ID | `olympos-backup` |
+| Secret key | **Store in Olympos**, `lab-backup-secret-key` |
+
+In production prefer a **Key Vault reference** (`kv://<vault>/<secret>`): the secret stays in Key Vault and is
+read when needed. *Store in Olympos* encrypts it with a Key Vault key (envelope encryption).
+
+![New destination](images/start-05-destination.png)
+
+**Test destination** writes, reads and tags a probe object and checks that deleting it is refused. Save runs
+the same test. A key that can delete is saved with a warning that stays on the destination.
+
+![Destination test](images/start-06-destination-tested.png)
+
+Then back up Olympos itself: on **Backups**, the *Olympos database* card picks a destination for the built-in
+`olympos-self` job (daily at 02:30 UTC). The job cannot be deleted. Restoring it needs the same Key Vault key,
+so keep purge protection on ([Restoring Olympos](restore-olympos.md)).
+
+![Olympos database backup](images/start-07-olympos-backup.png)
+
+## 5. Back up a database
+
+The agent finds databases by Service annotation (`olympos.io/backup: postgresql | clickhouse | vault`); they
+show as candidates under **Backups › &lt;cluster&gt;**. Choose **Configure** next to `orders-pg` in the `lab`
+cluster. The wizard has four steps.
+
+1. **Target**: what the agent found. The TLS name (`olympos.io/tls-server-name`) is pinned when the target
+   is first seen; if the annotation changes later, an admin of the cluster has to accept it.
+
+   ![Wizard: target](images/start-08-backup-target.png)
+
+2. **Credentials**: in the lab, *Store in Olympos* with user `backup`, password `CANARY-lab-pg-password`.
+   **Test connection** logs in through the agent tunnel and shows the server version, whether TLS was
+   verified end to end, the databases it will dump and the privileges it found. PostgreSQL needs
+   `pg_read_all_data` (or superuser).
+
+   ![Wizard: credentials tested](images/start-09-backup-credentials.png)
+
+3. **Destination & schedule**: `lab-minio`, *Daily 02:00*, and how many daily, weekly and monthly backups
+   to keep. Olympos tags each object with its tier; the storage's lifecycle rules delete old ones.
+
+   ![Wizard: schedule](images/start-10-backup-schedule.png)
+
+4. **Review & test run**: **Create job and run dry run** creates the job disabled and runs a schema-only
+   backup end to end. **Enable backup** is available only after the dry run passes.
+
+   ![Wizard: dry run passed](images/start-11-backup-dry-run.png)
+
+Start the first real backup with **Run now** on **Backups › Jobs**. Runs are listed under **Runs**:
+
+![Backup runs](images/backups-runs.png)
+
+Open a successful run to get the restore commands for exactly that backup: download, verify the checksum,
+restore into a new server. Restore is manual in v0.1; the full procedure is in [Restore](restore.md).
+
+![Restore commands of a run](images/start-12-backup-restore-commands.png)
+
+## 6. Connect a Vault
+
+Vaults are discovered like databases. On **Vaults**, select `vault` in the `lab` cluster and choose
+**Configure**. Paste its root token from `ENV.md`, then **List KV mounts** and choose which KV v2 mounts
+Olympos manages. Olympos creates an `olympos` policy (list paths, read key names, patch values, **no read of
+values**) and an AppRole, then discards the root token. You can revoke it right away.
+
+![Configure a vault](images/start-14-vault-configure.png)
+
+![Vault configured](images/start-15-vault-configured.png)
+
+Olympos now shows the vault's paths and keys, never the values, not even to admins:
+
+![A secret's keys](images/start-13-vaults.png)
+
+## 7. Change a secret with approval
+
+Every Vault change needs a second person (maker/checker). Nobody can approve their own request, admins
+included.
+
+1. **Give someone approval rights.** Sign in once as the approver in a private window
+   (<http://127.0.0.1:28080/auth/dev-login?oid=00000000-0000-0000-0000-0000000000a2&name=Ali%20Approver>);
+   until a grant exists they see *no access*. As the admin, open **Settings › Access › Grant access**, find
+   *Ali Approver*, tick `vault-approver` and limit the scope to the clusters labelled `env=lab`.
+
+   ![Grant access](images/start-16-grant-access.png)
+
+   ![Access grants](images/settings-access.png)
+
+2. **Request the change.** As the admin, on the vault's `secret/shop/payments`, choose **Replace** next to
+   `db_password`, enter the new value twice and a justification. The value is sealed with a Key Vault key
+   until approved; after you submit, only its HMAC fingerprint is shown. Requests expire after 72 hours.
+
+   ![New change request](images/start-17-change-request.png)
+
+   ![Submitted](images/start-18-change-submitted.png)
+
+   On **Approvals** the maker can follow the request but has no **Approve** button:
+
+   ![The maker's view](images/start-19-maker-cannot-approve.png)
+
+3. **Approve it.** As the approver, open **Approvals**. The request shows the key, the operation and the new
+   value's fingerprint (compare it with the maker over another channel if needed). **Approve & apply**
+   writes the change to Vault with a check-and-set on the version the maker saw: if the secret changed in
+   between, the apply fails and the request is closed.
+
+   ![Review and approve](images/approvals.png)
+
+   ![Applied](images/start-20-change-applied.png)
+
+## 8. Run audits
+
+**Audit › New schedule** runs Kubescape (NSA, CIS, MITRE), Polaris or kube-bench on the clusters whose
+labels match the scope. Kubescape and Polaris read the cluster through the agent's read-only API proxy;
+kube-bench runs as a Job on each node of clusters where it is enabled.
+
+![New audit schedule](images/start-21-audit-schedule.png)
+
+**Run now** starts a schedule right away. The Audit page shows the latest result per cluster and what
+changed since the previous run:
+
+![Audit](images/audit.png)
+
+## 9. Look at security
+
+**Security** shows, per cluster, the running images with their CVEs (scanned by digest with Trivy on the
+server), Kyverno policy results, NetworkPolicy coverage and credentials found in ConfigMaps.
+
+![Security overview](images/security-overview.png)
+
+Open a cluster to see its images. Where the registry no longer has the running digest, the image with the
+same tag is scanned and marked *Scanned by tag*. Private registries need a pull credential in
+**Settings › Registries**.
+
+![Images of a cluster](images/security.png)
+
+**Network policies** lists namespaces without a default-deny policy. Open a namespace to see its policies
+and simulate a connection: the simulator applies Kubernetes NetworkPolicy semantics to the policies the
+agent reported and explains which rule allowed or denied it.
+
+![Namespaces without default-deny](images/security-netpol-namespaces.png)
+
+![NetworkPolicy simulator](images/security-netpol.png)
+
+**Kyverno policies** lists policies with failing resources from the latest PolicyReports:
+
+![Kyverno violations](images/security-kyverno.png)
+
+![A Kyverno policy](images/security-kyverno-policy.png)
+
+## 10. Clean up
+
+```bash
+./test/e2e/env.sh down    # deletes both kind clusters
+```
+
+## Next steps
+
+- Install for real: [on Kubernetes](install.md) or [on a Linux VM](install-systemd.md).
+- How Olympos protects credentials and data: [Security model](security-model.md).
+- Restore a backup: [Restore](restore.md), and [Restoring Olympos](restore-olympos.md).
+- Re-take these screenshots after a UI change: `./test/e2e/env.sh`, then `cd web && pnpm docs-tour`.

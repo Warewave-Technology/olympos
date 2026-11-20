@@ -13,6 +13,17 @@ All notable changes to this project are documented here. The format follows
 - Release checksums (`SHA256SUMS-<arch>`) and signature bundles name pre-release packages the way GitHub
   stores them (`~` becomes `.`); `sha256sum -c` against v0.1.0-rc.2 found no files.
 
+- UI: a backup run's restore commands were squeezed into a narrow column; the Jobs table showed the next run
+  in the browser's time zone next to a schedule in the job's zone (now both in the job's zone); change
+  requests showed the vault as `cluster / namespace / namespace/service`.
+
+### Documentation
+- [Getting started](docs/getting-started.md): the local lab step by step, with a screenshot for every step
+  taken by `web/scripts/docs-tour.mjs` (`pnpm docs-tour`), which also checks that the steps still work.
+- README: requirements up front (Entra ID and Azure Key Vault are required), a working try-it path
+  (`./test/e2e/env.sh`), real screenshots instead of mock data; [docs/README.md](docs/README.md) maps all docs.
+- Documentation paths in the UI (restore commands, the Olympos database card) link to the docs on GitHub.
+
 ### Changed
 - `release.yml` runs as a dry run on pull requests and main pushes that touch the release inputs, and
   checks checksums and package versions strictly; signed releases verify their own signatures.

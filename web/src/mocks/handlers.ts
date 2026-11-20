@@ -40,7 +40,19 @@ function liveClusters(): Cluster[] {
   for (const c of db.clusters) {
     const t = db.enrolling.get(c.id);
     if (t && c.status === 'pending' && now - t > 9000) {
-      Object.assign(c, { status: 'online', last_seen_at: new Date().toISOString(), api_version: 'v1.32.2', min_kubelet: 'v1.32.2', nodes: 4, nodes_ready: 4, provider: 'oracle', provider_label: 'Oracle Cloud', region: 'eu-frankfurt-1', agent_version: '0.4.2', inventory_at: new Date().toISOString() });
+      Object.assign(c, {
+        status: 'online',
+        last_seen_at: new Date().toISOString(),
+        api_version: 'v1.32.2',
+        min_kubelet: 'v1.32.2',
+        nodes: 4,
+        nodes_ready: 4,
+        provider: 'oracle',
+        provider_label: 'Oracle Cloud',
+        region: 'eu-frankfurt-1',
+        agent_version: '0.4.2',
+        inventory_at: new Date().toISOString(),
+      });
     }
   }
   return db.clusters;
@@ -65,7 +77,13 @@ function dashboard(): Dashboard {
     { kind: 'backup_failed', severity: 'crit', label: 'Backup failed', detail: 'metrics-ch · SAS expired', link: '/backups?tab=runs' },
   ];
   for (const t of db.targets.filter((x) => x.tls_server_name_pending != null))
-    attention.push({ kind: 'target_tls_changed', severity: 'crit', label: 'TLS name changed', detail: `${t.namespace}/${t.service} asks for ${t.tls_server_name_pending || 'the default name'}; still verifying ${t.tls_server_name || `${t.service}.${t.namespace}.svc`}`, link: '/backups?tls=1' });
+    attention.push({
+      kind: 'target_tls_changed',
+      severity: 'crit',
+      label: 'TLS name changed',
+      detail: `${t.namespace}/${t.service} asks for ${t.tls_server_name_pending || 'the default name'}; still verifying ${t.tls_server_name || `${t.service}.${t.namespace}.svc`}`,
+      link: '/backups?tls=1',
+    });
   if (!selfBackup.configured) attention.push({ kind: 'self_backup_unset', severity: 'warn', label: 'Olympos backup', detail: 'choose where the Olympos database is backed up', link: '/backups?self=1' });
   if (perms().vault_approve && waiting.length) attention.push({ kind: 'approvals', severity: 'warn', label: `${waiting.length} approvals`, detail: 'waiting for you · oldest 51 h left', link: '/approvals' });
   const eol = cs.filter((c) => c.eol);
@@ -114,9 +132,17 @@ function restoreGuide(blob: string, doc: string) {
   return {
     doc,
     steps: [
-      { title: 'Download the backup and its manifest', commands: `az storage blob download --auth-mode login --account-name 'stolympos' --container-name 'backups' \\\n  --name '${blob}' --file backup.zip`, note: 'Human access to backup storage is break-glass (PIM).' },
+      {
+        title: 'Download the backup and its manifest',
+        commands: `az storage blob download --auth-mode login --account-name 'stolympos' --container-name 'backups' \\\n  --name '${blob}' --file backup.zip`,
+        note: 'Human access to backup storage is break-glass (PIM).',
+      },
       { title: 'Verify it', commands: "echo '<sha256>  backup.zip' | sha256sum -c -" },
-      { title: 'Restore into a new PostgreSQL', commands: 'unzip backup.zip -d restore/\nfor f in restore/*.dump; do\n  db=$(basename "$f" .dump)\n  createdb -h <new-host> -U postgres "$db"\n  pg_restore -h <new-host> -U postgres -d "$db" --no-owner -j 4 "$f"\ndone' },
+      {
+        title: 'Restore into a new PostgreSQL',
+        commands:
+          'unzip backup.zip -d restore/\nfor f in restore/*.dump; do\n  db=$(basename "$f" .dump)\n  createdb -h <new-host> -U postgres "$db"\n  pg_restore -h <new-host> -U postgres -d "$db" --no-owner -j 4 "$f"\ndone',
+      },
     ],
   };
 }
@@ -137,7 +163,31 @@ const routes: [string, string, Handler][] = [
       const name = String(r.body?.name ?? '');
       if (!/^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/.test(name)) return invalid('invalid cluster', { name: 'Use lowercase letters, digits and dashes.' });
       if (db.clusters.some((c) => c.name === name)) return invalid('invalid cluster', { name: 'A cluster with this name already exists.' });
-      const c: Cluster = { ...db.clusters[0], id: db.uuid(), name, labels: { ...(r.body.labels ?? {}), 'olympos.io/cluster': name }, bench_enabled: !!r.body.bench_enabled, status: 'pending', last_seen_at: null, api_version: '', min_kubelet: '', nodes: 0, nodes_ready: 0, cpu_milli: 0, mem_bytes: 0, provider: '', provider_label: '', region: '', zones: [], instance_types: [], agent_version: '', inventory_at: null, created_at: new Date().toISOString(), eol: false, version_skew: false };
+      const c: Cluster = {
+        ...db.clusters[0],
+        id: db.uuid(),
+        name,
+        labels: { ...(r.body.labels ?? {}), 'olympos.io/cluster': name },
+        bench_enabled: !!r.body.bench_enabled,
+        status: 'pending',
+        last_seen_at: null,
+        api_version: '',
+        min_kubelet: '',
+        nodes: 0,
+        nodes_ready: 0,
+        cpu_milli: 0,
+        mem_bytes: 0,
+        provider: '',
+        provider_label: '',
+        region: '',
+        zones: [],
+        instance_types: [],
+        agent_version: '',
+        inventory_at: null,
+        created_at: new Date().toISOString(),
+        eol: false,
+        version_skew: false,
+      };
       db.clusters.push(c);
       db.enrolling.set(c.id, Date.now());
       db.record('cluster.created', 'cluster', name, 'install command issued');
@@ -151,10 +201,14 @@ const routes: [string, string, Handler][] = [
       );
     },
   ],
-  ['GET', '/clusters/:id', (_r, p) => {
-    const c = liveClusters().find((x) => x.id === p.id);
-    return c ? ok(c) : notFound();
-  }],
+  [
+    'GET',
+    '/clusters/:id',
+    (_r, p) => {
+      const c = liveClusters().find((x) => x.id === p.id);
+      return c ? ok(c) : notFound();
+    },
+  ],
   [
     'PATCH',
     '/clusters/:id',
@@ -174,7 +228,8 @@ const routes: [string, string, Handler][] = [
       if (b.transfer_mode) {
         c.transfer_mode = b.transfer_mode;
         const has = db.findings.find((f) => f.control_id === 'transfer.compressed_mode' && f.cluster_id === c.id);
-        if (b.transfer_mode === 'compressed' && !has) db.findings.push({ ...db.findings[3], id: db.uuid(), cluster_id: c.id, cluster_name: c.name, resource_ref: `cluster/${c.name}`, first_seen_at: new Date().toISOString() });
+        if (b.transfer_mode === 'compressed' && !has)
+          db.findings.push({ ...db.findings[3], id: db.uuid(), cluster_id: c.id, cluster_name: c.name, resource_ref: `cluster/${c.name}`, first_seen_at: new Date().toISOString() });
         if (b.transfer_mode === 'e2e-tls' && has) has.status = 'resolved';
       }
       if (b.clear_egress_rate) c.egress_rate_per_gb = null;
@@ -202,7 +257,11 @@ const routes: [string, string, Handler][] = [
       const c = db.clusters.find((x) => x.id === p.id);
       if (!c) return notFound();
       db.enrolling.set(c.id, Date.now());
-      return ok({ cluster: c, command: `helm upgrade --install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${c.name} \\\n  --set bootstrapToken=obt_${Math.random().toString(36).slice(2, 12)}`, expires_at: new Date(Date.now() + 3600_000).toISOString() });
+      return ok({
+        cluster: c,
+        command: `helm upgrade --install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${c.name} \\\n  --set bootstrapToken=obt_${Math.random().toString(36).slice(2, 12)}`,
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      });
     },
   ],
   ['GET', '/clusters/:id/nodes', () => items([])],
@@ -246,7 +305,17 @@ const routes: [string, string, Handler][] = [
       const p = { id: db.uuid(), tenant_id: db.people.yigit.tenant_id, object_id: u.object_id, upn: u.upn, display_name: u.display_name, user_type: u.user_type, account_enabled: true };
       const ids: string[] = [];
       for (const role of roles) {
-        const g: Grant = { id: db.uuid(), principal: p, is_guest: u.is_guest, role, scope: r.body.scope || 'all', granted_by: db.people.yigit.id, granted_by_name: 'yigit@contoso.com', granted_at: new Date().toISOString(), stale: false };
+        const g: Grant = {
+          id: db.uuid(),
+          principal: p,
+          is_guest: u.is_guest,
+          role,
+          scope: r.body.scope || 'all',
+          granted_by: db.people.yigit.id,
+          granted_by_name: 'yigit@contoso.com',
+          granted_at: new Date().toISOString(),
+          stale: false,
+        };
         db.grants.push(g);
         ids.push(g.id);
       }
@@ -261,7 +330,8 @@ const routes: [string, string, Handler][] = [
       const i = db.grants.findIndex((g) => g.id === p.id);
       if (i < 0) return notFound();
       const g = db.grants[i];
-      if (g.role === 'admin' && db.grants.filter((x) => x.role === 'admin' && x.scope === 'all' && !x.stale).length <= 1) return { status: 409, body: { error: 'this is the last admin grant with scope all; grant admin to someone else first' } };
+      if (g.role === 'admin' && db.grants.filter((x) => x.role === 'admin' && x.scope === 'all' && !x.stale).length <= 1)
+        return { status: 409, body: { error: 'this is the last admin grant with scope all; grant admin to someone else first' } };
       db.grants.splice(i, 1);
       db.record('grant.revoked', 'grant', g.principal.upn, `− ${g.role}`);
       return { status: 204 };
@@ -324,7 +394,11 @@ const routes: [string, string, Handler][] = [
     },
   ],
   ['POST', '/notifications/channels/:id/test', async () => (await sleep(600), ok({ ok: true }))],
-  ['GET', '/notifications/routes', () => ok({ catalog: db.catalog, routes: db.catalog.map((e) => ({ event_type: e.event_type, channel_ids: db.channels.filter((c) => c.routes.includes(e.event_type)).map((c) => c.id) })) })],
+  [
+    'GET',
+    '/notifications/routes',
+    () => ok({ catalog: db.catalog, routes: db.catalog.map((e) => ({ event_type: e.event_type, channel_ids: db.channels.filter((c) => c.routes.includes(e.event_type)).map((c) => c.id) })) }),
+  ],
   [
     'PUT',
     '/notifications/routes',
@@ -356,7 +430,12 @@ const routes: [string, string, Handler][] = [
       if (!d) return notFound();
       const t = destTest({
         ...d,
-        sas: d.auth === 'sas_token' ? (d.sas_source === 'keyvault_ref' ? { source: 'keyvault_ref', ref: d.sas_ref } : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }) : undefined,
+        sas:
+          d.auth === 'sas_token'
+            ? d.sas_source === 'keyvault_ref'
+              ? { source: 'keyvault_ref', ref: d.sas_ref }
+              : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }
+            : undefined,
         secret_key: d.kind === 's3' ? { source: d.secret_key_source === 'stored' ? 'stored' : 'keyvault_ref', ref: d.secret_key_ref, value: d.secret_key_source === 'stored' ? 'stored-secret' : undefined } : undefined,
       });
       d.last_test = t;
@@ -396,8 +475,16 @@ const routes: [string, string, Handler][] = [
         ...d,
         ...r.body,
         kind: d.kind,
-        sas: r.body.sas ?? (d.auth === 'sas_token' ? (d.sas_source === 'keyvault_ref' ? { source: 'keyvault_ref', ref: d.sas_ref } : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }) : undefined),
-        secret_key: r.body.secret_key ?? (d.kind === 's3' ? { source: d.secret_key_source === 'stored' ? 'stored' : 'keyvault_ref', ref: d.secret_key_ref, value: d.secret_key_source === 'stored' ? 'stored-secret' : undefined } : undefined),
+        sas:
+          r.body.sas ??
+          (d.auth === 'sas_token'
+            ? d.sas_source === 'keyvault_ref'
+              ? { source: 'keyvault_ref', ref: d.sas_ref }
+              : { source: 'stored', value: `sv=2025-01-05&sr=c&sp=${d.sas_permissions}&se=${d.sas_expires_at}&sig=x` }
+            : undefined),
+        secret_key:
+          r.body.secret_key ??
+          (d.kind === 's3' ? { source: d.secret_key_source === 'stored' ? 'stored' : 'keyvault_ref', ref: d.secret_key_ref, value: d.secret_key_source === 'stored' ? 'stored-secret' : undefined } : undefined),
       };
       const v = validateDest(merged);
       if (v) return v;
@@ -409,19 +496,27 @@ const routes: [string, string, Handler][] = [
       return ok({ ...d, warnings: destWarnings(d, t) });
     },
   ],
-  ['DELETE', '/destinations/:id', (_r, p) => {
-    const d = db.destinations.find((x) => x.id === p.id);
-    if (d && d.jobs > 0) return { status: 409, body: { error: `used by ${d.jobs} backup jobs; move them to another destination first` } };
-    if (d) db.destinations.splice(db.destinations.indexOf(d), 1);
-    return { status: 204 };
-  }],
+  [
+    'DELETE',
+    '/destinations/:id',
+    (_r, p) => {
+      const d = db.destinations.find((x) => x.id === p.id);
+      if (d && d.jobs > 0) return { status: 409, body: { error: `used by ${d.jobs} backup jobs; move them to another destination first` } };
+      if (d) db.destinations.splice(db.destinations.indexOf(d), 1);
+      return { status: 204 };
+    },
+  ],
 
   // -------------------------------------------------------- backups
   ['GET', '/backup/jobs', () => items(db.jobs)],
-  ['GET', '/backup/jobs/:id', (_r, p) => {
-    const j = db.jobs.find((x) => x.id === p.id);
-    return j ? ok(j) : notFound();
-  }],
+  [
+    'GET',
+    '/backup/jobs/:id',
+    (_r, p) => {
+      const j = db.jobs.find((x) => x.id === p.id);
+      return j ? ok(j) : notFound();
+    },
+  ],
   [
     'POST',
     '/backup/jobs',
@@ -471,7 +566,7 @@ const routes: [string, string, Handler][] = [
       const b = r.body as BackupJobInput;
       if (b.enabled !== undefined) {
         j.enabled = b.enabled;
-        j.next_run_at = b.enabled ? nextRuns(j.cron, 1, new Date(), j.timezone)[0] ?? null : null;
+        j.next_run_at = b.enabled ? (nextRuns(j.cron, 1, new Date(), j.timezone)[0] ?? null) : null;
       }
       if (b.cron) j.cron = b.cron;
       if (b.timezone) j.timezone = b.timezone;
@@ -495,7 +590,26 @@ const routes: [string, string, Handler][] = [
       const j = db.jobs.find((x) => x.id === p.id);
       if (!j) return notFound();
       const trigger = r.body?.trigger === 'test' ? 'test' : 'manual';
-      const run: BackupRun = { id: db.uuid(), job_id: j.id, target_service: j.target.service, cluster_name: j.target.cluster_name, engine: j.engine, trigger, status: 'queued', scheduled_for: null, tier: trigger === 'test' ? '' : 'daily', started_at: new Date().toISOString(), finished_at: null, bytes: 0, wire_bytes: 0, blob_path: '', sha256: '', error: '', destination_name: j.destination.name, steps: [] };
+      const run: BackupRun = {
+        id: db.uuid(),
+        job_id: j.id,
+        target_service: j.target.service,
+        cluster_name: j.target.cluster_name,
+        engine: j.engine,
+        trigger,
+        status: 'queued',
+        scheduled_for: null,
+        tier: trigger === 'test' ? '' : 'daily',
+        started_at: new Date().toISOString(),
+        finished_at: null,
+        bytes: 0,
+        wire_bytes: 0,
+        blob_path: '',
+        sha256: '',
+        error: '',
+        destination_name: j.destination.name,
+        steps: [],
+      };
       db.runs.unshift(run);
       return ok(run, 202);
     },
@@ -508,7 +622,17 @@ const routes: [string, string, Handler][] = [
       const d = db.destinations.find((x) => x.id === (r.body?.destination_id ?? selfBackup.job?.destination_id));
       if (!d) return invalid('invalid self-backup', { destination_id: 'Choose where the Olympos database is backed up.' });
       selfBackup.configured = true;
-      selfBackup.job = { id: selfBackup.job?.id ?? db.uuid(), destination_id: d.id, destination_name: d.name, cron: r.body?.cron ?? selfBackup.job?.cron ?? '30 2 * * *', timezone: r.body?.timezone ?? selfBackup.job?.timezone ?? 'UTC', retention: r.body?.retention ?? selfBackup.job?.retention ?? { daily: 7, weekly: 4, monthly: 12 }, enabled: r.body?.enabled ?? true, notify_channel_id: null, created_at: selfBackup.job?.created_at ?? new Date().toISOString() };
+      selfBackup.job = {
+        id: selfBackup.job?.id ?? db.uuid(),
+        destination_id: d.id,
+        destination_name: d.name,
+        cron: r.body?.cron ?? selfBackup.job?.cron ?? '30 2 * * *',
+        timezone: r.body?.timezone ?? selfBackup.job?.timezone ?? 'UTC',
+        retention: r.body?.retention ?? selfBackup.job?.retention ?? { daily: 7, weekly: 4, monthly: 12 },
+        enabled: r.body?.enabled ?? true,
+        notify_channel_id: null,
+        created_at: selfBackup.job?.created_at ?? new Date().toISOString(),
+      };
       return ok(selfBackup);
     },
   ],
@@ -518,7 +642,24 @@ const routes: [string, string, Handler][] = [
     () => {
       if (!selfBackup.job) return { status: 409, body: { error: 'choose a destination for the Olympos self-backup first' } };
       const now = new Date().toISOString();
-      selfBackup.runs.unshift({ id: db.uuid(), job_id: selfBackup.job.id, target_service: 'olympos-db', cluster_name: 'olympos', engine: 'postgresql', trigger: 'manual', status: 'succeeded', scheduled_for: null, tier: 'daily', started_at: now, finished_at: now, bytes: 4_812_331, wire_bytes: 4_812_331, blob_path: 'olympos/olympos/olympos/olympos-db/postgresql/x.zip', sha256: '', error: '' });
+      selfBackup.runs.unshift({
+        id: db.uuid(),
+        job_id: selfBackup.job.id,
+        target_service: 'olympos-db',
+        cluster_name: 'olympos',
+        engine: 'postgresql',
+        trigger: 'manual',
+        status: 'succeeded',
+        scheduled_for: null,
+        tier: 'daily',
+        started_at: now,
+        finished_at: now,
+        bytes: 4_812_331,
+        wire_bytes: 4_812_331,
+        blob_path: 'olympos/olympos/olympos/olympos-db/postgresql/x.zip',
+        sha256: '',
+        error: '',
+      });
       selfBackup.restore = restoreGuide('olympos/olympos/olympos/olympos-db/postgresql/x.zip', 'docs/restore-olympos.md');
       return ok({ run_id: selfBackup.runs[0].id }, 202);
     },
@@ -529,14 +670,26 @@ const routes: [string, string, Handler][] = [
     (r) => {
       const job = r.query.get('job_id');
       const st = r.query.get('status');
-      return items(db.runs.filter((x) => (!job || x.job_id === job) && (!st || x.status === st)).map((x) => runFor(x.id)!).slice(0, Number(r.query.get('limit') ?? 50)));
+      return items(
+        db.runs
+          .filter((x) => (!job || x.job_id === job) && (!st || x.status === st))
+          .map((x) => runFor(x.id)!)
+          .slice(0, Number(r.query.get('limit') ?? 50)),
+      );
     },
   ],
-  ['GET', '/backup/runs/:id', (_r, p) => {
-    const x = runFor(p.id);
-    if (!x) return notFound();
-    return ok({ ...x, restore: x.status === 'succeeded' && x.trigger !== 'test' ? restoreGuide(x.blob_path || `olympos/${x.cluster_name}/${x.target_service}/${x.engine}/${x.id}.zip`, 'docs/restore.md#postgresql') : null });
-  }],
+  [
+    'GET',
+    '/backup/runs/:id',
+    (_r, p) => {
+      const x = runFor(p.id);
+      if (!x) return notFound();
+      return ok({
+        ...x,
+        restore: x.status === 'succeeded' && x.trigger !== 'test' ? restoreGuide(x.blob_path || `olympos/${x.cluster_name}/${x.target_service}/${x.engine}/${x.id}.zip`, 'docs/restore.md#postgresql') : null,
+      });
+    },
+  ],
   [
     'POST',
     '/backup/test-connection',
@@ -587,7 +740,9 @@ const routes: [string, string, Handler][] = [
       const hits: unknown[] = [];
       const base = (v: Vault) => ({ vault_id: v.id, vault_name: v.target.service, provider: v.provider, cluster_id: v.target.cluster_id, cluster_name: v.target.cluster_name, namespace: v.target.namespace });
       for (const v of db.vaults) {
-        const labels = Object.entries(v.cluster_labels ?? {}).map(([k, x]) => `${k}=${x}`).join(' ');
+        const labels = Object.entries(v.cluster_labels ?? {})
+          .map(([k, x]) => `${k}=${x}`)
+          .join(' ');
         const hay = `${v.target.service} ${v.target.cluster_name} ${v.target.namespace} ${v.provider === 'openbao' ? 'openbao' : 'hashicorp vault'} ${labels}`.toLowerCase();
         if (hay.includes(q)) hits.push({ match: 'vault', ...base(v) });
       }
@@ -599,10 +754,14 @@ const routes: [string, string, Handler][] = [
       return items(hits.slice(0, 50));
     },
   ],
-  ['GET', '/vaults/:id', (_r, p) => {
-    const v = db.vaults.find((x) => x.id === p.id);
-    return v ? ok(v) : notFound();
-  }],
+  [
+    'GET',
+    '/vaults/:id',
+    (_r, p) => {
+      const v = db.vaults.find((x) => x.id === p.id);
+      return v ? ok(v) : notFound();
+    },
+  ],
   [
     'POST',
     '/vaults/:id/inspect',
@@ -620,7 +779,15 @@ const routes: [string, string, Handler][] = [
         };
       }
       if (!/^(hvs\.|s\.)/.test(tok) || tok.length < 10) return invalid('token rejected', { root_token: 'Vault rejected this token (permission denied). Paste a root token or one with sys and auth admin rights.' });
-      return ok({ version: '1.17.6', sealed: false, mounts: [{ path: 'kv/', version: 2, managed: false, description: 'apps' }, { path: 'apps/', version: 2, managed: false, description: '' }, { path: 'legacy/', version: 1, managed: false, description: 'old integrations' }] });
+      return ok({
+        version: '1.17.6',
+        sealed: false,
+        mounts: [
+          { path: 'kv/', version: 2, managed: false, description: 'apps' },
+          { path: 'apps/', version: 2, managed: false, description: '' },
+          { path: 'legacy/', version: 1, managed: false, description: 'old integrations' },
+        ],
+      });
     },
   ],
   [
@@ -632,17 +799,27 @@ const routes: [string, string, Handler][] = [
       const v = db.vaults.find((x) => x.id === p.id);
       if (!v) return notFound();
       if (!r.body?.mounts?.length) return invalid('invalid configure', { mounts: 'Select at least one KV v2 mount.' });
-      Object.assign(v, { status: 'configured', configured_at: new Date().toISOString(), configured_by_name: 'yigit@contoso.com', last_index_at: new Date().toISOString(), kv_mounts: [...(r.body.mounts as string[]).map((m) => ({ path: m, version: 2, managed: true, description: '' })), { path: 'legacy/', version: 1, managed: false, description: '' }] });
+      Object.assign(v, {
+        status: 'configured',
+        configured_at: new Date().toISOString(),
+        configured_by_name: 'yigit@contoso.com',
+        last_index_at: new Date().toISOString(),
+        kv_mounts: [...(r.body.mounts as string[]).map((m) => ({ path: m, version: 2, managed: true, description: '' })), { path: 'legacy/', version: 1, managed: false, description: '' }],
+      });
       db.secrets[v.id] = [];
       db.record('vault.configured', 'vault', v.target.service, `AppRole olympos created · mounts ${(r.body.mounts as string[]).join(', ')}`);
       return ok(v);
     },
   ],
   ['POST', '/vaults/:id/refresh', () => ({ status: 202 })],
-  ['GET', '/vaults/:id/tree', (r, p) => {
-    const m = r.query.get('mount');
-    return items(db.summaries(p.id).filter((s) => !m || s.mount === m));
-  }],
+  [
+    'GET',
+    '/vaults/:id/tree',
+    (r, p) => {
+      const m = r.query.get('mount');
+      return items(db.summaries(p.id).filter((s) => !m || s.mount === m));
+    },
+  ],
   [
     'GET',
     '/vaults/:id/secrets/*',
@@ -666,10 +843,14 @@ const routes: [string, string, Handler][] = [
       return items(list.map(withPerms));
     },
   ],
-  ['GET', '/change-requests/:id', (_r, p) => {
-    const c = db.changeRequests.find((x) => x.id === p.id);
-    return c ? ok(withPerms(c)) : notFound();
-  }],
+  [
+    'GET',
+    '/change-requests/:id',
+    (_r, p) => {
+      const c = db.changeRequests.find((x) => x.id === p.id);
+      return c ? ok(withPerms(c)) : notFound();
+    },
+  ],
   [
     'POST',
     '/change-requests',
@@ -682,7 +863,7 @@ const routes: [string, string, Handler][] = [
       const c = {
         id: db.uuid(),
         number: db.nextCrNumber(),
-        vault: { id: v.id, name: v.target.service, cluster_name: v.target.cluster_name, provider: v.provider, version: v.version },
+        vault: { id: v.id, name: `${v.target.namespace}/${v.target.service}`, cluster_name: v.target.cluster_name, provider: v.provider, version: v.version },
         maker: db.people.yigit,
         checker: null,
         justification: b.justification,
@@ -697,7 +878,16 @@ const routes: [string, string, Handler][] = [
         approve_disabled_reason: 'You opened this request. Another approver must decide.',
         can_cancel: true,
         // Values are reduced to a fingerprint immediately and never stored by the mock.
-        items: b.items.map((it) => ({ id: db.uuid(), mount: it.mount, path: it.path, key: it.key ?? null, op: it.op, base_version: it.base_version ?? 0, versions: it.versions ?? [], fingerprint: it.value ? fingerprint(it.value) : '' })),
+        items: b.items.map((it) => ({
+          id: db.uuid(),
+          mount: it.mount,
+          path: it.path,
+          key: it.key ?? null,
+          op: it.op,
+          base_version: it.base_version ?? 0,
+          versions: it.versions ?? [],
+          fingerprint: it.value ? fingerprint(it.value) : '',
+        })),
         events: [{ at: new Date().toISOString(), kind: 'opened', actor_name: 'yigit@contoso.com', details: {} }],
         eligible_approvers: 2,
       };
@@ -736,44 +926,78 @@ const routes: [string, string, Handler][] = [
     '/audit/schedules',
     (r) => {
       if (!perms().operate) return forbidden();
-      const s = { id: db.uuid(), tool: r.body.tool, frameworks: r.body.frameworks ?? [], scope_selector: r.body.scope_selector || 'all', cron: r.body.cron, timezone: r.body.timezone ?? 'UTC', enabled: r.body.enabled ?? true, notify_channel_id: r.body.notify_channel_id ?? null, next_run_at: nextRuns(r.body.cron, 1)[0] ?? null, clusters: 7, last_run: null };
+      const s = {
+        id: db.uuid(),
+        tool: r.body.tool,
+        frameworks: r.body.frameworks ?? [],
+        scope_selector: r.body.scope_selector || 'all',
+        cron: r.body.cron,
+        timezone: r.body.timezone ?? 'UTC',
+        enabled: r.body.enabled ?? true,
+        notify_channel_id: r.body.notify_channel_id ?? null,
+        next_run_at: nextRuns(r.body.cron, 1)[0] ?? null,
+        clusters: 7,
+        last_run: null,
+      };
       db.auditSchedules.push(s);
       return ok(s, 201);
     },
   ],
-  ['PATCH', '/audit/schedules/:id', (r, p) => {
-    const s = db.auditSchedules.find((x) => x.id === p.id);
-    if (!s) return notFound();
-    Object.assign(s, r.body);
-    return ok(s);
-  }],
-  ['DELETE', '/audit/schedules/:id', (_r, p) => {
-    if (!perms().operate) return forbidden();
-    const i = db.auditSchedules.findIndex((x) => x.id === p.id);
-    if (i < 0) return notFound();
-    db.auditSchedules.splice(i, 1);
-    return { status: 204 };
-  }],
-  ['POST', '/audit/schedules/:id/run', (_r, p) => {
-    const s = db.auditSchedules.find((x) => x.id === p.id);
-    if (!s) return notFound();
-    const run = { id: db.uuid(), schedule_id: s.id, tool: s.tool, cluster_id: '', cluster_name: 'all clusters', status: 'queued' as const, started_at: null, finished_at: null, score: null, new_findings: 0, resolved_findings: 0, error: '' };
-    db.auditRuns.unshift(run);
-    return ok({ items: [run] }, 202);
-  }],
-  ['GET', '/audit/runs/:id', (_r, p) => {
-    const x = db.auditRuns.find((y) => y.id === p.id);
-    return x ? ok(x) : notFound();
-  }],
-  // -------------------------------------------------------- security
+  [
+    'PATCH',
+    '/audit/schedules/:id',
+    (r, p) => {
+      const s = db.auditSchedules.find((x) => x.id === p.id);
+      if (!s) return notFound();
+      Object.assign(s, r.body);
+      return ok(s);
+    },
+  ],
+  [
+    'DELETE',
+    '/audit/schedules/:id',
+    (_r, p) => {
+      if (!perms().operate) return forbidden();
+      const i = db.auditSchedules.findIndex((x) => x.id === p.id);
+      if (i < 0) return notFound();
+      db.auditSchedules.splice(i, 1);
+      return { status: 204 };
+    },
+  ],
   [
     'POST',
-    '/images/scan',
-    () =>
-      noImages()
-        ? { status: 409, body: { error: 'No running images to scan yet. Add a cluster first; its agent reports running images within a minute.' } }
-        : { status: 202 },
+    '/audit/schedules/:id/run',
+    (_r, p) => {
+      const s = db.auditSchedules.find((x) => x.id === p.id);
+      if (!s) return notFound();
+      const run = {
+        id: db.uuid(),
+        schedule_id: s.id,
+        tool: s.tool,
+        cluster_id: '',
+        cluster_name: 'all clusters',
+        status: 'queued' as const,
+        started_at: null,
+        finished_at: null,
+        score: null,
+        new_findings: 0,
+        resolved_findings: 0,
+        error: '',
+      };
+      db.auditRuns.unshift(run);
+      return ok({ items: [run] }, 202);
+    },
   ],
+  [
+    'GET',
+    '/audit/runs/:id',
+    (_r, p) => {
+      const x = db.auditRuns.find((y) => y.id === p.id);
+      return x ? ok(x) : notFound();
+    },
+  ],
+  // -------------------------------------------------------- security
+  ['POST', '/images/scan', () => (noImages() ? { status: 409, body: { error: 'No running images to scan yet. Add a cluster first; its agent reports running images within a minute.' } } : { status: 202 })],
   [
     'POST',
     '/images/:digest/scan',
@@ -800,28 +1024,49 @@ const routes: [string, string, Handler][] = [
       const b = r.body as RegistryInput;
       if (!b.host_pattern) return invalid('invalid registry', { host_pattern: 'Enter a host or host/path pattern, e.g. harbor.example.com/team/*' });
       if (b.password?.source === 'keyvault_ref' && !/^kv:\/\/[^/]+\/[^/]+$/.test(b.password.ref ?? '')) return invalid('invalid registry', { ref: 'Use kv://<vault>/<secret>.' });
-      const reg = { id: db.uuid(), host_pattern: b.host_pattern, username: b.username ?? '', credential_source: (b.password?.source ?? '') as never, credential_ref: b.password?.ref ?? '', images: 4, created_at: new Date().toISOString() };
+      const reg = {
+        id: db.uuid(),
+        host_pattern: b.host_pattern,
+        username: b.username ?? '',
+        credential_source: (b.password?.source ?? '') as never,
+        credential_ref: b.password?.ref ?? '',
+        images: 4,
+        created_at: new Date().toISOString(),
+      };
       db.registries.push(reg);
       db.unmatched.splice(0, db.unmatched.length, ...db.unmatched.filter((u) => !b.host_pattern.startsWith(u.host)));
       db.record('registry.created', 'registry', reg.host_pattern, '');
       return ok(reg, 201);
     },
   ],
-  ['DELETE', '/registries/:id', (_r, p) => {
-    const i = db.registries.findIndex((x) => x.id === p.id);
-    if (i >= 0) db.registries.splice(i, 1);
-    return { status: 204 };
-  }],
-  ['POST', '/registries/test', async (r) => {
-    await sleep(700);
-    return ok(r.body?.username ? { ok: true, error: '' } : { ok: false, error: 'registry answered 401 Unauthorized for anonymous pull' });
-  }],
+  [
+    'DELETE',
+    '/registries/:id',
+    (_r, p) => {
+      const i = db.registries.findIndex((x) => x.id === p.id);
+      if (i >= 0) db.registries.splice(i, 1);
+      return { status: 204 };
+    },
+  ],
+  [
+    'POST',
+    '/registries/test',
+    async (r) => {
+      await sleep(700);
+      return ok(r.body?.username ? { ok: true, error: '' } : { ok: false, error: 'registry answered 401 Unauthorized for anonymous pull' });
+    },
+  ],
 ];
 
 function withPerms(c: (typeof db.changeRequests)[number]) {
   const mine = c.maker.object_id === db.people.yigit.object_id;
   const p = perms();
-  return { ...c, can_approve: c.status === 'pending' && !mine && p.vault_approve, approve_disabled_reason: mine ? 'You opened this request. Another approver must decide.' : '', can_cancel: mine && c.status === 'pending' };
+  return {
+    ...c,
+    can_approve: c.status === 'pending' && !mine && p.vault_approve,
+    approve_disabled_reason: mine ? 'You opened this request. Another approver must decide.' : '',
+    can_cancel: mine && c.status === 'pending',
+  };
 }
 
 function decide(id: string, kind: 'approve' | 'reject', comment: string): MockRes {
@@ -868,7 +1113,8 @@ function validateDest(b: DestinationInput): MockRes | null {
   if (b.kind === 's3') {
     if (!/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/.test(b.bucket ?? '')) f.bucket = 'Bucket names are 3–63 lowercase letters, digits, dots and dashes.';
     if (!b.access_key_id?.trim()) f.access_key_id = 'Access key ID is required.';
-    if (!b.secret_key || (b.secret_key.source === 'keyvault_ref' ? !b.secret_key.ref : !b.secret_key.value)) f.secret_key = b.secret_key?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the secret key.';
+    if (!b.secret_key || (b.secret_key.source === 'keyvault_ref' ? !b.secret_key.ref : !b.secret_key.value))
+      f.secret_key = b.secret_key?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the secret key.';
   } else if (b.kind === 'nfs') {
     const m = db.destinationMounts.find((x) => b.path === x.path || (b.path ?? '').startsWith(x.path + '/'));
     if (!m) f.path = 'The path must be below one of the server mounts.';
@@ -877,20 +1123,46 @@ function validateDest(b: DestinationInput): MockRes | null {
   } else {
     if (!/^[a-z0-9]{3,24}$/.test(b.account ?? '')) f.account = 'Storage account names are 3–24 lowercase letters and digits.';
     if (!b.container) f.container = 'Container is required.';
-    if (b.auth === 'sas_token' && (!b.sas || (b.sas.source === 'keyvault_ref' ? !b.sas.ref : !b.sas.value))) f.sas = b.sas?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the SAS token.';
+    if (b.auth === 'sas_token' && (!b.sas || (b.sas.source === 'keyvault_ref' ? !b.sas.ref : !b.sas.value)))
+      f.sas = b.sas?.source === 'keyvault_ref' ? 'Enter the Key Vault reference (kv://vault/secret).' : 'Paste the SAS token.';
   }
   return Object.keys(f).length ? invalid('invalid destination', f) : null;
 }
 
 function emptyDest(kind: Destination['kind']): Destination {
-  return { id: '', name: '', kind, prefix: '', endpoint_override: '', auth: 'none', account: '', container: '', sas_source: '', sas_ref: '', sas_expires_at: null, sas_permissions: '', last_test_at: null, last_test_ok: null, jobs: 0 };
+  return {
+    id: '',
+    name: '',
+    kind,
+    prefix: '',
+    endpoint_override: '',
+    auth: 'none',
+    account: '',
+    container: '',
+    sas_source: '',
+    sas_ref: '',
+    sas_expires_at: null,
+    sas_permissions: '',
+    last_test_at: null,
+    last_test_ok: null,
+    jobs: 0,
+  };
 }
 
 /** What the server would persist: non-secret fields plus secret metadata, never the secret. */
 function storeDest(b: DestinationInput, base: Destination): Omit<Destination, 'id' | 'jobs' | 'last_test_at' | 'last_test_ok'> {
   const out = { ...base, name: b.name ?? base.name, prefix: b.prefix ?? base.prefix, endpoint_override: b.endpoint_override ?? base.endpoint_override };
   if (base.kind === 's3') {
-    return { ...out, auth: 'access_key', bucket: b.bucket, region: b.region || 'us-east-1', path_style: !!b.path_style, access_key_id: b.access_key_id, secret_key_source: b.secret_key?.source ?? base.secret_key_source ?? '', secret_key_ref: b.secret_key?.source === 'keyvault_ref' ? b.secret_key.ref : '' };
+    return {
+      ...out,
+      auth: 'access_key',
+      bucket: b.bucket,
+      region: b.region || 'us-east-1',
+      path_style: !!b.path_style,
+      access_key_id: b.access_key_id,
+      secret_key_source: b.secret_key?.source ?? base.secret_key_source ?? '',
+      secret_key_ref: b.secret_key?.source === 'keyvault_ref' ? b.secret_key.ref : '',
+    };
   }
   if (base.kind === 'nfs') return { ...out, auth: 'none', path: b.path };
   const sas = b.auth === 'sas_token' && b.sas?.source === 'stored' && b.sas.value ? parseSas(b.sas.value) : null;
@@ -954,10 +1226,34 @@ function destTest(b: DestinationInput): DestinationTest {
   }
   const endpointStep = b.endpoint_override ? [{ name: 'endpoint' as const, ok: true, detail: new URL(b.endpoint_override).host }] : [];
   if (b.auth !== 'sas_token') {
-    return { ok: true, can_delete: false, probe_path: probe, steps: [...endpointStep, { name: 'write', ok: true, detail: 'probe blob written' }, { name: 'read', ok: true, detail: 'read back, sha256 matches' }, { name: 'tag', ok: true, detail: 'olympos-tier tag set' }, { name: 'delete_refused', ok: true, detail: 'delete returned 403 AuthorizationPermissionMismatch' }], sas: null };
+    return {
+      ok: true,
+      can_delete: false,
+      probe_path: probe,
+      steps: [
+        ...endpointStep,
+        { name: 'write', ok: true, detail: 'probe blob written' },
+        { name: 'read', ok: true, detail: 'read back, sha256 matches' },
+        { name: 'tag', ok: true, detail: 'olympos-tier tag set' },
+        { name: 'delete_refused', ok: true, detail: 'delete returned 403 AuthorizationPermissionMismatch' },
+      ],
+      sas: null,
+    };
   }
   if (b.sas?.source === 'keyvault_ref') {
-    return { ok: true, can_delete: false, steps: [{ name: 'sas_permissions', ok: true, detail: 'r c w t' }, { name: 'sas_expiry', ok: true, detail: 'expires in 120 days' }, { name: 'write', ok: true, detail: '' }, { name: 'read', ok: true, detail: '' }, { name: 'tag', ok: true, detail: '' }, { name: 'delete_refused', ok: true, detail: '' }], sas: { permissions: 'rcwt', expires_at: new Date(Date.now() + 120 * 86400_000).toISOString(), missing: [], extra: [], scope: 'container' } };
+    return {
+      ok: true,
+      can_delete: false,
+      steps: [
+        { name: 'sas_permissions', ok: true, detail: 'r c w t' },
+        { name: 'sas_expiry', ok: true, detail: 'expires in 120 days' },
+        { name: 'write', ok: true, detail: '' },
+        { name: 'read', ok: true, detail: '' },
+        { name: 'tag', ok: true, detail: '' },
+        { name: 'delete_refused', ok: true, detail: '' },
+      ],
+      sas: { permissions: 'rcwt', expires_at: new Date(Date.now() + 120 * 86400_000).toISOString(), missing: [], extra: [], scope: 'container' },
+    };
   }
   const s = parseSas(b.sas?.value ?? '');
   const canDelete = s.extra.includes('d');

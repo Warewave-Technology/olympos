@@ -3009,17 +3009,30 @@ label.chk {
 .self-backup.attention-card {
   border-color: var(--warn-border, var(--border));
 }
-.self-backup dl.kv {
+dl.kv {
   display: grid;
-  grid-template-columns: max-content 1fr;
+  grid-template-columns: max-content minmax(0, 1fr);
   gap: 6px 16px;
   margin: 0;
 }
-.self-backup dl.kv dt {
+dl.kv dt {
   color: var(--fg-muted);
 }
-.self-backup dl.kv dd {
+dl.kv dd {
   margin: 0;
+}
+
+/* Restore commands of a backup run: full width, one block per step. */
+.restore-cmds {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.restore-cmds .spread {
+  margin-bottom: 6px;
 }
 
 /* Secret inventory key chips */

@@ -11,6 +11,11 @@ import { Badge, DetailPlaceholder, EmptyState, ErrorState, Field, FormError, Loa
 import { CrStatusBadge, OpBadge, PageHead, crLabel, opLabel } from '../ui/status';
 import { VaultIdentity, vaultPath } from '../ui/vault';
 
+/** The API names a change request's vault "namespace/service". */
+function serviceOf(cr: ChangeRequest): string {
+  return cr.vault.name.split('/').pop() ?? cr.vault.name;
+}
+
 type View = 'waiting' | 'mine' | 'all';
 
 function summary(cr: ChangeRequest): string {
@@ -33,7 +38,7 @@ function useVaultNamespaces(): (cr: ChangeRequest) => string | undefined {
 }
 
 export function crVaultPath(cr: ChangeRequest, ns?: string): string {
-  return vaultPath({ cluster: cr.vault.cluster_name, namespace: ns, service: cr.vault.name });
+  return vaultPath({ cluster: cr.vault.cluster_name, namespace: ns, service: serviceOf(cr) });
 }
 
 function pathOf(cr: ChangeRequest): string {
@@ -54,11 +59,7 @@ export function ApprovalsPage() {
   const selectedId = search.cr ?? items[0]?.id;
   const nsOf = useVaultNamespaces();
 
-  const views: { id: View; label: string }[] = [
-    ...(canApprove ? [{ id: 'waiting' as const, label: 'Waiting for me' }] : []),
-    { id: 'mine', label: 'Opened by me' },
-    { id: 'all', label: 'All' },
-  ];
+  const views: { id: View; label: string }[] = [...(canApprove ? [{ id: 'waiting' as const, label: 'Waiting for me' }] : []), { id: 'mine', label: 'Opened by me' }, { id: 'all', label: 'All' }];
 
   return (
     <>
@@ -90,21 +91,11 @@ export function ApprovalsPage() {
                   <button key={cr.id} type="button" className="li" aria-current={cr.id === selectedId} onClick={() => navigate({ search: (s) => ({ ...s, cr: cr.id }), replace: true })}>
                     <div className="l1">
                       <span className="mono">{crLabel(cr)}</span>
-                      {cr.status === 'pending' ? (
-                        mine ? (
-                          <Badge tone="mute">Awaiting other</Badge>
-                        ) : (
-                          <span className="muted small">{timeLeft(cr.expires_at, now)}</span>
-                        )
-                      ) : (
-                        <CrStatusBadge cr={cr} />
-                      )}
+                      {cr.status === 'pending' ? mine ? <Badge tone="mute">Awaiting other</Badge> : <span className="muted small">{timeLeft(cr.expires_at, now)}</span> : <CrStatusBadge cr={cr} />}
                     </div>
                     <div className="l2">{summary(cr)}</div>
                     <div className="l3 mono">{crVaultPath(cr, nsOf(cr))}</div>
-                    <div className="l3">
-                      {mine && cr.status === 'pending' ? `Approve disabled: you are the maker · ${pathOf(cr)}` : `${personName(cr.maker)} · ${pathOf(cr)}`}
-                    </div>
+                    <div className="l3">{mine && cr.status === 'pending' ? `Approve disabled: you are the maker · ${pathOf(cr)}` : `${personName(cr.maker)} · ${pathOf(cr)}`}</div>
                   </button>
                 );
               })
@@ -157,8 +148,18 @@ function CrDetail({ id }: { id: string }) {
   const reject = useMutation({ mutationFn: () => api.post<ChangeRequest>(`/change-requests/${id}/reject`, { comment }), onSuccess: done('rejected') });
   const cancel = useMutation({ mutationFn: () => api.post<ChangeRequest>(`/change-requests/${id}/cancel`), onSuccess: done('cancelled') });
 
-  if (q.isPending) return <section className="card"><Loading label="Loading change request…" /></section>;
-  if (q.isError) return <section className="card"><ErrorState what="this change request" error={q.error} onRetry={() => q.refetch()} /></section>;
+  if (q.isPending)
+    return (
+      <section className="card">
+        <Loading label="Loading change request…" />
+      </section>
+    );
+  if (q.isError)
+    return (
+      <section className="card">
+        <ErrorState what="this change request" error={q.error} onRetry={() => q.refetch()} />
+      </section>
+    );
   const cr = q.data;
   const ap = approveControl(me, cr);
   const canReject = rejectControl(me, cr);
@@ -187,7 +188,7 @@ function CrDetail({ id }: { id: string }) {
         <dl className="dl narrow">
           <dt>Vault</dt>
           <dd>
-            <VaultIdentity cluster={cr.vault.cluster_name} namespace={nsOf(cr)} service={cr.vault.name} provider={cr.vault.provider} version={cr.vault.version} compact />
+            <VaultIdentity cluster={cr.vault.cluster_name} namespace={nsOf(cr)} service={serviceOf(cr)} provider={cr.vault.provider} version={cr.vault.version} compact />
           </dd>
           <dt>Maker</dt>
           <dd>
@@ -258,9 +259,7 @@ function CrDetail({ id }: { id: string }) {
         <p className="muted small" style={{ margin: '-8px 0 0' }}>
           You see a fingerprint, not the value. Compare it with the maker over a separate channel if needed. If the secret changes before you approve, the apply fails and the request is closed.
         </p>
-        {cr.items.some((i) => i.op === 'destroy_history') && (
-          <div className="note crit">This request permanently destroys whole versions, including every other key stored in them. It cannot be undone.</div>
-        )}
+        {cr.items.some((i) => i.op === 'destroy_history') && <div className="note crit">This request permanently destroys whole versions, including every other key stored in them. It cannot be undone.</div>}
 
         {(ap.visible || canReject || cr.can_cancel) && cr.status === 'pending' && (
           <>
@@ -327,7 +326,10 @@ function CrDetail({ id }: { id: string }) {
           <ol className="trail">
             {cr.events.map((e, i) => (
               <li className="tl" key={i}>
-                <span className={`dot ${e.kind === 'applied' || e.kind === 'approved' ? 'ok' : e.kind === 'rejected' || e.kind === 'failed' ? 'crit' : e.kind === 'expired' || e.kind === 'cancelled' ? 'muted' : ''}`} aria-hidden="true" />
+                <span
+                  className={`dot ${e.kind === 'applied' || e.kind === 'approved' ? 'ok' : e.kind === 'rejected' || e.kind === 'failed' ? 'crit' : e.kind === 'expired' || e.kind === 'cancelled' ? 'muted' : ''}`}
+                  aria-hidden="true"
+                />
                 <div>
                   <div>{eventText(e)}</div>
                   <div className="muted mono small" style={{ marginTop: 2 }}>
