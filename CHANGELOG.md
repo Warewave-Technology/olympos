@@ -6,12 +6,18 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - unreleased
+## [0.1.0] - 2026-11-21
 
 First public release.
 
 ### Upgrade notes
-For anyone upgrading from a build before v0.1.0-rc.1. These changes came from the security review
+A new installation needs none of this: start with `docs/install.md` (Kubernetes) or
+`docs/install-systemd.md` (Linux VM).
+
+From a release candidate: nothing to do. The *Since v0.1.0-rc.N* sections of `CHANGELOG.md` list what
+changed.
+
+From a build before v0.1.0-rc.1: these changes came from the security review
 (`docs/security-review-v0.1.md`) and can stop backups until the setting is made:
 1. **Targets no longer trust public CAs.** Add the CA to `targetTLS.caBundleFile`, or set
    `targetTLS.systemRoots: true`. The error message names the setting.

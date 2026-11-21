@@ -85,7 +85,7 @@ Logs go to journald: `journalctl -u olympos-server` (JSON lines, secrets redacte
 
 ## 4. Configure
 
-Edit `/etc/olympos/config.yaml` (all keys: SPEC §2.1 and `docs/install.md`): at least `publicURL`,
+Edit `/etc/olympos/config.yaml` (every key: [Configuration](configuration.md)): at least `publicURL`,
 `agentGatewayURL`, `entra`, `bootstrapAdmins`, `keyVault`. Then:
 
 ```bash
