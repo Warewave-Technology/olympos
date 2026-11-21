@@ -22,6 +22,9 @@ protection**, backup storage). The VM needs:
   certificate: put `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` and `AZURE_CLIENT_CERTIFICATE_PATH` (PEM, readable by the
   `olympos` user, e.g. `/etc/olympos/sp.pem` 0640 root:olympos) in `/etc/olympos/environment` and leave
   `managedIdentityClientID` empty.
+- **Microsoft Graph:** the same identity (the VM's managed identity or the service principal, not the Entra
+  app registration) needs the Graph app role `User.ReadBasic.All` for the person search and the daily
+  principal sync; [Azure prerequisites › Microsoft Graph](azure.md#microsoft-graph) has the commands.
 
 ## 2. Olympos' own database (local PostgreSQL)
 

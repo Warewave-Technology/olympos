@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Documentation
+- The Graph permission `User.ReadBasic.All` was documented on the Entra app registration, where it has no
+  effect: Olympos calls Graph as the server's managed identity (or service principal), so the person search
+  and the daily principal sync failed with `403 Forbidden`. `docs/azure.md` now assigns the Graph app role to
+  that identity with `az rest`, and `docs/troubleshooting.md` covers the error.
+
 ## [0.1.0] - 2026-11-21
 
 First public release.
