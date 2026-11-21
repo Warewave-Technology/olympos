@@ -16,8 +16,9 @@ SA=stolympweu01            # backup storage account
 ## 1. Entra ID app registration
 
 Follow [install › Entra ID](install.md#entra-id): a single-tenant app with the redirect URI
-`https://<publicURL>/auth/callback`, a client secret stored in Key Vault, the Graph application permission
-`User.ReadBasic.All` with admin consent, and *Assignment required* on the enterprise application.
+`https://<publicURL>/auth/callback`, a client secret stored in Key Vault, and *Assignment required* on the
+enterprise application. The app registration needs no Graph API permission: Olympos calls Graph as the
+server's managed identity ([below](#microsoft-graph)).
 
 ## 2. The server's managed identity
 
@@ -54,6 +55,45 @@ az identity federated-credential create -g $RG --identity-name $MI --name olympo
 
 The chart annotates the ServiceAccount with the client ID and labels the pod
 (`azure.workload.identity/use: "true"`) when `workloadIdentity.enabled` is true.
+
+### Microsoft Graph
+
+The person search in *Settings › Access › Grant access* and the daily principal sync (which marks grants of
+disabled or deleted accounts stale) call Microsoft Graph with the same identity the server uses for Key
+Vault. Give that identity the Graph **app role** `User.ReadBasic.All`. A managed identity has no app
+registration, so the portal's *API permissions* page cannot do this; assign the role through Graph. This
+needs *Privileged Role Administrator* or *Global Administrator* in Entra ID:
+
+```bash
+GRAPH_SP=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 --query id -o tsv)   # Microsoft Graph
+ROLE_ID=$(az ad sp show --id 00000003-0000-0000-c000-000000000000 \
+  --query "appRoles[?value=='User.ReadBasic.All'].id" -o tsv)
+az rest --method POST \
+  --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$PRINCIPAL_ID/appRoleAssignments" \
+  --headers Content-Type=application/json \
+  --body "{\"principalId\":\"$PRINCIPAL_ID\",\"resourceId\":\"$GRAPH_SP\",\"appRoleId\":\"$ROLE_ID\"}"
+```
+
+`$PRINCIPAL_ID` (the identity's `principalId`) is the object ID of its service principal.
+`00000003-0000-0000-c000-000000000000` is Microsoft Graph's application ID in every tenant; the role ID is
+read from its `appRoles` rather than copied. Check the assignment:
+
+```bash
+az rest --method GET \
+  --uri "https://graph.microsoft.com/v1.0/servicePrincipals/$PRINCIPAL_ID/appRoleAssignments" \
+  --query "value[].{resource:resourceDisplayName, appRoleId:appRoleId}" -o table
+```
+
+On a VM outside Azure the server signs in as a service principal (`AZURE_CLIENT_ID`,
+[systemd install](install-systemd.md#1-prerequisites)); run the same commands with
+`PRINCIPAL_ID=$(az ad sp show --id <AZURE_CLIENT_ID> --query id -o tsv)`. That principal has an app
+registration, so *API permissions › Microsoft Graph › Application permissions › User.ReadBasic.All* with
+*Grant admin consent* in the portal works too.
+
+A token the server already holds keeps its old permissions until it expires, and Azure can cache managed
+identity tokens for up to 24 hours. After assigning the role, restart the server; if the search still fails,
+wait for the cached token to expire. Without the role, the search answers *Entra ID directory search
+failed* ([troubleshooting](troubleshooting.md#the-person-search-fails)).
 
 ## 3. Key Vault
 

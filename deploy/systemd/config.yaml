@@ -1,5 +1,5 @@
-# Olympos server configuration (systemd install). Reference:
-# docs/install-systemd.md and SPEC §2.1. After editing:
+# Olympos server configuration (systemd install). Every setting:
+# docs/configuration.md. After editing:
 #   sudo -u olympos olympos-server check-config -db && sudo systemctl restart olympos-server
 # (certificate renewals only need: sudo systemctl reload olympos-server)
 olympos:

@@ -145,6 +145,18 @@ They have no grant yet. An admin grants roles under *Settings › Access* ([Acce
 cannot sign in at all, check that they are assigned to the Olympos enterprise application in Entra
 (*Assignment required*).
 
+## The person search fails
+
+> Entra ID directory search failed; check the Graph permission User.ReadBasic.All
+
+*Settings › Access › Grant access* cannot find anyone, and the server log has `directory search` with
+`403 Forbidden`. The daily principal sync fails the same way (`principal sync`, `403 Forbidden`), so grants of
+disabled or deleted accounts are not marked stale. Olympos calls Microsoft Graph as the server's identity
+(its managed identity, or the service principal on a VM outside Azure), not as the Entra sign-in app: a
+Graph permission on the app registration has no effect. Give the server's identity the Graph app role
+`User.ReadBasic.All` ([Azure prerequisites › Microsoft Graph](azure.md#microsoft-graph)), then restart the
+server.
+
 ## Still stuck
 
 Open an issue with the server version (`olympos-server version`, or the image tag), the agent version

@@ -11,7 +11,7 @@ are required. To try Olympos first, without Azure, see [Getting started](getting
 |---|---|
 | AKS (or any Kubernetes ≥ 1.27) for the server | Helm chart `deploy/helm/olympos-server` |
 | PostgreSQL 16 | Azure Database for PostgreSQL Flexible Server recommended; in-cluster is fine for small installs |
-| User-assigned **Managed Identity** for the server | Used for Key Vault, Blob and (optionally) Graph via Azure Workload Identity |
+| User-assigned **Managed Identity** for the server | Used for Key Vault, Blob and Microsoft Graph, via Azure Workload Identity on AKS |
 | **Azure Key Vault** | Holds the KEK (RSA key), the HMAC key and every `kv://` secret |
 | **Azure Blob Storage** | Backup destination, hardened as in §4 below |
 | **Entra ID app registration** | Web platform, redirect URI `https://<publicURL>/auth/callback`, ID tokens |
@@ -21,8 +21,12 @@ are required. To try Olympos first, without Azure, see [Getting started](getting
 
 1. Register an app (single tenant). Add redirect URI `https://olympos.contoso.internal/auth/callback`.
 2. Create a client secret and store it in Key Vault (`olympos-oidc-client-secret`).
-3. Graph application permission **`User.ReadBasic.All`** (grant admin consent) — used for the person
-   search in *Settings › Access › Grant access* and the daily principal sync (disabled/deleted accounts → stale grants).
+3. Add no API permission here: sign-in only asks for `openid profile email`. Olympos calls Microsoft Graph
+   as the **server's identity** (the managed identity above, or the service principal on a VM outside
+   Azure), not as this app. That identity needs the Graph app role **`User.ReadBasic.All`**, given with a
+   Graph call: see [Azure prerequisites › Microsoft Graph](azure.md#microsoft-graph). It is used for the
+   person search in *Settings › Access › Grant access* and the daily principal sync (disabled/deleted
+   accounts → stale grants).
 4. Enterprise application → Properties → **Assignment required = Yes** and assign the people who may
    sign in. This is a second gate in front of Olympos's own grants.
 5. Note the tenant ID and client ID. Olympos validates `iss`, `tid`, `aud`, `exp`, `nbf` on every token

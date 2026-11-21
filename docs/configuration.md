@@ -107,7 +107,7 @@ built with `-tags dev`; release binaries and images reject them.
 | `entra.clientID` | string | — | yes (not with `devMode`) | App registration client ID. Entra sign-in is enabled only when this is set. |
 | `entra.clientSecretRef` | `kv://` ref | — | no | Client secret of the app registration. Not checked by validation; when empty the server sends an empty client secret in the token exchange. |
 | `entra.authorityHost` | URL | `https://login.microsoftonline.com` | no | Change for sovereign clouds. |
-| `entra.graphURL` | URL | `https://graph.microsoft.com` | no | Microsoft Graph endpoint for the person search and the daily principal sync. |
+| `entra.graphURL` | URL | `https://graph.microsoft.com` | no | Microsoft Graph endpoint for the person search and the daily principal sync. Called as the server's Azure identity, which needs the Graph app role `User.ReadBasic.All` ([Azure prerequisites](azure.md#microsoft-graph)). |
 
 ### `keyVault`
 
