@@ -17,7 +17,8 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
-> **Status:** pre-release. `v0.1.0-rc.2` is the latest release candidate; see [CHANGELOG.md](CHANGELOG.md).
+> **Status:** v0.1.0, the first public release: one server instance, Microsoft Entra ID and Azure Key Vault.
+> Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
 
