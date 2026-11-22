@@ -25,7 +25,8 @@ a complete backup with its own manifest, so restore from whichever copy you can 
   restore guide for that copy; `restore.copies` lists every copy it can be built from, with `selected` on
   the one in use. For `olympos-self`, use `GET /api/v1/backup/self?copy=<destination id>`. A destination
   without a successful copy of the run answers `422`.
-- **Copies completed by a repair.** When a run was `partial`, a repair run writes the missing copies later
+- **Copies completed by a repair.** When a run was `partial`, a repair run writes the missing copies later:
+  5 minutes after the run, or after 30 minutes or 2 hours more when the first repairs failed
   ([Findings and events](findings-and-events.md#partial-backups-and-repairs)). The original run offers
   those copies too, marked *Completed later by a repair*. A repaired copy is a **different, later dump**:
   its blob and manifest are named after the repair run (`<repair_run_id>.<ext>`,

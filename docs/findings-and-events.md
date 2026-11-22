@@ -219,7 +219,7 @@ activity log still gets one row per item.
 | Event type | When it fires | Message (title · fields) | Grouped? |
 |---|---|---|---|
 | `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, when a job is paused because its target is gone, and when the repairs of a [partial run](#partial-backups-and-repairs) give up. | *Backup failed: ns/svc* · cluster, target, trigger, error (and *missing* when repairs gave up). *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
-| `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed`. | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error. *Backup incomplete: Olympos database (olympos-self)*. | No |
+| `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed`. | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error, next_attempt (when a repair is queued). *Backup incomplete: Olympos database (olympos-self)*. | No |
 | `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away. | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
 | `backup.succeeded` | A backup run succeeded, or a repair run wrote every missing copy of a partial run. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
 | `cr.opened` | A Vault change request was opened and waits for approval. | *Change request waiting for approval* (link only). | No |
@@ -255,22 +255,36 @@ member (*Settings › Destinations › Groups*). Each copy has its own result.
 | Some | `partial` (amber, never green) | `backup.partial` |
 | None, or the dump itself failed | `failed` | `backup.failed` |
 
-After a `partial` run, Olympos starts a **repair run** right away: a new dump, written only to the
-destinations that are missing. Repairs run inside the job's retry window (half the time to its next
-scheduled run) and within three attempts in all, so the partial run and at most two repairs. A repair
-keeps the original run's trigger and scheduled time, and its `repair_of` field names the original run.
-The partial run stays `partial`: it is the record of what happened.
+After a `partial` run, Olympos queues a **repair run**: a new dump, written only to the destinations that
+are missing. Repairs are spaced out so that an outage has time to end:
+
+| Repair | Starts |
+|---|---|
+| 1st | 5 minutes after the partial run |
+| 2nd | 30 minutes after the 1st repair |
+| 3rd | 2 hours after the 2nd repair |
+
+Every repair must start inside the job's retry window (half the time to its next scheduled run); one that
+would start later is not queued. A daily job has a window of about 12 hours, so all three fit; a job that
+runs every hour has 30 minutes, so only the first repair does. A repair keeps the original run's trigger
+and scheduled time, and its `repair_of` field names the original run. While it waits, it is `queued` with
+`not_before` set to its start, and the partial run's details carry `next_repair_at`. It does not block
+*Run now* or a dry run. The partial run stays `partial`: it is the record of what happened.
 
 - A repair that writes every missing copy sends `backup.succeeded` (opt-in, as for every run) and clears
   *Backup incomplete*.
-- A repair that fails while another attempt is left sends nothing; the next repair is queued.
-- When no attempt is left, or the window is over, the last repair sends `backup.failed` with the
-  destinations that are still missing. The next scheduled run writes to every member again.
+- A repair that fails while another repair is left sends nothing; the next repair is queued.
+- When no repair is left (three used, or the next one would start after the window), the last repair
+  sends `backup.failed` with the destinations that are still missing. The next scheduled run writes to
+  every member again.
+- If the agent disconnects during a repair, its retry is the same repair: it waits for the reconnect, as
+  any run does, and does not count as another repair.
 - Test runs (the wizard's dry run) are never repaired. A run that fails entirely is not retried, as before.
 
 Besides the message fields, the stored event (`outbox.payload`) carries `job_id` and `run_id`.
-`backup.partial` adds `missing_destinations` (destination names, in member order) and `repair_queued`
-(`true` when a repair was queued). Events of a repair run add `repair_of`, the original run's ID; the
+`backup.partial` adds `missing_destinations` (destination names, in member order), `repair_queued`
+(`true` when a repair was queued) and, when one was, `next_attempt_at` (RFC 3339, when it starts; the
+message shows it as *next_attempt*). Events of a repair run add `repair_of`, the original run's ID; the
 `backup.failed` of a repair that gave up also has `missing_destinations`.
 
 **Metrics.** `olympos_backup_runs_total{engine,status}` counts `status="partial"` runs.

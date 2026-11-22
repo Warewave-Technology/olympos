@@ -204,27 +204,47 @@ card and pick `lab-copies` ([Restoring Olympos](restore-olympos.md)).
 
 ### When one destination fails
 
-To take the next screenshots, Azurite was made unreachable for one run (the tour takes the endpoints away
-from its Service, see `web/scripts/docs-tour.mjs`). The other destination still gets its copy. The run ends **Partial** (amber, never green), the Dashboard shows *Backup incomplete* and Olympos
-sends a `backup.partial` event ([Findings and events](findings-and-events.md#partial-backups-and-repairs)).
+To take the next screenshots, Azurite was made unreachable for one run. The other destination still gets
+its copy. The run ends **Partial** (amber, never green), the Dashboard shows *Backup incomplete* and
+Olympos sends a `backup.partial` event
+([Findings and events](findings-and-events.md#partial-backups-and-repairs)).
 
 ![Needs attention: backup incomplete](images/start-27-backup-incomplete.png)
 
-Olympos then starts a **repair run** right away: a new dump, written only to the destinations that are
-missing. It is marked *Repair* under **Runs**. The partial run stays Partial, as the record of what
-happened, and its details say which copy a repair completed. Once the repair has written every missing
-copy, *Backup incomplete* goes away.
+Olympos then queues a **repair run**: a new dump, written only to the destinations that are missing. It
+waits 5 minutes, so a short outage can pass. Under **Runs** it is marked *Repair* and shows when it starts;
+the partial run's details say *Repair queued: next attempt at …*.
 
-![A partial run and its repair](images/start-28-partial-and-repair.png)
+![A partial run and its queued repair](images/start-28-partial-and-repair.png)
 
 ![The partial run's copies](images/start-29-partial-run.png)
 
-A repaired copy comes from a later dump, so its SHA-256 differs from the other copies. Repairs follow each
-other at once, at most two of them (three attempts in all), inside the job's retry window (half the time
-to its next scheduled run). They cover a short interruption. If the destination stays down, the last
-repair sends `backup.failed` with the missing destination, and the next scheduled run (or **Run now**)
-writes to every member again. [Troubleshooting](troubleshooting.md#a-backup-is-incomplete-partial) lists
-the usual causes.
+The partial run stays Partial, as the record of what happened, and once the repair has run, its details
+say which copy the repair completed. When every missing copy is written, *Backup incomplete* goes away. A
+repaired copy comes from a later dump, so its SHA-256 differs from the other copies.
+
+If a repair fails too, the next one waits longer: the second repair starts 30 minutes after the first,
+the third 2 hours after the second. Every repair must start inside the job's retry window (half the time
+to its next scheduled run); one that would start later is not queued. When no repair is left, the last
+one sends `backup.failed` with the missing destination, and the next scheduled run (or **Run now**) writes
+to every member again. A repair waiting for its start does not block **Run now**.
+[Troubleshooting](troubleshooting.md#a-backup-is-incomplete-partial) lists the usual causes.
+
+To try it yourself, take Azurite off the network without losing its data, run the job, then put it back:
+
+```bash
+export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig-env
+# Point the Service at no pod: new connections are refused, the data stays.
+kubectl --context kind-olympos-lab -n olympos patch service azurite --type merge \
+  -p '{"spec":{"selector":{"app":"azurite-off"}}}'
+sleep 100   # Olympos's idle connections to Azurite close after 90 s
+# Backups › Jobs › Run now on payments-pg, wait until the run is Partial, then:
+kubectl --context kind-olympos-lab -n olympos patch service azurite --type merge \
+  -p '{"spec":{"selector":{"app":"azurite"}}}'
+```
+
+Do not scale Azurite to 0 instead: it keeps its data in memory, so the container and every backup in it
+would be gone. The repair starts 5 minutes after the partial run.
 
 ## 7. Connect a Vault
 

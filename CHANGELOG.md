@@ -19,10 +19,13 @@ All notable changes to this project are documented here. The format follows
 - Run status **Partial**: some copies written, not all. Amber badge and *Runs* filter, its own count in the
   24-hour summaries, the event `backup.partial` (not opt-in), and the *Needs attention* items *Backup
   incomplete* (`backup_partial`) and *Olympos backup incomplete* (`self_backup_partial`).
-- **Repair runs**: right after a partial run, inside the job's retry window and within three attempts in
-  all, a new dump is written to the missing destinations only (`repair_of` names the original run). A
-  repair that completes every copy sends `backup.succeeded` (opt-in); one that gives up sends
-  `backup.failed` with the missing destinations.
+- **Repair runs**: after a partial run, a new dump is written to the missing destinations only
+  (`repair_of` names the original run). Up to three repairs, spaced out: 5 minutes after the partial run,
+  30 minutes after the first repair, 2 hours after the second, each inside the job's retry window. A
+  waiting repair is `queued` with `not_before`; the partial run's details carry `next_repair_at`, and
+  `backup.partial` carries `next_attempt_at`. It does not block *Run now*. A repair that completes every
+  copy sends `backup.succeeded` (opt-in); one that gives up sends `backup.failed` with the missing
+  destinations.
 - Stall detection: a destination that takes no data for 10 minutes, or does not finish within 10 minutes
   after the end of the stream, is detached so the other copies can finish.
 - Restore from a chosen copy: *Restore from copy* on a run and on the *Olympos database* card, and

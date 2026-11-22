@@ -123,11 +123,13 @@ repeats it as `<destination>: <error>`. Then open that destination under **Setti
 | `is not writable by the server`, `no space left on device` | NFS: permissions or a full export. | Fix the export's owner or free space. |
 | `upload manifest:` | The data was written, its manifest was not, so the copy cannot be verified and counts as failed. | The same causes as above, usually a credential without create or write permission. |
 
-Olympos repairs on its own: right after a partial run it starts up to two repair runs, marked *Repair*,
-that write only the missing copies. They run inside the job's retry window, one right after the other, so
-they only help with a short interruption. If the destination stayed down, the last repair failed too and
-sent *Backup failed* with the missing destination. Once the destination test passes, choose **Run now** on
-the job, or wait for the next scheduled run: both write to every member again. *Backup incomplete* goes
+Olympos repairs on its own: after a partial run it queues up to three repair runs, marked *Repair*, that
+write only the missing copies. The first starts 5 minutes after the partial run, the second 30 minutes
+after the first, the third 2 hours after the second, as long as each starts inside the job's retry window
+(half the time to the next scheduled run). The partial run's details say when the next one starts. If the
+destination stayed down, the last repair failed too and sent *Backup failed* with the missing
+destination. Once the destination test passes, choose **Run now** on the job (a waiting repair does not
+block it), or wait for the next scheduled run: both write to every member again. *Backup incomplete* goes
 away when a repair or a later run has written every copy, or 48 hours after the run.
 
 ## A destination's SAS token expired

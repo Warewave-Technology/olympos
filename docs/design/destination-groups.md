@@ -1,7 +1,6 @@
 # Destination groups: one backup, several destinations
 
-Status: design approved by the owner on 2026-11-22; implemented on branch feat/destination-groups (PRs to
-follow). Tracks issue #32 (milestone v0.2).
+Status: implemented for v0.2 (#32).
 
 ## Intent
 
@@ -164,20 +163,28 @@ an object like a destination group.
 
 - Engine fails: `failed` (no copy can exist). Engine succeeds: `succeeded` / `partial` / `failed` from the
   copies as in decision 2.
-- `partial`, inside the retry window and below `MaxAttempts`: queue a repair run (`repair_of` = the original
-  run, same `trigger`, same `scheduled_for`, `attempt + 1`, same `retry_until`). The partial run stays
-  `partial`; it is the record of what happened.
+- `partial`: queue a repair run (`repair_of` = the original run, same `trigger`, same `scheduled_for`,
+  `attempt + 1`, same `retry_until`). The partial run stays `partial`; it is the record of what happened.
+- Repairs are spaced (owner decision 2026-11-22, replacing back-to-back repairs within `MaxAttempts`): the
+  k-th repair of an original run gets `not_before = now + RepairDelays[k-1]` with `RepairDelays` = 5 min,
+  30 min, 2 h, so at most `MaxRepairs` = 3 repairs. `now` is when the run before it finished; k is 1 + the
+  repairs of that original run that have a `not_before`. A repair whose `not_before` would be after
+  `retry_until` is not queued. Both runners skip queued runs whose `not_before` is still ahead.
 - A repair run ends `succeeded` (every missing copy written), `partial` (some), or `failed` (none, for any
-  reason: upload, engine, credential); a `partial` or `failed` repair queues another repair while the window
-  and attempts allow. Repairs exist only after a `partial` run: a plain run that fails entirely is not
-  retried, as today.
-- Agent disconnects keep their current rule (`disconnectedOutcome`), for plain and repair runs alike; the
-  retry of a disconnected repair keeps `repair_of` and the missing set.
+  reason: upload, engine, credential); a `partial` or `failed` repair queues the next repair while the
+  delays and the window allow. Repairs exist only after a `partial` run: a plain run that fails entirely is
+  not retried, as today.
+- Agent disconnects keep their current rule (`disconnectedOutcome`, `MaxAttempts`), for plain and repair
+  runs alike; the retry of a disconnected repair keeps `repair_of` and the missing set, has no
+  `not_before` (it starts when the agent is back) and so counts as the same repair.
+- A repair waiting for its `not_before` does not make the job busy (*Run now* and dry runs are accepted)
+  and is not the job's `last_run`. The partial run's detail carries `next_repair_at`; `backup.partial`
+  carries `next_attempt_at`.
 - Test runs (`trigger = 'test'`, the wizard's dry run) write to every member, get copy rows and the
   `partial` status like other runs, are never repaired, and the dry-run checklist shows one upload step per
   destination. The wizard's rule for enabling after a dry run applies to "every copy succeeded".
-- Outside the window or at the attempt limit, the copy stays missing; the next scheduled run writes to every
-  member again.
+- When no repair is left (three used, or the next would start after the window), the copy stays missing;
+  the next scheduled run writes to every member again.
 
 ### Notifications, metrics, dashboard
 
