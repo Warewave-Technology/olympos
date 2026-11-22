@@ -429,6 +429,8 @@ export interface SelfBackup {
   runs: BackupRun[];
   /** Restore commands for the latest succeeded or partial original run. */
   restore?: RestoreGuide | null;
+  /** Per current destination (member order): when the self-backup last wrote a successful copy there. */
+  destinations_last_success?: DestinationLastSuccess[];
 }
 /** GET/PUT /audit/settings: where raw audit reports are kept. */
 export interface AuditSettings {
@@ -465,9 +467,18 @@ export interface BackupJob {
   notify_on_success?: boolean;
   next_run_at: string | null;
   last_run: BackupRun | null;
+  /** Per current destination (member order): when the job last wrote a successful copy there. */
+  destinations_last_success?: DestinationLastSuccess[];
   estimated_monthly_bytes: number;
   estimated_monthly_cost: number | null;
   created_at: string;
+}
+/** docs/openapi.yaml DestinationLastSuccess. */
+export interface DestinationLastSuccess {
+  destination_id: string;
+  name: string;
+  /** When the latest successful copy there finished; null when there is none. */
+  last_success_at: string | null;
 }
 export interface ConnectionTest {
   ok: boolean;

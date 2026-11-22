@@ -140,3 +140,32 @@ describe('olympos-self to a destination group', () => {
     }
   });
 });
+
+describe('destinations of a group job', () => {
+  it('a group job row says when each member last got a copy', async () => {
+    renderApp('/backups?cluster=all&tab=jobs');
+    const list = await screen.findByRole('list', { name: 'Last copy per destination of billing-pg' }, T);
+    const items = within(list).getAllByRole('listitem');
+    expect(items).toHaveLength(2);
+    expect(items[0]).toHaveTextContent(/^blob-weu-backups · last copy \d+ h ago$/);
+    expect(items[1]).toHaveTextContent(/^minio-factory · last copy 2 days ago$/);
+    // a single-destination job has no such list
+    expect(screen.queryByRole('list', { name: 'Last copy per destination of openbao' })).toBeNull();
+  });
+
+  // Runs after the olympos-self group tests above: the self job writes to eu-offsite.
+  it('the Olympos database card shows each copy of the last run and the last copy per destination', async () => {
+    const user = userEvent.setup();
+    renderApp('/backups?self=1');
+    const card = await screen.findByRole('region', { name: /Olympos database/ }, T);
+    await user.click(await within(card).findByRole('button', { name: 'Run now' }, T));
+    const table = await within(card).findByRole('table', { name: 'Copies of the last run' }, T);
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('blob-weu-backups');
+    expect(within(rows[0]).getByText('Succeeded')).toHaveClass('ok');
+    expect(rows[1]).toHaveTextContent('minio-factory');
+    const list = within(card).getByRole('list', { name: 'Last copy per destination of the Olympos database' });
+    expect(within(list).getAllByRole('listitem').map((li) => li.textContent)).toEqual([expect.stringMatching(/^blob-weu-backups · last copy/), expect.stringMatching(/^minio-factory · last copy/)]);
+  });
+});

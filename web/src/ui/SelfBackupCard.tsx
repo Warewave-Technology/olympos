@@ -10,8 +10,8 @@ import { describeCron } from '../lib/cron';
 import { age, bytes, relDateTime } from '../lib/format';
 import { IconLock } from './icons';
 import { Badge, ErrorState, Modal, useToast } from './kit';
-import { RestoreWithCopies } from './BackupRunDialog';
-import { GroupName, KIND_LABEL } from './destinations';
+import { CopiesTable, RestoreWithCopies } from './BackupRunDialog';
+import { GroupName, KIND_LABEL, LastCopies } from './destinations';
 import { RunBadge } from './status';
 import { Select } from './Select';
 import { DocLink } from './DocLinks';
@@ -169,7 +169,18 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
               </dd>
               <dt>Last run</dt>
               <dd>{last ? <RunBadge run={last} /> : <span className="muted">Not yet</span>}</dd>
+              {v.job?.destination_group_id && !!v.destinations_last_success?.length && (
+                <>
+                  <dt>Last copy</dt>
+                  <dd>
+                    <LastCopies items={v.destinations_last_success} label="Last copy per destination of the Olympos database" />
+                  </dd>
+                </>
+              )}
             </dl>
+            {last?.copies && (last.copies.length > 1 || !!last.repair_of) && last.copies.length > 0 && (
+              <CopiesTable copies={last.copies} isRepair={!!last.repair_of} title="Copies of the last run" id="self-copies" />
+            )}
             <div className="row" style={{ gap: 8 }}>
               {canOperate && (
                 <button type="button" className="btn" disabled={busy || run.isPending} onClick={() => run.mutate()}>

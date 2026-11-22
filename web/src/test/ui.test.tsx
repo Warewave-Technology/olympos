@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { BackupRun, BackupRunCopy, ChangeRequest, RestoreGuide, SecretDetail, Vault } from '../api/types';
+import type { BackupRun, BackupRunCopy, BackupRunDetail, ChangeRequest, RestoreGuide, SecretDetail, Vault } from '../api/types';
 import { Drawer, SecretValue } from '../ui/kit';
 import { dateTime } from '../lib/format';
 
@@ -184,7 +184,7 @@ function renderRunDialog(body: object) {
   );
 }
 
-const partialRun = (over: Partial<BackupRun> & { next_repair_at?: string | null } = {}) => ({
+const partialRun = (over: Partial<BackupRunDetail> = {}) => ({
   id: 'r1', job_id: 'j1', target_service: 'billing-pg', cluster_name: 'prod', engine: 'postgresql', trigger: 'schedule', status: 'partial', scheduled_for: null, tier: 'daily',
   started_at: '2026-11-22T02:00:00Z', finished_at: '2026-11-22T02:06:40Z', bytes: 3.1e9, wire_bytes: 3.1e9, blob_path: 'p/a.zip', sha256: '9f2c4a1e5d6c7b30',
   error: 'minio-factory: PutObject: 503 SlowDown', destination_name: 'eu-offsite', repair_of: null,
@@ -247,6 +247,22 @@ describe('repair note of a partial run', () => {
     expect(within(cell).getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
     // short errors are not clamped and have no toggle
     expect(within(within(table).getAllByRole('row')[1]).queryByRole('button')).not.toBeInTheDocument();
+  });
+});
+
+describe('run without restore commands', () => {
+  // A run from before destination groups of a job that moved to a group: no copy row says where it went.
+  it('a real run says why its restore commands are unavailable and where the backup is', async () => {
+    await renderRunDialog(partialRun({ status: 'succeeded', error: '', trigger: 'schedule', copies: [], restore: null, blob_path: 'olympos/prod/billing-pg/x.zip', destination_name: 'eu-offsite' }));
+    const note = await screen.findByText(/Restore commands are unavailable: the job no longer writes to the destination this run used\./);
+    expect(note).toHaveTextContent('The backup is at olympos/prod/billing-pg/x.zip in that destination.');
+    expect(screen.queryByText(/Dry runs only check the setup/)).not.toBeInTheDocument();
+  });
+
+  it('a dry run says it is not a restorable backup', async () => {
+    await renderRunDialog(partialRun({ status: 'succeeded', error: '', trigger: 'test', copies: [], restore: null }));
+    expect(await screen.findByText('Dry runs only check the setup; they are not restorable backups.')).toBeInTheDocument();
+    expect(screen.queryByText(/Restore commands are unavailable/)).not.toBeInTheDocument();
   });
 });
 

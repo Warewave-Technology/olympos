@@ -193,7 +193,10 @@ somewhere else.
    ![Wizard: dry run with two copies](images/start-25-backup-group-dry-run.png)
 
 4. **Run it.** **Run now** on **Backups › Jobs**. The run's details list the **Copies**, one per destination,
-   with the same SHA-256. **Restore from copy** chooses which copy the restore commands download.
+   with the same SHA-256. **Restore from copy** chooses which copy the restore commands download. On
+   **Backups › Jobs**, the job's *Destination* lists each member with the time of its last successful copy,
+   so a member that keeps failing stands out. The *Olympos database* card shows the same for a group, and
+   the copies of its last run.
 
    ![A run with two copies](images/start-26-run-copies.png)
 

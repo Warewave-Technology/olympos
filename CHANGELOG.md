@@ -15,7 +15,10 @@ All notable changes to this project are documented here. The format follows
   SHA-256. Two members that write to the same location are refused. A destination in a group, and a group
   that a job uses, cannot be deleted. See `docs/getting-started.md` (step 6).
 - Per-copy results: a *Copies* table on each run (`copies` in run responses), and manifests name their
-  `destination` and `group`.
+  `destination` and `group`. The *Olympos database* card shows the copies of its last run.
+- The last successful copy per destination: `destinations_last_success` on jobs and on
+  `GET /api/v1/backup/self`; a group job's row on *Backups › Jobs* and the *Olympos database* card list each
+  member with the time of its last copy.
 - Run status **Partial**: some copies written, not all. Amber badge and *Runs* filter, its own count in the
   24-hour summaries, the event `backup.partial` (not opt-in), and the *Needs attention* items *Backup
   incomplete* (`backup_partial`) and *Olympos backup incomplete* (`self_backup_partial`).

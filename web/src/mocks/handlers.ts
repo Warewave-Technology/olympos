@@ -218,6 +218,18 @@ function restoreGuide(blob: string, doc: string, d?: Pick<Destination, 'kind' | 
 // The built-in olympos-self job starts unconfigured (Dashboard: Needs attention).
 const selfBackup: SelfBackup = { configured: false, job: null, runs: [] };
 
+/** GET /backup/self destinations_last_success: per current destination, the newest succeeded copy of a non-test run. */
+function selfLastSuccess(): NonNullable<SelfBackup['destinations_last_success']> {
+  const j = selfBackup.job;
+  if (!j) return [];
+  const g = j.destination_group_id ? db.destinationGroups.find((x) => x.id === j.destination_group_id) : undefined;
+  const dests = g ? g.members.map((m) => ({ id: m.id, name: m.name })) : [{ id: j.destination_id!, name: j.destination_name }];
+  return dests.map((d) => {
+    const run = selfBackup.runs.find((r) => r.trigger !== 'test' && r.finished_at && (r.copies?.length ? r.copies.some((c) => c.destination_id === d.id && c.status === 'succeeded') : !g && r.status === 'succeeded'));
+    return { destination_id: d.id, name: d.name, last_success_at: run?.finished_at ?? null };
+  });
+}
+
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
   ['GET', '/me', () => ok(db.me())],
@@ -795,6 +807,7 @@ const routes: [string, string, Handler][] = [
     '/backup/self',
     (r) => {
       const copy = r.query.get('copy');
+      selfBackup.destinations_last_success = selfLastSuccess();
       const last = selfBackup.runs.find((x) => !x.repair_of && (x.status === 'succeeded' || x.status === 'partial'));
       if (!copy || !last) return ok(selfBackup);
       const g = runRestore(last, 'docs/restore-olympos.md', copy);
@@ -825,6 +838,7 @@ const routes: [string, string, Handler][] = [
         notify_channel_id: null,
         created_at: selfBackup.job?.created_at ?? new Date().toISOString(),
       };
+      selfBackup.destinations_last_success = selfLastSuccess();
       return ok(selfBackup);
     },
   ],

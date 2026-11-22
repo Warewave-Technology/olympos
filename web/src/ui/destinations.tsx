@@ -1,6 +1,6 @@
 // Display helpers shared by Settings › Destinations and the backup wizard.
-import type { BackupJob, Destination, DestinationKind, DestinationTest } from '../api/types';
-import { daysUntil, plural, relDateTime } from '../lib/format';
+import type { BackupJob, Destination, DestinationKind, DestinationLastSuccess, DestinationTest } from '../api/types';
+import { age, daysUntil, plural, relDateTime } from '../lib/format';
 import { CheckIcon, IconGroup } from './icons';
 import { Badge } from './kit';
 
@@ -26,6 +26,20 @@ export function JobDestination({ job }: { job: Pick<BackupJob, 'destination' | '
   return <span className="mono">{job.destination?.name ?? '—'}</span>;
 }
 export const jobDestinationName = (job: Pick<BackupJob, 'destination' | 'destination_group'>) => job.destination_group?.name ?? job.destination?.name ?? '';
+
+/** One line per destination of a group: when its last successful copy was written (job rows, the self card). */
+export function LastCopies({ items, label }: { items: DestinationLastSuccess[]; label: string }) {
+  return (
+    <ul className="muted small" aria-label={label} style={{ listStyle: 'none', margin: '2px 0 0', padding: 0 }}>
+      {items.map((d) => (
+        <li key={d.destination_id}>
+          <span className="mono">{d.name}</span> ·{' '}
+          {d.last_success_at ? <span title={relDateTime(d.last_success_at)}>last copy {age(d.last_success_at)} ago</span> : 'no copy yet'}
+        </li>
+      ))}
+    </ul>
+  );
+}
 
 /** Settings › Destinations "Used by": jobs, plus the groups the destination is in. */
 export function usedByLabel(d: Pick<Destination, 'jobs' | 'groups'>): string {

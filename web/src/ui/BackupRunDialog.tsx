@@ -108,15 +108,16 @@ export function ClampedError({ text }: { text: string }) {
   );
 }
 
-function CopiesTable({ copies, isRepair }: { copies: BackupRunCopy[]; isRepair: boolean }) {
+/** One row per destination of a run (the run dialog, and the last olympos-self run on its card). */
+export function CopiesTable({ copies, isRepair, title = 'Copies', id = 'run-copies' }: { copies: BackupRunCopy[]; isRepair: boolean; title?: string; id?: string }) {
   return (
     <div>
-      <h3 id="run-copies" className="small" style={{ margin: '0 0 8px', fontWeight: 600 }}>
-        Copies
+      <h3 id={id} className="small" style={{ margin: '0 0 8px', fontWeight: 600 }}>
+        {title}
       </h3>
       {/* stack-sm: one card per copy on phones, so the error is never off-screen; explicit roles keep the table semantics there */}
       <div className="boxed tight table-wrap">
-        <table className="t stack-sm" role="table" aria-labelledby="run-copies">
+        <table className="t stack-sm" role="table" aria-labelledby={id}>
           <thead>
             <tr role="row">
               <th role="columnheader">Destination</th>
@@ -283,9 +284,20 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             <RepairNote run={run} onOpen={open} />
             {run.restore ? (
               <RestoreWithCopies guide={run.restore} runId={run.id} onSelect={setCopy} pending={q.isPlaceholderData} />
-            ) : run.status === 'succeeded' || run.status === 'partial' ? (
+            ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (
               <p className="muted small">Dry runs only check the setup; they are not restorable backups.</p>
-            ) : null}
+            ) : (
+              // a run from before destination groups of a job that moved to a group: no copy row says where it went
+              <p className="muted small">
+                Restore commands are unavailable: the job no longer writes to the destination this run used.
+                {run.blob_path && (
+                  <>
+                    {' '}
+                    The backup is at <span className="mono break">{run.blob_path}</span> in that destination.
+                  </>
+                )}
+              </p>
+            )}
           </div>
         )}
       </QueryView>

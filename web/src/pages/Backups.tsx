@@ -14,7 +14,7 @@ import { DataTable, type Column } from '../ui/DataTable';
 import { SelfBackupCard } from '../ui/SelfBackupCard';
 import { TLSNameChanges } from '../ui/TLSNameChanges';
 import { BackupRunDialog } from '../ui/BackupRunDialog';
-import { GroupName, JobDestination, jobDestinationName } from '../ui/destinations';
+import { GroupName, JobDestination, LastCopies, jobDestinationName } from '../ui/destinations';
 import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
@@ -358,7 +358,18 @@ function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob
         </>
       ),
     },
-    { id: 'dest', header: 'Destination', sortValue: (j) => jobDestinationName(j), cell: (j) => <JobDestination job={j} /> },
+    {
+      id: 'dest',
+      header: 'Destination',
+      sortValue: (j) => jobDestinationName(j),
+      cell: (j) => (
+        <>
+          <JobDestination job={j} />
+          {/* a group: when each member last got a copy (a missing copy shows here first) */}
+          {j.destination_group && !!j.destinations_last_success?.length && <LastCopies items={j.destinations_last_success} label={`Last copy per destination of ${j.target.service}`} />}
+        </>
+      ),
+    },
     { id: 'next', header: 'Next run', sortValue: (j) => (j.enabled ? j.next_run_at : null), className: 'mono', cell: (j) => (j.enabled && j.next_run_at ? formatInZone(j.next_run_at, j.timezone) : '—') },
     { id: 'last', header: 'Last run', sortValue: (j) => j.last_run?.status ?? null, cell: (j) => (j.last_run ? <RunBadge run={j.last_run} /> : <span className="muted">Never</span>) },
     {

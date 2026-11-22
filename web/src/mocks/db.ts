@@ -692,7 +692,16 @@ function job(t: Target, p: Partial<BackupJob>): BackupJob {
 }
 
 export const jobs: BackupJob[] = [
-  job(tByService('billing-pg'), { engine_options: { databases: ['billing'], globals: true }, destination: null, destination_group: { id: gOffsite.id, name: gOffsite.name, members: gOffsite.members.map((m) => m.name) } }),
+  job(tByService('billing-pg'), {
+    engine_options: { databases: ['billing'], globals: true },
+    destination: null,
+    destination_group: { id: gOffsite.id, name: gOffsite.name, members: gOffsite.members.map((m) => m.name) },
+    // the factory MinIO has been failing: its last copy is two days old
+    destinations_last_success: [
+      { destination_id: gOffsite.members[0].id, name: gOffsite.members[0].name, last_success_at: iso(8 * H - 400_000) },
+      { destination_id: gOffsite.members[1].id, name: gOffsite.members[1].name, last_success_at: iso(56 * H) },
+    ],
+  }),
   job(tByService('openbao'), {
     notify_on_success: true,
     cron: '0 */6 * * *',
