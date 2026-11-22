@@ -219,7 +219,7 @@ activity log still gets one row per item.
 | Event type | When it fires | Message (title · fields) | Grouped? |
 |---|---|---|---|
 | `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, when a job is paused because its target is gone, and when the repairs of a [partial run](#partial-backups-and-repairs) give up. | *Backup failed: ns/svc* · cluster, target, trigger, error (and *missing* when repairs gave up). *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
-| `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed`. | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error, next_attempt (when a repair is queued). *Backup incomplete: Olympos database (olympos-self)*. | No |
+| `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed` (on an upgrade to v0.2, every channel that gets `backup.failed` is routed `backup.partial` too). | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error, next_attempt (when a repair is queued). *Backup incomplete: Olympos database (olympos-self)*. | No |
 | `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away (a repair that ends missed sends `backup.failed` when it gives up instead). | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
 | `backup.succeeded` | A backup run succeeded, or a repair run wrote every missing copy of a partial run. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
 | `cr.opened` | A Vault change request was opened and waits for approval. | *Change request waiting for approval* (link only). | No |
@@ -300,7 +300,8 @@ be told when a destination keeps failing, alert on
 ### Routing
 
 Nothing is routed by default. An event with no route and no channel override is dropped (outcome
-`no_route`). To receive events:
+`no_route`). The one exception is an upgrade that adds an event type: the upgrade to v0.2 routes the new
+`backup.partial` to every channel that already gets `backup.failed`. To receive events:
 
 1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
    (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.

@@ -45,6 +45,8 @@ All notable changes to this project are documented here. The format follows
 
 ### Upgrade notes
 - Migration `00022` runs at start. Existing jobs, runs and single-destination backups are unchanged.
+- The new event `backup.partial` is routed to every Slack channel that receives `backup.failed` (the
+  migration adds those routes). Review *Settings › Notifications › Routing* if you want it elsewhere.
 
 ### Documentation
 - `docs/openapi.yaml` listed `notify_on_success` twice in `BackupJobInput`, which strict YAML parsers

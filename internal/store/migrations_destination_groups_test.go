@@ -3,10 +3,14 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
+	"github.com/Warewave-Technology/olympos/internal/store"
 	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
@@ -94,5 +98,69 @@ func TestDestinationGroupsMigration(t *testing.T) {
 	}
 	if before == after {
 		t.Fatal("updated_at not touched")
+	}
+}
+
+// Migration 00022 routes backup.partial to every channel that gets
+// backup.failed, so installs that route by event type hear of partial runs.
+// Down removes those routes again.
+func TestDestinationGroupsMigrationRoutesPartial(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	goose.SetBaseFS(store.MigrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB := stdlib.OpenDBFromPool(db)
+	defer sqlDB.Close()
+	if err := goose.DownToContext(ctx, sqlDB, "migrations", 21); err != nil {
+		t.Fatalf("down to 21: %v", err)
+	}
+
+	channel := func(name string) string {
+		var id string
+		if err := db.QueryRow(ctx, `INSERT INTO notification_channels (slack_channel_id, name) VALUES ($1, $1) RETURNING id::text`, name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	ops, sec, quiet := channel("ops"), channel("sec"), channel("quiet")
+	for _, r := range [][2]string{{"backup.failed", ops}, {"backup.failed", sec}, {"backup.partial", sec}, {"backup.missed", quiet}} {
+		if _, err := db.Exec(ctx, `INSERT INTO notification_routes (event_type, channel_id) VALUES ($1, $2)`, r[0], r[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := goose.UpToContext(ctx, sqlDB, "migrations", 22); err != nil {
+		t.Fatalf("up to 22: %v", err)
+	}
+	routed := func() []string {
+		rows, err := db.Query(ctx, `SELECT c.name FROM notification_routes r JOIN notification_channels c ON c.id = r.channel_id
+			WHERE r.event_type = 'backup.partial' ORDER BY c.name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, n)
+		}
+		return out
+	}
+	if got := strings.Join(routed(), ","); got != "ops,sec" {
+		t.Fatalf("backup.partial routes after up = %q, want ops,sec", got)
+	}
+	if err := goose.DownToContext(ctx, sqlDB, "migrations", 21); err != nil {
+		t.Fatalf("down to 21 again: %v", err)
+	}
+	if got := routed(); len(got) != 0 {
+		t.Fatalf("backup.partial routes after down = %v, want none", got)
+	}
+	if err := store.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate back up: %v", err)
 	}
 }

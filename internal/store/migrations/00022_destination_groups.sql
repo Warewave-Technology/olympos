@@ -69,6 +69,13 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER olympos_backup_run_copies_freeze BEFORE UPDATE OR DELETE ON backup_run_copies
   FOR EACH ROW EXECUTE FUNCTION olympos_backup_run_copies_freeze();
 
+-- backup.partial (new event) goes wherever backup.failed goes today: routes
+-- are explicit rows with no default, so without this an install that routes
+-- by event type would never hear of a partial run.
+INSERT INTO notification_routes (event_type, channel_id)
+  SELECT 'backup.partial', channel_id FROM notification_routes WHERE event_type = 'backup.failed'
+  ON CONFLICT (event_type, channel_id) DO NOTHING;
+
 -- +goose Down
 -- Production never migrates down. Refuse rather than lose data that the old
 -- schema cannot represent.
@@ -84,6 +91,8 @@ BEGIN
 END
 $$;
 -- +goose StatementEnd
+-- The old schema knows no backup.partial event.
+DELETE FROM notification_routes WHERE event_type = 'backup.partial';
 DROP TRIGGER olympos_backup_run_copies_freeze ON backup_run_copies;
 DROP FUNCTION olympos_backup_run_copies_freeze();
 DROP TABLE backup_run_copies;
