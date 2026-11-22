@@ -511,7 +511,8 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         <>
           <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
           {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
-          {r.attempt && r.attempt > 1 ? (
+          {/* a repair's attempt counts the runs before it; the Repair badge already marks it */}
+          {r.attempt && r.attempt > 1 && !r.repair_of ? (
             <span className="chip" title="Retried after the agent reconnected">
               attempt {r.attempt}
             </span>
@@ -533,7 +534,14 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
       align: 'num',
       sortValue: (r) => between(r.started_at, r.finished_at),
       defaultDir: 'desc',
-      cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))),
+      cell: (r) =>
+        r.status === 'queued' && r.not_before && Date.parse(r.not_before) > Date.now() ? (
+          <span className="muted">—</span> // a repair waiting for its start (the Result says when)
+        ) : r.status === 'running' || r.status === 'queued' ? (
+          'in progress'
+        ) : (
+          duration(between(r.started_at, r.finished_at))
+        ),
     },
     {
       id: 'result',

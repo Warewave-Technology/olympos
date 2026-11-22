@@ -1031,6 +1031,14 @@ mark {
   font-family: var(--font-ui);
   line-height: 1.4;
 }
+/* A badge with a long text (a run error): one line, cut with an ellipsis, full text in its title. */
+.badge.trunc {
+  display: inline-block;
+  max-width: 18rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
 .badge.ok {
   background: var(--ok-bg);
   color: var(--ok-fg);

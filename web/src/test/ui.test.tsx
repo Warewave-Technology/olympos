@@ -245,6 +245,18 @@ describe('partial backup runs', () => {
     expect(b).not.toHaveClass('ok');
   });
 
+  it('a long error is truncated in the badge, with the whole label as its tooltip', async () => {
+    const { RunBadge } = await import('../ui/status');
+    const error = 'lab-azurite: upload: ' + 'x'.repeat(200);
+    render(<RunBadge run={{ status: 'partial', error }} />);
+    const b = screen.getByText(`Partial · ${error}`);
+    expect(b).toHaveClass('badge', 'warn', 'trunc');
+    expect(b).toHaveAttribute('title', `Partial · ${error}`);
+    cleanup();
+    render(<RunBadge run={{ status: 'partial', error: 'short' }} />);
+    expect(screen.getByText('Partial · short')).not.toHaveClass('trunc');
+  });
+
   it('a repair waiting for its start says when it starts', async () => {
     const { RunBadge } = await import('../ui/status');
     const at = new Date(Date.now() + 5 * 60_000).toISOString();

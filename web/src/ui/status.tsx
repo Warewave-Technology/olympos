@@ -43,7 +43,13 @@ export function RunBadge({ run }: { run: Pick<BackupRun, 'status' | 'error'> & P
   // a repair waiting for its not_before (5 min, 30 min, 2 h after the run before it)
   const waits = run.status === 'queued' && !!run.not_before && Date.parse(run.not_before) > Date.now();
   const label = capitalize(run.status) + ((run.status === 'failed' || run.status === 'partial') && run.error ? ` · ${run.error}` : waits ? ` · starts ${dateTime(run.not_before)}` : '');
-  return <Badge tone={RUN_TONE[run.status] ?? 'mute'}>{label}</Badge>;
+  // a long error is cut with an ellipsis (tables, job rows); the whole label stays in the tooltip
+  const long = label.length > 60;
+  return (
+    <Badge tone={RUN_TONE[run.status] ?? 'mute'} className={long ? 'trunc' : undefined} title={long ? label : undefined}>
+      {label}
+    </Badge>
+  );
 }
 
 const CR_LABEL: Record<string, [string, Tone]> = {
