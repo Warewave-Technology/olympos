@@ -25,8 +25,11 @@ type Config struct {
 	BenchEnabled     bool
 	BenchMaxParallel int
 	BenchNamespace   string
-	MaxTunnels       int
-	HealthAddr       string
+	// BenchImageRepository pulls the pinned kube-bench digest from a mirror
+	// ("" = Docker Hub); see BenchImage.
+	BenchImageRepository string
+	MaxTunnels           int
+	HealthAddr           string
 	// SensitiveData scans ConfigMaps for credentials (F2); Exclude are
 	// namespace globs not scanned.
 	SensitiveData        bool
@@ -38,17 +41,18 @@ type Config struct {
 // ConfigFromEnv reads OLYMPOS_* variables.
 func ConfigFromEnv() (Config, error) {
 	c := Config{
-		Server:           os.Getenv("OLYMPOS_SERVER"),
-		ServerCAFile:     envOr("OLYMPOS_SERVER_CA_FILE", "/etc/olympos/ca.crt"),
-		ServerName:       os.Getenv("OLYMPOS_SERVER_NAME"),
-		Namespace:        envOr("POD_NAMESPACE", "olympos-system"),
-		IdentitySecret:   envOr("OLYMPOS_IDENTITY_SECRET", "olympos-agent-identity"),
-		ProviderOverride: os.Getenv("OLYMPOS_PROVIDER_OVERRIDE"),
-		BenchEnabled:     os.Getenv("OLYMPOS_BENCH_ENABLED") == "true",
-		BenchNamespace:   envOr("OLYMPOS_BENCH_NAMESPACE", "olympos-bench"),
-		HealthAddr:       envOr("OLYMPOS_HEALTH_ADDR", "127.0.0.1:8081"),
-		SensitiveData:    os.Getenv("OLYMPOS_SENSITIVE_DATA") != "false",
-		SecretsInventory: os.Getenv("OLYMPOS_SECRETS_INVENTORY") == "true",
+		Server:               os.Getenv("OLYMPOS_SERVER"),
+		ServerCAFile:         envOr("OLYMPOS_SERVER_CA_FILE", "/etc/olympos/ca.crt"),
+		ServerName:           os.Getenv("OLYMPOS_SERVER_NAME"),
+		Namespace:            envOr("POD_NAMESPACE", "olympos-system"),
+		IdentitySecret:       envOr("OLYMPOS_IDENTITY_SECRET", "olympos-agent-identity"),
+		ProviderOverride:     os.Getenv("OLYMPOS_PROVIDER_OVERRIDE"),
+		BenchEnabled:         os.Getenv("OLYMPOS_BENCH_ENABLED") == "true",
+		BenchNamespace:       envOr("OLYMPOS_BENCH_NAMESPACE", "olympos-bench"),
+		BenchImageRepository: os.Getenv("OLYMPOS_BENCH_IMAGE_REPOSITORY"),
+		HealthAddr:           envOr("OLYMPOS_HEALTH_ADDR", "127.0.0.1:8081"),
+		SensitiveData:        os.Getenv("OLYMPOS_SENSITIVE_DATA") != "false",
+		SecretsInventory:     os.Getenv("OLYMPOS_SECRETS_INVENTORY") == "true",
 	}
 	if v, ok := os.LookupEnv("OLYMPOS_SENSITIVE_DATA_EXCLUDE"); ok {
 		c.SensitiveDataExclude = []string{}
@@ -64,6 +68,9 @@ func ConfigFromEnv() (Config, error) {
 	}
 	if c.MaxTunnels, err = envInt("OLYMPOS_MAX_TUNNELS", 16); err != nil {
 		return c, err
+	}
+	if !validBenchRepository(c.BenchImageRepository) {
+		return c, fmt.Errorf("OLYMPOS_BENCH_IMAGE_REPOSITORY %q: want a repository without tag or digest, e.g. ghcr.io/warewave-technology/kube-bench", c.BenchImageRepository)
 	}
 	if c.Server == "" {
 		return c, fmt.Errorf("OLYMPOS_SERVER is required")

@@ -63,7 +63,7 @@ spec:
     all:
     - key: "{{`{{ request.object.spec.containers[].image }}`}}"
       operator: AllIn
-      value: [{{ .Values.bench.imagePattern | quote }}]
+      value: [{{ .Values.bench.imagePattern | default (printf "%s:*@sha256:*" (.Values.bench.imageRepository | default "docker.io/aquasec/kube-bench")) | quote }}]
 {{- end }}
 {{- with (dig "kyverno" "policyRefs" list .Values.bench) }}
 ---

@@ -7,6 +7,12 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Signed kube-bench image** ([#26](https://github.com/Warewave-Technology/olympos/issues/26)): upstream
+  kube-bench images are not signed, so each release copies the digest the agent pins to
+  `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity. New agent chart value
+  `bench.imageRepository` pulls that digest from this or your own mirror; the digest never changes with the
+  repository. An example Kyverno `ImageValidatingPolicy` is in `deploy/kyverno/kube-bench-signature.yaml`. See
+  `docs/install.md` (The kube-bench image).
 - **Destination groups** ([#32](https://github.com/Warewave-Technology/olympos/issues/32)): a named list of
   two to four destinations of any kinds (Azure Blob, S3, NFS), under *Settings › Destinations › Groups*
   (`/api/v1/destination-groups`). A backup job, or the Olympos database backup, writes to one destination or

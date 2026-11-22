@@ -148,6 +148,11 @@ func TestFanOutAllFail(t *testing.T) {
 	}
 }
 
+// testStall is the stall window for tests that must see a stall fire: wide
+// enough that healthy branches are not falsely detached on a slow, loaded
+// -race runner, short enough to keep the tests quick.
+const testStall = 250 * time.Millisecond
+
 func TestFanOutStall(t *testing.T) {
 	data := randomBytes(t, 64<<10)
 	a, c := &sink{}, &sink{}
@@ -160,7 +165,7 @@ func TestFanOutStall(t *testing.T) {
 	}}
 	f := NewFanOut(context.Background(), []Branch{
 		{Name: "a", Upload: a.upload}, stalled, {Name: "c", Upload: c.upload},
-	}, 50*time.Millisecond)
+	}, testStall)
 	if err := writeChunks(f, data, 8<<10); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -175,7 +180,7 @@ func TestFanOutStall(t *testing.T) {
 	if res[0].Err != nil || res[2].Err != nil {
 		t.Fatalf("healthy branches failed: a=%v c=%v", res[0].Err, res[2].Err)
 	}
-	if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), "stalled: no progress for 50ms") {
+	if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), "stalled: no progress for "+testStall.String()) {
 		t.Fatalf("stalled err = %v", res[1].Err)
 	}
 	if res[1].Bytes != 0 {
@@ -332,11 +337,13 @@ func TestFanOutMultiSegmentSlowReader(t *testing.T) {
 			if err != nil {
 				return err
 			}
-			time.Sleep(10 * time.Millisecond)
+			time.Sleep(30 * time.Millisecond)
 		}
 	}}
 	fast := &sink{}
-	f := NewFanOut(context.Background(), []Branch{slow, {Name: "fast", Upload: fast.upload}}, 100*time.Millisecond)
+	// 8 segments x ~60ms each (two 128 KiB reads per 256 KiB segment) is ~480ms
+	// in total, above the 400ms stall, while each segment stays far below it.
+	f := NewFanOut(context.Background(), []Branch{slow, {Name: "fast", Upload: fast.upload}}, 400*time.Millisecond)
 	if _, err := f.Write(data); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -361,7 +368,7 @@ func TestFanOutStallAfterSomeBytes(t *testing.T) {
 		<-ctx.Done()
 		return ctx.Err()
 	}}
-	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, partial}, 50*time.Millisecond)
+	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, partial}, testStall)
 	if err := writeChunks(f, data, 8<<10); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -391,7 +398,7 @@ func TestFanOutStallAfterEOF(t *testing.T) {
 		returned.Store(true)
 		return ctx.Err()
 	}}
-	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hang, {Name: "c", Upload: c.upload}}, 50*time.Millisecond)
+	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hang, {Name: "c", Upload: c.upload}}, testStall)
 	if err := writeChunks(f, data, 8<<10); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -406,7 +413,7 @@ func TestFanOutStallAfterEOF(t *testing.T) {
 	if res[0].Err != nil || res[2].Err != nil {
 		t.Fatalf("healthy branches failed: a=%v c=%v", res[0].Err, res[2].Err)
 	}
-	want := "stalled: upload did not finish within 50ms after the end of the stream"
+	want := "stalled: upload did not finish within " + testStall.String() + " after the end of the stream"
 	if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), want) {
 		t.Fatalf("hang err = %v", res[1].Err)
 	}
@@ -459,8 +466,8 @@ func TestFanOutUploadIgnoresContext(t *testing.T) {
 				<-release // ignores ctx, like a write blocked in the kernel
 				return nil
 			}}
-			f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hung, {Name: "c", Upload: c.upload}}, 50*time.Millisecond)
-			f.abandon = 50 * time.Millisecond
+			f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hung, {Name: "c", Upload: c.upload}}, testStall)
+			f.abandon = testStall
 			if err := writeChunks(f, data, 8<<10); err != nil {
 				t.Fatalf("write: %v", err)
 			}

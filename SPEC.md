@@ -568,7 +568,7 @@ pending ──approve──▶ approved ──▶ applying ──apply ok──�
 ### 12.3 kube-bench (opt-in exception)
 kube-bench must read node files, so it runs as a **Job per node**. Constraints (MUST):
 1. **Job spec is compiled into the agent.** Server can only send `RunBench{run_id, node_name, benchmark}`. Agent validates `node_name` exists and `benchmark` is in an allowlist.
-2. Image `aquasec/kube-bench` **pinned by digest** in the agent build; optional cosign verification.
+2. Image `aquasec/kube-bench` **pinned by digest** in the agent build. Upstream images are unsigned: each release copies the pinned index to `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity; `bench.imageRepository` pulls the same digest from that or another mirror (§18; `docs/install.md` › The kube-bench image).
 3. Pod: `hostPID: true`, host paths mounted **read-only** (`/etc/kubernetes`, `/var/lib/kubelet`, `/var/lib/etcd` if present, `/etc/systemd`, `/usr/bin` for binaries), no added capabilities, `nodeName` set, tolerations for control-plane taints, `ttlSecondsAfterFinished: 300`, `activeDeadlineSeconds: 600`.
 4. Namespace `olympos-bench` with PSA label `pod-security.kubernetes.io/enforce: privileged`; `olympos-system` stays `restricted`. If Kyverno policies would block the bench pods, the chart renders a `PolicyException` limited to that namespace (+ image) — opt-in, see §13.1.
 5. RBAC for this (Role in `olympos-bench`: `jobs` create/get/list/delete, `pods` get/list, `pods/log` get) is **rendered only when `bench.enabled=true`**. Agent advertises the capability in `Hello`.

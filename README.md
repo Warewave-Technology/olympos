@@ -98,13 +98,15 @@ step. `./test/e2e/env.sh down` removes the lab.
 
 Planned for v0.2 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
 
-- More than one server replica, with tunnels forwarded between replicas ([#21](https://github.com/Warewave-Technology/olympos/issues/21))
 - Restore from the UI into a new target, with approval ([#22](https://github.com/Warewave-Technology/olympos/issues/22))
 - More than one destination per backup job, one dump stored in each ([#32](https://github.com/Warewave-Technology/olympos/issues/32))
+- Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
+
+Planned for v0.3:
+
 - More than one approval for Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23))
 - S3 destinations with IAM roles instead of static keys ([#24](https://github.com/Warewave-Technology/olympos/issues/24))
 - Image scans from ACR with the server's managed identity ([#25](https://github.com/Warewave-Technology/olympos/issues/25))
-- Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
 
 Ideas and comments are welcome on the issues.
 

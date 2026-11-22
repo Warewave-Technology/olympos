@@ -371,7 +371,8 @@ variables that the chart renders; the chart has no `extraEnv`.
 | `bench.enabled` | `false` | Enable kube-bench (`OLYMPOS_BENCH_ENABLED`). Renders the bench Namespace (Pod Security `privileged`), a Role/RoleBinding there, and the optional Kyverno exceptions. |
 | `bench.maxParallel` | `3` | Concurrent kube-bench jobs (`OLYMPOS_BENCH_MAX_PARALLEL`; values below 1 become 1). |
 | `bench.namespace` | `olympos-bench` | Namespace for kube-bench jobs (`OLYMPOS_BENCH_NAMESPACE`). |
-| `bench.imagePattern` | `docker.io/aquasec/kube-bench:*@sha256:*` | Image match in the legacy Kyverno PolicyException only. The kube-bench image itself is pinned in the agent binary. |
+| `bench.imageRepository` | `""` (Docker Hub) | Pull the pinned kube-bench digest from a mirror (`OLYMPOS_BENCH_IMAGE_REPOSITORY`), e.g. `ghcr.io/warewave-technology/kube-bench`, signed by each release. A repository only: a tag or digest is refused. The digest stays the one in the agent binary. See [Installing › The kube-bench image](install.md#the-kube-bench-image). |
+| `bench.imagePattern` | `""` | Image match in the legacy Kyverno PolicyException only; `""` follows `bench.imageRepository` (`<repository>:*@sha256:*`). |
 | `bench.kyverno.legacyException` | `false` | Render a `kyverno.io/v2` PolicyException for all policies (Kyverno ≤ 1.19 with `kyverno.io` policies; Kyverno 1.20 rejects this kind). |
 | `bench.kyverno.policyRefs` | `[]` | Render a `policies.kyverno.io/v1` PolicyException naming these policies (Kyverno CEL policies), e.g. `[{name: require-run-as-nonroot, kind: ValidatingPolicy}]`. |
 | `resources` | requests `50m`/`64Mi`, limit `256Mi` memory | |

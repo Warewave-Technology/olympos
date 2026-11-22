@@ -1,0 +1,32 @@
+# Optional: admit kube-bench pods in the olympos-bench namespace only when the
+# image carries the Olympos release signature (docs/install.md › The kube-bench
+# image). Use with bench.imageRepository=ghcr.io/warewave-technology/kube-bench,
+# or with your own copy made by `cosign copy` (the signature is copied too).
+# Kyverno 1.17 or later (policies.kyverno.io/v1).
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: olympos-kube-bench-signature
+spec:
+  validationActions: [Deny]
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: olympos-bench
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        operations: [CREATE]
+        resources: [pods]
+  matchImageReferences:
+    - glob: "ghcr.io/warewave-technology/kube-bench*"
+  attestors:
+    - name: olympos
+      cosign:
+        keyless:
+          identities:
+            - issuer: https://token.actions.githubusercontent.com
+              subjectRegExp: ^https://github.com/Warewave-Technology/olympos/.github/workflows/release.yml@refs/tags/v
+  validations:
+    - expression: images.containers.map(image, verifyImageSignatures(image, [attestors.olympos])).all(e, e > 0)
+      message: the kube-bench image is not signed by an Olympos release
