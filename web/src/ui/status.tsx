@@ -36,10 +36,11 @@ export function TlsBadge({ t }: { t: Pick<Target, 'tls_ok'> }) {
   return t.tls_ok ? <Badge tone="ok">Yes</Badge> : <Badge tone="warn">No</Badge>;
 }
 
-const RUN_TONE: Record<string, Tone> = { succeeded: 'ok', failed: 'crit', missed: 'crit', running: 'info', queued: 'mute' };
+// partial (a group run that wrote some of its copies) is a warning, never a success.
+const RUN_TONE: Record<string, Tone> = { succeeded: 'ok', partial: 'warn', failed: 'crit', missed: 'crit', running: 'info', queued: 'mute' };
 
 export function RunBadge({ run }: { run: Pick<BackupRun, 'status' | 'error'> }) {
-  const label = capitalize(run.status) + (run.status === 'failed' && run.error ? ` · ${run.error}` : '');
+  const label = capitalize(run.status) + ((run.status === 'failed' || run.status === 'partial') && run.error ? ` · ${run.error}` : '');
   return <Badge tone={RUN_TONE[run.status] ?? 'mute'}>{label}</Badge>;
 }
 

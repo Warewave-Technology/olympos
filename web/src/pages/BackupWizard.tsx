@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, ItemList, SchedulePreview, Target, Vault } from '../api/types';
+import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, DestinationGroup, ItemList, SchedulePreview, Target, Vault } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, formatInZone, nextRuns, presetFor, timeZones, tzOffsetLabel, validateCron } from '../lib/cron';
 import { age, between, bytes, daysUntil, duration, engineLabel, joinPath, money } from '../lib/format';
@@ -10,7 +10,7 @@ import { backupWizardRoute } from '../router';
 import { CheckIcon } from '../ui/icons';
 import { Badge, EmptyState, ErrorState, Field, FormError, Loading, Spinner, aria, fieldError, useAction, useToast } from '../ui/kit';
 import { PageHead, RunBadge } from '../ui/status';
-import { KindBadge, authLabel, destLocation } from '../ui/destinations';
+import { GroupName, KIND_LABEL, KindBadge, authLabel, destLocation } from '../ui/destinations';
 import { Select } from '../ui/Select';
 import { TagInput, validateDatabaseName } from '../ui/TagInput';
 
@@ -28,7 +28,9 @@ interface Form {
   secretName: string;
   username: string;
   databases: string[];
+  /** Exactly one of destinationId and groupId is set. */
   destinationId: string;
+  groupId: string;
   cron: string;
   custom: boolean;
   timezone: string;
@@ -54,7 +56,7 @@ function parseRef(ref: string): { kv: string; secret: string } {
 
 function initialForm(job?: BackupJob): Form {
   if (!job) {
-    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: [], destinationId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false };
+    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: [], destinationId: '', groupId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false };
   }
   const r = parseRef(job.credential.ref);
   const dbs = (job.engine_options?.databases as string[] | undefined) ?? [];
@@ -64,7 +66,8 @@ function initialForm(job?: BackupJob): Form {
     secretName: r.secret,
     username: job.credential.username,
     databases: dbs,
-    destinationId: job.destination.id,
+    destinationId: job.destination?.id ?? '',
+    groupId: job.destination_group?.id ?? '',
     cron: job.cron,
     custom: !presetFor(job.cron),
     timezone: job.timezone || 'UTC',
@@ -163,17 +166,21 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
 
   const clusterQ = useQuery({ queryKey: ['clusters', target.cluster_id], queryFn: () => api.get<Cluster>(`/clusters/${target.cluster_id}`) });
   const destQ = useQuery({ queryKey: ['destinations'], queryFn: () => api.get<ItemList<Destination>>('/destinations') });
+  const groupsQ = useQuery({ queryKey: ['destination-groups'], queryFn: () => api.get<ItemList<DestinationGroup>>('/destination-groups') });
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
   const cluster = clusterQ.data;
-  const dest = destQ.data?.items.find((d) => d.id === f.destinationId);
+  const dest = f.groupId ? undefined : destQ.data?.items.find((d) => d.id === f.destinationId);
+  const group = f.groupId ? groupsQ.data?.items.find((g) => g.id === f.groupId) : undefined;
+  const pickDestination = (id: string) => setF((p) => ({ ...p, destinationId: id, groupId: '' }));
+  const pickGroup = (id: string) => setF((p) => ({ ...p, destinationId: '', groupId: id }));
   const channel = chanQ.data?.items.find((c) => c.id === f.notifyChannelId);
 
   useEffect(() => {
-    if (!f.destinationId && destQ.data?.items.length) {
+    if (!f.destinationId && !f.groupId && destQ.data?.items.length) {
       const mi = destQ.data.items.find((d) => d.auth === 'managed_identity') ?? destQ.data.items[0];
       set('destinationId', mi.id);
     }
-  }, [destQ.data, f.destinationId]);
+  }, [destQ.data, f.destinationId, f.groupId]);
 
   useEffect(() => {
     headingRef.current?.focus();
@@ -217,7 +224,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
       }
     }
     if (s === 3) {
-      if (!f.destinationId) e.destination_id = 'Pick a destination. Add one in Settings › Destinations first if the list is empty.';
+      if (!f.destinationId && !f.groupId) e.destination_id = 'Pick a destination or a group. Add one in Settings › Destinations first if the list is empty.';
       if (cronErr) e.cron = cronErr;
       for (const k of ['daily', 'weekly', 'monthly'] as const) {
         const n = Number(f[k]);
@@ -261,7 +268,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const jobBody = (): BackupJobInput => ({
     target_id: target.id,
     credential: credential(),
-    destination_id: f.destinationId,
+    ...(f.groupId ? { destination_group_id: f.groupId } : { destination_id: f.destinationId }),
     engine_options: isVault ? {} : target.engine === 'postgresql' ? { databases: f.databases, globals: true } : { databases: f.databases },
     cron: f.cron.trim(),
     timezone: f.timezone,
@@ -295,9 +302,10 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
     queryKey: ['backup-runs', runId],
     queryFn: () => api.get<BackupRun>(`/backup/runs/${runId}`),
     enabled: !!runId,
-    refetchInterval: (q) => (q.state.data && ['succeeded', 'failed', 'missed'].includes(q.state.data.status) ? false : 1500),
+    refetchInterval: (q) => (q.state.data && ['succeeded', 'failed', 'missed', 'partial'].includes(q.state.data.status) ? false : 1500),
   });
   const run = runQ.data;
+  // A group dry run passes only when every copy was written; partial is not a pass.
   const dryOk = run?.status === 'succeeded';
 
   const enable = useAction<BackupJob>();
@@ -319,6 +327,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   };
 
   const fe = (name: string) => errs[name] ?? fieldError(save.error, name) ?? fieldError(test.error, name);
+  const destErr = fe('destination_id') ?? fe('destination_group_id');
   const tlsHint = target.tls_ok ? 'TLS verified' : target.tls_ok === false ? 'no TLS' : 'TLS not probed';
   const stepHint = (n: Step) => (n === 1 ? `${target.service} · ${tlsHint}` : n === 2 && isVault ? 'Olympos AppRole, no password' : STEPS[n - 1].hint);
   const annotation = [
@@ -608,7 +617,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
           {/* ------------------------------------------------ step 3 */}
           {step === 3 && (
             <>
-              <fieldset className="opts" aria-describedby={fe('destination_id') ? 'w-dest-err' : undefined}>
+              <fieldset className="opts" aria-describedby={destErr ? 'w-dest-err' : undefined}>
                 <legend className="lbl">Destination</legend>
                 {destQ.isPending && <Loading label="Loading destinations…" />}
                 {destQ.isError && <ErrorState what="destinations" error={destQ.error} onRetry={() => destQ.refetch()} />}
@@ -622,7 +631,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   const sas = d.kind === 'azure_blob' && d.auth === 'sas_token';
                   return (
                     <label className="opt" key={d.id}>
-                      <input type="radio" name="dst" checked={f.destinationId === d.id} onChange={() => set('destinationId', d.id)} />
+                      <input type="radio" name="dst" checked={!f.groupId && f.destinationId === d.id} onChange={() => pickDestination(d.id)} />
                       <span style={{ minWidth: 0 }}>
                         <span className="inline-sm">
                           <span className="t1 mono">{d.name}</span>
@@ -637,10 +646,28 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     </label>
                   );
                 })}
+                {groupsQ.data?.items.map((g) => (
+                  <label className="opt" key={g.id}>
+                    <input type="radio" name="dst" checked={f.groupId === g.id} onChange={() => pickGroup(g.id)} />
+                    <span style={{ minWidth: 0 }}>
+                      <span className="inline-sm">
+                        <span className="t1">
+                          <GroupName name={g.name} />
+                        </span>
+                        <Badge tone="mute">Group</Badge>
+                      </span>
+                      <span className="t2">
+                        One dump to every member, in order: {g.members.map((m, i) => `${i + 1} ${m.name} (${KIND_LABEL[m.kind]})`).join(' → ')}
+                        {g.members.some((m) => m.kind === 'nfs') ? ' · retention on NFS must be enforced by the storage' : ''}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+                {groupsQ.isError && <p className="muted small">Destination groups could not be loaded; single destinations are still available.</p>}
               </fieldset>
-              {fe('destination_id') && (
+              {destErr && (
                 <div className="field-error" id="w-dest-err" role="alert">
-                  {fe('destination_id')}
+                  {destErr}
                 </div>
               )}
 
@@ -699,7 +726,9 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
               <div className="form-section">
                 <h3>Retention &amp; notifications</h3>
                 <p className="muted small" style={{ margin: 0 }}>
-                  {dest?.kind === 'nfs'
+                  {group
+                    ? 'Kept per tier (GFS) on every member, enforced by each destination’s lifecycle rules (on NFS, by the storage).'
+                    : dest?.kind === 'nfs'
                     ? 'Kept per tier (GFS). On NFS the storage must protect old backups; Olympos can delete there.'
                     : dest?.kind === 's3'
                       ? 'Kept per tier (GFS), enforced by bucket lifecycle rules via object tags.'
@@ -785,9 +814,14 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   </>
                 )}
                 <dt>Destination</dt>
-                <dd className="mono">
-                  {dest ? `${dest.name} · ${joinPath(dest.prefix, target.cluster_name, target.namespace, target.service, target.engine)}/` : '—'}
-                </dd>
+                {group ? (
+                  <dd>
+                    <GroupName name={group.name} /> <span className="muted">· every member, in order:</span> <span className="mono">{group.members.map((m) => m.name).join(' → ')}</span>
+                    <div className="mono small muted">{joinPath(target.cluster_name, target.namespace, target.service, target.engine)}/ below each member&apos;s prefix</div>
+                  </dd>
+                ) : (
+                  <dd className="mono">{dest ? `${dest.name} · ${joinPath(dest.prefix, target.cluster_name, target.namespace, target.service, target.engine)}/` : '—'}</dd>
+                )}
                 <dt>Schedule</dt>
                 <dd>
                   <span className="mono">{f.cron}</span> {f.timezone} <span className="muted">· {describeCron(f.cron)}</span>
@@ -843,6 +877,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                         <span>{s.detail || s.name}</span>
                       </li>
                     ))}
+                    {(run.copies ?? []).map((c) => (
+                      <li key={c.destination_id} className="chk">
+                        <CheckIcon ok={c.status === 'succeeded'} />
+                        <span>{`${c.destination_name}: ${c.status === 'succeeded' ? `${bytes(c.bytes)} written and verified` : `copy failed${c.error ? ` · ${c.error}` : ''}`}`}</span>
+                      </li>
+                    ))}
                     {(run.status === 'queued' || run.status === 'running') && (
                       <li className="chk">
                         <Spinner label="Dry run in progress" />
@@ -852,6 +892,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   </ul>
                 )}
                 {run?.status === 'failed' && <p className="field-error">Fix the problem (credentials in step 2, destination in step 3), then run the dry run again.</p>}
+                {run?.status === 'partial' && <p className="field-error">Not every destination of the group was written. Fix the failed destination (Settings › Destinations) or pick another group in step 3, then run the dry run again.</p>}
               </div>
 
               <FormError error={save.error ?? dry.error ?? enable.error} />

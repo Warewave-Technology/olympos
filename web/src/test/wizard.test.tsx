@@ -67,3 +67,55 @@ describe('Backup wizard · configured vault', () => {
     expect(await screen.findByRole('heading', { name: 'Destination & schedule' }, T)).toBeInTheDocument();
   });
 });
+
+describe('Backup wizard · destination group', () => {
+  afterEach(() => localStorage.removeItem('olympos.mock.failCopy'));
+
+  it('writes to a group (destination_group_id only); a dry run with one failed copy is not a pass', async () => {
+    const user = userEvent.setup();
+    const group = db.destinationGroups.find((g) => g.name === 'eu-offsite')!;
+    localStorage.setItem('olympos.mock.failCopy', 'minio-factory');
+    await renderApp(`/backups/new?target=${db.tByService('orders-pg').id}`);
+    await toStep2(user);
+    await user.type(screen.getByLabelText('Key Vault'), 'kv-platform-weu');
+    await user.type(screen.getByLabelText('Secret name (holds the password)'), 'orders-backup');
+    await user.type(screen.getByLabelText('Username'), 'backup_ro');
+    await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+    await screen.findByRole('heading', { name: 'Destination & schedule' }, T);
+
+    const radio = await screen.findByRole('radio', { name: /eu-offsite/ }, T);
+    // groups are marked as such and list their members in order
+    const opt = radio.closest('label')!;
+    expect(within(opt).getByRole('img', { name: 'Destination group' })).toBeInTheDocument();
+    expect(opt).toHaveTextContent(/blob-weu-backups.*minio-factory/);
+    await user.click(radio);
+    expect(radio).toBeChecked();
+    await user.click(screen.getByRole('button', { name: 'Next: review' }));
+    const dt = await screen.findByText('Destination', { selector: 'dt' }, T);
+    expect(dt.nextElementSibling).toHaveTextContent(/eu-offsite.*blob-weu-backups.*minio-factory/);
+
+    const sent: { method: string; path: string; body: unknown }[] = [];
+    const orig = window.fetch;
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method && init.method !== 'GET') sent.push({ method: init.method, path: String(input), body: init.body ? JSON.parse(String(init.body)) : undefined });
+      return orig(input, init);
+    };
+    try {
+      await user.click(screen.getByRole('button', { name: 'Create job and run dry run' }));
+      await waitFor(() => expect(sent.some((c) => c.path.endsWith('/run'))).toBe(true), T);
+      const create = sent.find((c) => c.method === 'POST' && c.path.endsWith('/backup/jobs'))!;
+      expect(create.body).toMatchObject({ destination_group_id: group.id });
+      expect(create.body).not.toHaveProperty('destination_id');
+      // let the mock dry run finish now
+      await waitFor(() => expect(db.runs.some((r) => r.trigger === 'test')).toBe(true), T);
+      const dry = db.runs.find((r) => r.trigger === 'test')!;
+      dry.started_at = new Date(Date.now() - 10_000).toISOString();
+      expect(await screen.findByText(/^Partial/, {}, { timeout: 6000 })).toHaveClass('warn');
+      expect(screen.getByText(/minio-factory: copy failed/)).toBeInTheDocument();
+      expect(screen.getByText(/blob-weu-backups: .* written/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Enable backup' })).toBeDisabled();
+    } finally {
+      window.fetch = orig;
+    }
+  }, 15_000);
+});

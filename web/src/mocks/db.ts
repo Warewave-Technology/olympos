@@ -7,11 +7,13 @@ import type {
   AuditSettings,
   BackupJob,
   BackupRun,
+  BackupRunCopy,
   BenchCheck,
   ChangeRequest,
   Channel,
   Cluster,
   Destination,
+  DestinationGroup,
   DestinationMount,
   Finding,
   Grant,
@@ -471,6 +473,7 @@ export const destinations: Destination[] = [
       sas: null,
     },
     jobs: 9,
+    groups: 1,
   },
   {
     id: uuid(),
@@ -499,6 +502,7 @@ export const destinations: Destination[] = [
       sas: { permissions: 'rcwt', expires_at: isoIn(12 * D), missing: [], extra: [], scope: 'container' },
     },
     jobs: 2,
+    groups: 1,
   },
   {
     id: uuid(),
@@ -534,6 +538,7 @@ export const destinations: Destination[] = [
       sas: null,
     },
     jobs: 1,
+    groups: 1,
   },
   {
     id: uuid(),
@@ -563,8 +568,27 @@ export const destinations: Destination[] = [
       sas: null,
     },
     jobs: 0,
+    groups: 1,
   },
 ];
+
+const dByName = (n: string) => destinations.find((d) => d.name === n)!;
+const member = (n: string) => ({ id: dByName(n).id, name: n, kind: dByName(n).kind });
+
+/** Destination groups: one dump to every member, in order (docs/design/destination-groups.md). */
+export const destinationGroups: DestinationGroup[] = [
+  { id: uuid(), name: 'eu-offsite', description: 'Regional Blob plus an S3 copy on the factory MinIO', members: [member('blob-weu-backups'), member('minio-factory')], jobs: 1, created_at: iso(20 * D), updated_at: iso(20 * D) },
+  { id: uuid(), name: 'dr-pair', description: '', members: [member('blob-neu-dr'), member('nas-factory')], jobs: 0, created_at: iso(9 * D), updated_at: iso(9 * D) },
+];
+const [gOffsite] = destinationGroups;
+
+/** One copy per group member; `failed` maps member names to their error. */
+export function groupCopies(g: DestinationGroup, bytes: number, failed: Record<string, string> = {}, tier = 'daily'): BackupRunCopy[] {
+  return g.members.map((m) => {
+    const err = failed[m.name];
+    return { destination_id: m.id, destination_name: m.name, destination_kind: m.kind, status: err ? 'failed' : 'succeeded', blob_path: err ? '' : `olympos/run/${m.name}.zip`, bytes: err ? 0 : bytes, sha256: err ? '' : hex(64), tier: err ? '' : tier, error: err ?? '' };
+  });
+}
 
 /** Audit settings: raw reports are not stored until an admin chooses a destination. */
 export const auditSettings: AuditSettings = { raw_destination: null };
@@ -604,6 +628,7 @@ export const channels: Channel[] = [
 
 export const catalog: Routes['catalog'] = [
   { event_type: 'backup.failed', description: 'A backup run failed', opt_in: false },
+  { event_type: 'backup.partial', description: 'A backup was written to some of its destinations but not all.', opt_in: false },
   { event_type: 'backup.missed', description: 'A scheduled run did not start', opt_in: false },
   { event_type: 'backup.succeeded', description: 'A backup run succeeded (noisy)', opt_in: true },
   { event_type: 'cr.opened', description: 'A change request waits for approval (link only)', opt_in: false },
@@ -648,6 +673,7 @@ function job(t: Target, p: Partial<BackupJob>): BackupJob {
     engine: t.engine,
     credential: { id: uuid(), source: 'keyvault_ref', ref: `kv://kv-platform-weu/${t.service}-backup`, username: 'backup_ro' },
     destination: { id: destinations[0].id, name: destinations[0].name },
+    destination_group: null,
     engine_options: {},
     cron: '0 2 * * *',
     timezone: 'Europe/Istanbul',
@@ -666,7 +692,7 @@ function job(t: Target, p: Partial<BackupJob>): BackupJob {
 }
 
 export const jobs: BackupJob[] = [
-  job(tByService('billing-pg'), { engine_options: { databases: ['billing'], globals: true } }),
+  job(tByService('billing-pg'), { engine_options: { databases: ['billing'], globals: true }, destination: null, destination_group: { id: gOffsite.id, name: gOffsite.name, members: gOffsite.members.map((m) => m.name) } }),
   job(tByService('openbao'), {
     notify_on_success: true,
     cron: '0 */6 * * *',
@@ -693,7 +719,21 @@ export const runs: BackupRun[] = [
     wire_bytes: 0,
     destination_name: 'blob-neu-dr',
   }),
-  run({ job_id: jBilling.id, target_service: 'billing-pg', cluster_name: 'prod-aks-weu-02', engine: 'postgresql', started_at: iso(8 * H), finished_at: iso(8 * H - 400_000), bytes: 3.1e9, wire_bytes: 3.1e9 }),
+  // a group run that missed its MinIO copy; no repair has completed it (Dashboard: Backup incomplete)
+  run({
+    job_id: jBilling.id,
+    target_service: 'billing-pg',
+    cluster_name: 'prod-aks-weu-02',
+    engine: 'postgresql',
+    status: 'partial',
+    error: 'minio-factory: dial tcp: i/o timeout',
+    started_at: iso(8 * H),
+    finished_at: iso(8 * H - 400_000),
+    bytes: 3.1e9,
+    wire_bytes: 3.1e9,
+    destination_name: gOffsite.name,
+    copies: groupCopies(gOffsite, 3.1e9, { 'minio-factory': 'dial tcp: i/o timeout' }),
+  }),
   run({ job_id: jBao.id, target_service: 'openbao', cluster_name: 'prod-aks-weu-01', engine: 'vault', started_at: iso(8 * H), finished_at: iso(8 * H - 10_000), bytes: 41e6, wire_bytes: 41e6 }),
   run({
     job_id: jBilling.id,
@@ -705,6 +745,10 @@ export const runs: BackupRun[] = [
     bytes: 3.08e9,
     wire_bytes: 3.08e9,
     tier: 'weekly',
+    status: 'partial',
+    error: 'minio-factory: PutObject: 503 SlowDown',
+    destination_name: gOffsite.name,
+    copies: groupCopies(gOffsite, 3.08e9, { 'minio-factory': 'PutObject: 503 SlowDown' }, 'weekly'),
   }),
   run({
     job_id: jMetrics.id,
@@ -718,6 +762,21 @@ export const runs: BackupRun[] = [
     destination_name: 'blob-neu-dr',
   }),
 ];
+// the repair that completed the weekly run's missing copy
+runs.splice(4, 0, run({
+  job_id: jBilling.id,
+  target_service: 'billing-pg',
+  cluster_name: 'prod-aks-weu-02',
+  engine: 'postgresql',
+  started_at: iso(31.6 * H),
+  finished_at: iso(31.6 * H - 412_000),
+  bytes: 3.08e9,
+  wire_bytes: 3.08e9,
+  tier: 'weekly',
+  destination_name: 'minio-factory',
+  repair_of: runs[4].id,
+  copies: groupCopies({ ...gOffsite, members: gOffsite.members.slice(1) }, 3.08e9, {}, 'weekly'),
+}));
 jBilling.last_run = runs[2];
 jBao.last_run = runs[0];
 jMetrics.last_run = runs[1];
@@ -739,7 +798,8 @@ for (let i = 0; i < 84; i++) {
       bytes: failed ? 0 : j.engine === 'postgresql' ? 3.05e9 + i * 1e6 : j.engine === 'vault' ? 41e6 : 17.5e9,
       wire_bytes: failed ? 0 : j.engine === 'clickhouse' ? 2.3e9 : j.engine === 'postgresql' ? 3.05e9 : 41e6,
       tier: i % 7 === 0 ? 'weekly' : 'daily',
-      destination_name: j.destination.name,
+      destination_name: j.destination_group?.name ?? j.destination?.name,
+      copies: j === jBilling && !failed && i % 29 !== 11 ? groupCopies(gOffsite, 3.05e9 + i * 1e6, {}, i % 7 === 0 ? 'weekly' : 'daily') : undefined,
     }),
   );
 }

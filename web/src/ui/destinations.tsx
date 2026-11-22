@@ -1,13 +1,36 @@
 // Display helpers shared by Settings › Destinations and the backup wizard.
-import type { Destination, DestinationKind, DestinationTest } from '../api/types';
-import { daysUntil, relDateTime } from '../lib/format';
-import { CheckIcon } from './icons';
+import type { BackupJob, Destination, DestinationKind, DestinationTest } from '../api/types';
+import { daysUntil, plural, relDateTime } from '../lib/format';
+import { CheckIcon, IconGroup } from './icons';
 import { Badge } from './kit';
 
 export const KIND_LABEL: Record<DestinationKind, string> = { azure_blob: 'Azure Blob', s3: 'S3', nfs: 'NFS' };
 
 export function KindBadge({ kind }: { kind: DestinationKind }) {
   return <Badge tone="mute">{KIND_LABEL[kind] ?? kind}</Badge>;
+}
+
+/** A destination group's name with the group marker (screen readers hear "Destination group"). */
+export function GroupName({ name, mono = true }: { name: string; mono?: boolean }) {
+  return (
+    <span className="grp">
+      <IconGroup className="ico-warn" label="Destination group" />
+      <span className={mono ? 'mono' : undefined}>{name}</span>
+    </span>
+  );
+}
+
+/** Where a job writes: its destination, or its group with the marker. */
+export function JobDestination({ job }: { job: Pick<BackupJob, 'destination' | 'destination_group'> }) {
+  if (job.destination_group) return <GroupName name={job.destination_group.name} />;
+  return <span className="mono">{job.destination?.name ?? '—'}</span>;
+}
+export const jobDestinationName = (job: Pick<BackupJob, 'destination' | 'destination_group'>) => job.destination_group?.name ?? job.destination?.name ?? '';
+
+/** Settings › Destinations "Used by": jobs, plus the groups the destination is in. */
+export function usedByLabel(d: Pick<Destination, 'jobs' | 'groups'>): string {
+  const jobs = plural(d.jobs, 'job');
+  return d.groups ? `${jobs} · in ${plural(d.groups, 'group')}` : jobs;
 }
 
 export function endpointHost(url: string | undefined): string {

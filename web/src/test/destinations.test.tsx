@@ -2,8 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { Destination, DestinationTest } from '../api/types';
+import type { Destination, DestinationGroup, DestinationTest } from '../api/types';
+import { MeProvider } from '../auth/me';
+import * as mockDb from '../mocks/db';
 import { DestinationDialog, joinMountPath } from '../pages/settings/DestinationDialog';
+import { DestinationGroupsCard } from '../pages/settings/DestinationGroupDialog';
+import { usedByLabel } from '../ui/destinations';
 import { ToastProvider } from '../ui/kit';
 
 type Call = { method: string; path: string; body: unknown };
@@ -201,5 +205,152 @@ describe('destination dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(writes()).toEqual([{ method: 'PATCH', path: '/api/v1/destinations/d9', body: { name: 'minio-2' } }]);
+  });
+});
+
+// ------------------------------------------------------------ destination groups
+describe('destination groups', () => {
+  const dests = [
+    saved({ id: 'd1', name: 'blob-weu-backups', kind: 'azure_blob', jobs: 9, groups: 2 }),
+    saved({ id: 'd2', name: 'minio-factory', kind: 's3', auth: 'access_key', jobs: 1, groups: 1 }),
+    saved({ id: 'd3', name: 'nas-factory', kind: 'nfs', auth: 'none', jobs: 0, groups: 1 }),
+  ];
+  const m = (d: Destination) => ({ id: d.id, name: d.name, kind: d.kind });
+  const groups: DestinationGroup[] = [
+    { id: 'g1', name: 'eu-offsite', description: 'Blob plus an S3 copy', members: [m(dests[0]), m(dests[1])], jobs: 5, created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z' },
+    { id: 'g2', name: 'dr-pair', description: '', members: [m(dests[2]), m(dests[0])], jobs: 0, created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z' },
+  ];
+  const lists = (c: Call) =>
+    c.path === '/api/v1/destination-groups' && c.method === 'GET' ? { status: 200, body: { items: groups } } : c.path === '/api/v1/destinations' ? { status: 200, body: { items: dests } } : null;
+
+  function renderGroups(role = 'admin') {
+    localStorage.setItem('olympos.mock.role', role);
+    const me = mockDb.me();
+    localStorage.removeItem('olympos.mock.role');
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <ToastProvider>
+          <MeProvider me={me}>
+            <DestinationGroupsCard />
+          </MeProvider>
+        </ToastProvider>
+      </QueryClientProvider>,
+    );
+    return qc;
+  }
+  const members = (dialog: HTMLElement) =>
+    within(within(dialog).getByRole('list', { name: 'Destinations, in order' }))
+      .getAllByRole('listitem')
+      .map((li) => li.querySelector('.mono')?.textContent);
+
+  it('lists groups with their members in order, kind badges and how many jobs use them', async () => {
+    respond = (c) => lists(c) ?? { status: 404 };
+    renderGroups();
+    const table = await screen.findByRole('table', { name: 'Destination groups' });
+    const row = within(table).getByRole('row', { name: /eu-offsite/ });
+    expect(within(row).getAllByText(/^(blob-weu-backups|minio-factory)$/).map((e) => e.textContent)).toEqual(['blob-weu-backups', 'minio-factory']);
+    expect(within(row).getByText('Azure Blob')).toBeInTheDocument();
+    expect(within(row).getByText('S3')).toBeInTheDocument();
+    expect(within(row).getByText('5 jobs')).toBeInTheDocument();
+    // a group in use cannot be deleted; the reason is on the control
+    expect(within(row).getByRole('button', { name: 'Delete eu-offsite' })).toBeDisabled();
+    expect(within(row).getByRole('button', { name: 'Delete eu-offsite' })).toHaveAttribute('title', 'Used by 5 jobs. Move them first.');
+    const dr = within(table).getByRole('row', { name: /dr-pair/ });
+    expect(within(dr).getAllByText(/^(nas-factory|blob-weu-backups)$/).map((e) => e.textContent)).toEqual(['nas-factory', 'blob-weu-backups']);
+    expect(within(dr).getByText('0 jobs')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'New group' })).toBeInTheDocument();
+  });
+
+  it('a viewer sees the groups but no controls', async () => {
+    respond = (c) => lists(c) ?? { status: 404 };
+    renderGroups('viewer');
+    const table = await screen.findByRole('table', { name: 'Destination groups' });
+    expect(within(table).getByRole('row', { name: /eu-offsite/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'New group' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /^(Edit|Delete) / })).toBeNull();
+  });
+
+  it('create: one member is not enough, and server field errors land on their fields', async () => {
+    const user = userEvent.setup();
+    respond = (c) =>
+      lists(c) ??
+      (c.method === 'POST'
+        ? { status: 422, body: { error: 'invalid destination group', fields: { name: 'a destination group named cold already exists', member_ids: 'minio-factory and nas-factory write to the same location' } } }
+        : { status: 404 });
+    renderGroups();
+    await user.click(await screen.findByRole('button', { name: 'New group' }));
+    const dialog = screen.getByRole('dialog', { name: 'New destination group' });
+    await user.type(within(dialog).getByLabelText('Name'), 'cold');
+    const add = within(dialog).getByRole('combobox', { name: 'Add destination' });
+    await waitFor(() => expect(add).toBeEnabled());
+    await user.click(add);
+    await user.click(screen.getByRole('option', { name: /minio-factory/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }));
+    expect(members(dialog)).toEqual(['minio-factory']);
+    expect(within(dialog).getByText('1 of 4')).toBeInTheDocument();
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('A group needs 2 to 4 destinations');
+    expect(within(dialog).getByRole('button', { name: 'Create group' })).toBeDisabled();
+
+    await user.click(add);
+    await user.click(screen.getByRole('option', { name: /nas-factory/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }));
+    expect(members(dialog)).toEqual(['minio-factory', 'nas-factory']);
+    expect(within(dialog).queryByText('A group needs 2 to 4 destinations')).toBeNull();
+    await user.click(within(dialog).getByRole('button', { name: 'Create group' }));
+    expect(await within(dialog).findByText('a destination group named cold already exists')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Name')).toHaveAttribute('aria-invalid', 'true');
+    expect(within(dialog).getByText('minio-factory and nas-factory write to the same location')).toBeInTheDocument();
+    expect(writes()).toEqual([{ method: 'POST', path: '/api/v1/destination-groups', body: { name: 'cold', description: '', member_ids: ['d2', 'd3'] } }]);
+  });
+
+  it('edit: reorders, adds and removes members, warns how many jobs it affects and sends only what changed', async () => {
+    const user = userEvent.setup();
+    respond = (c) => lists(c) ?? (c.method === 'PATCH' ? { status: 200, body: { ...groups[0], members: [m(dests[2]), m(dests[1])] } } : { status: 404 });
+    renderGroups();
+    await user.click(await screen.findByRole('button', { name: 'Edit eu-offsite' }));
+    const dialog = screen.getByRole('dialog', { name: 'eu-offsite' });
+    expect(within(dialog).getByText('Edit group')).toBeInTheDocument();
+    expect(within(dialog).getByText('This change affects 5 backup jobs.')).toBeInTheDocument();
+    expect(within(dialog).getByText('Existing backups are not copied to a destination you add; only new runs write to it.')).toBeInTheDocument();
+    expect(members(dialog)).toEqual(['blob-weu-backups', 'minio-factory']);
+    expect(within(dialog).getByRole('button', { name: 'Move blob-weu-backups up' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Move minio-factory down' })).toBeDisabled();
+
+    const add = within(dialog).getByRole('combobox', { name: 'Add destination' });
+    await waitFor(() => expect(add).toBeEnabled());
+    await user.click(add);
+    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual([expect.stringContaining('nas-factory')]); // members are not offered again
+    await user.click(screen.getByRole('option', { name: /nas-factory/ }));
+    await user.click(within(dialog).getByRole('button', { name: 'Add' }));
+    const added = within(within(dialog).getByRole('list', { name: 'Destinations, in order' })).getAllByRole('listitem')[2];
+    expect(within(added).getByText('New')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Move nas-factory up' }));
+    expect(members(dialog)).toEqual(['blob-weu-backups', 'nas-factory', 'minio-factory']);
+    await user.click(within(dialog).getByRole('button', { name: 'Remove blob-weu-backups' }));
+    expect(members(dialog)).toEqual(['nas-factory', 'minio-factory']);
+    expect(within(dialog).getByText('2 of 4')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Save group' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(writes()).toEqual([{ method: 'PATCH', path: '/api/v1/destination-groups/g1', body: { member_ids: ['d3', 'd2'] } }]);
+  });
+
+  it('delete shows the server 409 message (a job started using the group meanwhile)', async () => {
+    const user = userEvent.setup();
+    respond = (c) => lists(c) ?? (c.method === 'DELETE' ? { status: 409, body: { error: 'used by 1 backup job; move it to another destination or group first' } } : { status: 404 });
+    renderGroups();
+    await user.click(await screen.findByRole('button', { name: 'Delete dr-pair' }));
+    const confirm = screen.getByRole('dialog', { name: 'Delete dr-pair?' });
+    expect(within(confirm).getByText(/The member destinations and the backups stored on them stay/)).toBeInTheDocument();
+    await user.click(within(confirm).getByRole('button', { name: 'Delete group' }));
+    expect(await within(confirm).findByRole('alert')).toHaveTextContent('Used by 1 backup job; move it to another destination or group first.');
+    expect(writes()).toEqual([{ method: 'DELETE', path: '/api/v1/destination-groups/g2', body: undefined }]);
+  });
+
+  it('destination rows say how many groups a destination is in', () => {
+    expect(usedByLabel(dests[0])).toBe('9 jobs · in 2 groups');
+    expect(usedByLabel(dests[1])).toBe('1 job · in 1 group');
+    expect(usedByLabel(saved({ jobs: 0, groups: 0 }))).toBe('0 jobs');
+    expect(usedByLabel(saved({ jobs: 3 }))).toBe('3 jobs');
   });
 });

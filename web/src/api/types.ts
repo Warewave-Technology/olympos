@@ -143,7 +143,7 @@ export interface Target {
 }
 
 export interface AttentionItem {
-  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'self_backup_unset' | 'self_backup_failed' | 'kek_purgeable' | 'kek_recovery_unknown' | 'target_tls_changed';
+  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'backup_partial' | 'self_backup_unset' | 'self_backup_failed' | 'self_backup_partial' | 'kek_purgeable' | 'kek_recovery_unknown' | 'target_tls_changed';
   severity: 'crit' | 'warn';
   label: string;
   detail: string;
@@ -280,9 +280,35 @@ export interface Destination {
   last_test_ok: boolean | null;
   last_test?: DestinationTest | null;
   jobs: number;
+  /** Number of destination groups this destination is a member of. */
+  groups?: number;
   created_at?: string;
   /** Only on create/patch responses. */
   warnings?: string[];
+}
+/** docs/openapi.yaml DestinationGroupInput: create needs name and member_ids; PATCH takes any. */
+export interface DestinationGroupInput {
+  name?: string;
+  description?: string;
+  /** 2 to 4 distinct destination ids in order; the first is the default restore copy. */
+  member_ids?: string[];
+}
+export interface DestinationGroupMember {
+  id: string;
+  name: string;
+  kind: DestinationKind;
+}
+/** A set of destinations a backup job writes one dump to (docs/design/destination-groups.md). */
+export interface DestinationGroup {
+  id: string;
+  name: string;
+  description: string;
+  /** In position order. */
+  members: DestinationGroupMember[];
+  /** Jobs using the group (a count only, deleted jobs included). */
+  jobs: number;
+  created_at: string;
+  updated_at: string;
 }
 
 // ---------------------------------------------------- backups
@@ -300,7 +326,9 @@ export interface Retention {
 export interface BackupJobInput {
   target_id?: string;
   credential?: CredentialInput;
+  /** Exactly one of destination_id and destination_group_id; on PATCH, setting one clears the other. */
   destination_id?: string;
+  destination_group_id?: string;
   engine_options?: Record<string, unknown>;
   cron?: string;
   timezone?: string;
@@ -310,7 +338,21 @@ export interface BackupJobInput {
   /** Also send backup.succeeded for this job. */
   notify_on_success?: boolean;
 }
-export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'missed';
+/** partial = a destination group run that wrote some but not all of its copies. */
+export type RunStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'missed' | 'partial';
+/** One destination's result of a run. */
+export interface BackupRunCopy {
+  destination_id: string;
+  destination_name: string;
+  destination_kind: DestinationKind;
+  status: 'succeeded' | 'failed';
+  /** May be set on a failed copy; it is not a restore source then. */
+  blob_path: string;
+  bytes: number;
+  sha256: string;
+  tier: string;
+  error: string;
+}
 export interface BackupRun {
   id: string;
   job_id: string;
@@ -330,15 +372,32 @@ export interface BackupRun {
   error: string;
   /** > 1: retried after the agent reconnected. */
   attempt?: number;
-  /** Optional (openapi extension): destination name for run lists. */
+  /** The destination the run wrote to when it wrote to exactly one, else the job's destination or group name. */
   destination_name?: string;
+  /** One result per destination in write order; empty for runs from before destination groups. */
+  copies?: BackupRunCopy[];
+  /** The run whose missing copies this run completes. */
+  repair_of?: string | null;
+  created_at?: string;
   /** Optional (openapi extension): dry-run checklist steps. */
   steps?: { name: string; ok: boolean; detail: string }[];
 }
 /** Ready-to-copy restore commands of one successful run (F19). */
+export interface RestoreCopy {
+  destination_id: string;
+  name: string;
+  kind: DestinationKind;
+  /** The copy the steps are built from. */
+  selected: boolean;
+  /** The run that wrote this copy: the guide's run, or a repair of it. */
+  run_id: string;
+  taken_at: string | null;
+}
 export interface RestoreGuide {
   doc: string;
   steps: { title: string; commands: string; note?: string }[];
+  /** Succeeded copies in member order, then copies repairs completed later. */
+  copies?: RestoreCopy[];
 }
 export interface BackupRunDetail extends BackupRun {
   restore: RestoreGuide | null;
@@ -348,7 +407,11 @@ export interface SelfBackup {
   configured: boolean;
   job: {
     id: string;
-    destination_id: string;
+    /** Set when the job writes to one destination. */
+    destination_id: string | null;
+    /** Set when the job writes to every destination of a group. */
+    destination_group_id?: string | null;
+    /** Name of the destination or the group. */
     destination_name: string;
     cron: string;
     timezone: string;
@@ -358,7 +421,7 @@ export interface SelfBackup {
     created_at: string;
   } | null;
   runs: BackupRun[];
-  /** Restore commands for the latest successful run. */
+  /** Restore commands for the latest succeeded or partial original run. */
   restore?: RestoreGuide | null;
 }
 /** GET/PUT /audit/settings: where raw audit reports are kept. */
@@ -371,6 +434,7 @@ export interface AuditSettingsInput {
 
 export interface SelfBackupInput {
   destination_id?: string;
+  destination_group_id?: string;
   cron?: string;
   timezone?: string;
   retention?: Retention;
@@ -381,7 +445,10 @@ export interface BackupJob {
   target: Target;
   engine: string;
   credential: { id: string; source: string; ref: string; username: string };
-  destination: { id: string; name: string };
+  /** Set for a job that writes to one destination, else null. */
+  destination: { id: string; name: string } | null;
+  /** Set for a job that writes to a destination group, else null. */
+  destination_group: { id: string; name: string; members: string[] } | null;
   engine_options: Record<string, unknown>;
   cron: string;
   timezone: string;
@@ -788,7 +855,8 @@ export interface BackupClusterSummary {
   candidates: number;
   jobs: number;
   jobs_enabled: number;
-  last_24h: { succeeded: number; failed: number; missed: number };
+  /** Original runs; partial = wrote some copies and its repairs did not complete them. */
+  last_24h: { succeeded: number; failed: number; missed: number; partial?: number };
   last_success_at: string | null;
   bytes_30d: number;
 }

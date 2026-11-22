@@ -319,10 +319,13 @@ function auditSummary(c: Cluster): AuditClusterSummary {
 function backupSummary(c: Cluster): BackupClusterSummary {
   const targets = db.targets.filter((t) => t.cluster_id === c.id && t.status !== 'gone');
   const jobs = db.jobs.filter((j) => j.target.cluster_id === c.id);
-  const runs = db.runs.filter((r) => r.cluster_name === c.name && r.trigger !== 'test');
+  const all = db.runs.filter((r) => r.cluster_name === c.name && r.trigger !== 'test');
+  const runs = all.filter((r) => !r.repair_of); // original runs only
+  // a partial run whose repair succeeded counts as succeeded
+  const outcome = (r: (typeof runs)[number]) => (r.status === 'partial' && all.some((x) => x.repair_of === r.id && x.status === 'succeeded') ? 'succeeded' : r.status);
   const since = (ms: number) => runs.filter((r) => Date.now() - new Date(r.started_at ?? r.scheduled_for ?? 0).getTime() < ms);
   const day = since(D);
-  const ok = runs.filter((r) => r.status === 'succeeded').sort((a, b) => (b.finished_at ?? '').localeCompare(a.finished_at ?? ''));
+  const ok = runs.filter((r) => r.status === 'succeeded' || r.status === 'partial').sort((a, b) => (b.finished_at ?? '').localeCompare(a.finished_at ?? ''));
   return {
     cluster_id: c.id,
     cluster_name: c.name,
@@ -330,7 +333,12 @@ function backupSummary(c: Cluster): BackupClusterSummary {
     candidates: targets.filter((t) => t.status === 'candidate' && t.engine !== '').length,
     jobs: jobs.length,
     jobs_enabled: jobs.filter((j) => j.enabled).length,
-    last_24h: { succeeded: day.filter((r) => r.status === 'succeeded').length, failed: day.filter((r) => r.status === 'failed').length, missed: day.filter((r) => r.status === 'missed').length },
+    last_24h: {
+      succeeded: day.filter((r) => outcome(r) === 'succeeded').length,
+      failed: day.filter((r) => r.status === 'failed').length,
+      missed: day.filter((r) => r.status === 'missed').length,
+      partial: day.filter((r) => outcome(r) === 'partial').length,
+    },
     last_success_at: ok[0]?.finished_at ?? null,
     bytes_30d: since(30 * D).reduce((s, r) => s + (r.bytes || 0), 0),
   };

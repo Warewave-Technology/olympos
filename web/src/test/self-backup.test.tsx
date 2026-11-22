@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import * as db from '../mocks/db';
 import { renderApp } from './renderApp';
 
 afterEach(cleanup);
@@ -43,5 +44,37 @@ describe('restore commands (F19)', () => {
     expect(await within(dialog).findByText('Download the backup and its manifest', {}, T)).toBeTruthy();
     expect(within(dialog).getAllByText(/pg_restore -h <new-host>/).length).toBeGreaterThan(0);
     expect(within(dialog).getAllByRole('button', { name: /Copy/ }).length).toBeGreaterThan(0);
+  });
+});
+
+describe('olympos-self to a destination group', () => {
+  it('the picker offers groups next to destinations and sends destination_group_id', async () => {
+    const user = userEvent.setup();
+    const sent: { method: string; body: unknown }[] = [];
+    renderApp('/backups?self=1');
+    const card = await screen.findByRole('region', { name: /Olympos database/ }, T);
+    const change = within(card).queryByRole('button', { name: 'Change' });
+    if (change) await user.click(change);
+    const picker = within(card).getByRole('combobox', { name: 'Destination' });
+    await waitFor(() => expect((picker as HTMLButtonElement).disabled).toBe(false), T);
+    await user.click(picker);
+    const option = await screen.findByRole('option', { name: /eu-offsite/ }, T);
+    expect(option).toHaveTextContent(/Group · blob-weu-backups → minio-factory/);
+    await user.click(option);
+    const orig = window.fetch;
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PUT') sent.push({ method: 'PUT', body: JSON.parse(String(init.body)) });
+      return orig(input, init);
+    };
+    try {
+      await user.click(within(card).getByRole('button', { name: change ? 'Save' : 'Back up Olympos here' }));
+      await waitFor(() => expect(sent).toHaveLength(1), T);
+    } finally {
+      window.fetch = orig;
+    }
+    const group = db.destinationGroups.find((g) => g.name === 'eu-offsite')!;
+    expect(sent[0].body).toEqual({ destination_group_id: group.id });
+    const dd = (await within(card).findByText('eu-offsite', {}, T)).closest('dd')!;
+    expect(within(dd).getByRole('img', { name: 'Destination group' })).toBeInTheDocument();
   });
 });
