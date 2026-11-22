@@ -73,6 +73,21 @@ func SequentialSHA256(ctx context.Context, o Object) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
+// ErrObjectChanged is returned when the blob was replaced between opening it
+// and a later ranged read (the ETag no longer matches).
+var ErrObjectChanged = errors.New("the backup object changed while it was being read")
+
+// scrubbedError is an error whose message has been cleaned of credentials
+// (SAS query strings, signatures) while the original stays reachable for
+// errors.Is / errors.As (context.Canceled, ...).
+type scrubbedError struct {
+	msg string
+	err error
+}
+
+func (e *scrubbedError) Error() string { return e.msg }
+func (e *scrubbedError) Unwrap() error { return e.err }
+
 // rangeFetch returns a stream of exactly n bytes of the blob starting at off
 // (n > 0, off+n <= size).
 type rangeFetch func(ctx context.Context, off, n int64) (io.ReadCloser, error)
@@ -83,6 +98,9 @@ type rangeObject struct {
 	ctx   context.Context
 	size  int64
 	fetch rangeFetch
+	// scrub turns a storage or transport error (from the request or from
+	// reading the body) into one that is safe to show.
+	scrub func(error) error
 }
 
 func (o *rangeObject) Size() int64  { return o.size }
@@ -107,15 +125,15 @@ func (o *rangeObject) ReadAt(p []byte, off int64) (int, error) {
 	}
 	rc, err := o.fetch(o.ctx, off, want)
 	if err != nil {
-		return 0, err
+		return 0, o.scrub(err)
 	}
 	defer rc.Close()
 	n, err := io.ReadFull(rc, p[:want])
 	if err != nil {
 		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-			err = io.ErrUnexpectedEOF // the service sent fewer bytes than the range
+			return n, io.ErrUnexpectedEOF // the service sent fewer bytes than the range
 		}
-		return n, err
+		return n, o.scrub(err)
 	}
 	if int(want) < len(p) {
 		return n, io.EOF

@@ -438,6 +438,11 @@ func (f *FS) Open(ctx context.Context, path string) (Object, error) {
 	if err != nil {
 		return nil, err
 	}
+	// file resolved the directory; resolve the last component too so a
+	// symlink in the destination cannot point outside the mount.
+	if p, err = f.safeDir(p); err != nil {
+		return nil, err
+	}
 	fh, err := os.Open(p)
 	if err != nil {
 		return nil, err

@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -151,12 +153,14 @@ func TestSequentialSHA256HonoursContext(t *testing.T) {
 type fakeS3 struct {
 	mu       sync.Mutex
 	data     []byte
-	requests []string // "METHOD Range"
+	etag     string
+	hang     chan struct{} // when set, GETs signal here and wait for the client to go away
+	requests []string      // "METHOD Range"
 	srv      *httptest.Server
 }
 
 func newFakeS3(t *testing.T, bucket, key string, data []byte) *fakeS3 {
-	f := &fakeS3{data: data}
+	f := &fakeS3{data: data, etag: `"abc"`}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.requests = append(f.requests, r.Method+" "+r.Header.Get("Range"))
@@ -167,7 +171,15 @@ func newFakeS3(t *testing.T, bucket, key string, data []byte) *fakeS3 {
 			_, _ = w.Write([]byte(`<?xml version="1.0"?><Error><Code>NoSuchKey</Code><Message>no</Message></Error>`))
 			return
 		}
-		w.Header().Set("ETag", `"abc"`)
+		f.mu.Lock()
+		etag, hang := f.etag, f.hang
+		f.mu.Unlock()
+		if hang != nil && r.Method == http.MethodGet {
+			hang <- struct{}{}
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("ETag", etag)
 		// ServeContent answers HEAD and Range (206 + Content-Range).
 		http.ServeContent(w, r, "", time.Unix(1_700_000_000, 0), bytes.NewReader(f.data))
 	}))
@@ -215,21 +227,102 @@ func TestS3Reader(t *testing.T) {
 	}
 }
 
-func TestS3ReaderHonoursContext(t *testing.T) {
-	f := newFakeS3(t, "bkt", "k", readerPayload(1000))
+func newFakeS3Reader(t *testing.T, f *fakeS3, key string, ctx context.Context) blob.Object {
+	t.Helper()
 	s, err := blob.OpenS3(blob.S3Target{Name: "s3", Bucket: "bkt", EndpointOverride: f.srv.URL, PathStyle: true,
 		AccessKeyID: "ak", SecretKey: "sk"}, blob.StorageOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	o, err := s.Open(ctx, "k")
+	o, err := s.Open(ctx, key)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer o.Close()
+	t.Cleanup(func() { _ = o.Close() })
+	return o
+}
+
+func TestS3ReaderHonoursContext(t *testing.T) {
+	f := newFakeS3(t, "bkt", "k", readerPayload(1000))
+	ctx, cancel := context.WithCancel(context.Background())
+	o := newFakeS3Reader(t, f, "k", ctx)
 	cancel()
-	if _, err := o.ReadAt(make([]byte, 10), 0); err == nil {
-		t.Fatal("ReadAt after cancel must fail")
+	if _, err := o.ReadAt(make([]byte, 10), 0); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadAt after cancel: %v", err)
 	}
+}
+
+func TestS3ReaderCancelMidRequest(t *testing.T) {
+	f := newFakeS3(t, "bkt", "k", readerPayload(1000))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	o := newFakeS3Reader(t, f, "k", ctx)
+	f.mu.Lock()
+	f.hang = make(chan struct{}, 1)
+	f.mu.Unlock()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := o.ReadAt(make([]byte, 10), 0)
+		errc <- err
+	}()
+	<-f.hang
+	cancel()
+	select {
+	case err := <-errc:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("mid-request cancel: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("ReadAt did not return after cancel")
+	}
+}
+
+// A blob replaced after Open fails the next read instead of mixing bytes of
+// two versions.
+func TestS3ReaderPinsETag(t *testing.T) {
+	f := newFakeS3(t, "bkt", "k", readerPayload(1000))
+	o := newFakeS3Reader(t, f, "k", context.Background())
+	if _, err := o.ReadAt(make([]byte, 10), 0); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	f.etag = `"changed"`
+	f.mu.Unlock()
+	_, err := o.ReadAt(make([]byte, 10), 0)
+	if !errors.Is(err, blob.ErrObjectChanged) || !strings.Contains(err.Error(), "changed while it was being read") {
+		t.Fatalf("changed object: %v", err)
+	}
+}
+
+func TestFSReaderRefusesSymlinkOutsideMount(t *testing.T) {
+	root, outside := nfsRoot(t)
+	if err := os.WriteFile(filepath.Join(outside, "secret.zip"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := root + "/nas/olympos/backups"
+	w, err := blob.OpenFS(blob.FSTarget{Name: "nas", Path: dir}, blob.StorageOptions{NFSRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.EnsureDir(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.zip"), filepath.Join(w.Dir(), "link.zip")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Open(context.Background(), "link.zip"); err == nil || !strings.Contains(err.Error(), "outside mount") {
+		t.Fatalf("symlink to a file outside the mount: %v", err)
+	}
+	// A symlink that stays inside the mount is fine.
+	if _, err := w.Upload(context.Background(), "real.zip", strings.NewReader("data"), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(w.Dir(), "real.zip"), filepath.Join(w.Dir(), "alias.zip")); err != nil {
+		t.Fatal(err)
+	}
+	o, err := w.Open(context.Background(), "alias.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = o.Close()
 }

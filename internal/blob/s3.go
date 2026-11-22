@@ -307,7 +307,8 @@ func LoadS3Target(ctx context.Context, q store.Querier, kv secrets.KeyVault, env
 var _ Reader = (*S3)(nil)
 
 // Open implements Reader: the size comes from StatObject, every ReadAt is
-// one ranged GET. ctx bounds the returned Object's reads.
+// one ranged GET pinned to the object's ETag. ctx bounds the returned
+// Object's reads.
 func (s *S3) Open(ctx context.Context, path string) (Object, error) {
 	if err := validPath(path); err != nil {
 		return nil, err
@@ -316,28 +317,28 @@ func (s *S3) Open(ctx context.Context, path string) (Object, error) {
 	if err != nil {
 		return nil, errors.New(DescribeS3(err))
 	}
-	return &rangeObject{ctx: ctx, size: st.Size, fetch: func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
-		opts := minio.GetObjectOptions{}
-		if err := opts.SetRange(off, off+n-1); err != nil {
-			return nil, err
-		}
-		o, err := s.c.GetObject(ctx, s.bucket, path, opts)
-		if err != nil {
-			return nil, errors.New(DescribeS3(err))
-		}
-		return s3RangeBody{o}, nil
-	}}, nil
+	return &rangeObject{ctx: ctx, size: st.Size, scrub: scrubS3,
+		fetch: func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
+			opts := minio.GetObjectOptions{}
+			if err := opts.SetRange(off, off+n-1); err != nil {
+				return nil, err
+			}
+			if st.ETag != "" {
+				// A replaced object fails with 412 instead of mixing bytes of
+				// two versions.
+				if err := opts.SetMatchETag(st.ETag); err != nil {
+					return nil, err
+				}
+			}
+			return s.c.GetObject(ctx, s.bucket, path, opts)
+		}}, nil
 }
 
-// s3RangeBody maps minio errors of the lazy first read to readable ones.
-type s3RangeBody struct{ o *minio.Object }
-
-func (b s3RangeBody) Read(p []byte) (int, error) {
-	n, err := b.o.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		err = errors.New(DescribeS3(err))
+// scrubS3 maps minio errors of a range read (the first Read of the lazy
+// object reports request errors) to readable ones.
+func scrubS3(err error) error {
+	if minio.ToErrorResponse(err).StatusCode == http.StatusPreconditionFailed {
+		return &scrubbedError{msg: ErrObjectChanged.Error(), err: errors.Join(ErrObjectChanged, err)}
 	}
-	return n, err
+	return &scrubbedError{msg: DescribeS3(err), err: err}
 }
-
-func (b s3RangeBody) Close() error { return b.o.Close() }

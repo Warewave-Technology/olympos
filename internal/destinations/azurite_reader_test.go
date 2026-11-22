@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/container"
+
 	"github.com/Warewave-Technology/olympos/internal/blob"
 )
 
@@ -69,5 +71,21 @@ func TestAzureReader(t *testing.T) {
 
 	if _, err := r.Open(ctx, "pfx/missing.zip"); err == nil {
 		t.Fatal("opening a missing blob must fail")
+	}
+
+	// Replacing the blob after Open fails the next read (If-Match pin).
+	cc, err := container.NewClientWithSharedKeyCredential(ep+"/"+name, sharedKey(t), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cc.NewBlobClient(path).Delete(ctx, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Upload(ctx, path, bytes.NewReader([]byte("replacement")), "", nil); err != nil {
+		t.Fatal(err)
+	}
+	_, err = o.ReadAt(make([]byte, 10), 0)
+	if !errors.Is(err, blob.ErrObjectChanged) {
+		t.Fatalf("replaced blob: %v", err)
 	}
 }
