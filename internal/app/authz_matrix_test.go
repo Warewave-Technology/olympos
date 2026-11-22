@@ -144,7 +144,7 @@ func TestAuthzMatrix(t *testing.T) {
 	// Readable by every signed-in reader by design: global configuration
 	// that cluster-scoped operators pick from (destinations, notification
 	// channels; no secret material in the views; docs/security-review-v0.1.md).
-	openToAll := regexp.MustCompile(`^/api/v1/(me|principals/search|notifications/catalog|destinations/\{id\}|notifications/channels/\{id\})$`)
+	openToAll := regexp.MustCompile(`^/api/v1/(me|principals/search|notifications/catalog|destinations/\{id\}|destination-groups/\{id\}|notifications/channels/\{id\})$`)
 	for _, r := range routes {
 		path := fill(r.pattern, ids)
 		write := r.method != http.MethodGet
@@ -181,7 +181,7 @@ func fill(pattern string, ids map[string]string) string {
 		{"/api/v1/clusters/", "cluster"}, {"/api/v1/targets/", "target"}, {"/api/v1/backup/jobs/", "job"},
 		{"/api/v1/backup/runs/", "run"}, {"/api/v1/vaults/", "vault"}, {"/api/v1/change-requests/", "cr"},
 		{"/api/v1/audit/schedules/", "schedule"}, {"/api/v1/audit/runs/", "audit_run"}, {"/api/v1/images/", "digest"},
-		{"/api/v1/destinations/", "destination"}, {"/api/v1/notifications/channels/", "channel"},
+		{"/api/v1/destinations/", "destination"}, {"/api/v1/destination-groups/", "destination_group"}, {"/api/v1/notifications/channels/", "channel"},
 		{"/api/v1/registries/", "registry"}, {"/api/v1/grants/", "grant"},
 	}
 	id := uuid.NewString()
@@ -219,6 +219,13 @@ func seedProd(t *testing.T, db *store.DB) map[string]string {
 		t.Fatal(err)
 	}
 	q("destination", `INSERT INTO destinations (name, account, container, prefix, auth) VALUES ('prod-dest', 'acct', 'backups', 'p', 'managed_identity') RETURNING id::text`)
+	q("destination_b", `INSERT INTO destinations (name, account, container, prefix, auth) VALUES ('prod-dest-b', 'acct', 'backups-b', 'p', 'managed_identity') RETURNING id::text`)
+	q("destination_group", `INSERT INTO destination_groups (name) VALUES ('prod-group') RETURNING id::text`)
+	for i, d := range []string{ids["destination"], ids["destination_b"]} {
+		if _, err := db.Exec(ctx, `INSERT INTO destination_group_members (group_id, destination_id, position) VALUES ($1, $2, $3)`, ids["destination_group"], d, i); err != nil {
+			t.Fatal(err)
+		}
+	}
 	q("job", `INSERT INTO backup_jobs (target_id, destination_id, cron, timezone) VALUES ($1, $2, '0 2 * * *', 'UTC') RETURNING id::text`, ids["target"], ids["destination"])
 	q("run", `INSERT INTO backup_runs (job_id, trigger, status, blob_path, sha256) VALUES ($1, 'manual', 'succeeded', 'p/x.zip', 'abc') RETURNING id::text`, ids["job"])
 	q("vault", `INSERT INTO vaults (target_id, provider, status) VALUES ($1, 'hashicorp', 'discovered') RETURNING id::text`, vt)

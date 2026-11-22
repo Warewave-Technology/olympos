@@ -102,6 +102,36 @@ The server checks again every hour, so the Dashboard item goes away within an ho
 checks at once). When the check passes again, the log says *Key Vault purge protection is on: the KEK is
 recoverable*.
 
+## A backup is incomplete (Partial)
+
+A run shows **Partial**, the Dashboard shows *Backup incomplete · \<service\> · missing \<destination\>*
+(*Olympos backup incomplete* for Olympos' own database), or Slack shows *Backup incomplete: ns/svc*. The job
+writes to a destination group and at least one member did not get its copy. The copies that were written
+are complete backups, so nothing is lost yet.
+
+Open the run under **Backups › Runs**. The *Copies* table shows each failed copy's error; the run's result
+repeats it as `<destination>: <error>`. Then open that destination under **Settings › Destinations**
+(**Edit**, **Test destination**): the test usually fails with the same error.
+
+| The error contains | Cause | Fix |
+|---|---|---|
+| `connection refused`, `no such host`, `i/o timeout` | The server cannot reach the storage endpoint: network, private endpoint, DNS or firewall, or the service is down. | Fix the path from the server to the endpoint. |
+| `SAS token expired` | The Azure Blob SAS has expired. | [Rotate it](#a-destinations-sas-token-expired). |
+| `AuthenticationFailed`, `AuthorizationPermissionMismatch`, `AccessDenied`, `InvalidAccessKeyId`, `403` | The credential is no longer valid or has lost a permission. | Renew the SAS or S3 key, or the managed identity's role assignment (read, write, tag). |
+| `ContainerNotFound`, `NoSuchBucket` | The container or bucket was deleted or renamed. | Recreate it, or point the destination at the right one. |
+| `stalled: no progress for 10m0s`, `stalled: upload did not finish within 10m0s after the end of the stream` | The destination accepted the connection but stopped taking data, for example a hanging NFS server or a throttled endpoint. Olympos detached it after 10 minutes so the other copies could finish. With `the upload did not return within 30s after it was cancelled and was left behind` the upload was stuck where Olympos cannot interrupt it, typically a write blocked in the kernel on a hard NFS mount whose server is gone: Olympos stops waiting for it after another 30 seconds, but that upload stays blocked in the server process (logged as *abandoning an upload*) until the kernel returns or olympos-server restarts. | Check the storage itself. For NFS, check the mount on the server host (a `stat` of the path hangs); once the NFS server is back, or after a restart of olympos-server, the blocked upload is gone. |
+| `is not writable by the server`, `no space left on device` | NFS: permissions or a full export. | Fix the export's owner or free space. |
+| `upload manifest:` | The data was written, its manifest was not, so the copy cannot be verified and counts as failed. | The same causes as above, usually a credential without create or write permission. |
+
+Olympos repairs on its own: after a partial run it queues up to three repair runs, marked *Repair*, that
+write only the missing copies. The first starts 5 minutes after the partial run, the second 30 minutes
+after the first, the third 2 hours after the second, as long as each starts inside the job's retry window
+(half the time to the next scheduled run). The partial run's details say when the next one starts. If the
+destination stayed down, the last repair failed too and sent *Backup failed* with the missing
+destination. Once the destination test passes, choose **Run now** on the job (a waiting repair does not
+block it), or wait for the next scheduled run: both write to every member again. *Backup incomplete* goes
+away when a repair or a later run has written every copy, or 48 hours after the run.
+
 ## A destination's SAS token expired
 
 Olympos warns 14 and 3 days before an Azure Blob SAS token expires (`sas.expiring`) and backups to that

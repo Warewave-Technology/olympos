@@ -1,13 +1,58 @@
 // Display helpers shared by Settings › Destinations and the backup wizard.
-import type { Destination, DestinationKind, DestinationTest } from '../api/types';
-import { daysUntil, relDateTime } from '../lib/format';
-import { CheckIcon } from './icons';
+import type { BackupJob, Destination, DestinationKind, DestinationLastSuccess, DestinationTest } from '../api/types';
+import { age, daysUntil, plural, relDateTime } from '../lib/format';
+import { CheckIcon, IconGroup } from './icons';
 import { Badge } from './kit';
 
 export const KIND_LABEL: Record<DestinationKind, string> = { azure_blob: 'Azure Blob', s3: 'S3', nfs: 'NFS' };
 
 export function KindBadge({ kind }: { kind: DestinationKind }) {
   return <Badge tone="mute">{KIND_LABEL[kind] ?? kind}</Badge>;
+}
+
+/** A destination group's name with the group marker (screen readers hear "Destination group"). */
+export function GroupName({ name, mono = true }: { name: string; mono?: boolean }) {
+  return (
+    <span className="grp">
+      <IconGroup className="ico-warn" label="Destination group" />
+      <span className={mono ? 'mono' : undefined}>{name}</span>
+    </span>
+  );
+}
+
+/** Where a job writes: its destination, or its group with the marker. */
+export function JobDestination({ job }: { job: Pick<BackupJob, 'destination' | 'destination_group'> }) {
+  if (job.destination_group) return <GroupName name={job.destination_group.name} />;
+  return <span className="mono">{job.destination?.name ?? '—'}</span>;
+}
+export const jobDestinationName = (job: Pick<BackupJob, 'destination' | 'destination_group'>) => job.destination_group?.name ?? job.destination?.name ?? '';
+
+/** One line per destination of a group: when its last successful copy was written (job rows, the self card). */
+export function LastCopies({ items, label }: { items: DestinationLastSuccess[]; label: string }) {
+  return (
+    <ul className="muted small" aria-label={label} style={{ listStyle: 'none', margin: '2px 0 0', padding: 0 }}>
+      {items.map((d) => (
+        <li key={d.destination_id}>
+          <span className="mono">{d.name}</span> ·{' '}
+          {d.last_success_at ? <span title={relDateTime(d.last_success_at)}>last copy {age(d.last_success_at)} ago</span> : 'no copy yet'}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Settings › Destinations "Used by": jobs, plus the groups the destination is in. */
+export function usedByLabel(d: Pick<Destination, 'jobs' | 'groups'>): string {
+  const jobs = plural(d.jobs, 'job');
+  return d.groups ? `${jobs} · in ${plural(d.groups, 'group')}` : jobs;
+}
+
+/** Why the server refuses to delete a destination, or null when it may go (same order as the API). */
+export function deleteRefusal(d: Pick<Destination, 'jobs' | 'groups' | 'copies'>): string | null {
+  if (d.groups) return `It is in ${plural(d.groups, 'destination group')}; remove it there first.`;
+  if (d.jobs > 0) return d.jobs === 1 ? '1 backup job uses it; move it to another destination first.' : `${plural(d.jobs, 'backup job')} use it; move them to another destination first.`;
+  if (d.copies) return `It holds copies of ${plural(d.copies, 'backup run')}. It is kept so their restore commands stay valid.`;
+  return null;
 }
 
 export function endpointHost(url: string | undefined): string {

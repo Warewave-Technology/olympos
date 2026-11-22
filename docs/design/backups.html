@@ -30,6 +30,11 @@ a{color:#83a598}a:hover{color:#8ec07c}
 .tabs a.on{color:#fbf1c7;border-bottom-color:#fabd2f}
 .opt{display:flex;gap:10px;align-items:flex-start;padding:12px;border:1px solid #504945;border-radius:8px;font-size:13px;cursor:pointer}
 .opt.on{border-color:#fabd2f;background:#32302f}
+.code{font-family:'JetBrains Mono',monospace;font-size:12.5px;line-height:1.6;background:#1d2021;border:1px solid #3c3836;border-radius:8px;padding:14px 16px;color:#ebdbb2;white-space:pre-wrap;word-break:break-all;margin:0}
+.note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
+.note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
+.grp{display:inline-flex;align-items:center;gap:6px}
+.btn.ic{padding:0;min-width:32px;width:32px}
 </style>
 </head>
 <body>
@@ -92,13 +97,89 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <table class="t">
 <thead><tr><th>Started</th><th>Target</th><th>Destination</th><th style="text-align: right">Size</th><th style="text-align: right">Duration</th><th>Result</th></tr></thead>
 <tbody>
+<tr><td class="mono">Today 11:00</td><td class="mono">orders-pg</td><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg>eu-offsite</span></td><td style="text-align: right">42 MB</td><td style="text-align: right">12 s</td><td><span class="badge warn">Partial</span> <span class="muted" style="font-size: 12px">1 of 2 copies</span></td></tr>
 <tr><td class="mono">Today 08:00</td><td class="mono">openbao</td><td>blob-weu-backups</td><td style="text-align: right">42 MB</td><td style="text-align: right">11 s</td><td><span class="badge ok">Succeeded</span></td></tr>
-<tr><td class="mono">Today 03:30</td><td class="mono">metrics-ch</td><td>blob-weu-backups</td><td style="text-align: right">—</td><td style="text-align: right">4 m 12 s</td><td><span class="badge crit">Failed · SAS expired</span></td></tr>
-<tr><td class="mono">Today 02:00</td><td class="mono">billing-pg</td><td>blob-weu-backups</td><td style="text-align: right">3.1 GB</td><td style="text-align: right">6 m 40 s</td><td><span class="badge ok">Succeeded</span></td></tr>
+<tr><td class="mono">Today 03:30</td><td class="mono">metrics-ch</td><td>blob-weu-backups</td><td style="text-align: right">&mdash;</td><td style="text-align: right">4 m 12 s</td><td><span class="badge crit">Failed &middot; SAS expired</span></td></tr>
+<tr><td class="mono">Today 02:20</td><td class="mono">billing-pg <span class="badge mute" style="margin-left: 4px">Repair</span></td><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg>eu-offsite</span></td><td style="text-align: right">3.1 GB</td><td style="text-align: right">6 m 52 s</td><td><span class="badge ok">Succeeded</span></td></tr>
+<tr class="sel"><td class="mono">Today 02:00</td><td class="mono">billing-pg</td><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg>eu-offsite</span></td><td style="text-align: right">3.1 GB</td><td style="text-align: right">6 m 40 s</td><td><span class="badge warn">Partial</span> <span class="muted" style="font-size: 12px">1 of 2 copies</span></td></tr>
+<tr><td class="mono">Yesterday 02:00</td><td class="mono">billing-pg</td><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg>eu-offsite</span></td><td style="text-align: right">3.0 GB</td><td style="text-align: right">6 m 31 s</td><td><span class="badge ok">Succeeded</span> <span class="muted" style="font-size: 12px">2 of 2 copies</span></td></tr>
 </tbody>
 </table>
 </div>
 <div style="height: 8px"></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="d1-t" style="flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Run &middot; billing-pg</div>
+<h2 id="d1-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Today 02:00</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Run detail. Partial: at least one copy was written and at least one was not.</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center"><span class="badge warn">Partial</span><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">eu-offsite</span></span><span class="muted" style="font-size: 12.5px">3.1 GB &middot; 6 m 40 s &middot; scheduled</span></div>
+<div>
+<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Copies</h3>
+<div style="overflow-x: auto; border: 1px solid #3c3836; border-radius: 8px">
+<table class="t">
+<thead><tr><th>Destination</th><th>Status</th><th style="text-align: right">Size</th><th>sha256</th><th>Tier</th><th>Error</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span></td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">3.1 GB</td><td><span class="mono">9f2c4a1e&hellip;7b30</span></td><td>daily</td><td class="muted">&mdash;</td></tr>
+<tr><td><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span></td><td><span class="badge crit">Failed</span></td><td style="text-align: right">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td style="color: #fc7f6f">PutObject: 503 SlowDown, upload aborted</td></tr>
+<tr><td><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span> <span class="badge mute" style="margin-left: 4px">Repair</span></td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">3.1 GB</td><td><span class="mono">c71d08b5&hellip;e2a9</span></td><td>daily</td><td class="muted">&mdash;</td></tr>
+</tbody>
+</table>
+</div>
+<div class="muted" style="font-size: 12px; margin-top: 8px">Each copy is verified by size and hash. The repaired copy comes from a later dump, so its sha256 differs.</div>
+</div>
+<div>
+<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Repair</h3>
+<div class="note">Missing copy completed by repair run <a href="#" class="mono">Today 02:20</a> at <span class="mono">02:27</span>. The run itself stays <span class="badge warn" style="margin: 0 2px">Partial</span> as the record of what happened.</div>
+</div>
+<div>
+<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Restore</h3>
+<fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
+<legend class="lbl">Restore from copy</legend>
+<label class="opt on"><input type="radio" name="copy" checked style="margin-top: 2px"><span><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span><br><span class="muted" style="font-size: 12px">First successful copy in member order &middot; taken 02:00</span></span></label>
+<label class="opt"><input type="radio" name="copy" style="margin-top: 2px"><span><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span><br><span class="muted" style="font-size: 12px">Completed later by a repair, taken at 02:21</span></span></label>
+</fieldset>
+<pre class="code" style="margin-top: 12px">az storage blob download --auth-mode login --account-name stolympweu01 \
+  --container-name backups --name billing-pg/2026-11-22T02-00-00Z/billing.dump \
+  --file backup.dump
+sha256sum backup.dump   # must match the sha256 of this copy: 9f2c4a1e&hellip;7b30</pre>
+<div class="muted" style="font-size: 12px; margin-top: 8px">Commands use the selected copy's destination. Failed copies are not listed.</div>
+</div>
+<div style="display: flex; justify-content: flex-end"><button class="btn">Close</button></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="d2-t" style="flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Run &middot; orders-pg</div>
+<h2 id="d2-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Today 11:00</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Run detail. A repair is still pending.</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center"><span class="badge warn">Partial</span><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">eu-offsite</span></span><span class="muted" style="font-size: 12.5px">42 MB &middot; 12 s &middot; scheduled</span></div>
+<div>
+<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Copies</h3>
+<div style="overflow-x: auto; border: 1px solid #3c3836; border-radius: 8px">
+<table class="t">
+<thead><tr><th>Destination</th><th>Status</th><th style="text-align: right">Size</th><th>sha256</th><th>Tier</th><th>Error</th></tr></thead>
+<tbody>
+<tr><td><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span></td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">42 MB</td><td><span class="mono">3ab49e10&hellip;51cf</span></td><td>daily</td><td class="muted">&mdash;</td></tr>
+<tr><td><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span></td><td><span class="badge crit">Failed</span></td><td style="text-align: right">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td style="color: #fc7f6f">dial tcp: i/o timeout</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+<div>
+<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Repair</h3>
+<div class="note warn">Not every copy was written. Repair queued: next attempt at <span class="mono">11:12</span>. It writes only to <span class="mono">s3-fra-offsite</span>.</div>
+</div>
+<div style="display: flex; justify-content: flex-end"><button class="btn">Close</button></div>
 </section>
 
 

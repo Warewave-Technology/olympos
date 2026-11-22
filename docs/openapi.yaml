@@ -254,18 +254,56 @@ paths:
       responses:
         "200": {description: Updated (check `warnings`), content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
         "409": {description: Name already used}
-        "422": {description: Invalid input or destination test failed, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTestFailed"}}}}
+        "422":
+          description: "Invalid input (`fields`), destination test failed (`test`), or the new location is already used by another member of a group this destination is in (`fields`, keyed by the changed location field: path, bucket, account, container, endpoint_override or prefix)."
+          content: {application/json: {schema: {oneOf: [{$ref: "#/components/schemas/DestinationTestFailed"}, {$ref: "#/components/schemas/FieldErrors"}]}}}
     delete:
       tags: [backups]
       responses:
         "204": {description: Deleted}
-        "409": {description: Used by backup jobs}
+        "409": {description: "Used by backup jobs, a member of a destination group, or holds copies of backup runs (`copies` > 0): such a destination is kept so the restore commands of those runs stay valid."}
   /destinations/{id}/test:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [backups]
       responses:
         "200": {description: Report, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTest"}}}}
+
+  /destination-groups:
+    get:
+      tags: [backups]
+      summary: Destination groups (readable by any role, like destinations). Members are in position order; `jobs` is only a count.
+      responses:
+        "200":
+          description: Destination groups
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/DestinationGroup"}}}}}}
+    post:
+      tags: [backups]
+      summary: Create a destination group (admin, scope all). A backup job that targets a group writes one dump to every member. 2 to 4 distinct destinations, any mix of kinds; two members must not write to the same location.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroupInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "403": {description: Not an admin with scope all}
+        "422": {description: "Invalid input (fields: name, description, member_ids)"}
+  /destination-groups/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [backups]
+      responses:
+        "200": {description: Destination group, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "404": {description: Unknown group}
+    patch:
+      tags: [backups]
+      summary: Partial update (absent fields keep their value). `member_ids` replaces the member list and its order; existing backups are not copied to an added destination, and nothing is deleted from a removed one.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroupInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "422": {description: "Invalid input (fields: name, description, member_ids)"}
+    delete:
+      tags: [backups]
+      responses:
+        "204": {description: Deleted (the member destinations stay)}
+        "409": {description: Used by backup jobs}
 
   # ------------------------------------------------------------ backups (M2)
   /backup/jobs:
@@ -283,7 +321,7 @@ paths:
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
-        "422": {description: "Validation (cron, timezone, credential.*, destination_id, ...)"}
+        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, ...). Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
   /backup/jobs/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -311,7 +349,7 @@ paths:
             schema: {type: object, properties: {trigger: {type: string, enum: [manual, test], default: manual}}}
       responses:
         "202": {description: Queued, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
-        "409": {description: A run of this job is already queued or running, or the target is gone}
+        "409": {description: "A run of this job is already queued or running, or the target is gone. A repair waiting for its not_before does not count."}
   /backup/clusters:
     get:
       tags: [backups]
@@ -335,8 +373,8 @@ paths:
                         candidates: {type: integer, description: targets without a job}
                         jobs: {type: integer}
                         jobs_enabled: {type: integer}
-                        last_24h: {type: object, properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}}}
-                        last_success_at: {type: [string, "null"], format: date-time}
+                        last_24h: {type: object, description: "original runs by outcome (repair runs are not counted); a partial run whose repair succeeded counts as succeeded; partial = wrote some of its copies and its repairs did not complete them", properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}, partial: {type: integer}}}
+                        last_success_at: {type: [string, "null"], format: date-time, description: finish time of the newest restorable run (succeeded or partial)}
                         bytes_30d: {type: integer}
   /backup/runs:
     get:
@@ -353,8 +391,11 @@ paths:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
       tags: [backups]
+      parameters:
+        - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from: the run's own copy there, else the newest copy a repair completed there. Default: the first succeeded copy of the run in member order."}
       responses:
-        "200": {description: "Run; restore = ready-to-copy restore commands for a successful run (F19), else null", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}}}]}}}}
+        "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}, next_repair_at: {type: [string, "null"], format: date-time, description: "Partial run with a repair queued: when the repair starts (its not_before), else null"}}}]}}}}
+        "422": {description: "copy is not a destination id, or the run has no successful copy in that destination"}
   /backup/test-connection:
     post:
       tags: [backups]
@@ -379,8 +420,11 @@ paths:
     get:
       tags: [backups]
       summary: The built-in olympos-self job (Olympos' own database) and its last 20 runs. Global read.
+      parameters:
+        - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from (the guide is for the latest succeeded or partial original run): that run's own copy there, else the newest copy a repair completed there. Default: the first succeeded copy of the run in member order."}
       responses:
         "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
+        "422": {description: "copy is not a destination id, or the latest restorable run has no successful copy in that destination"}
     put:
       tags: [backups]
       summary: Configure the olympos-self job (global admin). There is no DELETE; the job is built in.
@@ -390,7 +434,8 @@ paths:
             schema:
               type: object
               properties:
-                destination_id: {type: string}
+                destination_id: {type: string, description: "Write to one destination. Exactly one of destination_id and destination_group_id when the job is first configured; later, setting one clears the other and leaving both out keeps the current one."}
+                destination_group_id: {type: string, description: "Write the dump to every destination of a group (docs/design/destination-groups.md)."}
                 cron: {type: string, description: "Default 30 2 * * *"}
                 timezone: {type: string}
                 retention: {$ref: "#/components/schemas/Retention"}
@@ -399,14 +444,14 @@ paths:
       responses:
         "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
         "403": {description: Not a global admin}
-        "422": {description: Field errors}
+        "422": {description: "Field errors (destination_id: neither or both of destination_id and destination_group_id, or an unknown destination; destination_group_id: an unknown group)"}
   /backup/self/run:
     post:
       tags: [backups]
       summary: Queue a manual olympos-self run (global operate).
       responses:
         "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {run_id: {type: string}}}}}}
-        "409": {description: Not configured yet, or a run is already queued/running}
+        "409": {description: "Not configured yet, or a run is already queued/running (a repair waiting for its not_before does not count)"}
   /backup/schedule-preview:
     get:
       tags: [backups]
@@ -1135,7 +1180,7 @@ components:
           items:
             type: object
             properties:
-              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, kek_purgeable, kek_recovery_unknown]}
+              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, backup_partial, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, self_backup_partial, kek_purgeable, kek_recovery_unknown]}
               severity: {type: string, enum: [crit, warn]}
               label: {type: string}
               detail: {type: string}
@@ -1263,8 +1308,40 @@ components:
         last_test_ok: {type: [boolean, "null"]}
         last_test: {$ref: "#/components/schemas/DestinationTest"}
         jobs: {type: integer}
+        groups: {type: integer, description: Number of destination groups this destination is a member of}
+        copies: {type: integer, description: "Number of backup runs with a copy record (succeeded or failed) on this destination. A destination with copies cannot be deleted: the records keep those runs' restore commands pointing at it."}
         created_at: {type: string, format: date-time}
         warnings: {type: array, items: {type: string}, description: "Only on create/patch responses: things the admin must see (credential can delete, account SAS, expiry < 14 days)"}
+    DestinationGroupInput:
+      type: object
+      description: Create requires `name` and `member_ids`; patch takes any of them.
+      properties:
+        name: {type: string, maxLength: 80}
+        description: {type: string, maxLength: 500}
+        member_ids:
+          type: array
+          minItems: 2
+          maxItems: 4
+          items: {type: string, format: uuid}
+          description: Destination ids in order (the first is the default restore copy). Distinct, existing, and no two writing to the same location (same kind, location and prefix).
+    DestinationGroup:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string}
+        members:
+          type: array
+          description: In position order.
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              name: {type: string}
+              kind: {type: string, enum: [azure_blob, s3, nfs]}
+        jobs: {type: integer, description: "Number of backup jobs that use the group (deleted jobs included). Never the jobs themselves."}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     DestinationMount:
       type: object
       description: A volume mounted into the server for NFS destinations (Helm value nfsMounts).
@@ -1298,6 +1375,12 @@ components:
             notes: {type: array, items: {type: string}}
         error: {type: string}
         probe_path: {type: string, description: "{prefix}/.olympos-probe/<uuid>"}
+    FieldErrors:
+      type: object
+      description: A 422 body that names the refused fields.
+      properties:
+        error: {type: string}
+        fields: {type: object, additionalProperties: {type: string}, description: Field name to the reason it was refused}
     DestinationTestFailed:
       type: object
       properties:
@@ -1325,17 +1408,17 @@ components:
       properties:
         target_id: {type: string}
         credential: {$ref: "#/components/schemas/CredentialInput"}
-        destination_id: {type: string}
+        destination_id: {type: string, description: "Write to one destination. Exactly one of destination_id and destination_group_id. On PATCH, setting one clears the other."}
+        destination_group_id: {type: string, description: "Write to every destination of a group (docs/design/destination-groups.md)."}
         engine_options:
           type: object
           description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}
-        notify_on_success: {type: boolean, description: "Send backup.succeeded for this job (default false; routed like other events, job channel overrides)"}
         enabled: {type: boolean}
         notify_channel_id: {type: [string, "null"]}
-        notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3)."}
+        notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3; default false). Routed like other events; the job's channel overrides the routing."}
     BackupJob:
       type: object
       properties:
@@ -1343,7 +1426,8 @@ components:
         target: {$ref: "#/components/schemas/Target"}
         engine: {type: string}
         credential: {type: object, properties: {id: {type: string}, source: {type: string}, ref: {type: string}, username: {type: string}}}
-        destination: {type: object, properties: {id: {type: string}, name: {type: string}}}
+        destination: {type: [object, "null"], description: "Set for a job that writes to one destination, else null.", properties: {id: {type: string}, name: {type: string}}}
+        destination_group: {type: [object, "null"], description: "Set for a job that writes to a destination group, else null.", properties: {id: {type: string}, name: {type: string}, members: {type: array, items: {type: string}, description: "Member destination names in position order"}}}
         engine_options: {type: object}
         cron: {type: string}
         timezone: {type: string}
@@ -1353,10 +1437,20 @@ components:
         notify_channel_id: {type: [string, "null"]}
         notify_on_success: {type: boolean}
         next_run_at: {type: [string, "null"], format: date-time}
-        last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}]}
+        last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}], description: "Latest non-test run; a repair waiting for its not_before is skipped"}
+        destinations_last_success:
+          type: array
+          description: "Per current destination of the job (its destination, or its group's members in position order): when the job last wrote a successful copy there. Repairs count, dry runs do not. A succeeded run from before destination groups counts for the job's destination."
+          items: {$ref: "#/components/schemas/DestinationLastSuccess"}
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
         estimated_monthly_cost: {type: [number, "null"], description: "estimated_monthly_bytes / GiB x cluster egress_rate_per_gb (when set)"}
         created_at: {type: string, format: date-time}
+    DestinationLastSuccess:
+      type: object
+      properties:
+        destination_id: {type: string, format: uuid}
+        name: {type: string}
+        last_success_at: {type: [string, "null"], format: date-time, description: "When the latest successful copy there finished; null if there is none"}
     RestoreGuide:
       type: [object, "null"]
       properties:
@@ -1364,6 +1458,18 @@ components:
         steps:
           type: array
           items: {type: object, properties: {title: {type: string}, commands: {type: string}, note: {type: string}}}
+        copies:
+          type: array
+          description: "The succeeded copies of the run in member order (a failed copy is never listed, even when its data blob landed), then, for an original run, the succeeded copies its repairs completed later, by repair start. The selected one is what the steps are built from (blob path, destination, and the manifest of the run that wrote it). copy=<destination id> selects the run's own copy there, else the newest repair copy there. A repair run's guide lists its own copies only."
+          items:
+            type: object
+            properties:
+              destination_id: {type: string, format: uuid}
+              name: {type: string}
+              kind: {type: string, enum: [azure_blob, s3, nfs]}
+              selected: {type: boolean}
+              run_id: {type: string, format: uuid, description: "The run that wrote this copy: the guide's run, or one of its repairs (the copy was completed later by a repair)"}
+              taken_at: {type: [string, "null"], format: date-time, description: "When the run that wrote this copy started"}
     AuditSettings:
       type: object
       properties:
@@ -1381,16 +1487,18 @@ components:
           - type: object
             properties:
               id: {type: string}
-              destination_id: {type: string}
-              destination_name: {type: string}
+              destination_id: {type: [string, "null"], description: "Set when the job writes to one destination"}
+              destination_group_id: {type: [string, "null"], description: "Set when the job writes to every destination of a group"}
+              destination_name: {type: string, description: "Name of the destination or the group"}
               cron: {type: string}
               timezone: {type: string}
               retention: {$ref: "#/components/schemas/Retention"}
               enabled: {type: boolean}
               notify_channel_id: {type: [string, "null"]}
               created_at: {type: string, format: date-time}
-        runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}}
-        restore: {$ref: "#/components/schemas/RestoreGuide"}
+        runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}, description: "With copies, repair_of and destination_name like job runs; repairs are runs of the same job"}
+        restore: {$ref: "#/components/schemas/RestoreGuide", description: "Restore commands for the latest succeeded or partial original run (never a repair, which holds only the copies it completed), or null"}
+        destinations_last_success: {type: array, items: {$ref: "#/components/schemas/DestinationLastSuccess"}, description: "Like BackupJob.destinations_last_success, for the olympos-self job (empty until configured)"}
     BackupRun:
       type: object
       properties:
@@ -1400,7 +1508,7 @@ components:
         cluster_name: {type: string}
         engine: {type: string}
         trigger: {type: string, enum: [schedule, manual, test]}
-        status: {type: string, enum: [queued, running, succeeded, failed, missed]}
+        status: {type: string, enum: [queued, running, succeeded, failed, missed, partial], description: "partial = a destination group run that wrote some but not all of its copies"}
         scheduled_for: {type: [string, "null"], format: date-time}
         tier: {type: string, enum: ["", daily, weekly, monthly, test], description: "GFS tier = blob index tag olympos-tier (test for dry runs)"}
         started_at: {type: [string, "null"], format: date-time}
@@ -1410,8 +1518,26 @@ components:
         blob_path: {type: string}
         sha256: {type: string}
         error: {type: string, description: "Secrets scrubbed; agent_disconnected: … when the agent was gone (retried after the reconnect, see attempt)"}
-        attempt: {type: integer, description: "1 = first attempt; > 1 = retried after the agent reconnected (F18, max 3, inside half the interval to the next activation)"}
+        attempt: {type: integer, description: "Counts every run queued for one activation (or manual request): 1 = the first; +1 for each retry after an agent disconnect (F18, retried below attempt 3, inside half the interval to the next activation) and for each repair of a partial run (repair_of set)"}
         created_at: {type: string, format: date-time}
+        repair_of: {type: [string, "null"], format: uuid, description: "The run whose missing copies this run completes"}
+        not_before: {type: [string, "null"], format: date-time, description: "A queued run is not started before then; set on repairs (5 min after the partial run, 30 min after the first repair, 2 h after the second), null = as soon as a worker is free"}
+        destination_name: {type: string, description: "The destination the run wrote to when it wrote to exactly one, else the job's destination or group name"}
+        copies:
+          type: array
+          description: "One result per destination, in the order the run wrote them; empty for runs from before destination groups."
+          items:
+            type: object
+            properties:
+              destination_id: {type: string, format: uuid}
+              destination_name: {type: string}
+              destination_kind: {type: string, enum: [azure_blob, s3, nfs]}
+              status: {type: string, enum: [succeeded, failed]}
+              blob_path: {type: string, description: "May be set on a failed copy (the data blob landed, the manifest did not); it is not a restore source."}
+              bytes: {type: integer}
+              sha256: {type: string}
+              tier: {type: string}
+              error: {type: string}
     ConnectionTest:
       type: object
       properties:

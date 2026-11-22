@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import type { ChangeRequest, SecretDetail, Vault } from '../api/types';
+import type { BackupRun, BackupRunCopy, BackupRunDetail, ChangeRequest, RestoreGuide, SecretDetail, Vault } from '../api/types';
 import { Drawer, SecretValue } from '../ui/kit';
+import { dateTime } from '../lib/format';
 
 afterEach(() => {
   cleanup();
@@ -166,5 +167,188 @@ describe('vault key table', () => {
     expect(masks.length).toBeGreaterThanOrEqual(6);
     expect(document.body.innerHTML).not.toContain(canary);
     fireEvent.keyDown(document, { key: 'Escape' });
+  });
+});
+
+function renderRunDialog(body: object) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })),
+  );
+  return import('../ui/BackupRunDialog').then(({ BackupRunDialog }) =>
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <BackupRunDialog id="r1" onClose={() => {}} />
+      </QueryClientProvider>,
+    ),
+  );
+}
+
+const partialRun = (over: Partial<BackupRunDetail> = {}) => ({
+  id: 'r1', job_id: 'j1', target_service: 'billing-pg', cluster_name: 'prod', engine: 'postgresql', trigger: 'schedule', status: 'partial', scheduled_for: null, tier: 'daily',
+  started_at: '2026-11-22T02:00:00Z', finished_at: '2026-11-22T02:06:40Z', bytes: 3.1e9, wire_bytes: 3.1e9, blob_path: 'p/a.zip', sha256: '9f2c4a1e5d6c7b30',
+  error: 'minio-factory: PutObject: 503 SlowDown', destination_name: 'eu-offsite', repair_of: null,
+  copies: [
+    { destination_id: 'd1', destination_name: 'blob-weu-backups', destination_kind: 'azure_blob', status: 'succeeded', blob_path: 'p/a.zip', bytes: 3.1e9, sha256: '9f2c4a1e5d6c7b30', tier: 'daily', error: '' },
+    { destination_id: 'd2', destination_name: 'minio-factory', destination_kind: 's3', status: 'failed', blob_path: '', bytes: 0, sha256: '', tier: '', error: 'PutObject: 503 SlowDown' },
+  ],
+  restore: { doc: 'docs/restore.md#postgresql', steps: [{ title: 'Download', commands: 'az storage blob download' }], copies: [{ destination_id: 'd1', name: 'blob-weu-backups', kind: 'azure_blob', selected: true, run_id: 'r1', taken_at: '2026-11-22T02:00:00Z' }] },
+  ...over,
+});
+
+describe('repair note of a partial run', () => {
+  it('says when the queued repair starts', async () => {
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    await renderRunDialog(partialRun({ next_repair_at: at }));
+    const note = await screen.findByText(/Repair queued: next attempt at/);
+    expect(note).toHaveTextContent(`Repair queued: next attempt at ${dateTime(at)}`);
+    expect(screen.queryByText(/when they are used up/)).not.toBeInTheDocument();
+  });
+
+  it('a repair that is due but not started yet is not "next attempt at" a past time', async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    await renderRunDialog(partialRun({ next_repair_at: past }));
+    expect(await screen.findByText(/Repair due now; it starts when a worker is free \(and the agent is connected\)\./)).toBeInTheDocument();
+    expect(screen.queryByText(/next attempt at/)).not.toBeInTheDocument();
+  });
+
+  it('the dialog of a waiting repair says when it starts', async () => {
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    await renderRunDialog(partialRun({ id: 'r2', status: 'queued', error: '', repair_of: 'r1', not_before: at, copies: [], restore: null } as never));
+    expect(await screen.findByText(`Queued · starts ${dateTime(at)}`)).toHaveClass('badge');
+  });
+
+  it('without a queued repair, says what happens to the missing copy', async () => {
+    await renderRunDialog(partialRun({ next_repair_at: null }));
+    expect(
+      await screen.findByText(/Olympos completes missing copies with repair runs inside the job's retry window; when they are used up, the copy stays missing until the next scheduled run\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Repair queued/)).not.toBeInTheDocument();
+  });
+
+  it('clamps long errors: the badge carries the status only, the full text is one click away', async () => {
+    const long = 'upload: ' + 'PUT https://olympos-lab-azurite.olympos.svc.cluster.local:10000/devstoreaccount1/backups/groups/olympos-lab/lab/orders-pg/postgresql/2026/11/22/x.zip '.repeat(4) + 'dial tcp 10.96.0.1:10000: connect: connection refused';
+    const run = partialRun({ error: 'minio-factory: ' + long });
+    run.copies![1] = { ...run.copies![1], error: long };
+    const user = userEvent.setup();
+    await renderRunDialog(run);
+    const table = await screen.findByRole('table', { name: 'Copies' });
+    // Result: a short badge, the error below it, clamped
+    const badge = screen.getByText('Partial', { selector: '.badge' });
+    expect(badge).toHaveTextContent(/^Partial$/);
+    const cell = within(table).getAllByRole('row')[2].lastElementChild as HTMLElement;
+    const clamp = cell.querySelector('.clamp') as HTMLElement;
+    expect(clamp).toHaveTextContent(long);
+    expect(clamp).toHaveAttribute('title', long);
+    const more = within(cell).getByRole('button', { name: 'Show the full error' });
+    expect(more).toHaveAttribute('aria-expanded', 'false');
+    await user.click(more);
+    expect(clamp).not.toHaveClass('clamp-3');
+    expect(within(cell).getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+    // short errors are not clamped and have no toggle
+    expect(within(within(table).getAllByRole('row')[1]).queryByRole('button')).not.toBeInTheDocument();
+  });
+});
+
+describe('run without restore commands', () => {
+  // A run from before destination groups of a job that moved to a group: no copy row says where it went.
+  it('a real run says why its restore commands are unavailable and where the backup is', async () => {
+    await renderRunDialog(partialRun({ status: 'succeeded', error: '', trigger: 'schedule', copies: [], restore: null, blob_path: 'olympos/prod/billing-pg/x.zip', destination_name: 'eu-offsite' }));
+    const note = await screen.findByText(/Restore commands are unavailable: the job no longer writes to the destination this run used\./);
+    expect(note).toHaveTextContent('The backup is at olympos/prod/billing-pg/x.zip in that destination.');
+    expect(screen.queryByText(/Dry runs only check the setup/)).not.toBeInTheDocument();
+  });
+
+  it('a dry run says it is not a restorable backup', async () => {
+    await renderRunDialog(partialRun({ status: 'succeeded', error: '', trigger: 'test', copies: [], restore: null }));
+    expect(await screen.findByText('Dry runs only check the setup; they are not restorable backups.')).toBeInTheDocument();
+    expect(screen.queryByText(/Restore commands are unavailable/)).not.toBeInTheDocument();
+  });
+});
+
+describe('partial backup runs', () => {
+  it('a partial run is a warning, never a success, and shows its error', async () => {
+    const { RunBadge } = await import('../ui/status');
+    render(<RunBadge run={{ status: 'partial', error: 'minio-factory: dial tcp: i/o timeout' }} />);
+    const b = screen.getByText('Partial · minio-factory: dial tcp: i/o timeout');
+    expect(b).toHaveClass('badge', 'warn');
+    expect(b).not.toHaveClass('ok');
+  });
+
+  it('a long error is truncated in the badge, with the whole label as its tooltip', async () => {
+    const { RunBadge } = await import('../ui/status');
+    const error = 'lab-azurite: upload: ' + 'x'.repeat(200);
+    render(<RunBadge run={{ status: 'partial', error }} />);
+    const b = screen.getByText(`Partial · ${error}`);
+    expect(b).toHaveClass('badge', 'warn', 'trunc');
+    expect(b).toHaveAttribute('title', `Partial · ${error}`);
+    cleanup();
+    render(<RunBadge run={{ status: 'partial', error: 'short' }} />);
+    expect(screen.getByText('Partial · short')).not.toHaveClass('trunc');
+  });
+
+  it('a repair waiting for its start says when it starts', async () => {
+    const { RunBadge } = await import('../ui/status');
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    render(<RunBadge run={{ status: 'queued', error: '', not_before: at }} />);
+    expect(screen.getByText(`Queued · starts ${dateTime(at)}`)).toHaveClass('badge', 'mute');
+    cleanup();
+    render(<RunBadge run={{ status: 'queued', error: '', not_before: new Date(Date.now() - 1000).toISOString() }} />);
+    expect(screen.getByText('Queued')).toBeInTheDocument();
+  });
+
+  it('the run dialog lists every copy and switches the restore commands to another copy', async () => {
+    const { BackupRunDialog } = await import('../ui/BackupRunDialog');
+    const copy = (over: Partial<BackupRunCopy>): BackupRunCopy => ({ destination_id: 'd1', destination_name: 'blob-weu-backups', destination_kind: 'azure_blob', status: 'succeeded', blob_path: 'p/a.zip', bytes: 3.1e9, sha256: '9f2c4a1e5d6c7b30', tier: 'daily', error: '', ...over });
+    const run: BackupRun = {
+      id: 'r1', job_id: 'j1', target_service: 'billing-pg', cluster_name: 'prod', engine: 'postgresql', trigger: 'schedule', status: 'partial', scheduled_for: null, tier: 'daily',
+      started_at: '2026-11-22T02:00:00Z', finished_at: '2026-11-22T02:06:40Z', bytes: 3.1e9, wire_bytes: 3.1e9, blob_path: 'p/a.zip', sha256: '9f2c4a1e5d6c7b30', error: 'minio-factory: PutObject: 503 SlowDown',
+      destination_name: 'eu-offsite', repair_of: null,
+      copies: [copy({}), copy({ destination_id: 'd2', destination_name: 'minio-factory', destination_kind: 's3', status: 'failed', blob_path: '', bytes: 0, sha256: '', tier: '', error: 'PutObject: 503 SlowDown' })],
+    };
+    const guide = (sel: 'd1' | 'd2'): RestoreGuide => ({
+      doc: 'docs/restore.md#postgresql',
+      steps: [{ title: 'Download the backup and its manifest', commands: sel === 'd1' ? 'az storage blob download --name p/a.zip' : 'aws s3 cp s3://olympos-backups/p/b.zip .' }],
+      copies: [
+        { destination_id: 'd1', name: 'blob-weu-backups', kind: 'azure_blob', selected: sel === 'd1', run_id: 'r1', taken_at: '2026-11-22T02:00:00Z' },
+        { destination_id: 'd2', name: 'minio-factory', kind: 's3', selected: sel === 'd2', run_id: 'r2', taken_at: '2026-11-22T02:21:00Z' },
+      ],
+    });
+    const urls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        urls.push(url);
+        const sel = new URL(url, 'http://x').searchParams.get('copy') === 'd2' ? 'd2' : 'd1';
+        return new Response(JSON.stringify({ ...run, restore: guide(sel) }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }),
+    );
+    const user = userEvent.setup();
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <BackupRunDialog id="r1" onClose={() => {}} />
+      </QueryClientProvider>,
+    );
+    const table = await screen.findByRole('table', { name: 'Copies' });
+    const rows = within(table).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toHaveTextContent('blob-weu-backups');
+    expect(within(rows[0]).getByText('Succeeded')).toHaveClass('ok');
+    expect(rows[1]).toHaveTextContent('minio-factory');
+    expect(within(rows[1]).getByText('Failed')).toHaveClass('crit');
+    expect(rows[1]).toHaveTextContent('PutObject: 503 SlowDown');
+    // the group marker: this run wrote to a group
+    expect(screen.getByRole('img', { name: 'Destination group' })).toBeInTheDocument();
+
+    const picker = screen.getByRole('group', { name: 'Restore from copy' });
+    expect(within(picker).getByRole('radio', { name: /blob-weu-backups/ })).toBeChecked();
+    const repaired = within(picker).getByRole('radio', { name: /minio-factory/ });
+    expect(repaired).not.toBeChecked();
+    expect(repaired.closest('label')).toHaveTextContent('Completed later by a repair, taken at');
+    expect(screen.getByText('az storage blob download --name p/a.zip')).toBeInTheDocument();
+    await user.click(repaired);
+    expect(await screen.findByText('aws s3 cp s3://olympos-backups/p/b.zip .')).toBeInTheDocument();
+    expect(urls.at(-1)).toBe('/api/v1/backup/runs/r1?copy=d2');
+    expect(within(picker).getByRole('radio', { name: /minio-factory/ })).toBeChecked();
   });
 });

@@ -123,9 +123,10 @@ allow it first (`az postgres flexible-server parameter set -g <rg> -s <server> -
 --value PGCRYPTO`); elsewhere install the PostgreSQL contrib package.
 
 Its state (grants, the internal CA key, change requests, schedules) must survive a lost cluster: after
-installing, open **Backups › Olympos database** and choose a destination. The built-in job
-`olympos-self` (`pg_dump -Fc`, daily by default, same manifest, tags and retention as every job) cannot
-be deleted; the Dashboard shows *Needs attention* until it has a destination. Restore:
+installing, open **Backups › Olympos database** and choose a destination, or a destination group to keep
+two independent copies ([Getting started](getting-started.md#6-write-each-backup-to-two-destinations)).
+The built-in job `olympos-self` (`pg_dump -Fc`, daily by default, same manifest, tags and retention as
+every job) cannot be deleted; the Dashboard shows *Needs attention* until it has a destination. Restore:
 `docs/restore-olympos.md`.
 
 **v0.1 runs as a single replica.** Availability comes from Kubernetes restarting the pod; agents reconnect
@@ -359,8 +360,8 @@ no buttons, never secret values.
 
 ## 6. Operating
 
-- `/metrics` on `:9090` (agents online, tunnels, backup durations/results, scheduler lag, outbox
-  backlog, change requests). `/healthz`, `/readyz`.
+- `/metrics` on `:9090` (agents online, tunnels, backup durations/results, backup copies per
+  destination, scheduler lag, outbox backlog, change requests). `/healthz`, `/readyz`.
 - Logs are JSON (slog) with a redaction layer.
 - Upgrade: read the release's upgrade notes and back up Olympos first; see [Upgrading](upgrade.md).
   Migrations run at start-up; downgrades are refused.

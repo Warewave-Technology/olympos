@@ -441,7 +441,175 @@ const stages = {
     await page.goto(`${URL}/backups`);
     await shot(page, 'backups');
   },
+
+  // Two copies of every backup: Azurite next to MinIO, a group of both, a job
+  // that writes to it. Then Azurite is taken off the network for one run:
+  // the run ends Partial and a repair run writes the missing copy.
+  async groups() {
+    const page = await signIn('admin');
+    await page.goto(`${URL}/settings/destinations`);
+    await page
+      .getByRole('button', { name: /New destination/ })
+      .first()
+      .click();
+    let dlg = page.getByRole('dialog');
+    await dlg.getByText('Azure Blob', { exact: true }).click();
+    await dlg.getByLabel('Name', { exact: true }).fill('lab-azurite');
+    await dlg.getByLabel('Storage account', { exact: true }).fill('devstoreaccount1');
+    await dlg.getByLabel('Container', { exact: true }).fill('backups');
+    await dlg.getByLabel(/Endpoint override/).fill('http://azurite.olympos.svc:10000/devstoreaccount1');
+    await dlg.getByText('SAS token', { exact: true }).click();
+    await dlg.getByText('Store in Olympos', { exact: true }).click();
+    await dlg.getByLabel('SAS token', { exact: true }).fill(azuriteSas());
+    await dlg.getByRole('button', { name: /^Save/ }).click();
+    await dlg.waitFor({ state: 'detached', timeout: 60_000 });
+
+    const groups = page.getByRole('region', { name: 'Groups' });
+    await groups.getByRole('button', { name: 'New group' }).first().click();
+    dlg = page.getByRole('dialog');
+    await dlg.getByLabel('Name', { exact: true }).fill('lab-copies');
+    await dlg.getByLabel('Description', { exact: true }).fill('MinIO and Azurite');
+    for (const name of ['lab-minio', 'lab-azurite']) {
+      await dlg.getByRole('combobox', { name: 'Add destination' }).click();
+      await page.getByRole('option', { name: new RegExp(name) }).click();
+      await dlg.getByRole('button', { name: 'Add', exact: true }).click();
+    }
+    await dump(page, 'group dialog');
+    await shot(page, 'start-22-destination-group', dlg);
+    await dlg.getByRole('button', { name: 'Create group' }).click();
+    await dlg.waitFor({ state: 'detached', timeout: 30_000 });
+    await groups.getByText('lab-copies').first().waitFor();
+    await shot(page, 'start-23-destination-groups');
+
+    // A second database, backed up to the group from the start.
+    await openWizard(page, 'edge', 'payments-pg');
+    await page.getByRole('button', { name: 'Next: credentials' }).click();
+    await page.getByText('Store in Olympos', { exact: true }).click();
+    await page.getByLabel('Username', { exact: true }).fill('backup');
+    await page.getByLabel('Password', { exact: true }).fill('edge-pg-password');
+    await page.getByRole('button', { name: 'Test connection' }).click();
+    await page.getByLabel('Privileges').waitFor({ timeout: 60_000 });
+    await page.getByRole('button', { name: 'Next: destination' }).click();
+    await page.locator('label.opt').filter({ hasText: 'lab-copies' }).click();
+    await dump(page, 'destination step with a group');
+    await shot(page, 'start-24-backup-group');
+    await page.getByRole('button', { name: /^Next/ }).click();
+    await page.getByRole('button', { name: 'Create job and run dry run' }).click();
+    await page.getByRole('button', { name: 'Enable backup' }).and(page.locator(':enabled')).waitFor({ timeout: 180_000 });
+    await dump(page, 'group dry run done');
+    await shot(page, 'start-25-backup-group-dry-run');
+    await page.getByRole('button', { name: 'Enable backup' }).click();
+    await page.waitForURL(/\/backups(?!\/new)/, { timeout: 30_000 });
+
+    // A run with two copies.
+    const ok = await runJob(page, 'payments-pg', (r) => !r.repair_of);
+    if (ok.status !== 'succeeded') throw new Error(`group run ended ${ok.status}: ${ok.error}`);
+    await openRun(page, 'payments-pg', (rows) => rows.filter({ hasText: '2 of 2 copies' }).filter({ hasNotText: 'Repair' }));
+    await dump(page, 'group run dialog');
+    await shot(page, 'start-26-run-copies', page.getByRole('dialog'));
+    await page.keyboard.press('Escape');
+  },
+
+  // Azurite unreachable for one run: the run is Partial, and the first repair
+  // run, queued for 5 minutes later, writes the missing copy once Azurite is back.
+  async partial() {
+    const page = await signIn('admin');
+    // Off the network, data kept (Azurite holds it in memory): the Service
+    // loses its endpoints. Kept-alive connections close after 90 s idle.
+    azurite(false);
+    let partial;
+    try {
+      await page.waitForTimeout(100_000);
+      partial = await runJob(page, 'payments-pg', (r) => !r.repair_of);
+      if (partial.status !== 'partial') throw new Error(`expected a partial run, got ${partial.status}: ${partial.error}`);
+    } finally {
+      azurite(true);
+    }
+    await page.goto(URL);
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    await attention.getByText('Backup incomplete').waitFor({ timeout: 30_000 });
+    await shot(page, 'start-27-backup-incomplete', attention);
+    // The repair waits in the queue (Queued · starts …), and the partial run says when.
+    await page.goto(`${URL}/backups?tab=runs`);
+    await page.getByRole('row').filter({ hasText: 'payments-pg' }).filter({ hasText: 'Repair' }).filter({ hasText: 'Queued · starts' }).first().waitFor();
+    await shot(page, 'start-28-partial-and-repair');
+    await openRun(page, 'payments-pg', (rows) => rows.filter({ hasText: 'Partial' }));
+    await page.getByRole('dialog').locator('.note').filter({ hasText: 'Repair queued: next attempt at' }).waitFor();
+    await dump(page, 'partial run dialog');
+    await shot(page, 'start-29-partial-run', page.getByRole('dialog'));
+    await page.keyboard.press('Escape');
+    // The repair starts 5 minutes after the partial run and writes only the missing copy.
+    const repair = await waitRun(page, 'payments-pg', (r) => r.repair_of === partial.id, 600_000);
+    if (repair.status !== 'succeeded') throw new Error(`repair ended ${repair.status}: ${repair.error}`);
+
+    // Olympos' own database to the group as well.
+    await page.goto(`${URL}/backups`);
+    const self = page.locator('section.self-backup');
+    await self.getByRole('button', { name: 'Change' }).click();
+    await self.getByRole('combobox', { name: 'Destination' }).click();
+    await page.getByRole('option', { name: /lab-copies/ }).click();
+    await self.getByRole('button', { name: 'Save', exact: true }).click();
+    await self.getByRole('button', { name: 'Change' }).waitFor();
+    await self.getByRole('button', { name: 'Run now' }).click();
+    await self.getByRole('button', { name: 'Restore commands' }).waitFor({ timeout: 180_000 });
+    await self.getByRole('button', { name: 'Restore commands' }).click();
+    await page.getByRole('dialog').getByText('Restore from copy').waitFor();
+    await dump(page, 'self restore');
+    await shot(page, 'start-30-olympos-restore-copy', page.getByRole('dialog'));
+    await page.keyboard.press('Escape');
+  },
 };
+
+/** The lab's Azurite SAS from ENV.md (lab only: signed with Azurite's well-known key). */
+function azuriteSas() {
+  const sas = env.match(/^\s*SAS: (\S+)/m)?.[1];
+  if (!sas) throw new Error('no Azurite SAS in test/e2e/.work/ENV.md: run ./test/e2e/env.sh');
+  return sas;
+}
+
+/** kubectl in the lab cluster's olympos namespace. */
+function lab(...args) {
+  execFileSync('kubectl', ['--context', 'kind-olympos-lab', '-n', 'olympos', ...args], { env: { ...process.env, KUBECONFIG }, stdio: 'inherit' });
+}
+
+/** Takes the lab's Azurite off the network (a Service without endpoints) or puts it back. */
+function azurite(on) {
+  lab('patch', 'service', 'azurite', '--type', 'merge', '-p', JSON.stringify({ spec: { selector: { app: on ? 'azurite' : 'azurite-stopped' } } }));
+}
+
+/** Runs of one target, newest first, through the API (the page's session). */
+async function runsOf(page, service) {
+  const res = await page.request.get(`${URL}/api/v1/backup/runs?limit=20`);
+  if (!res.ok()) throw new Error(`GET /backup/runs: ${res.status()}`);
+  return (await res.json()).items.filter((r) => r.target_service === service && r.trigger !== 'test');
+}
+
+/** Waits for the newest run of service that matches pick and has finished. */
+async function waitRun(page, service, pick, timeout = 240_000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    const r = (await runsOf(page, service)).find(pick);
+    if (r && !['queued', 'running'].includes(r.status)) return r;
+    if (Date.now() > end) throw new Error(`no finished ${service} run: ${JSON.stringify(r ?? null)}`);
+    await page.waitForTimeout(2000);
+  }
+}
+
+/** Run now on a job, then waits until that run has finished. */
+async function runJob(page, service, pick) {
+  const before = new Set((await runsOf(page, service)).map((r) => r.id));
+  await page.goto(`${URL}/backups?tab=jobs`);
+  await page.getByRole('button', { name: `Run ${service} now` }).click();
+  return waitRun(page, service, (r) => !before.has(r.id) && pick(r));
+}
+
+/** Opens the newest run of a target on the Runs tab that which() keeps. */
+async function openRun(page, service, which) {
+  await page.goto(`${URL}/backups?tab=runs`);
+  const rows = page.getByRole('row', { name: new RegExp(`(Restore commands and details|Details) of the ${service} run`) });
+  await which(rows).first().click();
+  await page.getByRole('dialog').waitFor();
+}
 
 try {
   for (const [name, run] of Object.entries(stages)) {

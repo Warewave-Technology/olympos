@@ -14,6 +14,7 @@ import { DataTable, type Column } from '../ui/DataTable';
 import { SelfBackupCard } from '../ui/SelfBackupCard';
 import { TLSNameChanges } from '../ui/TLSNameChanges';
 import { BackupRunDialog } from '../ui/BackupRunDialog';
+import { GroupName, JobDestination, LastCopies, jobDestinationName } from '../ui/destinations';
 import { ClusterOverview, ScopeCrumbs, ClusterOfflineNote, findCluster, resolveScope, scopeParam, useClusterList, type ClusterInfo, type OverviewRow, type Scope } from '../ui/clusterScope';
 
 type Tab = 'candidates' | 'jobs' | 'runs';
@@ -32,6 +33,8 @@ function jobStatus(j: BackupJob) {
   if (j.paused_reason) return <Badge tone="warn">Paused · {j.paused_reason === 'target_gone' ? 'target gone' : j.paused_reason}</Badge>;
   if (!j.enabled) return <Badge tone="mute">Disabled</Badge>;
   if (j.last_run && (j.last_run.status === 'failed' || j.last_run.status === 'missed')) return <Badge tone="crit">Last run {j.last_run.status}</Badge>;
+  // partial needs attention (a copy is missing) but is not a failure: a restorable backup exists
+  if (j.last_run?.status === 'partial') return <Badge tone="warn">Last run partial</Badge>;
   return <Badge tone="ok">{describeCron(j.cron)}</Badge>;
 }
 
@@ -55,6 +58,8 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
   const q = useQuery({ queryKey: ['backup-clusters'], queryFn: () => api.get<ItemList<BackupClusterSummary>>('/backup/clusters') });
   const rows = q.data?.items ?? [];
   const failing = rows.filter((r) => r.last_24h.failed + r.last_24h.missed > 0).length;
+  // partial alone is a warning: a restorable copy exists, another one is missing
+  const partialOnly = rows.filter((r) => r.last_24h.failed + r.last_24h.missed === 0 && (r.last_24h.partial ?? 0) > 0).length;
   const columns: Column<OverviewRow<BackupClusterSummary>>[] = [
     {
       id: 'jobs',
@@ -73,17 +78,18 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
     {
       id: 'day',
       header: 'Last 24 h',
-      sortValue: (r) => r.last_24h.failed * 1000 + r.last_24h.missed * 100 - r.last_24h.succeeded,
+      sortValue: (r) => r.last_24h.failed * 1000 + r.last_24h.missed * 100 + (r.last_24h.partial ?? 0) * 10 - r.last_24h.succeeded,
       defaultDir: 'desc',
       className: 'wrap',
       cell: (r) =>
-        r.last_24h.succeeded + r.last_24h.failed + r.last_24h.missed === 0 ? (
+        r.last_24h.succeeded + r.last_24h.failed + r.last_24h.missed + (r.last_24h.partial ?? 0) === 0 ? (
           <span className="muted">No runs</span>
         ) : (
           <span className="sev-chips">
             {r.last_24h.succeeded > 0 && <Badge tone="ok">{r.last_24h.succeeded} succeeded</Badge>}
             {r.last_24h.failed > 0 && <Badge tone="crit">{r.last_24h.failed} failed</Badge>}
             {r.last_24h.missed > 0 && <Badge tone="crit">{r.last_24h.missed} missed</Badge>}
+            {(r.last_24h.partial ?? 0) > 0 && <Badge tone="warn">{r.last_24h.partial} partial</Badge>}
           </span>
         ),
     },
@@ -102,6 +108,11 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
       {failing > 0 && (
         <div className="note crit" role="note">
           <b>{plural(failing, 'cluster')} with failed or missed runs in the last 24 hours.</b> Open a cluster to see its runs.
+        </div>
+      )}
+      {partialOnly > 0 && (
+        <div className="note warn" role="note">
+          <b>{plural(partialOnly, 'cluster')} with partial runs in the last 24 hours.</b> A copy is missing; repair runs complete it inside the job&apos;s retry window. Open a cluster to see its runs.
         </div>
       )}
       <TLSNameChanges focus={focusTLS} />
@@ -327,7 +338,7 @@ function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob
       id: 'target',
       header: 'Target',
       sortValue: (j) => j.target.service,
-      searchText: (j) => `${j.target.service} ${j.target.cluster_name} ${j.target.namespace} ${j.engine} ${j.destination.name}`,
+      searchText: (j) => `${j.target.service} ${j.target.cluster_name} ${j.target.namespace} ${j.engine} ${jobDestinationName(j)}`,
       cell: (j) => (
         <>
           <div className="mono">{j.target.service}</div>
@@ -347,7 +358,18 @@ function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob
         </>
       ),
     },
-    { id: 'dest', header: 'Destination', sortValue: (j) => j.destination.name, className: 'mono', cell: (j) => j.destination.name },
+    {
+      id: 'dest',
+      header: 'Destination',
+      sortValue: (j) => jobDestinationName(j),
+      cell: (j) => (
+        <>
+          <JobDestination job={j} />
+          {/* a group: when each member last got a copy (a missing copy shows here first) */}
+          {j.destination_group && !!j.destinations_last_success?.length && <LastCopies items={j.destinations_last_success} label={`Last copy per destination of ${j.target.service}`} />}
+        </>
+      ),
+    },
     { id: 'next', header: 'Next run', sortValue: (j) => (j.enabled ? j.next_run_at : null), className: 'mono', cell: (j) => (j.enabled && j.next_run_at ? formatInZone(j.next_run_at, j.timezone) : '—') },
     { id: 'last', header: 'Last run', sortValue: (j) => j.last_run?.status ?? null, cell: (j) => (j.last_run ? <RunBadge run={j.last_run} /> : <span className="muted">Never</span>) },
     {
@@ -366,7 +388,13 @@ function JobsTab({ jobsQ, canOperate, inCluster }: { jobsQ: Q<ItemList<BackupJob
       defaultDir: 'desc',
       cell: (j) => (j.estimated_monthly_cost != null ? `≈ ${money(j.estimated_monthly_cost)}` : <span className="muted">no rate</span>),
     },
-    { id: 'status', header: 'Status', sortValue: (j) => (j.paused_reason ? 1 : !j.enabled ? 2 : j.last_run && j.last_run.status !== 'succeeded' ? 0 : 3), cell: jobStatus },
+    {
+      id: 'status',
+      header: 'Status',
+      // failed first, then partial (needs attention, not failed), paused, disabled, healthy
+      sortValue: (j) => (j.paused_reason ? 2 : !j.enabled ? 3 : j.last_run?.status === 'partial' ? 1 : j.last_run && j.last_run.status !== 'succeeded' ? 0 : 4),
+      cell: jobStatus,
+    },
     {
       id: 'actions',
       header: 'Actions',
@@ -438,7 +466,7 @@ function RunsTab({ clusterName }: { clusterName?: string }) {
       <div className="card-head">
         <h2 id="runs-t">Runs</h2>
         <div className="pills" role="group" aria-label="Filter by result">
-          {['', 'succeeded', 'failed', 'missed', 'running'].map((s) => (
+          {['', 'succeeded', 'partial', 'failed', 'missed', 'running'].map((s) => (
             <button key={s} type="button" className="pill" aria-pressed={status === s} onClick={() => setStatus(s)}>
               {s ? s[0].toUpperCase() + s.slice(1) : 'All'}
             </button>
@@ -457,6 +485,12 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
     queryFn: () => api.get<ItemList<BackupRun>>('/backup/runs', { limit, status }),
     refetchInterval: 30_000,
   });
+  // A run's job targets a group: shared with the Jobs tab (same query), for runs that wrote no copy.
+  const jobsQ = useQuery({ queryKey: ['backup-jobs'], queryFn: () => api.get<ItemList<BackupJob>>('/backup/jobs') });
+  const groupJobs = new Set((jobsQ.data?.items ?? []).filter((j) => j.destination_group).map((j) => j.id));
+  // One copy: destination_name is that member, shown plainly. More, or none on a group job: the group.
+  const isGroupRun = (r: BackupRun) => (r.copies?.length ?? 0) > 1 || ((r.copies?.length ?? 0) === 0 && !r.repair_of && groupJobs.has(r.job_id));
+  const copiesOk = (r: BackupRun) => (r.copies ?? []).filter((c) => c.status === 'succeeded').length;
   const columns: Column<BackupRun>[] = [
     { id: 'started', header: 'Started', sortValue: (r) => r.started_at ?? r.scheduled_for, defaultDir: 'desc', className: 'mono', cell: (r) => relDateTime(r.started_at ?? r.scheduled_for) },
     {
@@ -468,6 +502,14 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         <>
           <span className="mono">{r.target_service}</span>
           {(showCluster ?? !compact) && <span className="mono muted small"> {r.cluster_name}</span>}
+          {r.repair_of && (
+            <>
+              {' '}
+              <Badge tone="mute" title="Completes the missing copies of an earlier partial run">
+                Repair
+              </Badge>
+            </>
+          )}
         </>
       ),
     },
@@ -480,7 +522,8 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         <>
           <span className="muted">{r.trigger === 'test' ? 'dry run' : r.trigger}</span>
           {r.tier && r.tier !== 'daily' ? <span className="chip">{r.tier}</span> : null}
-          {r.attempt && r.attempt > 1 ? (
+          {/* a repair's attempt counts the runs before it; the Repair badge already marks it */}
+          {r.attempt && r.attempt > 1 && !r.repair_of ? (
             <span className="chip" title="Retried after the agent reconnected">
               attempt {r.attempt}
             </span>
@@ -488,7 +531,12 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
         </>
       ),
     },
-    { id: 'dest', header: 'Destination', sortValue: (r) => r.destination_name || null, cell: (r) => r.destination_name || <span className="muted">—</span> },
+    {
+      id: 'dest',
+      header: 'Destination',
+      sortValue: (r) => r.destination_name || null,
+      cell: (r) => (!r.destination_name ? <span className="muted">—</span> : isGroupRun(r) ? <GroupName name={r.destination_name} mono={false} /> : r.destination_name),
+    },
     { id: 'size', header: 'Size', align: 'num', sortValue: (r) => r.bytes || null, defaultDir: 'desc', cell: (r) => (r.bytes ? bytes(r.bytes) : '—') },
     { id: 'wire', header: 'On the wire', align: 'num', hidden: compact, sortValue: (r) => r.wire_bytes || null, defaultDir: 'desc', cell: (r) => (r.wire_bytes ? bytes(r.wire_bytes) : '—') },
     {
@@ -497,9 +545,32 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
       align: 'num',
       sortValue: (r) => between(r.started_at, r.finished_at),
       defaultDir: 'desc',
-      cell: (r) => (r.status === 'running' || r.status === 'queued' ? 'in progress' : duration(between(r.started_at, r.finished_at))),
+      cell: (r) =>
+        r.status === 'queued' && r.not_before && Date.parse(r.not_before) > Date.now() ? (
+          <span className="muted">—</span> // a repair waiting for its start (the Result says when)
+        ) : r.status === 'running' || r.status === 'queued' ? (
+          'in progress'
+        ) : (
+          duration(between(r.started_at, r.finished_at))
+        ),
     },
-    { id: 'result', header: 'Result', sortValue: (r) => r.status, cell: (r) => <RunBadge run={r} /> },
+    {
+      id: 'result',
+      header: 'Result',
+      sortValue: (r) => r.status,
+      className: 'wrap',
+      cell: (r) => (
+        <>
+          <RunBadge run={r} />
+          {(r.copies?.length ?? 0) > 1 && r.status !== 'queued' && r.status !== 'running' && (
+            <span className="muted small">
+              {' '}
+              {copiesOk(r)} of {r.copies!.length} copies
+            </span>
+          )}
+        </>
+      ),
+    },
   ];
   const [open, setOpen] = useState<string | null>(null);
   return (
@@ -508,7 +579,7 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
       <DataTable
         label={compact ? 'Recent runs' : 'Backup runs'}
         onRowClick={(r) => setOpen(r.id)}
-        rowLabel={(r) => `${r.status === 'succeeded' ? 'Restore commands and details' : 'Details'} of the ${r.target_service} run of ${relDateTime(r.started_at ?? r.scheduled_for)}`}
+        rowLabel={(r) => `${r.status === 'succeeded' || r.status === 'partial' ? 'Restore commands and details' : 'Details'} of the ${r.target_service} run of ${relDateTime(r.started_at ?? r.scheduled_for)}`}
         what="backup runs"
         rows={q.data ? (clusterName ? q.data.items.filter((r) => r.cluster_name === clusterName) : q.data.items).slice(0, show ?? limit) : undefined}
         loading={q.isPending}

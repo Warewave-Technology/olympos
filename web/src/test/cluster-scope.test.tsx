@@ -143,4 +143,15 @@ describe('cluster overview pages', () => {
     await screen.findAllByText('billing-pg', {}, T);
     expect(screen.queryByText('orders-pg')).toBeNull(); // another cluster's candidate
   });
+
+  it('Backups: the overview flags clusters whose only problem is a partial run', async () => {
+    await renderApp('/backups');
+    await screen.findByRole('table', { name: 'Backups by cluster' }, T);
+    // oke-fra-erp has a failed run; prod-aks-weu-02 only a partial one
+    const crit = await screen.findByText('1 cluster with failed or missed runs in the last 24 hours.', {}, T);
+    expect(crit.closest('.note')).toHaveClass('crit');
+    const warn = screen.getByText('1 cluster with partial runs in the last 24 hours.');
+    expect(warn.closest('.note')).toHaveClass('warn');
+    expect(warn.closest('.note')).toHaveTextContent('A copy is missing');
+  });
 });

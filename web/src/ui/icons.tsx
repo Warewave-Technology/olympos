@@ -111,3 +111,20 @@ export const IconLock = (p: P) => (
     <path d="M8 11V8a4 4 0 0 1 8 0v3" />
   </Svg>
 );
+/** Two stacked squares: a destination group (several destinations, one dump). */
+export const IconGroup = (p: P) => (
+  <Svg viewBox="0 0 16 16" strokeWidth="1.6" {...p}>
+    <rect x="5.5" y="1.5" width="9" height="9" rx="2" />
+    <path d="M3.5 5.5A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2" />
+  </Svg>
+);
+export const IconArrowUp = (p: P) => (
+  <Svg viewBox="0 0 16 16" strokeWidth="1.8" {...p}>
+    <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" />
+  </Svg>
+);
+export const IconArrowDown = (p: P) => (
+  <Svg viewBox="0 0 16 16" strokeWidth="1.8" {...p}>
+    <path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" />
+  </Svg>
+);

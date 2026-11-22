@@ -4,7 +4,7 @@ import { ApiError, api } from '../../api/client';
 import type { Destination, DestinationInput, DestinationKind, DestinationMount, DestinationTest, DestinationTestFailed, ItemList, SecretSourceInput } from '../../api/types';
 import { date } from '../../lib/format';
 import { parseSas, type SasCheck } from '../../lib/sas';
-import { KIND_LABEL, TestReport } from '../../ui/destinations';
+import { KIND_LABEL, TestReport, deleteRefusal } from '../../ui/destinations';
 import { CheckIcon } from '../../ui/icons';
 import { Badge, Field, FormError, Modal, aria, fieldError, useAction, useToast } from '../../ui/kit';
 import { Select } from '../../ui/Select';
@@ -84,6 +84,7 @@ export function DestinationDialog({ dest, onClose }: { dest?: Destination; onClo
   const [reportNote, setReportNote] = useState<string | undefined>();
   const [saved, setSaved] = useState<Destination | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const refusal = dest ? deleteRefusal(dest) : null;
   const test = useAction<DestinationTest>();
   const save = useAction<Destination>();
   const del = useAction<boolean>();
@@ -497,12 +498,16 @@ export function DestinationDialog({ dest, onClose }: { dest?: Destination; onClo
         {confirmDelete && dest && (
           <div className="note crit" role="alertdialog" aria-labelledby="dst-del-t">
             <b id="dst-del-t">Delete {dest.name}?</b> Only the destination definition is removed; backups already stored there are not touched.
-            {dest.jobs > 0 && <> {dest.jobs} backup jobs use it — move them to another destination first; the server refuses otherwise.</>}
+            {refusal && (
+              <p id="dst-del-why" style={{ margin: '6px 0 0' }}>
+                <b>It cannot be deleted.</b> {refusal}
+              </p>
+            )}
             <div className="end" style={{ marginTop: 10 }}>
               <button type="button" className="btn sm" onClick={() => setConfirmDelete(false)}>
                 Keep it
               </button>
-              <button type="button" className="btn sm danger" onClick={() => void doDelete()} disabled={del.pending || dest.jobs > 0}>
+              <button type="button" className="btn sm danger" onClick={() => void doDelete()} disabled={del.pending || refusal !== null} aria-describedby={refusal ? 'dst-del-why' : undefined}>
                 Delete destination
               </button>
             </div>

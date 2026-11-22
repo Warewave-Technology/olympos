@@ -376,3 +376,40 @@ func TestTargetGonePausesJobs(t *testing.T) {
 		t.Fatalf("not resumed: %q %v", reason, last)
 	}
 }
+
+// Ruling A: a single-destination dry run reads exactly as before
+// destination groups.
+func TestDryRunStepsSingleDestination(t *testing.T) {
+	db := testutil.DB(t)
+	f := seed(t, db, "prod", nil, "online")
+	for _, tc := range []struct {
+		name, options      string
+		setup              func(*fakeBlobs)
+		want               string
+		detailAt           int
+		detail, lastDetail string
+	}{
+		{name: "success", want: "+agent +credential +engine +upload +manifest",
+			detailAt: 3, detail: "Wrote 14.6 KiB to dest (2.0 KiB on the wire)", lastDetail: "Manifest with checksum written"},
+		{name: "upload", setup: func(b *fakeBlobs) { b.fail = errors.New("503 ServerBusy") },
+			want: "+agent +credential +engine -upload", detailAt: 3, detail: "upload: 503 ServerBusy"},
+		{name: "open", setup: func(b *fakeBlobs) { b.openErr = errors.New("no credential") },
+			want: "+agent +credential -destination", detailAt: 2, detail: "open destination: no credential"},
+		{name: "engine", options: `{"fail_after_write":true}`,
+			want: "+agent +credential -engine", detailAt: 2, detail: "dump failed after writing"},
+		{name: "manifest", setup: func(b *fakeBlobs) { b.failManifest = errors.New("409 Conflict") },
+			want: "+agent +credential +engine +upload -manifest", detailAt: 3, detail: "Wrote 14.6 KiB", lastDetail: "upload manifest: 409 Conflict"},
+	} {
+		b := newBlobs("olympos")
+		if tc.setup != nil {
+			tc.setup(b)
+		}
+		w := newWorker(t, db, newDialer(f.ClusterID), b)
+		run := queue(t, db, addJob(t, db, f, jobOpts{options: tc.options}), "test", nil)
+		claimAndRun(t, w, run)
+		_, steps, names := runSteps(t, db, run)
+		if names != tc.want || steps[tc.detailAt].Detail != tc.detail || tc.lastDetail != "" && steps[len(steps)-1].Detail != tc.lastDetail {
+			t.Errorf("%s: %s %+v", tc.name, names, steps)
+		}
+	}
+}

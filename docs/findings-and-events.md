@@ -70,18 +70,21 @@ vault's cluster.
 | **Agent offline** · `<cluster> · <time>` | crit | The cluster is marked offline and was last seen longer ago than `agents.offlineAlertAfter` (default 5 minutes), the delay of the `agent.offline` message. | Check the agent pod and its outbound connection to the gateway. See [troubleshooting](troubleshooting.md). | *Settings › Clusters & agents* (that cluster) |
 | **Backup failed** · `<service> · <error>` | crit | In the last 48 hours, the latest finished run of a backup job failed. Test runs and failures marked `agent_disconnected: retrying` are left out. | Open the run, read the error and its steps, fix the cause, then run it again or wait for the next schedule. | *Backups* (that job) |
 | **Backup missed** · `<service>` | crit | In the last 48 hours, the latest run of a job was `missed`: the scheduler did not start it, or the agent stayed away past the window. | Check that the server was up and the agent connected at the scheduled time. | *Backups* (that job) |
+| **Backup incomplete** · `<service> · missing <destinations>` | warn | In the last 48 hours, the latest run of a job that writes to a [destination group](#partial-backups-and-repairs) was `partial`: some copies were written, the named ones were not, and no repair run has written them since. While a repair is running, or after one failed, the item stays. Only destinations the job still writes to are named: a destination removed from the group (or a job moved elsewhere) is no longer missing, and the item goes away when none is left. | Open the run: the *Copies* table shows each destination's error. Fix that destination and run its test under *Settings › Destinations*. Repairs run on their own inside the retry window; after that, run the job again or wait for the next schedule. See [troubleshooting](troubleshooting.md#a-backup-is-incomplete-partial). | *Backups* (that job) |
 | **TLS name changed** · `<ns>/<svc> asks for <name>; still verifying <pinned>` | crit | A target's `olympos.io/tls-server-name` annotation no longer matches the name Olympos pinned when it first saw the target. Backups and Vault calls keep verifying the pinned name. | If you expected the change, an admin of that cluster clicks *Accept new name* under *Backups*. If not, revert the annotation and find out who edited the Service. | *Backups* (*TLS name changed* card) |
 | **Olympos backup failed** · `<error>` | crit | The latest finished run of the built-in `olympos-self` job in the last 48 hours failed. | Open the *Olympos database* card under *Backups* and check the run and its destination. | *Backups* (*Olympos database* card) |
 | **Key Vault** · `purge protection is off (<level>): enable soft delete and purge protection` | crit | At the last check, the KEK's recovery level was not recoverable with purge protection. A dump of the Olympos database is useless without that key. | Turn on soft delete and purge protection on the vault ([below](#key-vault-purge-protection)). | *Backups* (*Olympos database* card) |
+| **Olympos backup incomplete** · `missing <destinations>` | warn | The same for the built-in `olympos-self` job, when it writes to a group. | As above, from the *Olympos database* card. | *Backups* (*Olympos database* card) |
 | **Critical CVEs** · `N new in M images` | crit | A critical CVE was first seen in the last 24 hours in an image running in your clusters. | Open *Security › Images*, sort by *Critical*, and use *Fix* (fixed-in version) to plan an image update. | *Security* |
 | **Olympos backup** · `choose where the Olympos database is backed up` | warn | The built-in `olympos-self` job has no destination yet. | An admin picks a destination on the *Olympos database* card. It runs daily at 02:30 UTC by default. | *Backups* (*Olympos database* card) |
 | **Key Vault** · `could not check purge protection of the KEK (needs keys/get)` | warn | The last check failed, usually because the server's identity cannot read the key's properties. | Grant the server identity `keys/get` on the key (the *Key Vault Crypto User* role includes it). | *Backups* (*Olympos database* card) |
 | **N approvals** · `waiting for you · oldest <time> left` | warn | Pending change requests you may approve and that you did not open yourself. *Time left* is the earliest expiry. | Review them under *Approvals* before they expire. | *Approvals* |
 | **End of life** · `N clusters on v1.x, …` | warn | At least one cluster runs a Kubernetes minor version past its upstream end of life. | Plan an upgrade. The *Version matrix* marks those versions *EOL*. | Dashboard, filtered to EOL clusters |
 
-The API names these kinds `agent_offline`, `backup_failed`, `backup_missed`, `target_tls_changed`,
-`self_backup_failed`, `kek_purgeable`, `critical_cves`, `self_backup_unset`, `kek_recovery_unknown`,
-`approvals` and `eol` (`GET /api/v1/dashboard`, field `attention`).
+The API names these kinds `agent_offline`, `backup_failed`, `backup_missed`, `backup_partial`,
+`target_tls_changed`, `self_backup_failed`, `self_backup_partial`, `kek_purgeable`, `critical_cves`,
+`self_backup_unset`, `kek_recovery_unknown`, `approvals` and `eol` (`GET /api/v1/dashboard`, field
+`attention`).
 
 The server checks the two Key Vault items at start and then **every hour**. After you fix the vault, the
 item goes away at the next check, within an hour; restarting the server checks at once. The server log
@@ -215,9 +218,10 @@ activity log still gets one row per item.
 
 | Event type | When it fires | Message (title · fields) | Grouped? |
 |---|---|---|---|
-| `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, and when a job is paused because its target is gone. | *Backup failed: ns/svc* · cluster, target, trigger, error. *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
-| `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away. | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
-| `backup.succeeded` | A backup run succeeded. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
+| `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, when a job is paused because its target is gone, and when the repairs of a [partial run](#partial-backups-and-repairs) give up. | *Backup failed: ns/svc* · cluster, target, trigger, error (and *missing* when repairs gave up). *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
+| `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed` (on an upgrade to v0.2, every channel that gets `backup.failed` is routed `backup.partial` too). | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error, next_attempt (when a repair is queued). *Backup incomplete: Olympos database (olympos-self)*. | No |
+| `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away (a repair that ends missed sends `backup.failed` when it gives up instead). | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
+| `backup.succeeded` | A backup run succeeded, or a repair run wrote every missing copy of a partial run. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
 | `cr.opened` | A Vault change request was opened and waits for approval. | *Change request waiting for approval* (link only). | No |
 | `cr.approved` | A change request was approved. | *Change request approved* · Vault. | No |
 | `cr.rejected` | A change request was rejected. | *Change request rejected* · Vault. | No |
@@ -240,10 +244,66 @@ Short agent blips send nothing. A cluster counts as offline after 60 seconds of 
 from when the agent was last seen. The message counts it from the later of that and the server's start,
 so a server that was down does not send one for every cluster.
 
+### Partial backups and repairs
+
+A job can write to a **destination group** instead of one destination: one dump per run, one copy in each
+member (*Settings › Destinations › Groups*). Each copy has its own result.
+
+| Copies written | Run status | Event |
+|---|---|---|
+| All | `succeeded` (green) | `backup.succeeded`, if the job opted in |
+| Some | `partial` (amber, never green) | `backup.partial` |
+| None, or the dump itself failed | `failed` | `backup.failed` |
+
+After a `partial` run, Olympos queues a **repair run**: a new dump, written only to the destinations that
+are missing. Repairs are spaced out so that an outage has time to end:
+
+| Repair | Starts |
+|---|---|
+| 1st | 5 minutes after the partial run |
+| 2nd | 30 minutes after the 1st repair |
+| 3rd | 2 hours after the 2nd repair |
+
+Every repair must start inside the job's retry window (half the time to its next scheduled run); one that
+would start later is not queued. A daily job has a window of about 12 hours, so all three fit; a job that
+runs every hour has 30 minutes, so only the first repair does. A repair keeps the original run's trigger
+and scheduled time, and its `repair_of` field names the original run. While it waits, it is `queued` with
+`not_before` set to its start, and the partial run's details carry `next_repair_at`. It does not block
+*Run now* or a dry run. The partial run stays `partial`: it is the record of what happened.
+
+- A repair that writes every missing copy sends `backup.succeeded` (opt-in, as for every run) and clears
+  *Backup incomplete*.
+- A repair that fails while another repair is left sends nothing; the next repair is queued.
+- When no repair is left (three used, or the next one would start after the window), the last repair
+  sends `backup.failed` with the destinations that are still missing. The next scheduled run writes to
+  every member again.
+- If the agent disconnects during a repair, the disconnect rule for every run applies: a repair whose
+  attempt is below 3 is retried once the agent is back, and that retry is the same repair, not another
+  one. Later ones (and one whose window is over) end `missed`, without `backup.missed`, and continue the
+  repair chain as after a failed repair: the next repair is queued with its delay, or, when none is
+  left, the repair sends `backup.failed` with the missing destinations.
+- A repair that comes due while its job is disabled (*Pause* on the job) or paused (target gone) does
+  not run: it ends `failed` with `skipped: the job is disabled` or `skipped: the job is paused`, sends
+  nothing and no further repair is queued. *Backup incomplete* stays until a later run writes every copy.
+- Test runs (the wizard's dry run) are never repaired. A run that fails entirely is not retried, as before.
+
+Besides the message fields, the stored event (`outbox.payload`) carries `job_id` and `run_id`.
+`backup.partial` adds `missing_destinations` (destination names, in member order), `repair_queued`
+(`true` when a repair was queued) and, when one was, `next_attempt_at` (RFC 3339, when it starts; the
+message shows it as *next_attempt*). Events of a repair run add `repair_of`, the original run's ID; the
+`backup.failed` of a repair that gave up also has `missing_destinations`.
+
+**Metrics.** `olympos_backup_runs_total{engine,status}` counts `status="partial"` runs.
+`olympos_backup_copies_total{destination,status}` counts finished copies per destination name, with
+`status` `succeeded` or `failed`, for every run including single-destination jobs and `olympos-self`. To
+be told when a destination keeps failing, alert on
+`increase(olympos_backup_copies_total{status="failed"}[1d]) > 0`.
+
 ### Routing
 
 Nothing is routed by default. An event with no route and no channel override is dropped (outcome
-`no_route`). To receive events:
+`no_route`). The one exception is an upgrade that adds an event type: the upgrade to v0.2 routes the new
+`backup.partial` to every channel that already gets `backup.failed`. To receive events:
 
 1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
    (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.
@@ -302,9 +362,11 @@ must survive.
 
 ### Choosing the Olympos backup destination
 
-Under *Backups › Olympos database*, an admin picks a destination. The job is built in and cannot be
-deleted. Once it has a destination, *Olympos backup* leaves Needs attention. A failed run shows *Olympos
-backup failed* until a later run succeeds or 48 hours pass.
+Under *Backups › Olympos database*, an admin picks a destination or a destination group (two copies of
+Olympos' own database are worth having). The job is built in and cannot be deleted. Once it has a
+destination, *Olympos backup* leaves Needs attention. A failed run shows *Olympos backup failed* until a
+later run succeeds or 48 hours pass; a partial run shows *Olympos backup incomplete* until a repair or a
+later run writes every copy.
 
 ### Leaving compressed mode
 

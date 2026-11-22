@@ -5,8 +5,10 @@ import type { Destination, ItemList } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { destinationsRoute } from '../../router';
 import { DeleteRefused, DestinationStatus, KindBadge, authLabel, destLocation } from '../../ui/destinations';
+import { plural } from '../../lib/format';
 import { EmptyState } from '../../ui/kit';
 import { DestinationDialog } from './DestinationDialog';
+import { DestinationGroupsCard } from './DestinationGroupDialog';
 import { SettingsLayout } from './SettingsLayout';
 import { DataTable } from '../../ui/DataTable';
 
@@ -84,7 +86,18 @@ export function DestinationsPage() {
             },
             { id: 'auth', header: 'Auth', sortValue: authLabel, className: 'wrap', cell: authLabel },
             { id: 'del', header: 'Delete refused', sortValue: (x) => (x.last_test ? (x.last_test.can_delete ? 0 : 1) : null), cell: (x) => <DeleteRefused d={x} /> },
-            { id: 'jobs', header: 'Used by', sortValue: (x) => x.jobs, defaultDir: 'desc', cell: (x) => (x.jobs === 1 ? '1 job' : `${x.jobs} jobs`) },
+            {
+              id: 'jobs',
+              header: 'Used by',
+              sortValue: (x) => x.jobs,
+              defaultDir: 'desc',
+              cell: (x) => (
+                <>
+                  {plural(x.jobs, 'job')}
+                  {x.groups ? <span className="muted"> · in {plural(x.groups, 'group')}</span> : null}
+                </>
+              ),
+            },
             { id: 'status', header: 'Status', sortValue: (x) => (x.last_test_ok === false ? 0 : x.last_test_ok === null ? 1 : 2), cell: (x) => <DestinationStatus d={x} /> },
             {
               id: 'actions',
@@ -102,6 +115,7 @@ export function DestinationsPage() {
         />
         <div className="card-foot">Every save runs the destination test: a probe is written, read back, tagged and a delete is attempted. A credential that can delete is saved with a warning, never silently.</div>
       </section>
+      <DestinationGroupsCard />
       {dialogOpen && <DestinationDialog key={id} dest={selected} onClose={close} />}
     </SettingsLayout>
   );

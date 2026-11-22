@@ -15,6 +15,7 @@ import (
 // Event types (v1 catalog).
 const (
 	BackupFailed        = "backup.failed"
+	BackupPartial       = "backup.partial"
 	BackupMissed        = "backup.missed"
 	BackupSucceeded     = "backup.succeeded"
 	CROpened            = "cr.opened"
@@ -38,7 +39,7 @@ const (
 // Catalog lists every event type, in display order. backup.succeeded is
 // opt-in: it has no default route.
 var Catalog = []string{
-	BackupFailed, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
+	BackupFailed, BackupPartial, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
 	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, SecretFindings, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
 }
 

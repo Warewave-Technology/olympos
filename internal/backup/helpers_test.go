@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -35,6 +36,8 @@ type fakeOpts struct {
 	LeakSecret bool `json:"leak_secret"`
 	NoTLS      bool `json:"no_tls"`
 	Payload    int  `json:"payload"`
+	// FailAfterWrite: write the payload, then fail.
+	FailAfterWrite bool `json:"fail_after_write"`
 }
 
 var fakePayload = bytes.Repeat([]byte("olympos-backup-"), 1000)
@@ -85,6 +88,13 @@ func (fakeEngine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer)
 	if _, err := w.Write(fakePayload); err != nil {
 		return nil, err
 	}
+	if o.FailAfterWrite {
+		msg := "dump failed after writing"
+		if o.LeakSecret {
+			msg += ": password=" + string(c.Secret)
+		}
+		return nil, errors.New(msg)
+	}
 	tls := !o.NoTLS && ec.UseTLS
 	return &backup.RunResult{ServerVersion: "fake 1.0", ToolVersion: "fakedump 2", TLS: &tls, Details: map[string]any{"restore": "cat"}}, nil
 }
@@ -130,30 +140,86 @@ type fakeConn struct{ net.Conn }
 
 func (fakeConn) WireBytes() int64 { return wirePerConn }
 
-// fakeBlobs stores uploads in memory.
+// fakeBlobs stores uploads in memory. It serves every destination itself,
+// unless a destination was given its own fake with dest.
 type fakeBlobs struct {
 	mu     sync.Mutex
 	prefix string
 	blobs  map[string][]byte
 	tags   map[string]map[string]string
 	fail   error
+	// failOnly > 0: only that many uploads fail with fail, later ones work.
+	failOnly int
+	// failAfter > 0: Upload reads that many bytes, then fails (with fail, or
+	// a connection reset when fail is nil).
+	failAfter int64
+	// openErr is what ForDestination returns for this destination.
+	openErr error
+	// failManifest fails manifest uploads only (the data blob is stored).
+	failManifest error
+	// wrapReadErr wraps a read error without %w, as the Azure and S3
+	// writers do.
+	wrapReadErr bool
+	dests       map[uuid.UUID]*fakeBlobs
 }
 
 func newBlobs(prefix string) *fakeBlobs {
 	return &fakeBlobs{prefix: prefix, blobs: map[string][]byte{}, tags: map[string]map[string]string{}}
 }
 
+// dest gives destination id its own fake writer with prefix.
+func (f *fakeBlobs) dest(id uuid.UUID, prefix string) *fakeBlobs {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.dests == nil {
+		f.dests = map[uuid.UUID]*fakeBlobs{}
+	}
+	d := newBlobs(prefix)
+	f.dests[id] = d
+	return d
+}
+
 func (f *fakeBlobs) ForDestination(ctx context.Context, id uuid.UUID) (blob.Writer, error) {
-	return f, nil
+	f.mu.Lock()
+	d, ok := f.dests[id]
+	f.mu.Unlock()
+	if !ok {
+		d = f
+	}
+	if d.openErr != nil {
+		return nil, d.openErr
+	}
+	return d, nil
 }
 func (f *fakeBlobs) Prefix() string { return f.prefix }
 
 func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct string, tags map[string]string) (blob.UploadResult, error) {
-	if f.fail != nil {
-		return blob.UploadResult{}, f.fail
+	if f.failAfter > 0 {
+		_, _ = io.CopyN(io.Discard, r, f.failAfter)
+		if f.fail != nil {
+			return blob.UploadResult{}, f.fail
+		}
+		return blob.UploadResult{}, errors.New("connection reset by peer")
+	}
+	f.mu.Lock()
+	failErr := f.fail
+	if failErr != nil && f.failOnly > 0 {
+		if f.failOnly--; f.failOnly == 0 {
+			f.fail = nil
+		}
+	}
+	f.mu.Unlock()
+	if failErr != nil {
+		return blob.UploadResult{}, failErr
+	}
+	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
+		return blob.UploadResult{}, f.failManifest
 	}
 	b, err := io.ReadAll(r)
 	if err != nil {
+		if f.wrapReadErr {
+			return blob.UploadResult{}, fmt.Errorf("upload %s: %s", path, err)
+		}
 		return blob.UploadResult{}, err
 	}
 	f.mu.Lock()
@@ -192,6 +258,33 @@ func seed(t *testing.T, db *store.DB, name string, labels map[string]string, sta
 	return f
 }
 
+// addDest adds another destination.
+func addDest(t *testing.T, db *store.DB, name string) uuid.UUID {
+	t.Helper()
+	var id uuid.UUID
+	if err := db.QueryRow(context.Background(), `INSERT INTO destinations (name, account, container, prefix, auth)
+		VALUES ($1, 'acct', 'backups', 'olympos', 'managed_identity') RETURNING id`, name).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// addGroup adds a destination group with members in that order.
+func addGroup(t *testing.T, db *store.DB, name string, members ...uuid.UUID) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	var id uuid.UUID
+	if err := db.QueryRow(ctx, `INSERT INTO destination_groups (name) VALUES ($1) RETURNING id`, name).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	for i, m := range members {
+		if _, err := db.Exec(ctx, `INSERT INTO destination_group_members (group_id, destination_id, position) VALUES ($1,$2,$3)`, id, m, i); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
 type jobOpts struct {
 	cron, tz   string
 	enabled    bool
@@ -199,6 +292,7 @@ type jobOpts struct {
 	options    string
 	credential *uuid.UUID
 	channel    *uuid.UUID
+	group      *uuid.UUID // the job targets this group instead of f.DestID
 }
 
 func addJob(t *testing.T, db *store.DB, f fixture, o jobOpts) uuid.UUID {
@@ -212,10 +306,14 @@ func addJob(t *testing.T, db *store.DB, f fixture, o jobOpts) uuid.UUID {
 	if o.options == "" {
 		o.options = "{}"
 	}
+	dest := &f.DestID
+	if o.group != nil {
+		dest = nil
+	}
 	var id uuid.UUID
-	if err := db.QueryRow(context.Background(), `INSERT INTO backup_jobs (target_id, destination_id, cron, timezone, enabled, last_scheduled_for,
-		engine_options, credential_id, notify_channel_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
-		f.TargetID, f.DestID, o.cron, o.tz, o.enabled, o.last, o.options, o.credential, o.channel).Scan(&id); err != nil {
+	if err := db.QueryRow(context.Background(), `INSERT INTO backup_jobs (target_id, destination_id, destination_group_id, cron, timezone, enabled,
+		last_scheduled_for, engine_options, credential_id, notify_channel_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
+		f.TargetID, dest, o.group, o.cron, o.tz, o.enabled, o.last, o.options, o.credential, o.channel).Scan(&id); err != nil {
 		t.Fatal(err)
 	}
 	return id
@@ -257,6 +355,9 @@ func events(t *testing.T, db *store.DB, typ string) []event {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// yearly gives a retry window of weeks: half the time to the next 1 January.
+const yearly = "0 0 1 1 *"
 
 func mustContain(t *testing.T, s, sub string) {
 	t.Helper()

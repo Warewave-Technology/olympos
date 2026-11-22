@@ -1,5 +1,5 @@
 // DEV-ONLY request handlers for the VITE_MOCK fixture layer.
-import type { BackupJobInput, BackupRun, SelfBackup, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
+import type { BackupJob, BackupJobInput, BackupRun, BackupRunCopy, DestinationGroup, DestinationGroupInput, RestoreGuide, SelfBackup, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
@@ -84,6 +84,16 @@ function dashboard(): Dashboard {
       detail: `${t.namespace}/${t.service} asks for ${t.tls_server_name_pending || 'the default name'}; still verifying ${t.tls_server_name || `${t.service}.${t.namespace}.svc`}`,
       link: '/backups?tls=1',
     });
+  // partial runs no repair has completed since (latest original run per job)
+  for (const j of db.jobs) {
+    const last = db.runs.find((r) => r.job_id === j.id && r.trigger !== 'test' && !r.repair_of);
+    if (last?.status !== 'partial' || db.runs.some((r) => r.repair_of === last.id && r.status === 'succeeded')) continue;
+    const missing = (last.copies ?? []).filter((c) => c.status === 'failed').map((c) => c.destination_name);
+    attention.push({ kind: 'backup_partial', severity: 'warn', label: 'Backup incomplete', detail: `${j.target.service} · missing ${missing.join(', ')}`, link: '/backups?tab=runs' });
+  }
+  const selfLast = selfBackup.runs.find((r) => !r.repair_of);
+  if (selfLast?.status === 'partial')
+    attention.push({ kind: 'self_backup_partial', severity: 'warn', label: 'Olympos backup incomplete', detail: `missing ${(selfLast.copies ?? []).filter((c) => c.status === 'failed').map((c) => c.destination_name).join(', ')}`, link: '/backups?self=1' });
   if (!selfBackup.configured) attention.push({ kind: 'self_backup_unset', severity: 'warn', label: 'Olympos backup', detail: 'choose where the Olympos database is backed up', link: '/backups?self=1' });
   if (perms().vault_approve && waiting.length) attention.push({ kind: 'approvals', severity: 'warn', label: `${waiting.length} approvals`, detail: 'waiting for you · oldest 51 h left', link: '/approvals' });
   const eol = cs.filter((c) => c.eol);
@@ -124,17 +134,75 @@ function runFor(id: string): BackupRun | undefined {
   ];
   if (el < 1500) Object.assign(r, { status: 'queued', steps: [] });
   else if (el < 6000) Object.assign(r, { status: 'running', steps: steps.slice(0, Math.min(4, Math.floor((el - 1500) / 1000) + 1)) });
-  else Object.assign(r, { status: 'succeeded', finished_at: new Date(started + 6000).toISOString(), bytes: 2.1e6, wire_bytes: 0.4e6, steps });
+  else {
+    // A group job writes one copy per member. localStorage olympos.mock.failCopy = <destination name> fails that copy.
+    const g = groupOf(db.jobs.find((j) => j.id === r.job_id));
+    const fail = localStorage.getItem('olympos.mock.failCopy') ?? '';
+    const copies = g ? db.groupCopies(g, 2.1e6, fail ? { [fail]: 'dial tcp: i/o timeout' } : {}, 'test') : undefined;
+    const bad = copies?.filter((c) => c.status === 'failed') ?? [];
+    const status = !copies || bad.length === 0 ? 'succeeded' : bad.length === copies.length ? 'failed' : 'partial';
+    // A group run: an upload step per copy, a manifest step per uploaded copy (as the server's checklist).
+    const groupSteps = copies && [
+      ...steps.slice(0, 3),
+      ...copies.map((c) => (c.status === 'succeeded' ? { name: 'upload', ok: true, detail: `Wrote 2.0 MiB to ${c.destination_name} (390.6 KiB on the wire)` } : { name: 'upload', ok: false, detail: `${c.destination_name}: ${c.error}` })),
+      ...copies.filter((c) => c.status === 'succeeded').map((c) => ({ name: 'manifest', ok: true, detail: `Manifest with checksum written to ${c.destination_name}` })),
+    ];
+    Object.assign(r, { status, finished_at: new Date(started + 6000).toISOString(), bytes: 2.1e6, wire_bytes: 0.4e6, steps: groupSteps ?? steps, copies, error: bad.map((c) => `${c.destination_name}: ${c.error}`).join('; ') });
+  }
   return r;
 }
 
-function restoreGuide(blob: string, doc: string) {
+function groupOf(j: Pick<BackupJob, 'destination_group'> | undefined): DestinationGroup | undefined {
+  return j?.destination_group ? db.destinationGroups.find((g) => g.id === j.destination_group!.id) : undefined;
+}
+
+/** Each destination's groups count follows the group list. */
+function syncGroupCounts() {
+  for (const d of db.destinations) d.groups = db.destinationGroups.filter((g) => g.members.some((m) => m.id === d.id)).length;
+}
+
+function validateGroup(b: DestinationGroupInput, self?: DestinationGroup): MockRes | null {
+  const fields: Record<string, string> = {};
+  const name = (b.name ?? self?.name ?? '').trim();
+  if (!name) fields.name = 'Enter a name.';
+  else if (db.destinationGroups.some((g) => g.name === name && g.id !== self?.id) || db.destinations.some((d) => d.name === name)) fields.name = `the name ${name} is already used by a destination or group`;
+  const ids = b.member_ids ?? self?.members.map((m) => m.id) ?? [];
+  if (ids.length < 2 || ids.length > 4) fields.member_ids = 'a group needs 2 to 4 destinations';
+  else if (new Set(ids).size !== ids.length) fields.member_ids = 'a destination can be in a group only once';
+  else if (ids.some((id) => !db.destinations.some((d) => d.id === id))) fields.member_ids = 'unknown destination';
+  return Object.keys(fields).length ? invalid('invalid destination group', fields) : null;
+}
+
+/** Restore guide of a run: built from the selected succeeded copy (its own, then those its repairs completed). */
+function runRestore(x: BackupRun, doc: string, copyId: string | null): RestoreGuide | null | MockRes {
+  type C = BackupRunCopy & { run_id: string; taken_at: string | null };
+  const own: C[] = (x.copies ?? []).filter((c) => c.status === 'succeeded').map((c) => ({ ...c, run_id: x.id, taken_at: x.started_at }));
+  const later: C[] = x.repair_of ? [] : db.runs.filter((r) => r.repair_of === x.id).flatMap((r) => (r.copies ?? []).filter((c) => c.status === 'succeeded').map((c) => ({ ...c, run_id: r.id, taken_at: r.started_at })));
+  const all = [...own, ...later];
+  const fallback = x.blob_path || `olympos/${x.cluster_name}/${x.target_service}/${x.engine}/${x.id}.zip`;
+  if (!all.length) return restoreGuide(fallback, doc);
+  const sel = copyId ? (own.find((c) => c.destination_id === copyId) ?? [...later].reverse().find((c) => c.destination_id === copyId)) : all[0];
+  if (!sel) return invalid('no successful copy of this run in that destination', { copy: 'no successful copy of this run in that destination' });
+  const d = db.destinations.find((v) => v.id === sel.destination_id);
+  return {
+    ...restoreGuide(`${x.cluster_name}/${x.target_service}/${sel.run_id.slice(0, 8)}/${x.engine}.zip`, doc, d),
+    copies: all.map((c) => ({ destination_id: c.destination_id, name: c.destination_name, kind: c.destination_kind, selected: c === sel, run_id: c.run_id, taken_at: c.taken_at })),
+  };
+}
+
+function restoreGuide(blob: string, doc: string, d?: Pick<Destination, 'kind' | 'account' | 'container' | 'bucket' | 'endpoint_override' | 'path' | 'prefix'>) {
+  const download =
+    d?.kind === 's3'
+      ? `aws s3 cp${d.endpoint_override ? ` --endpoint-url '${d.endpoint_override}'` : ''} 's3://${d.bucket}/${d.prefix}${blob}' backup.zip`
+      : d?.kind === 'nfs'
+        ? `cp '${d.path}/${blob}' backup.zip`
+        : `az storage blob download --auth-mode login --account-name '${d?.account || 'stolympos'}' --container-name '${d?.container || 'backups'}' \\\n  --name '${d ? d.prefix + blob : blob}' --file backup.zip`;
   return {
     doc,
     steps: [
       {
         title: 'Download the backup and its manifest',
-        commands: `az storage blob download --auth-mode login --account-name 'stolympos' --container-name 'backups' \\\n  --name '${blob}' --file backup.zip`,
+        commands: download,
         note: 'Human access to backup storage is break-glass (PIM).',
       },
       { title: 'Verify it', commands: "echo '<sha256>  backup.zip' | sha256sum -c -" },
@@ -149,6 +217,18 @@ function restoreGuide(blob: string, doc: string) {
 
 // The built-in olympos-self job starts unconfigured (Dashboard: Needs attention).
 const selfBackup: SelfBackup = { configured: false, job: null, runs: [] };
+
+/** GET /backup/self destinations_last_success: per current destination, the newest succeeded copy of a non-test run. */
+function selfLastSuccess(): NonNullable<SelfBackup['destinations_last_success']> {
+  const j = selfBackup.job;
+  if (!j) return [];
+  const g = j.destination_group_id ? db.destinationGroups.find((x) => x.id === j.destination_group_id) : undefined;
+  const dests = g ? g.members.map((m) => ({ id: m.id, name: m.name })) : [{ id: j.destination_id!, name: j.destination_name }];
+  return dests.map((d) => {
+    const run = selfBackup.runs.find((r) => r.trigger !== 'test' && r.finished_at && (r.copies?.length ? r.copies.some((c) => c.destination_id === d.id && c.status === 'succeeded') : !g && r.status === 'succeeded'));
+    return { destination_id: d.id, name: d.name, last_success_at: run?.finished_at ?? null };
+  });
+}
 
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
@@ -502,7 +582,78 @@ const routes: [string, string, Handler][] = [
     (_r, p) => {
       const d = db.destinations.find((x) => x.id === p.id);
       if (d && d.jobs > 0) return { status: 409, body: { error: `used by ${d.jobs} backup jobs; move them to another destination first` } };
+      if (d && d.groups) return { status: 409, body: { error: `member of ${d.groups} destination group${d.groups === 1 ? '' : 's'}; remove it from the group first` } };
       if (d) db.destinations.splice(db.destinations.indexOf(d), 1);
+      return { status: 204 };
+    },
+  ],
+
+  // -------------------------------------------------------- destination groups
+  ['GET', '/destination-groups', () => items(db.destinationGroups)],
+  [
+    'GET',
+    '/destination-groups/:id',
+    (_r, p) => {
+      const g = db.destinationGroups.find((x) => x.id === p.id);
+      return g ? ok(g) : notFound();
+    },
+  ],
+  [
+    'POST',
+    '/destination-groups',
+    (r) => {
+      if (!perms().admin_global) return forbidden();
+      const b = (r.body ?? {}) as DestinationGroupInput;
+      const v = validateGroup(b);
+      if (v) return v;
+      const now = new Date().toISOString();
+      const g: DestinationGroup = {
+        id: db.uuid(),
+        name: b.name!.trim(),
+        description: (b.description ?? '').trim(),
+        members: b.member_ids!.map((id) => db.destinations.find((d) => d.id === id)!).map((d) => ({ id: d.id, name: d.name, kind: d.kind })),
+        jobs: 0,
+        created_at: now,
+        updated_at: now,
+      };
+      db.destinationGroups.push(g);
+      syncGroupCounts();
+      db.record('destination_group.created', 'destination_group', g.name, g.members.map((m) => m.name).join(' → '));
+      return ok(g, 201);
+    },
+  ],
+  [
+    'PATCH',
+    '/destination-groups/:id',
+    (r, p) => {
+      if (!perms().admin_global) return forbidden();
+      const g = db.destinationGroups.find((x) => x.id === p.id);
+      if (!g) return notFound();
+      const b = (r.body ?? {}) as DestinationGroupInput;
+      const v = validateGroup(b, g);
+      if (v) return v;
+      if (b.name !== undefined) g.name = b.name.trim();
+      if (b.description !== undefined) g.description = b.description.trim();
+      if (b.member_ids) g.members = b.member_ids.map((id) => db.destinations.find((d) => d.id === id)!).map((d) => ({ id: d.id, name: d.name, kind: d.kind }));
+      g.updated_at = new Date().toISOString();
+      for (const j of db.jobs) if (j.destination_group?.id === g.id) j.destination_group = { id: g.id, name: g.name, members: g.members.map((m) => m.name) };
+      syncGroupCounts();
+      db.record('destination_group.updated', 'destination_group', g.name, g.members.map((m) => m.name).join(' → '));
+      return ok(g);
+    },
+  ],
+  [
+    'DELETE',
+    '/destination-groups/:id',
+    (_r, p) => {
+      if (!perms().admin_global) return forbidden();
+      const g = db.destinationGroups.find((x) => x.id === p.id);
+      if (g && g.jobs > 0) return { status: 409, body: { error: `used by ${g.jobs} backup job${g.jobs === 1 ? '' : 's'}; move ${g.jobs === 1 ? 'it' : 'them'} to another destination or group first` } };
+      if (g) {
+        db.destinationGroups.splice(db.destinationGroups.indexOf(g), 1);
+        syncGroupCounts();
+        db.record('destination_group.deleted', 'destination_group', g.name, '');
+      }
       return { status: 204 };
     },
   ],
@@ -529,14 +680,19 @@ const routes: [string, string, Handler][] = [
         const v = db.vaults.find((x) => x.target.id === t.id);
         if (!v || v.status !== 'configured') return invalid('vault not configured', { target_id: 'Configure this vault in Olympos first (Vaults > Configure): backups use its Olympos AppRole.' });
       } else if (!b.credential?.username) return invalid('invalid job', { username: 'Username is required.' });
+      if (!!b.destination_id === !!b.destination_group_id) return invalid('invalid job', { destination_id: 'Pick a destination or a destination group (exactly one).' });
       const dest = db.destinations.find((d) => d.id === b.destination_id);
-      if (!dest) return invalid('invalid job', { destination_id: 'Pick a destination.' });
-      const job = {
+      const group = db.destinationGroups.find((g) => g.id === b.destination_group_id);
+      if (b.destination_id && !dest) return invalid('invalid job', { destination_id: 'Pick a destination.' });
+      if (b.destination_group_id && !group) return invalid('invalid job', { destination_group_id: 'Unknown destination group.' });
+      if (group) group.jobs++;
+      const job: BackupJob = {
         id: db.uuid(),
         target: t,
         engine: t.engine,
         credential: b.credential ? { id: db.uuid(), source: b.credential.source, ref: b.credential.ref ?? '', username: b.credential.username } : { id: '', source: 'approle', ref: '', username: 'approle' },
-        destination: { id: dest.id, name: dest.name },
+        destination: dest ? { id: dest.id, name: dest.name } : null,
+        destination_group: group ? { id: group.id, name: group.name, members: group.members.map((m) => m.name) } : null,
         engine_options: b.engine_options ?? {},
         cron: b.cron ?? '0 2 * * *',
         timezone: b.timezone ?? 'UTC',
@@ -571,9 +727,25 @@ const routes: [string, string, Handler][] = [
       if (b.cron) j.cron = b.cron;
       if (b.timezone) j.timezone = b.timezone;
       if (b.retention) j.retention = b.retention;
+      if (b.destination_id && b.destination_group_id) return invalid('invalid job', { destination_id: 'Pick a destination or a destination group (exactly one).' });
       if (b.destination_id) {
         const d = db.destinations.find((x) => x.id === b.destination_id);
-        if (d) j.destination = { id: d.id, name: d.name };
+        if (!d) return invalid('invalid job', { destination_id: 'Pick a destination.' });
+        const old = groupOf(j);
+        if (old) old.jobs--;
+        j.destination = { id: d.id, name: d.name };
+        j.destination_group = null;
+      }
+      if (b.destination_group_id) {
+        const g = db.destinationGroups.find((x) => x.id === b.destination_group_id);
+        if (!g) return invalid('invalid job', { destination_group_id: 'Unknown destination group.' });
+        const old = groupOf(j);
+        if (old !== g) {
+          if (old) old.jobs--;
+          g.jobs++;
+        }
+        j.destination = null;
+        j.destination_group = { id: g.id, name: g.name, members: g.members.map((m) => m.name) };
       }
       if (b.notify_channel_id !== undefined) j.notify_channel_id = b.notify_channel_id;
       if (b.notify_on_success !== undefined) j.notify_on_success = b.notify_on_success;
@@ -607,7 +779,7 @@ const routes: [string, string, Handler][] = [
         blob_path: '',
         sha256: '',
         error: '',
-        destination_name: j.destination.name,
+        destination_name: j.destination_group?.name ?? j.destination?.name,
         steps: [],
       };
       db.runs.unshift(run);
@@ -630,18 +802,35 @@ const routes: [string, string, Handler][] = [
       return ok(db.auditSettings);
     },
   ],
-  ['GET', '/backup/self', () => ok(selfBackup)],
+  [
+    'GET',
+    '/backup/self',
+    (r) => {
+      const copy = r.query.get('copy');
+      selfBackup.destinations_last_success = selfLastSuccess();
+      const last = selfBackup.runs.find((x) => !x.repair_of && (x.status === 'succeeded' || x.status === 'partial'));
+      if (!copy || !last) return ok(selfBackup);
+      const g = runRestore(last, 'docs/restore-olympos.md', copy);
+      if (g && 'status' in g) return g;
+      return ok({ ...selfBackup, restore: g });
+    },
+  ],
   [
     'PUT',
     '/backup/self',
     (r) => {
-      const d = db.destinations.find((x) => x.id === (r.body?.destination_id ?? selfBackup.job?.destination_id));
-      if (!d) return invalid('invalid self-backup', { destination_id: 'Choose where the Olympos database is backed up.' });
+      if (r.body?.destination_id && r.body?.destination_group_id) return invalid('invalid self-backup', { destination_id: 'Choose a destination or a destination group, not both.' });
+      const groupId = r.body?.destination_group_id ?? (r.body?.destination_id ? null : selfBackup.job?.destination_group_id);
+      const g = groupId ? db.destinationGroups.find((x) => x.id === groupId) : undefined;
+      if (groupId && !g) return invalid('invalid self-backup', { destination_group_id: 'Unknown destination group.' });
+      const d = g ? undefined : db.destinations.find((x) => x.id === (r.body?.destination_id ?? selfBackup.job?.destination_id));
+      if (!g && !d) return invalid('invalid self-backup', { destination_id: 'Choose where the Olympos database is backed up.' });
       selfBackup.configured = true;
       selfBackup.job = {
         id: selfBackup.job?.id ?? db.uuid(),
-        destination_id: d.id,
-        destination_name: d.name,
+        destination_id: d?.id ?? null,
+        destination_group_id: g?.id ?? null,
+        destination_name: (g ?? d)!.name,
         cron: r.body?.cron ?? selfBackup.job?.cron ?? '30 2 * * *',
         timezone: r.body?.timezone ?? selfBackup.job?.timezone ?? 'UTC',
         retention: r.body?.retention ?? selfBackup.job?.retention ?? { daily: 7, weekly: 4, monthly: 12 },
@@ -649,6 +838,7 @@ const routes: [string, string, Handler][] = [
         notify_channel_id: null,
         created_at: selfBackup.job?.created_at ?? new Date().toISOString(),
       };
+      selfBackup.destinations_last_success = selfLastSuccess();
       return ok(selfBackup);
     },
   ],
@@ -658,6 +848,7 @@ const routes: [string, string, Handler][] = [
     () => {
       if (!selfBackup.job) return { status: 409, body: { error: 'choose a destination for the Olympos self-backup first' } };
       const now = new Date().toISOString();
+      const g = selfBackup.job.destination_group_id ? db.destinationGroups.find((x) => x.id === selfBackup.job!.destination_group_id) : undefined;
       selfBackup.runs.unshift({
         id: db.uuid(),
         job_id: selfBackup.job.id,
@@ -675,8 +866,12 @@ const routes: [string, string, Handler][] = [
         blob_path: 'olympos/olympos/olympos/olympos-db/postgresql/x.zip',
         sha256: '',
         error: '',
+        destination_name: selfBackup.job.destination_name,
+        copies: g ? db.groupCopies(g, 4_812_331) : undefined,
+        repair_of: null,
       });
-      selfBackup.restore = restoreGuide('olympos/olympos/olympos/olympos-db/postgresql/x.zip', 'docs/restore-olympos.md');
+      const guide = runRestore(selfBackup.runs[0], 'docs/restore-olympos.md', null);
+      selfBackup.restore = guide && !('status' in guide) ? guide : null;
       return ok({ run_id: selfBackup.runs[0].id }, 202);
     },
   ],
@@ -697,13 +892,15 @@ const routes: [string, string, Handler][] = [
   [
     'GET',
     '/backup/runs/:id',
-    (_r, p) => {
+    (r, p) => {
       const x = runFor(p.id);
       if (!x) return notFound();
-      return ok({
-        ...x,
-        restore: x.status === 'succeeded' && x.trigger !== 'test' ? restoreGuide(x.blob_path || `olympos/${x.cluster_name}/${x.target_service}/${x.engine}/${x.id}.zip`, 'docs/restore.md#postgresql') : null,
-      });
+      const restorable = (x.status === 'succeeded' || x.status === 'partial') && x.trigger !== 'test';
+      const restore = restorable ? runRestore(x, 'docs/restore.md#postgresql', r.query.get('copy')) : null;
+      if (restore && 'status' in restore) return restore;
+      // a partial run with a repair queued: when it starts
+      const waiting = x.status === 'partial' ? db.runs.filter((y) => y.repair_of === x.id && y.status === 'queued' && y.not_before).map((y) => y.not_before!) : [];
+      return ok({ ...x, restore, next_repair_at: waiting.sort()[0] ?? null });
     },
   ],
   [
