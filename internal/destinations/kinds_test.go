@@ -202,9 +202,11 @@ func TestS3DestinationsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Upload(ctx, blob.Join(w.Prefix(), "resolver", uuid.NewString()), strings.NewReader("x"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+	rp := blob.Join(w.Prefix(), "resolver", uuid.NewString())
+	if _, err := w.Upload(ctx, rp, strings.NewReader("0123456789"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
 		t.Fatal(err)
 	}
+	assertReaderFor(t, e, d.ID, rp)
 
 	// No secret anywhere.
 	rows, _ := e.DB.Query(ctx, `SELECT details::text FROM activity_log WHERE object_type = 'destination'`)
@@ -389,7 +391,30 @@ func TestAzureEndpointOverrideAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Upload(context.Background(), "run/"+uuid.NewString(), strings.NewReader("x"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+	rp := "run/" + uuid.NewString()
+	if _, err := w.Upload(context.Background(), rp, strings.NewReader("0123456789"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
 		t.Fatal(err)
+	}
+	assertReaderFor(t, e, d.ID, rp)
+}
+
+// assertReaderFor reads the 10-byte blob at path back by range through the
+// resolver's Reader.
+func assertReaderFor(t *testing.T, e *apitest.Env, id uuid.UUID, path string) {
+	t.Helper()
+	ctx := context.Background()
+	var rr blob.ReaderResolver = blob.NewResolver(e.DB, e.KV, e.Envelope, nil).(*blob.DestResolver)
+	r, err := rr.ReaderFor(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, err := r.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	p := make([]byte, 4)
+	if n, err := o.ReadAt(p, 3); err != nil || n != 4 || string(p) != "3456" || o.Size() != 10 {
+		t.Fatalf("range read: n=%d err=%v %q size=%d", n, err, p, o.Size())
 	}
 }

@@ -341,3 +341,28 @@ func LoadTarget(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *
 	}
 	return t, nil
 }
+
+var _ Reader = (*Azure)(nil)
+
+// Open implements Reader: the size comes from the blob's properties, every
+// ReadAt is one ranged GET. ctx bounds the returned Object's reads.
+func (a *Azure) Open(ctx context.Context, path string) (Object, error) {
+	if err := validPath(path); err != nil {
+		return nil, err
+	}
+	bc := a.cc.NewBlobClient(path)
+	props, err := bc.GetProperties(ctx, nil)
+	if err != nil {
+		return nil, errors.New(Describe(err))
+	}
+	if props.ContentLength == nil {
+		return nil, fmt.Errorf("open %s: no content length", path)
+	}
+	return &rangeObject{ctx: ctx, size: *props.ContentLength, fetch: func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
+		resp, err := bc.DownloadStream(ctx, &blob.DownloadStreamOptions{Range: blob.HTTPRange{Offset: off, Count: n}})
+		if err != nil {
+			return nil, errors.New(Describe(err))
+		}
+		return resp.Body, nil
+	}}, nil
+}

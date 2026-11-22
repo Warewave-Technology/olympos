@@ -429,3 +429,27 @@ func LoadFSTarget(ctx context.Context, q store.Querier, id uuid.UUID) (FSTarget,
 	}
 	return t, nil
 }
+
+var _ Reader = (*FS)(nil)
+
+// Open implements Reader over the safe resolved path of a regular file.
+func (f *FS) Open(ctx context.Context, path string) (Object, error) {
+	p, err := f.file(path, false)
+	if err != nil {
+		return nil, err
+	}
+	fh, err := os.Open(p)
+	if err != nil {
+		return nil, err
+	}
+	st, err := fh.Stat()
+	if err != nil {
+		_ = fh.Close()
+		return nil, err
+	}
+	if !st.Mode().IsRegular() {
+		_ = fh.Close()
+		return nil, fmt.Errorf("open %s: not a regular file", path)
+	}
+	return &fsObject{ctx: ctx, f: fh, size: st.Size()}, nil
+}
