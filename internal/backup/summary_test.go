@@ -50,6 +50,28 @@ func TestClusterSummariesAPI(t *testing.T) {
 	run("missed", "schedule", now.Add(-4*time.Hour), nil, 0)
 	run("partial", "schedule", now.Add(-time.Hour), at(50*time.Minute), 70) // restorable: the last backup, not ok
 	run("succeeded", "test", now.Add(-time.Minute), at(30*time.Second), 7)  // connection test: ignored
+	// Repairs are not counted themselves: an original partial run counts as
+	// ok once a repair of it succeeded, and stays partial when they gave up.
+	original := func(created time.Time, finished *time.Time) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, scheduled_for, created_at, started_at, finished_at)
+			VALUES ($1, 'schedule', 'partial', $2, $2, $2, $3) RETURNING id`, job, created, finished).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	repair := func(of uuid.UUID, status string, attempt int, created time.Time, finished *time.Time) {
+		t.Helper()
+		exec(`INSERT INTO backup_runs (job_id, trigger, status, scheduled_for, attempt, repair_of, created_at, started_at, finished_at)
+			SELECT job_id, trigger, $2, scheduled_for, $3, id, $4, $4, $5 FROM backup_runs WHERE id = $1`, of, status, attempt, created, finished)
+	}
+	completed := original(now.Add(-6*time.Hour), at(6*time.Hour-time.Minute))
+	repair(completed, "failed", 2, now.Add(-6*time.Hour+2*time.Minute), at(6*time.Hour-3*time.Minute))
+	repair(completed, "succeeded", 3, now.Add(-6*time.Hour+4*time.Minute), at(6*time.Hour-5*time.Minute))
+	gaveUp := original(now.Add(-7*time.Hour), at(7*time.Hour-time.Minute))
+	repair(gaveUp, "failed", 2, now.Add(-7*time.Hour+2*time.Minute), at(7*time.Hour-3*time.Minute))
+	repair(gaveUp, "failed", 3, now.Add(-7*time.Hour+4*time.Minute), at(7*time.Hour-5*time.Minute))
 
 	all := e.Login(e.Principal("root", "Member", "viewer")) // scope "all"
 	var resp struct{ Items []backup.ClusterSummary }
@@ -67,7 +89,7 @@ func TestClusterSummariesAPI(t *testing.T) {
 	if p.Targets != 2 || p.Candidates != 1 || p.Jobs != 1 || p.JobsEnabled != 1 {
 		t.Errorf("prod counts = %+v", p)
 	}
-	if p.Last24h != (backup.RunCounts{Succeeded: 1, Failed: 1, Missed: 1, Partial: 1}) || p.Bytes30d != 150 {
+	if p.Last24h != (backup.RunCounts{Succeeded: 2, Failed: 1, Missed: 1, Partial: 2}) || p.Bytes30d != 150 {
 		t.Errorf("prod runs = %+v bytes=%d", p.Last24h, p.Bytes30d)
 	}
 	if p.LastSuccessAt == nil || p.LastSuccessAt.Sub(*at(50 * time.Minute)).Abs() > time.Second {

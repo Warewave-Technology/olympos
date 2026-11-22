@@ -17,7 +17,8 @@ type RunCounts struct {
 	Succeeded int `json:"succeeded"`
 	Failed    int `json:"failed"`
 	Missed    int `json:"missed"`
-	// Partial: runs that wrote some of their copies (not counted as ok).
+	// Partial: runs that wrote some of their copies and whose repairs did
+	// not complete them (not counted as ok). Repair runs are not counted.
 	Partial int `json:"partial"`
 }
 
@@ -38,8 +39,9 @@ type ClusterSummary struct {
 //   - targets: backup targets (olympos.io/backup set) that are not gone;
 //     candidates: those without a (non-deleted) job;
 //   - jobs / jobs_enabled: non-deleted jobs on the cluster's targets;
-//   - last_24h: runs by outcome, at their finish (or scheduled) time; a
-//     partial run is counted on its own, not as ok;
+//   - last_24h: original runs (not repairs) by outcome, at their finish
+//     (or scheduled) time; a partial run counts as ok once a repair of it
+//     succeeded (it then has every copy), else on its own, not as ok;
 //   - bytes_30d: bytes of successful runs finished in the last 30 days;
 //   - last_success_at: the newest restorable run (succeeded or partial) per
 //     job via backup_runs_job (job_id, created_at DESC), so old run history
@@ -62,12 +64,15 @@ const clusterSummarySQL = `
 	  FROM cj WHERE deleted_at IS NULL GROUP BY cluster_id),
 	r AS (
 	  SELECT cj.cluster_id,
-	         count(*) FILTER (WHERE r.status = 'succeeded' AND r.finished_at > now() - interval '24 hours') AS ok,
-	         count(*) FILTER (WHERE r.status = 'failed' AND COALESCE(r.finished_at, r.created_at) > now() - interval '24 hours') AS failed,
-	         count(*) FILTER (WHERE r.status = 'missed' AND COALESCE(r.scheduled_for, r.created_at) > now() - interval '24 hours') AS missed,
-	         count(*) FILTER (WHERE r.status = 'partial' AND r.finished_at > now() - interval '24 hours') AS partial,
+	         count(*) FILTER (WHERE r.repair_of IS NULL AND (r.status = 'succeeded' OR r.status = 'partial' AND rep.ok)
+	           AND r.finished_at > now() - interval '24 hours') AS ok,
+	         count(*) FILTER (WHERE r.repair_of IS NULL AND r.status = 'failed' AND COALESCE(r.finished_at, r.created_at) > now() - interval '24 hours') AS failed,
+	         count(*) FILTER (WHERE r.repair_of IS NULL AND r.status = 'missed' AND COALESCE(r.scheduled_for, r.created_at) > now() - interval '24 hours') AS missed,
+	         count(*) FILTER (WHERE r.repair_of IS NULL AND r.status = 'partial' AND NOT rep.ok AND r.finished_at > now() - interval '24 hours') AS partial,
 	         COALESCE(sum(r.bytes) FILTER (WHERE r.status = 'succeeded' AND r.finished_at > now() - interval '30 days'), 0) AS bytes
 	  FROM cj JOIN backup_runs r ON r.job_id = cj.id
+	  CROSS JOIN LATERAL (SELECT r.status = 'partial' AND EXISTS (
+	    SELECT 1 FROM backup_runs x WHERE x.repair_of = r.id AND x.status = 'succeeded') AS ok) rep
 	  WHERE r.trigger <> 'test' AND r.created_at > now() - interval '31 days'
 	  GROUP BY cj.cluster_id),
 	ls AS (

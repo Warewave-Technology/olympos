@@ -371,7 +371,7 @@ paths:
                         candidates: {type: integer, description: targets without a job}
                         jobs: {type: integer}
                         jobs_enabled: {type: integer}
-                        last_24h: {type: object, description: "runs by outcome; partial = wrote some of its copies, counted on its own (not as succeeded)", properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}, partial: {type: integer}}}
+                        last_24h: {type: object, description: "original runs by outcome (repair runs are not counted); a partial run whose repair succeeded counts as succeeded; partial = wrote some of its copies and its repairs did not complete them", properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}, partial: {type: integer}}}
                         last_success_at: {type: [string, "null"], format: date-time, description: finish time of the newest restorable run (succeeded or partial)}
                         bytes_30d: {type: integer}
   /backup/runs:
