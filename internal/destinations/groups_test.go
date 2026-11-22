@@ -4,12 +4,15 @@ package destinations_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/Warewave-Technology/olympos/internal/apitest"
+	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/destinations"
 	"github.com/Warewave-Technology/olympos/internal/server"
 	"github.com/Warewave-Technology/olympos/internal/targetid"
@@ -326,4 +329,62 @@ func count(t *testing.T, e *apitest.Env, sql string) int {
 		t.Fatal(err)
 	}
 	return n
+}
+
+// Editing a member destination must not make it write to the same location
+// as another member of one of its groups.
+func TestDestinationPatchKeepsGroupLocationsDistinct(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "nfs")
+	for _, d := range []string{"a", "b", "c"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	e := apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
+		return []server.Module{&destinations.API{DB: e.DB, Log: e.Log, KV: e.KV, Env: e.Envelope, Storage: blob.StorageOptions{NFSRoot: root}}}
+	}})
+	admin := e.Login(e.Principal("ada", "Member", "admin"))
+	mk := func(name, mount string) destinations.View {
+		t.Helper()
+		if code, body := admin.Raw("POST", "/api/v1/destinations", map[string]any{"name": name, "kind": "nfs", "path": filepath.Join(root, mount, "olympos"), "prefix": "prod"}); code != 201 {
+			t.Fatalf("create %s: %d %s", name, code, body)
+		}
+		return findView(t, admin, name)
+	}
+	da, db, dc := mk("nas-a", "a"), mk("nas-b", "b"), mk("nas-c", "c")
+	var g destinations.GroupView
+	if code := admin.Do("POST", "/api/v1/destination-groups", map[string]any{"name": "mirror", "member_ids": []string{da.ID.String(), db.ID.String()}}, &g); code != 201 {
+		t.Fatalf("group: %d", code)
+	}
+	path := "/api/v1/destinations/" + db.ID.String()
+	var eb struct {
+		Error  string
+		Fields map[string]string
+	}
+	// Same path as the other member: refused on the path field, nothing changes.
+	if code := admin.Do("PATCH", path, map[string]any{"path": filepath.Join(root, "a", "olympos")}, &eb); code != 422 ||
+		eb.Fields["path"] != "nas-b and nas-a in group mirror would write to the same location" {
+		t.Fatalf("same path: %d %+v", code, eb)
+	}
+	if v := findView(t, admin, "nas-b"); v.Path != db.Path {
+		t.Fatalf("refused edit changed the destination: %+v", v)
+	}
+	// A destination in no group may use any location, and so may a member that moves elsewhere.
+	if code := admin.Do("PATCH", "/api/v1/destinations/"+dc.ID.String(), map[string]any{"path": filepath.Join(root, "a", "olympos")}, nil); code != 200 {
+		t.Fatalf("ungrouped duplicate: %d", code)
+	}
+	if code := admin.Do("PATCH", path, map[string]any{"path": filepath.Join(root, "b", "olympos2")}, nil); code != 200 {
+		t.Fatalf("move to a free location: %d", code)
+	}
+	// Prefix edits count as well: nas-b is at b/olympos2 with prefix prod; a is a/olympos prod.
+	if code := admin.Do("PATCH", path, map[string]any{"path": filepath.Join(root, "a", "olympos"), "prefix": "other"}, nil); code != 200 {
+		t.Fatalf("same path, other prefix: %d", code)
+	}
+	if code := admin.Do("PATCH", path, map[string]any{"prefix": "prod"}, &eb); code != 422 || eb.Fields["prefix"] == "" {
+		t.Fatalf("same prefix: %d %+v", code, eb)
+	}
+	// A rename keeps working.
+	if code := admin.Do("PATCH", path, map[string]any{"name": "nas-b2"}, nil); code != 200 {
+		t.Fatalf("rename: %d", code)
+	}
 }

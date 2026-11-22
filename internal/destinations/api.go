@@ -840,6 +840,18 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
+		// Edits must keep the group invariant: no two members of a group
+		// write to the same location. Without a location change nothing can
+		// have become a duplicate.
+		if lf := locationField(locked.spec, s); lf != "" {
+			msg, err := groupLocationConflict(r.Context(), tx, groupDestOf(id, s))
+			if err != nil {
+				return err
+			}
+			if msg != "" {
+				return errFields{lf: msg}
+			}
+		}
 		credID := locked.credID()
 		var oldCred *uuid.UUID
 		switch {
@@ -901,9 +913,12 @@ func (a *API) patch(w http.ResponseWriter, r *http.Request) {
 		return err
 	})
 	secret = ""
+	var fe errFields
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpx.NotFound(w)
+	case errors.As(err, &fe):
+		httpx.FieldErrors(w, "invalid destination", fe)
 	case store.IsUniqueViolation(err):
 		httpx.JSON(w, http.StatusConflict, httpx.ErrorBody{Error: "a destination with this name already exists", Fields: map[string]string{"name": "already exists"}})
 	case err != nil:

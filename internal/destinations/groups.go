@@ -188,6 +188,26 @@ type groupDest struct {
 	bucket, path                                     string
 }
 
+// queryGroupDests loads the location columns of destinations (where is a
+// clause on alias d).
+func queryGroupDests(ctx context.Context, q store.Querier, where string, args ...any) ([]groupDest, error) {
+	rows, err := q.Query(ctx, `SELECT d.id, d.name, d.kind, d.prefix, d.endpoint_override, d.account, d.container, d.bucket, d.path
+		FROM destinations d `+where, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []groupDest
+	for rows.Next() {
+		var d groupDest
+		if err := rows.Scan(&d.id, &d.name, &d.kind, &d.prefix, &d.endpoint, &d.account, &d.container, &d.bucket, &d.path); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
 // checkMembers validates a member list and returns the field error for
 // "member_ids" ("" when valid).
 func checkMembers(ctx context.Context, q store.Querier, ids []uuid.UUID) (string, error) {
@@ -201,22 +221,13 @@ func checkMembers(ctx context.Context, q store.Querier, ids []uuid.UUID) (string
 		}
 		seen[id] = true
 	}
-	rows, err := q.Query(ctx, `SELECT id, name, kind, prefix, endpoint_override, account, container, bucket, path
-		FROM destinations WHERE id = ANY($1)`, ids)
+	ds, err := queryGroupDests(ctx, q, `WHERE d.id = ANY($1)`, ids)
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
 	byID := map[uuid.UUID]groupDest{}
-	for rows.Next() {
-		var d groupDest
-		if err := rows.Scan(&d.id, &d.name, &d.kind, &d.prefix, &d.endpoint, &d.account, &d.container, &d.bucket, &d.path); err != nil {
-			return "", err
-		}
+	for _, d := range ds {
 		byID[d.id] = d
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
 	}
 	locs := map[string]groupDest{}
 	for _, id := range ids {
@@ -532,4 +543,69 @@ func (a *API) deleteGroup(w http.ResponseWriter, r *http.Request) {
 func isForeignKey(err error) bool {
 	var pg *pgconn.PgError
 	return errors.As(err, &pg) && pg.Code == "23503"
+}
+
+// groupDestOf is the location of an edited destination as it would be saved.
+func groupDestOf(id uuid.UUID, s spec) groupDest {
+	return groupDest{id: id, name: s.Name, kind: s.Kind, prefix: s.Prefix, endpoint: s.EndpointOverride,
+		account: s.Account, container: s.Container, bucket: s.Bucket, path: s.Path}
+}
+
+// groupLocationConflict refuses an edit that makes destination d write to the
+// same location as another member of a group it belongs to. It returns the
+// message, or "" when there is no conflict. Run inside the edit's transaction.
+func groupLocationConflict(ctx context.Context, q store.Querier, d groupDest) (string, error) {
+	rows, err := q.Query(ctx, `SELECT g.id, g.name FROM destination_groups g
+		JOIN destination_group_members m ON m.group_id = g.id WHERE m.destination_id = $1 ORDER BY g.name`, d.id)
+	if err != nil {
+		return "", err
+	}
+	type grp struct {
+		id   uuid.UUID
+		name string
+	}
+	var groups []grp
+	for rows.Next() {
+		var g grp
+		if err := rows.Scan(&g.id, &g.name); err != nil {
+			rows.Close()
+			return "", err
+		}
+		groups = append(groups, g)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	for _, g := range groups {
+		others, err := queryGroupDests(ctx, q, `JOIN destination_group_members m ON m.destination_id = d.id
+			WHERE m.group_id = $1 AND d.id <> $2 ORDER BY m.position`, g.id, d.id)
+		if err != nil {
+			return "", err
+		}
+		for _, o := range others {
+			if o.location() == d.location() {
+				return fmt.Sprintf("%s and %s in group %s would write to the same location", d.name, o.name, g.name), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// locationField names the first location field of a destination that an edit
+// changed (the field error goes there).
+func locationField(old, now spec) string {
+	for _, c := range []struct {
+		name     string
+		from, to string
+	}{
+		{"path", old.Path, now.Path}, {"bucket", old.Bucket, now.Bucket}, {"account", old.Account, now.Account},
+		{"container", old.Container, now.Container}, {"endpoint_override", old.EndpointOverride, now.EndpointOverride},
+		{"prefix", old.Prefix, now.Prefix},
+	} {
+		if c.from != c.to {
+			return c.name
+		}
+	}
+	return ""
 }
