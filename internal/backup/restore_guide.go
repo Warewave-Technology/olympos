@@ -86,6 +86,76 @@ func (s *guideSource) dests() []any {
 // copy rows; they use the job's destination. With destID set and no
 // succeeded copy there, the error is ErrNoSuccessfulCopy.
 func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, destID *uuid.UUID) (*RestoreGuide, error) {
+	gs, err := loadGuideSources(ctx, q, runID)
+	if err != nil {
+		return nil, err
+	}
+	pick, err := gs.pick(destID)
+	if err != nil || pick < 0 {
+		return nil, err
+	}
+	s := gs.sources[pick]
+	in := gs.in
+	in.kind, in.account, in.container, in.endpoint, in.bucket, in.region, in.nfsPath =
+		s.dest.kind, s.dest.account, s.dest.container, s.dest.endpoint, s.dest.bucket, s.dest.region, s.dest.nfsPath
+	in.blobPath, in.sha256, in.runID = s.blob, s.sum, s.copy.RunID
+	g := buildRestoreGuide(in)
+	for i, c := range gs.sources {
+		c.copy.Selected = i == pick
+		g.Copies = append(g.Copies, c.copy)
+	}
+	return g, nil
+}
+
+// RestoreSource is the copy a restore from the UI reads: the same copy the
+// restore guide of the run offers for that destination (LoadRestoreGuide).
+// CopyRunID is the run that wrote it (the run, or one of its repairs);
+// BlobPath is the full path in the destination and SHA256 the copy's digest.
+type RestoreSource struct {
+	RunID           uuid.UUID
+	CopyRunID       uuid.UUID
+	DestinationID   uuid.UUID
+	DestinationName string
+	DestinationKind string
+	BlobPath        string
+	SHA256          string
+}
+
+// ErrNotRestorable is returned by FindRestoreSource for a run that has no
+// copy to restore from: not succeeded or partial, a test run, or no
+// succeeded copy at all.
+var ErrNotRestorable = errors.New("this run has no successful copy to restore from")
+
+// FindRestoreSource picks the copy of runID a restore reads, with exactly
+// the rules of LoadRestoreGuide: destID nil takes the guide's default copy;
+// a destination without a succeeded copy of the run (or of its repairs) is
+// ErrNoSuccessfulCopy; a run without any is ErrNotRestorable. An unknown
+// run is store.ErrNotFound.
+func FindRestoreSource(ctx context.Context, q store.Querier, runID uuid.UUID, destID *uuid.UUID) (*RestoreSource, error) {
+	gs, err := loadGuideSources(ctx, q, runID)
+	if err != nil {
+		return nil, err
+	}
+	pick, err := gs.pick(destID)
+	if err != nil {
+		return nil, err
+	}
+	if pick < 0 {
+		return nil, ErrNotRestorable
+	}
+	s := gs.sources[pick]
+	return &RestoreSource{RunID: runID, CopyRunID: s.copy.RunID, DestinationID: s.copy.DestinationID,
+		DestinationName: s.copy.Name, DestinationKind: s.copy.Kind, BlobPath: s.blob, SHA256: s.sum}, nil
+}
+
+// guideSources is a run with the copies it can be restored from, in the
+// order the guide offers them.
+type guideSources struct {
+	in      guideInput // run and target fields
+	sources []guideSource
+}
+
+func loadGuideSources(ctx context.Context, q store.Querier, runID uuid.UUID) (*guideSources, error) {
 	var in guideInput
 	var status, trigger, runBlob, runSum string
 	var jobID uuid.UUID
@@ -148,13 +218,19 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	if status != "succeeded" && status != "partial" || trigger == "test" {
 		sources = nil
 	}
+	_ = json.Unmarshal(opts, &in.options)
+	return &guideSources{in: in, sources: sources}, nil
+}
 
+// pick returns the index of the copy used for destID (-1: none and destID
+// nil), or ErrNoSuccessfulCopy.
+func (gs *guideSources) pick(destID *uuid.UUID) (int, error) {
 	pick := -1
 	switch {
-	case destID == nil && len(sources) > 0:
+	case destID == nil && len(gs.sources) > 0:
 		pick = 0
 	case destID != nil:
-		for i, s := range sources {
+		for i, s := range gs.sources {
 			if s.copy.DestinationID != *destID {
 				continue
 			}
@@ -165,23 +241,10 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 			// Repairs come last, oldest first: the last match is the newest.
 		}
 	}
-	if pick < 0 {
-		if destID != nil {
-			return nil, ErrNoSuccessfulCopy
-		}
-		return nil, nil
+	if pick < 0 && destID != nil {
+		return -1, ErrNoSuccessfulCopy
 	}
-	s := sources[pick]
-	in.kind, in.account, in.container, in.endpoint, in.bucket, in.region, in.nfsPath =
-		s.dest.kind, s.dest.account, s.dest.container, s.dest.endpoint, s.dest.bucket, s.dest.region, s.dest.nfsPath
-	in.blobPath, in.sha256, in.runID = s.blob, s.sum, s.copy.RunID
-	_ = json.Unmarshal(opts, &in.options)
-	g := buildRestoreGuide(in)
-	for i, c := range sources {
-		c.copy.Selected = i == pick
-		g.Copies = append(g.Copies, c.copy)
-	}
-	return g, nil
+	return pick, nil
 }
 
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
