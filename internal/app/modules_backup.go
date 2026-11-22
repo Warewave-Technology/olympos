@@ -41,13 +41,18 @@ func init() {
 		if !ok {
 			return Wiring{}, fmt.Errorf("blob resolver %T cannot read backups", blobs)
 		}
-		restores := &restore.API{DB: d.DB, Log: d.Log.With("component", "restore"), Envelope: d.Envelope, Creds: creds,
+		rlog := d.Log.With("component", "restore")
+		restores := &restore.API{DB: d.DB, Log: rlog, Envelope: d.Envelope, Creds: creds,
 			Dialer: d.Gateway, Blobs: readers, TTL: d.Cfg.ChangeRequests.TTL}
+		// Approved restores run next to the backup worker: the same tunnels
+		// and the same per-cluster limit (backup runs and restores together).
+		executor := &restore.Executor{DB: d.DB, Log: rlog.With("loop", "executor"), Dialer: d.Gateway, Blobs: readers,
+			Creds: creds, Envelope: d.Envelope, PerCluster: d.Cfg.Backup.PerClusterConcurrency}
 		return Wiring{
 			Modules: []server.Module{api, restores},
 			// Restore expiry runs on its own leader lock, next to the module
 			// that owns restores (the vaults maintenance loop is Vault's).
-			Workers: []Worker{sched.Run, worker.Run, self.Run, restores.RunExpiry},
+			Workers: []Worker{sched.Run, worker.Run, self.Run, restores.RunExpiry, executor.Run},
 		}, nil
 	})
 }

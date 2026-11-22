@@ -94,6 +94,7 @@ func init() {
 type fakeDialer struct {
 	mu        sync.Mutex
 	connected map[uuid.UUID]bool
+	dials     int
 }
 
 func (d *fakeDialer) Connected(id uuid.UUID) bool {
@@ -103,7 +104,22 @@ func (d *fakeDialer) Connected(id uuid.UUID) bool {
 }
 
 func (d *fakeDialer) Dial(context.Context, uuid.UUID, string, gateway.DialOptions) (gateway.Conn, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.dials++
 	return nil, errors.New("the fake dialer does not dial")
+}
+
+func (d *fakeDialer) setConnected(id uuid.UUID, v bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.connected[id] = v
+}
+
+func (d *fakeDialer) dialCount() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.dials
 }
 
 type memObject struct{ *bytes.Reader }
@@ -208,17 +224,23 @@ func (e *env) target(cluster uuid.UUID, svc, engine, provider string) string {
 // for a succeeded or partial run, its sidecar manifest with details.
 func (e *env) run(target, status, trigger, ext string, details map[string]any) uuid.UUID {
 	e.T.Helper()
+	return e.runSum(target, status, trigger, ext, details, "abc")
+}
+
+// runSum is run with the copy's recorded SHA-256.
+func (e *env) runSum(target, status, trigger, ext string, details map[string]any, sum string) uuid.UUID {
+	e.T.Helper()
 	var job, run uuid.UUID
 	e.scan(&job, `INSERT INTO backup_jobs (target_id, destination_id, cron, timezone) VALUES ($1, $2, '0 2 * * *', 'UTC') RETURNING id`, target, e.dest)
 	run = uuid.New()
 	path := "p/c/shop/" + run.String() + "." + ext
 	e.exec(`INSERT INTO backup_runs (id, job_id, trigger, status, blob_path, sha256, started_at, finished_at, destination_ids)
-		VALUES ($1, $2, $3, $4, $5, 'abc', now(), now(), ARRAY[$6::uuid])`, run, job, trigger, status, path, e.dest)
+		VALUES ($1, $2, $3, $4, $5, $7, now(), now(), ARRAY[$6::uuid])`, run, job, trigger, status, path, e.dest, sum)
 	cs := "succeeded"
 	if status == "failed" {
 		cs = "failed"
 	}
-	e.exec(`INSERT INTO backup_run_copies (run_id, destination_id, status, blob_path, sha256) VALUES ($1, $2, $3, $4, 'abc')`, run, e.dest, cs, path)
+	e.exec(`INSERT INTO backup_run_copies (run_id, destination_id, status, blob_path, sha256) VALUES ($1, $2, $3, $4, $5)`, run, e.dest, cs, path, sum)
 	m, _ := json.Marshal(map[string]any{"run_id": run, "details": details})
 	e.blobs.put(backup.ManifestPath(path, run), m)
 	return run

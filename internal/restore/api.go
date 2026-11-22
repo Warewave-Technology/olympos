@@ -205,10 +205,8 @@ func internalErr(err error) *evalError {
 func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open bool, tr *backup.SecretScrubber) (*evaluation, *evalError) {
 	ev := &evaluation{}
 	unknownRun := invalid("invalid restore request", map[string]string{"run_id": "unknown run"})
-	err := a.DB.QueryRow(ctx, `SELECT r.status, r.trigger, j.target_id, COALESCE(t.engine, ''), COALESCE(t.cluster_id, '00000000-0000-0000-0000-000000000000'),
-		COALESCE(c.labels, '{}')
-		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id LEFT JOIN clusters c ON c.id = t.cluster_id
-		WHERE r.id = $1`, in.RunID).Scan(&ev.run.status, &ev.run.trigger, &ev.run.targetID, &ev.run.engine, &ev.run.clusterID, &ev.run.labels)
+	var err error
+	ev.run, err = loadSourceRun(ctx, a.DB, in.RunID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ev, unknownRun
 	}
@@ -219,16 +217,14 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 		if !sub.CanGlobal(authz.PermRead) {
 			return ev, unknownRun
 		}
-		return ev, invalid("invalid restore request", map[string]string{"run_id": "Olympos' own database is restored with the server stopped (docs/restore-olympos.md)"})
+		return ev, invalid("invalid restore request", map[string]string{"run_id": selfRunMessage})
 	}
 	if !sub.Can(authz.PermRead, ev.run.labels) {
 		return ev, unknownRun
 	}
 
 	unknownTarget := invalid("invalid restore request", map[string]string{"target_id": "unknown target"})
-	err = a.DB.QueryRow(ctx, `SELECT t.cluster_id, c.labels, c.status, t.engine, t.status, COALESCE(v.status, '')
-		FROM targets t JOIN clusters c ON c.id = t.cluster_id LEFT JOIN vaults v ON v.target_id = t.id WHERE t.id = $1`, in.TargetID).
-		Scan(&ev.target.clusterID, &ev.target.labels, &ev.target.clusterStatus, &ev.target.engine, &ev.target.status, &ev.target.vaultStatus)
+	ev.target, err = loadTargetInfo(ctx, a.DB, in.TargetID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ev, unknownTarget
 	}
@@ -247,34 +243,12 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 	// From here on the caller may open the request: say what is wrong.
 	engine := ev.run.engine
 	fields := map[string]string{}
-	switch {
-	case ev.run.trigger == "test":
-		fields["run_id"] = "a dry run holds no data to restore"
-	case ev.run.status != "succeeded" && ev.run.status != "partial":
-		fields["run_id"] = "only a succeeded or partial run can be restored (this run is " + ev.run.status + ")"
-	default:
-		src, err := backup.FindRestoreSource(ctx, a.DB, in.RunID, in.CopyDestinationID)
-		switch {
-		case errors.Is(err, backup.ErrNoSuccessfulCopy):
-			fields["copy_destination_id"] = err.Error()
-		case errors.Is(err, backup.ErrNotRestorable):
-			fields["run_id"] = err.Error()
-		case err != nil:
-			return ev, internalErr(err)
-		default:
-			ev.src = src
-		}
+	src, err := sourceRules(ctx, a.DB, ev.run, in.RunID, in.CopyDestinationID, fields)
+	if err != nil {
+		return ev, internalErr(err)
 	}
-	switch {
-	case in.TargetID == *ev.run.targetID:
-		fields["target_id"] = "a restore never writes to the backup's own target; choose a new target"
-	case ev.target.engine != engine:
-		fields["target_id"] = fmt.Sprintf("the target is %s, the backup is %s", engineName(ev.target.engine), engineName(engine))
-	case ev.target.status == "gone":
-		fields["target_id"] = "the target is gone"
-	case engine == "vault" && ev.target.vaultStatus == "configured":
-		fields["target_id"] = "this Vault is configured in Olympos; a snapshot is restored into a new Vault only"
-	}
+	ev.src = src
+	targetRules(ev.run, ev.target, in.TargetID, fields)
 	if engine == "vault" {
 		if in.Credential != nil {
 			fields["credential"] = "not used for a Vault restore; give a token of the new Vault"
@@ -339,9 +313,8 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 		return ev, invalid("invalid restore request", fields)
 	}
 
-	insp, ok := InspectorFor(engine)
-	if !ok {
-		msg := "restores of " + engineName(engine) + " are not available yet"
+	if _, ok := InspectorFor(engine); !ok {
+		msg := noInspectorMessage(engine)
 		return ev, invalid(msg, map[string]string{"target_id": msg})
 	}
 	if !a.Dialer.Connected(ev.target.clusterID) {
@@ -359,13 +332,7 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 	if err != nil {
 		return ev, internalErr(err)
 	}
-	timeout := a.InspectTimeout
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
-	ictx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	rep, err := insp.InspectRestoreTarget(ictx, ec, ev.databases)
+	rep, fields, notes, err := inspectTarget(ctx, engine, ec, ev.databases, a.InspectTimeout)
 	if err != nil {
 		msg := "the target check failed: " + tr.Scrub(err.Error())
 		a.Log.Warn("restore: target check failed", "target_id", in.TargetID, "err", msg)
@@ -374,12 +341,8 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 		}
 		return ev, invalid(msg, map[string]string{"target_id": msg})
 	}
-	if rep.Existing == nil {
-		rep.Existing = map[string]bool{}
-	}
 	ev.report = rep
 	ev.opts.ServerVersion = rep.ServerVersion
-	fields, notes := CheckReport(engine, ev.databases, rep)
 	ev.opts.Notes = notes
 	if engine == "postgresql" {
 		su := rep.Superuser
@@ -399,6 +362,109 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 	return ev, nil
 }
 
+// ---------------------------------------------------------------- rules core
+//
+// The rules of a request that both the open-time check (evaluate, with
+// HTTP errors) and the start-time re-check (Executor) apply.
+
+// selfRunMessage: olympos-self runs are not restored from the UI.
+const selfRunMessage = "Olympos' own database is restored with the server stopped (docs/restore-olympos.md)"
+
+func noInspectorMessage(engine string) string {
+	return "restores of " + engineName(engine) + " are not available yet"
+}
+
+// loadSourceRun loads the run a request restores (pgx.ErrNoRows when it
+// does not exist). targetID is nil for an olympos-self run.
+func loadSourceRun(ctx context.Context, q store.Querier, runID uuid.UUID) (sourceRun, error) {
+	var run sourceRun
+	err := q.QueryRow(ctx, `SELECT r.status, r.trigger, j.target_id, COALESCE(t.engine, ''), COALESCE(t.cluster_id, '00000000-0000-0000-0000-000000000000'),
+		COALESCE(c.labels, '{}')
+		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id LEFT JOIN clusters c ON c.id = t.cluster_id
+		WHERE r.id = $1`, runID).Scan(&run.status, &run.trigger, &run.targetID, &run.engine, &run.clusterID, &run.labels)
+	return run, err
+}
+
+// loadTargetInfo loads the target a request restores into (pgx.ErrNoRows
+// when it does not exist).
+func loadTargetInfo(ctx context.Context, q store.Querier, targetID string) (targetInfo, error) {
+	var t targetInfo
+	err := q.QueryRow(ctx, `SELECT t.cluster_id, c.labels, c.status, t.engine, t.status, COALESCE(v.status, '')
+		FROM targets t JOIN clusters c ON c.id = t.cluster_id LEFT JOIN vaults v ON v.target_id = t.id WHERE t.id = $1`, targetID).
+		Scan(&t.clusterID, &t.labels, &t.clusterStatus, &t.engine, &t.status, &t.vaultStatus)
+	return t, err
+}
+
+// sourceRules: the run is succeeded or partial and not a test run, and the
+// chosen copy is a succeeded copy of it or of one of its repairs (as the
+// restore guide offers). Broken rules are added to fields; the copy is
+// returned when it was found. err is an internal error only.
+func sourceRules(ctx context.Context, q store.Querier, run sourceRun, runID uuid.UUID, destID *uuid.UUID, fields map[string]string) (*backup.RestoreSource, error) {
+	switch {
+	case run.trigger == "test":
+		fields["run_id"] = "a dry run holds no data to restore"
+	case run.status != "succeeded" && run.status != "partial":
+		fields["run_id"] = "only a succeeded or partial run can be restored (this run is " + run.status + ")"
+	default:
+		src, err := backup.FindRestoreSource(ctx, q, runID, destID)
+		switch {
+		case errors.Is(err, backup.ErrNoSuccessfulCopy):
+			fields["copy_destination_id"] = err.Error()
+		case errors.Is(err, backup.ErrNotRestorable):
+			fields["run_id"] = err.Error()
+		case err != nil:
+			return nil, err
+		default:
+			return src, nil
+		}
+	}
+	return nil, nil
+}
+
+// targetRules: the target has the run's engine, is not the run's own
+// target, is discovered (not gone) and, for Vault, is not a Vault
+// configured in Olympos. Broken rules are added to fields.
+func targetRules(run sourceRun, t targetInfo, targetID string, fields map[string]string) {
+	switch {
+	case run.targetID != nil && targetID == *run.targetID:
+		fields["target_id"] = "a restore never writes to the backup's own target; choose a new target"
+	case t.engine != run.engine:
+		fields["target_id"] = fmt.Sprintf("the target is %s, the backup is %s", engineName(t.engine), engineName(run.engine))
+	case t.status == "gone":
+		fields["target_id"] = "the target is gone"
+	case run.engine == "vault" && t.vaultStatus == "configured":
+		fields["target_id"] = "this Vault is configured in Olympos; a snapshot is restored into a new Vault only"
+	}
+}
+
+// errNoInspector: no inspector is registered for the engine.
+var errNoInspector = errors.New("no restore inspector")
+
+// inspectTarget runs the engine's inspector on the target (reads only,
+// with the request's credential, bounded by timeout; default 60 s) and
+// applies CheckReport. err is the inspector's error, unscrubbed: the caller
+// scrubs it with the scrubber that tracked the credential.
+func inspectTarget(ctx context.Context, engine string, ec backup.EngineContext, databases []string, timeout time.Duration) (*TargetReport, map[string]string, []string, error) {
+	insp, ok := InspectorFor(engine)
+	if !ok {
+		return nil, nil, nil, errNoInspector
+	}
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	ictx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	rep, err := insp.InspectRestoreTarget(ictx, ec, databases)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if rep.Existing == nil {
+		rep.Existing = map[string]bool{}
+	}
+	fields, notes := CheckReport(engine, databases, rep)
+	return rep, fields, notes, nil
+}
+
 // recordCheck writes restore.checked: the request's credential reached the
 // target (it was tested), whatever the outcome. problem is the scrubbed
 // reason the check failed ("" when it passed).
@@ -413,7 +479,7 @@ func (a *API) recordCheck(ctx context.Context, sub *authz.Subject, in *Input, ev
 	actor := sub.Principal.ID
 	return store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
 		return activity.Record(ctx, tx, activity.Entry{ActorID: &actor, Action: "restore.checked", ObjectType: "target",
-			ObjectID: in.TargetID, ClusterID: &ev.target.clusterID, Details: d})
+			ObjectID: in.TargetID, ClusterID: &ev.run.clusterID, Details: d})
 	})
 }
 
@@ -657,7 +723,10 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		details := map[string]any{"run_id": in.RunID, "copy_run_id": ev.src.CopyRunID, "destination_id": ev.src.DestinationID,
 			"source_cluster_id": ev.run.clusterID, "target_id": in.TargetID, "engine": ev.run.engine, "databases": ev.databases,
 			"break_glass": in.BreakGlass}
-		if err := httpx.Record(r, tx, "restore.requested", "restore_request", id.String(), &ev.target.clusterID, details); err != nil {
+		// Every audit row and event of a restore is on the backup's cluster:
+		// they name its run and databases, which a reader of the target's
+		// cluster only must not see.
+		if err := httpx.Record(r, tx, "restore.requested", "restore_request", id.String(), &ev.run.clusterID, details); err != nil {
 			return err
 		}
 		rq, err := loadRequest(ctx, tx, id)
@@ -666,7 +735,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		}
 		fields := summary(rq)
 		fields["Maker"] = displayName(sub.Principal)
-		payload := map[string]any{"restore_id": id, "run_id": in.RunID, "target_id": in.TargetID, "engine": ev.run.engine}
+		payload := eventPayload(rq)
 		if !in.BreakGlass {
 			return notify.Emit(ctx, tx, notify.Event{Type: notify.RestoreRequested, Key: notify.RestoreRequested + ":" + id.String(),
 				Title: "Restore request waiting for approval", Link: Link(id), Fields: fields, Payload: payload})
@@ -674,7 +743,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 		// Break-glass: the maker is the decider, recorded here and in the
 		// event; checker_principal_id stays NULL.
 		just := strings.TrimSpace(in.Justification)
-		if err := httpx.Record(r, tx, "restore.break_glass", "restore_request", id.String(), &ev.target.clusterID,
+		if err := httpx.Record(r, tx, "restore.break_glass", "restore_request", id.String(), &ev.run.clusterID,
 			map[string]any{"run_id": in.RunID, "target_id": in.TargetID, "decided_by": actor, "justification": just}); err != nil {
 			return err
 		}
@@ -807,7 +876,7 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 		}
 		fields := summary(rq)
 		fields["Checker"] = displayName(sub.Principal)
-		payload := map[string]any{"restore_id": id, "run_id": rq.Source.RunID, "target_id": rq.Target.ID, "engine": rq.Engine}
+		payload := eventPayload(rq)
 		if !approve {
 			if _, err := tx.Exec(ctx, `UPDATE restore_requests SET status = 'rejected', checker_principal_id = $2, decided_at = $3,
 				decision_comment = $4, finished_at = $3 WHERE id = $1`, id, actor, now, in.Comment); err != nil {
@@ -816,7 +885,7 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 			if err := Wipe(ctx, tx, id); err != nil {
 				return err
 			}
-			if err := httpx.Record(r, tx, "restore.rejected", "restore_request", id.String(), &l.TargetClusterID,
+			if err := httpx.Record(r, tx, "restore.rejected", "restore_request", id.String(), &l.SourceClusterID,
 				map[string]any{"comment": in.Comment, "target_id": l.TargetID}); err != nil {
 				return err
 			}
@@ -832,7 +901,7 @@ func (a *API) decide(w http.ResponseWriter, r *http.Request, approve bool) {
 		if err != nil {
 			return err
 		}
-		if err := httpx.Record(r, tx, "restore.approved", "restore_request", id.String(), &l.TargetClusterID,
+		if err := httpx.Record(r, tx, "restore.approved", "restore_request", id.String(), &l.SourceClusterID,
 			map[string]any{"comment": in.Comment, "target_id": l.TargetID}); err != nil {
 			return err
 		}
@@ -899,7 +968,7 @@ func (a *API) cancel(w http.ResponseWriter, r *http.Request) {
 		if err := Wipe(ctx, tx, id); err != nil {
 			return err
 		}
-		return httpx.Record(r, tx, "restore.cancelled", "restore_request", id.String(), &l.TargetClusterID,
+		return httpx.Record(r, tx, "restore.cancelled", "restore_request", id.String(), &l.SourceClusterID,
 			map[string]any{"target_id": l.TargetID, "was": string(l.Status)})
 	})
 	if errors.Is(err, errHandled) {
@@ -928,7 +997,7 @@ func (a *API) expireTx(ctx context.Context, tx pgx.Tx, l lockedRequest) error {
 		reason = "approved but not started within 24 hours"
 	}
 	return activity.Record(ctx, tx, activity.Entry{Action: "restore.expired", ObjectType: "restore_request", ObjectID: l.ID.String(),
-		ClusterID: &l.TargetClusterID, Details: map[string]any{"target_id": l.TargetID, "was": string(l.Status), "reason": reason}})
+		ClusterID: &l.SourceClusterID, Details: map[string]any{"target_id": l.TargetID, "was": string(l.Status), "reason": reason}})
 }
 
 // ExpireDue expires pending requests past their TTL and approved requests

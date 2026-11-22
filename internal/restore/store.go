@@ -193,7 +193,10 @@ type lockedRequest struct {
 	ApprovedExpiresAt *time.Time
 	TargetID          string
 	TargetClusterID   uuid.UUID
-	Clusters          Clusters
+	// SourceClusterID is the backup's cluster: the request's audit rows
+	// and events are recorded there.
+	SourceClusterID uuid.UUID
+	Clusters        Clusters
 }
 
 var errNotFound = errors.New("not found")
@@ -202,12 +205,12 @@ func lockRequest(ctx context.Context, tx pgx.Tx, id uuid.UUID) (lockedRequest, e
 	var l lockedRequest
 	var st string
 	err := tx.QueryRow(ctx, `SELECT rr.id, rr.status, rr.maker_principal_id, rr.expires_at, rr.approved_expires_at, rr.target_id,
-		tc.id, tc.labels, sc.labels
+		tc.id, tc.labels, sc.id, sc.labels
 		FROM restore_requests rr JOIN targets t ON t.id = rr.target_id JOIN clusters tc ON tc.id = t.cluster_id
 		JOIN backup_runs r ON r.id = rr.source_run_id JOIN backup_jobs j ON j.id = r.job_id
 		JOIN targets st ON st.id = j.target_id JOIN clusters sc ON sc.id = st.cluster_id
 		WHERE rr.id = $1 FOR UPDATE OF rr`, id).
-		Scan(&l.ID, &st, &l.MakerID, &l.ExpiresAt, &l.ApprovedExpiresAt, &l.TargetID, &l.TargetClusterID, &l.Clusters.Target, &l.Clusters.Run)
+		Scan(&l.ID, &st, &l.MakerID, &l.ExpiresAt, &l.ApprovedExpiresAt, &l.TargetID, &l.TargetClusterID, &l.Clusters.Target, &l.SourceClusterID, &l.Clusters.Run)
 	l.Status = Status(st)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return l, errNotFound
