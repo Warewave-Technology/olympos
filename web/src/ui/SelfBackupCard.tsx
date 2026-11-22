@@ -4,17 +4,22 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
-import type { Destination, DestinationGroup, ItemList, SelfBackup, SelfBackupInput } from '../api/types';
+import type { BackupRun, Destination, DestinationGroup, ItemList, SelfBackup, SelfBackupInput } from '../api/types';
 import { useCan } from '../auth/me';
 import { describeCron } from '../lib/cron';
 import { age, bytes, relDateTime } from '../lib/format';
 import { IconLock } from './icons';
-import { Badge, Modal, useToast } from './kit';
+import { Badge, ErrorState, Modal, useToast } from './kit';
 import { RestoreWithCopies } from './BackupRunDialog';
 import { GroupName, KIND_LABEL } from './destinations';
 import { RunBadge } from './status';
 import { Select } from './Select';
 import { DocLink } from './DocLinks';
+
+/** A repair waiting for its not_before (5 min, 30 min, 2 h after the run before it). */
+const waiting = (r: BackupRun) => r.status === 'queued' && !!r.not_before && Date.parse(r.not_before) > Date.now();
+/** Running, or queued and due: a waiting repair does not keep Run now from starting. */
+const active = (r: BackupRun) => r.status === 'running' || (r.status === 'queued' && !waiting(r));
 
 export function SelfBackupCard({ focus }: { focus?: boolean }) {
   const isAdmin = useCan('admin_global');
@@ -25,7 +30,7 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
   const q = useQuery({
     queryKey: ['backup-self'],
     queryFn: () => api.get<SelfBackup>('/backup/self'),
-    refetchInterval: (query) => (query.state.data?.runs.some((r) => r.status === 'queued' || r.status === 'running') ? 3_000 : 30_000),
+    refetchInterval: (query) => (query.state.data?.runs.some(active) ? 3_000 : 30_000),
   });
   const destQ = useQuery({
     queryKey: ['destinations'],
@@ -66,29 +71,33 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
 
   const v = q.data;
   if (!v) return null;
-  const last = v.runs[0];
+  // the job's last run, as on job rows: a repair waiting to start is not it yet
+  const last = v.runs.find((r) => !waiting(r));
   // A partial run is restorable (some copies exist), so it counts here; it is shown as Partial.
   const lastOk = v.runs.find((r) => !r.repair_of && (r.status === 'succeeded' || r.status === 'partial'));
-  const busy = v.runs.some((r) => r.status === 'queued' || r.status === 'running');
+  const busy = v.runs.some(active);
   const dests = destQ.data?.items ?? [];
   const groups = groupsQ.data?.items ?? [];
+  const loadingLists = destQ.isPending || groupsQ.isPending;
   const current = v.job?.destination_group_id ? `g:${v.job.destination_group_id}` : v.job?.destination_id ? `d:${v.job.destination_id}` : '';
   const choice = dest || current;
+  // Only a loaded option is shown: never the raw "g:<id>" / "d:<id>" while the lists load or after they failed.
+  const known = (c: string) => (c.startsWith('g:') ? groups.some((g) => `g:${g.id}` === c) : dests.some((d) => `d:${d.id}` === c));
   const input = (c: string): SelfBackupInput => (c.startsWith('g:') ? { destination_group_id: c.slice(2) } : { destination_id: c.slice(2) });
   const picker = (
     <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
       <Select
         aria-label="Destination"
-        value={choice}
+        value={known(choice) ? choice : ''}
         onChange={setDest}
-        placeholder={dests.length ? 'Choose a destination or a group' : 'No destinations yet'}
+        placeholder={loadingLists ? 'Loading destinations…' : dests.length ? 'Choose a destination or a group' : destQ.isError ? 'Destinations could not be loaded' : 'No destinations yet'}
         options={[
           ...dests.map((d) => ({ value: `d:${d.id}`, label: d.name, text: d.name, hint: KIND_LABEL[d.kind] })),
           ...groups.map((g) => ({ value: `g:${g.id}`, label: <GroupName name={g.name} mono={false} />, text: g.name, hint: `Group · ${g.members.map((m) => m.name).join(' → ')}` })),
         ]}
-        disabled={!dests.length}
+        disabled={loadingLists || !dests.length}
       />
-      <button type="button" className="btn pri" disabled={!choice || save.isPending} onClick={() => save.mutate(input(choice))}>
+      <button type="button" className="btn pri" disabled={!known(choice) || save.isPending} onClick={() => save.mutate(input(choice))}>
         {v.configured ? 'Save' : 'Back up Olympos here'}
       </button>
       {v.configured && (
@@ -96,11 +105,13 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
           Cancel
         </button>
       )}
-      {!dests.length && (
+      {!loadingLists && !dests.length && !destQ.isError && (
         <Link to="/settings/destinations" className="small">
           Add a destination
         </Link>
       )}
+      {destQ.isError && <ErrorState what="destinations" error={destQ.error} onRetry={() => void destQ.refetch()} />}
+      {groupsQ.isError && !destQ.isError && <p className="muted small">Destination groups could not be loaded; single destinations are still available.</p>}
     </div>
   );
 

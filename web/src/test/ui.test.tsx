@@ -5,6 +5,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { BackupRun, BackupRunCopy, ChangeRequest, RestoreGuide, SecretDetail, Vault } from '../api/types';
 import { Drawer, SecretValue } from '../ui/kit';
+import { dateTime } from '../lib/format';
 
 afterEach(() => {
   cleanup();
@@ -166,6 +167,72 @@ describe('vault key table', () => {
     expect(masks.length).toBeGreaterThanOrEqual(6);
     expect(document.body.innerHTML).not.toContain(canary);
     fireEvent.keyDown(document, { key: 'Escape' });
+  });
+});
+
+function renderRunDialog(body: object) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })),
+  );
+  return import('../ui/BackupRunDialog').then(({ BackupRunDialog }) =>
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <BackupRunDialog id="r1" onClose={() => {}} />
+      </QueryClientProvider>,
+    ),
+  );
+}
+
+const partialRun = (over: Partial<BackupRun> & { next_repair_at?: string | null } = {}) => ({
+  id: 'r1', job_id: 'j1', target_service: 'billing-pg', cluster_name: 'prod', engine: 'postgresql', trigger: 'schedule', status: 'partial', scheduled_for: null, tier: 'daily',
+  started_at: '2026-11-22T02:00:00Z', finished_at: '2026-11-22T02:06:40Z', bytes: 3.1e9, wire_bytes: 3.1e9, blob_path: 'p/a.zip', sha256: '9f2c4a1e5d6c7b30',
+  error: 'minio-factory: PutObject: 503 SlowDown', destination_name: 'eu-offsite', repair_of: null,
+  copies: [
+    { destination_id: 'd1', destination_name: 'blob-weu-backups', destination_kind: 'azure_blob', status: 'succeeded', blob_path: 'p/a.zip', bytes: 3.1e9, sha256: '9f2c4a1e5d6c7b30', tier: 'daily', error: '' },
+    { destination_id: 'd2', destination_name: 'minio-factory', destination_kind: 's3', status: 'failed', blob_path: '', bytes: 0, sha256: '', tier: '', error: 'PutObject: 503 SlowDown' },
+  ],
+  restore: { doc: 'docs/restore.md#postgresql', steps: [{ title: 'Download', commands: 'az storage blob download' }], copies: [{ destination_id: 'd1', name: 'blob-weu-backups', kind: 'azure_blob', selected: true, run_id: 'r1', taken_at: '2026-11-22T02:00:00Z' }] },
+  ...over,
+});
+
+describe('repair note of a partial run', () => {
+  it('says when the queued repair starts', async () => {
+    await renderRunDialog(partialRun({ next_repair_at: '2026-11-22T02:11:40Z' }));
+    const note = await screen.findByText(/Repair queued: next attempt at/);
+    expect(note).toHaveTextContent(`Repair queued: next attempt at ${dateTime('2026-11-22T02:11:40Z')}`);
+    expect(screen.queryByText(/when they are used up/)).not.toBeInTheDocument();
+  });
+
+  it('without a queued repair, says what happens to the missing copy', async () => {
+    await renderRunDialog(partialRun({ next_repair_at: null }));
+    expect(
+      await screen.findByText(/Olympos completes missing copies with repair runs inside the job's retry window; when they are used up, the copy stays missing until the next scheduled run\./),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Repair queued/)).not.toBeInTheDocument();
+  });
+
+  it('clamps long errors: the badge carries the status only, the full text is one click away', async () => {
+    const long = 'upload: ' + 'PUT https://olympos-lab-azurite.olympos.svc.cluster.local:10000/devstoreaccount1/backups/groups/olympos-lab/lab/orders-pg/postgresql/2026/11/22/x.zip '.repeat(4) + 'dial tcp 10.96.0.1:10000: connect: connection refused';
+    const run = partialRun({ error: 'minio-factory: ' + long });
+    run.copies![1] = { ...run.copies![1], error: long };
+    const user = userEvent.setup();
+    await renderRunDialog(run);
+    const table = await screen.findByRole('table', { name: 'Copies' });
+    // Result: a short badge, the error below it, clamped
+    const badge = screen.getByText('Partial', { selector: '.badge' });
+    expect(badge).toHaveTextContent(/^Partial$/);
+    const cell = within(table).getAllByRole('row')[2].lastElementChild as HTMLElement;
+    const clamp = cell.querySelector('.clamp') as HTMLElement;
+    expect(clamp).toHaveTextContent(long);
+    expect(clamp).toHaveAttribute('title', long);
+    const more = within(cell).getByRole('button', { name: 'Show the full error' });
+    expect(more).toHaveAttribute('aria-expanded', 'false');
+    await user.click(more);
+    expect(clamp).not.toHaveClass('clamp-3');
+    expect(within(cell).getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+    // short errors are not clamped and have no toggle
+    expect(within(within(table).getAllByRole('row')[1]).queryByRole('button')).not.toBeInTheDocument();
   });
 });
 

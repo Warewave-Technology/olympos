@@ -111,8 +111,10 @@ describe('Backup wizard · destination group', () => {
       const dry = db.runs.find((r) => r.trigger === 'test')!;
       dry.started_at = new Date(Date.now() - 10_000).toISOString();
       expect(await screen.findByText(/^Partial/, {}, { timeout: 6000 })).toHaveClass('warn');
-      expect(screen.getByText(/minio-factory: copy failed/)).toBeInTheDocument();
-      expect(screen.getByText(/blob-weu-backups: .* written/)).toBeInTheDocument();
+      // one line per copy from the server's checklist, each size once
+      expect(screen.getByText('minio-factory: dial tcp: i/o timeout')).toBeInTheDocument();
+      expect(screen.getAllByText(/^Wrote .* to blob-weu-backups/)).toHaveLength(1);
+      expect(screen.queryByText(/written and verified/)).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Enable backup' })).toBeDisabled();
     } finally {
       window.fetch = orig;

@@ -58,6 +58,8 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
   const q = useQuery({ queryKey: ['backup-clusters'], queryFn: () => api.get<ItemList<BackupClusterSummary>>('/backup/clusters') });
   const rows = q.data?.items ?? [];
   const failing = rows.filter((r) => r.last_24h.failed + r.last_24h.missed > 0).length;
+  // partial alone is a warning: a restorable copy exists, another one is missing
+  const partialOnly = rows.filter((r) => r.last_24h.failed + r.last_24h.missed === 0 && (r.last_24h.partial ?? 0) > 0).length;
   const columns: Column<OverviewRow<BackupClusterSummary>>[] = [
     {
       id: 'jobs',
@@ -106,6 +108,11 @@ function BackupsOverview({ clusters, clustersLoading, focusSelf, focusTLS }: { c
       {failing > 0 && (
         <div className="note crit" role="note">
           <b>{plural(failing, 'cluster')} with failed or missed runs in the last 24 hours.</b> Open a cluster to see its runs.
+        </div>
+      )}
+      {partialOnly > 0 && (
+        <div className="note warn" role="note">
+          <b>{plural(partialOnly, 'cluster')} with partial runs in the last 24 hours.</b> A copy is missing; repair runs complete it inside the job&apos;s retry window. Open a cluster to see its runs.
         </div>
       )}
       <TLSNameChanges focus={focusTLS} />

@@ -141,7 +141,13 @@ function runFor(id: string): BackupRun | undefined {
     const copies = g ? db.groupCopies(g, 2.1e6, fail ? { [fail]: 'dial tcp: i/o timeout' } : {}, 'test') : undefined;
     const bad = copies?.filter((c) => c.status === 'failed') ?? [];
     const status = !copies || bad.length === 0 ? 'succeeded' : bad.length === copies.length ? 'failed' : 'partial';
-    Object.assign(r, { status, finished_at: new Date(started + 6000).toISOString(), bytes: 2.1e6, wire_bytes: 0.4e6, steps, copies, error: bad.map((c) => `${c.destination_name}: ${c.error}`).join('; ') });
+    // A group run: an upload step per copy, a manifest step per uploaded copy (as the server's checklist).
+    const groupSteps = copies && [
+      ...steps.slice(0, 3),
+      ...copies.map((c) => (c.status === 'succeeded' ? { name: 'upload', ok: true, detail: `Wrote 2.0 MiB to ${c.destination_name} (390.6 KiB on the wire)` } : { name: 'upload', ok: false, detail: `${c.destination_name}: ${c.error}` })),
+      ...copies.filter((c) => c.status === 'succeeded').map((c) => ({ name: 'manifest', ok: true, detail: `Manifest with checksum written to ${c.destination_name}` })),
+    ];
+    Object.assign(r, { status, finished_at: new Date(started + 6000).toISOString(), bytes: 2.1e6, wire_bytes: 0.4e6, steps: groupSteps ?? steps, copies, error: bad.map((c) => `${c.destination_name}: ${c.error}`).join('; ') });
   }
   return r;
 }
@@ -878,7 +884,9 @@ const routes: [string, string, Handler][] = [
       const restorable = (x.status === 'succeeded' || x.status === 'partial') && x.trigger !== 'test';
       const restore = restorable ? runRestore(x, 'docs/restore.md#postgresql', r.query.get('copy')) : null;
       if (restore && 'status' in restore) return restore;
-      return ok({ ...x, restore });
+      // a partial run with a repair queued: when it starts
+      const waiting = x.status === 'partial' ? db.runs.filter((y) => y.repair_of === x.id && y.status === 'queued' && y.not_before).map((y) => y.not_before!) : [];
+      return ok({ ...x, restore, next_repair_at: waiting.sort()[0] ?? null });
     },
   ],
   [

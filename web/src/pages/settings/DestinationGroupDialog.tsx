@@ -18,6 +18,9 @@ const MAX_MEMBERS = 4;
 const groupsQuery = { queryKey: ['destination-groups'], queryFn: () => api.get<ItemList<DestinationGroup>>('/destination-groups') };
 
 /** Members in order: "1 [Azure Blob] blob-weu-backups → 2 [S3] minio-factory". */
+
+/** Why a group cannot be deleted. */
+const inUse = (jobs: number) => `Used by ${plural(jobs, 'job')}. Move ${jobs === 1 ? 'it' : 'them'} first.`;
 export function GroupMembers({ group }: { group: Pick<DestinationGroup, 'members'> }) {
   return (
     <span className="member-path">
@@ -105,16 +108,22 @@ export function DestinationGroupsCard() {
                   onClick={() => setDeleting(g)}
                   aria-label={`Delete ${g.name}`}
                   disabled={g.jobs > 0}
-                  title={g.jobs > 0 ? `Used by ${plural(g.jobs, 'job')}. Move ${g.jobs === 1 ? 'it' : 'them'} first.` : undefined}
+                  title={g.jobs > 0 ? inUse(g.jobs) : undefined}
+                  aria-describedby={g.jobs > 0 ? `g-del-why-${g.id}` : undefined}
                 >
                   Delete
                 </button>
+                {g.jobs > 0 && (
+                  <span id={`g-del-why-${g.id}`} className="sr-only">
+                    {inUse(g.jobs)}
+                  </span>
+                )}
               </>
             ),
           },
         ]}
       />
-      <div className="card-foot">Every run writes each member and verifies each copy by size and hash. A missing copy is retried by a repair run that writes only to that destination; the original run stays Partial as the record.</div>
+      <div className="card-foot">Every run writes each member and verifies each copy by size and hash. A missing copy is retried by repair runs 5 minutes, 30 minutes and 2 hours later, inside the job&apos;s retry window; they write only to that destination, and the original run stays Partial as the record.</div>
       {canAdmin && editing && <DestinationGroupDialog key={editing === 'new' ? 'new' : editing.id} group={editing === 'new' ? undefined : editing} onClose={() => setEditing(null)} />}
       {canAdmin && deleting && <DeleteGroupDialog group={deleting} onClose={() => setDeleting(null)} />}
     </section>

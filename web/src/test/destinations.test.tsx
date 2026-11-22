@@ -256,6 +256,11 @@ describe('destination groups', () => {
     // a group in use cannot be deleted; the reason is on the control
     expect(within(row).getByRole('button', { name: 'Delete eu-offsite' })).toBeDisabled();
     expect(within(row).getByRole('button', { name: 'Delete eu-offsite' })).toHaveAttribute('title', 'Used by 5 jobs. Move them first.');
+    // not only a tooltip (touch and keyboard users never see it): the reason is text the control points at
+    const del = within(row).getByRole('button', { name: 'Delete eu-offsite' });
+    const why = document.getElementById(del.getAttribute('aria-describedby') ?? '');
+    expect(why).toHaveTextContent('Used by 5 jobs. Move them first.');
+    expect(del).toHaveAccessibleDescription('Used by 5 jobs. Move them first.');
     const dr = within(table).getByRole('row', { name: /dr-pair/ });
     expect(within(dr).getAllByText(/^(nas-factory|blob-weu-backups)$/).map((e) => e.textContent)).toEqual(['nas-factory', 'blob-weu-backups']);
     expect(within(dr).getByText('0 jobs')).toBeInTheDocument();

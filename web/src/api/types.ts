@@ -378,6 +378,8 @@ export interface BackupRun {
   copies?: BackupRunCopy[];
   /** The run whose missing copies this run completes. */
   repair_of?: string | null;
+  /** A queued run is not started before then (repairs wait 5 min, 30 min, 2 h); null = as soon as a worker is free. */
+  not_before?: string | null;
   created_at?: string;
   /** Optional (openapi extension): dry-run checklist steps. */
   steps?: { name: string; ok: boolean; detail: string }[];
@@ -401,6 +403,8 @@ export interface RestoreGuide {
 }
 export interface BackupRunDetail extends BackupRun {
   restore: RestoreGuide | null;
+  /** Partial run with a repair queued: when the repair starts (its not_before). */
+  next_repair_at?: string | null;
 }
 /** GET /backup/self: the built-in olympos-self job (Olympos' own database). */
 export interface SelfBackup {

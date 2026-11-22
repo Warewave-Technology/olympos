@@ -704,6 +704,10 @@ export const jobs: BackupJob[] = [
 ];
 const [jBilling, jBao, jMetrics] = jobs;
 
+// a long error, as the S3 client reports it (the run dialog clamps it)
+const minioDown =
+  'upload: PutObject "olympos/prod-aks-weu-02/billing/billing-pg/postgresql/2026/11/22/7c1e2f.zip": operation error S3: PutObject, exceeded maximum number of attempts, 3, https response error StatusCode: 0, RequestID: , HostID: , request send failed, Put "https://minio.factory.internal:9000/olympos-backups/olympos/prod-aks-weu-02/billing/billing-pg/postgresql/2026/11/22/7c1e2f.zip?x-id=PutObject": dial tcp 10.40.12.7:9000: i/o timeout';
+
 export const runs: BackupRun[] = [
   run({ job_id: jBao.id, target_service: 'openbao', cluster_name: 'prod-aks-weu-01', engine: 'vault', started_at: iso(2 * H), finished_at: iso(2 * H - 11_000), bytes: 42e6, wire_bytes: 42e6 }),
   run({
@@ -726,13 +730,13 @@ export const runs: BackupRun[] = [
     cluster_name: 'prod-aks-weu-02',
     engine: 'postgresql',
     status: 'partial',
-    error: 'minio-factory: dial tcp: i/o timeout',
+    error: `minio-factory: ${minioDown}`,
     started_at: iso(8 * H),
     finished_at: iso(8 * H - 400_000),
     bytes: 3.1e9,
     wire_bytes: 3.1e9,
     destination_name: gOffsite.name,
-    copies: groupCopies(gOffsite, 3.1e9, { 'minio-factory': 'dial tcp: i/o timeout' }),
+    copies: groupCopies(gOffsite, 3.1e9, { 'minio-factory': minioDown }),
   }),
   run({ job_id: jBao.id, target_service: 'openbao', cluster_name: 'prod-aks-weu-01', engine: 'vault', started_at: iso(8 * H), finished_at: iso(8 * H - 10_000), bytes: 41e6, wire_bytes: 41e6 }),
   run({

@@ -77,4 +77,66 @@ describe('olympos-self to a destination group', () => {
     const dd = (await within(card).findByText('eu-offsite', {}, T)).closest('dd')!;
     expect(within(dd).getByRole('img', { name: 'Destination group' })).toBeInTheDocument();
   });
+
+  // Runs after the test above: the job writes to the eu-offsite group.
+  it('never shows the raw g:/d: value while destinations load or when groups fail', async () => {
+    const user = userEvent.setup();
+    const orig = window.fetch;
+    let release: () => void = () => {};
+    const held = new Promise<void>((r) => (release = r));
+    let failGroups = false;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('/api/v1/destination-groups')) {
+        if (failGroups) return new Response(JSON.stringify({ error: 'boom' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+        await held;
+      }
+      return orig(input, init);
+    };
+    try {
+      renderApp('/backups?self=1');
+      const card = await screen.findByRole('region', { name: /Olympos database/ }, T);
+      await user.click(await within(card).findByRole('button', { name: 'Change' }, T));
+      const picker = within(card).getByRole('combobox', { name: 'Destination' });
+      expect(picker).toHaveTextContent('Loading destinations…');
+      expect(picker).not.toHaveTextContent(/[gd]:[0-9a-f-]{8}/);
+      expect(picker).toBeDisabled();
+      release();
+      await waitFor(() => expect(picker).toHaveTextContent('eu-offsite'), T);
+
+      cleanup();
+      failGroups = true;
+      renderApp('/backups?self=1');
+      const card2 = await screen.findByRole('region', { name: /Olympos database/ }, T);
+      await user.click(await within(card2).findByRole('button', { name: 'Change' }, T));
+      expect(await within(card2).findByText(/Destination groups could not be loaded/, {}, T)).toBeInTheDocument();
+      const picker2 = within(card2).getByRole('combobox', { name: 'Destination' });
+      expect(picker2).not.toHaveTextContent(/[gd]:[0-9a-f-]{8}/);
+    } finally {
+      window.fetch = orig;
+    }
+  });
+
+  it('a repair waiting for its start does not make the job busy', async () => {
+    const orig = window.fetch;
+    window.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await orig(input, init);
+      if (String(input) !== '/api/v1/backup/self' || (init?.method ?? 'GET') !== 'GET') return res;
+      const v = await res.json();
+      const at = new Date(Date.now() - 60_000).toISOString();
+      const partial = { ...v.runs[0], id: 'p1', status: 'partial', error: 'minio-factory: dial tcp: i/o timeout', started_at: at, finished_at: at, repair_of: null };
+      const repair = { ...partial, id: 'r1', status: 'queued', error: '', started_at: null, finished_at: null, repair_of: 'p1', not_before: new Date(Date.now() + 4 * 60_000).toISOString() };
+      return new Response(JSON.stringify({ ...v, runs: [repair, partial, ...v.runs] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    };
+    try {
+      renderApp('/backups?self=1');
+      const card = await screen.findByRole('region', { name: /Olympos database/ }, T);
+      const runNow = await within(card).findByRole('button', { name: 'Run now' }, T);
+      expect(runNow).toBeEnabled();
+      const last = within(card).getByText('Last run', { selector: 'dt' }).nextElementSibling!;
+      expect(last).toHaveTextContent(/^Partial/);
+    } finally {
+      window.fetch = orig;
+    }
+  });
 });

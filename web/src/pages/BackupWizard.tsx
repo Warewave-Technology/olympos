@@ -877,7 +877,8 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                         <span>{s.detail || s.name}</span>
                       </li>
                     ))}
-                    {(run.copies ?? []).map((c) => (
+                    {/* the server's checklist has an upload and a manifest step per copy; list copies only without one */}
+                    {!run.steps?.length && (run.copies ?? []).map((c) => (
                       <li key={c.destination_id} className="chk">
                         <CheckIcon ok={c.status === 'succeeded'} />
                         <span>{`${c.destination_name}: ${c.status === 'succeeded' ? `${bytes(c.bytes)} written and verified` : `copy failed${c.error ? ` · ${c.error}` : ''}`}`}</span>

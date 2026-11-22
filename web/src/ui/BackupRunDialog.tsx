@@ -7,7 +7,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { BackupRun, BackupRunCopy, BackupRunDetail, RestoreCopy, RestoreGuide } from '../api/types';
-import { between, bytes, duration, relDateTime } from '../lib/format';
+import { between, bytes, dateTime, duration, relDateTime } from '../lib/format';
 import { Badge, CopyButton, FormError, Modal, QueryView } from './kit';
 import { DocLink, WithDocLinks } from './DocLinks';
 import { GroupName, KindBadge } from './destinations';
@@ -87,41 +87,73 @@ export function RestoreWithCopies({ guide, runId, onSelect, pending, error }: { 
 
 const shortHash = (h: string) => (h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h);
 
+/** Errors longer than this are clamped to three lines with a toggle for the rest. */
+const LONG_ERROR = 120;
+
+/** An error that wraps anywhere; a long one is clamped to three lines, the full text one click away (and in the tooltip). */
+export function ClampedError({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > LONG_ERROR;
+  return (
+    <span className="clamp-wrap">
+      <span className={`clamp ico-crit${long && !open ? ' clamp-3' : ''}`} title={long ? text : undefined}>
+        {text}
+      </span>
+      {long && (
+        <button type="button" className="link-btn small" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show the full error'}
+        </button>
+      )}
+    </span>
+  );
+}
+
 function CopiesTable({ copies, isRepair }: { copies: BackupRunCopy[]; isRepair: boolean }) {
   return (
     <div>
       <h3 id="run-copies" className="small" style={{ margin: '0 0 8px', fontWeight: 600 }}>
         Copies
       </h3>
+      {/* stack-sm: one card per copy on phones, so the error is never off-screen; explicit roles keep the table semantics there */}
       <div className="boxed tight table-wrap">
-        <table className="t" aria-labelledby="run-copies">
+        <table className="t stack-sm" role="table" aria-labelledby="run-copies">
           <thead>
-            <tr>
-              <th>Destination</th>
-              <th>Status</th>
-              <th className="num">Size</th>
-              <th>SHA-256</th>
-              <th>Tier</th>
-              <th>Error</th>
+            <tr role="row">
+              <th role="columnheader">Destination</th>
+              <th role="columnheader">Status</th>
+              <th role="columnheader" className="num">
+                Size
+              </th>
+              <th role="columnheader">SHA-256</th>
+              <th role="columnheader">Tier</th>
+              <th role="columnheader">Error</th>
             </tr>
           </thead>
           <tbody>
             {copies.map((c) => (
-              <tr key={c.destination_id}>
-                <td className="wrap">
+              <tr key={c.destination_id} role="row">
+                <td role="cell" data-label="Destination">
                   <span className="inline-sm">
                     <span className="mono">{c.destination_name}</span>
                     <KindBadge kind={c.destination_kind} />
                     {isRepair && <Badge tone="mute">Repair</Badge>}
                   </span>
                 </td>
-                <td>{c.status === 'succeeded' ? <Badge tone="ok">Succeeded</Badge> : <Badge tone="crit">Failed</Badge>}</td>
-                <td className="num">{c.status === 'succeeded' && c.bytes ? bytes(c.bytes) : '—'}</td>
-                <td className="mono" title={c.sha256 || undefined}>
+                <td role="cell" data-label="Status">
+                  {c.status === 'succeeded' ? <Badge tone="ok">Succeeded</Badge> : <Badge tone="crit">Failed</Badge>}
+                </td>
+                <td role="cell" data-label="Size" className="num">
+                  {c.status === 'succeeded' && c.bytes ? bytes(c.bytes) : '—'}
+                </td>
+                <td role="cell" data-label="SHA-256" className="mono" title={c.sha256 || undefined}>
                   {c.status === 'succeeded' && c.sha256 ? shortHash(c.sha256) : <span className="muted">—</span>}
                 </td>
-                <td>{c.status === 'succeeded' && c.tier ? c.tier : <span className="muted">—</span>}</td>
-                <td className="wrap">{c.error ? <span className="ico-crit">{c.error}</span> : <span className="muted">—</span>}</td>
+                <td role="cell" data-label="Tier">
+                  {c.status === 'succeeded' && c.tier ? c.tier : <span className="muted">—</span>}
+                </td>
+                <td role="cell" data-label="Error" className="wrap err-cell">
+                  {c.error ? <ClampedError text={c.error} /> : <span className="muted">—</span>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -162,7 +194,18 @@ function RepairNote({ run, onOpen }: { run: BackupRunDetail; onOpen: (id: string
       </div>
     );
   }
-  return <div className="note warn">Not every copy was written. Olympos retries the missing copies with repair runs inside the job&apos;s retry window; they write only to the destinations that failed.</div>;
+  if (run.next_repair_at) {
+    return (
+      <div className="note warn">
+        Not every copy was written. Repair queued: next attempt at {dateTime(run.next_repair_at)}. It writes only to the destinations that failed.
+      </div>
+    );
+  }
+  return (
+    <div className="note warn">
+      Not every copy was written. Olympos completes missing copies with repair runs inside the job&apos;s retry window; when they are used up, the copy stays missing until the next scheduled run.
+    </div>
+  );
 }
 
 const isGroupRun = (r: Pick<BackupRun, 'copies'>) => (r.copies?.length ?? 0) > 1;
@@ -196,12 +239,18 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             <dl className="kv">
               <dt>Result</dt>
               <dd>
-                <RunBadge run={run} />
+                {/* the status alone: a long error would run past the dialog in a badge */}
+                <RunBadge run={{ status: run.status, error: '' }} />
                 {isGroupRun(run) && (
                   <span className="muted small">
                     {' '}
                     {run.copies!.filter((c) => c.status === 'succeeded').length} of {run.copies!.length} copies
                   </span>
+                )}
+                {(run.status === 'failed' || run.status === 'partial') && run.error && (
+                  <div className="small" style={{ marginTop: 4 }}>
+                    <ClampedError text={run.error} />
+                  </div>
                 )}
               </dd>
               {run.destination_name && (
