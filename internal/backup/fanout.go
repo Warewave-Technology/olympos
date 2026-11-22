@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -13,6 +14,13 @@ import (
 // DefaultFanOutStall is how long a branch may go without accepting a write
 // before it is detached.
 const DefaultFanOutStall = 10 * time.Minute
+
+// DefaultFanOutAbandon is how long Close waits for a detached branch's
+// upload to return. An upload stuck where cancellation cannot reach it (a
+// write or fsync blocked in the kernel on a hard NFS mount whose server is
+// gone) is abandoned after that: its goroutine is left behind and the
+// branch is reported as stalled, so the other copies are still finished.
+const DefaultFanOutAbandon = 30 * time.Second
 
 // fanOutSegment bounds how much of one Write a branch must take within a
 // single stall window, so a slow but moving upload is not mistaken for a
@@ -29,7 +37,8 @@ var errUploadEnded = errors.New("upload returned before the stream ended")
 
 // Branch is one destination of a fan-out: Upload reads the whole stream from
 // r and returns when it has stored it (or failed). The context is cancelled
-// when the branch is detached, so Upload must honour it.
+// when the branch is detached and Upload should honour it; one that does not
+// return within DefaultFanOutAbandon after that is abandoned by Close.
 type Branch struct {
 	Name   string
 	Upload func(ctx context.Context, r io.Reader) error
@@ -130,8 +139,9 @@ func (b *fanBranch) write(p []byte, stall time.Duration, stallErr error) {
 type FanOut struct {
 	branches    []*fanBranch
 	stall       time.Duration
-	stallErr    error // a branch refused a write for stall
-	endStallErr error // a branch did not finish after the end of the stream
+	stallErr    error         // a branch refused a write for stall
+	endStallErr error         // a branch did not finish after the end of the stream
+	abandon     time.Duration // how long Close waits for a detached upload
 	closeOnce   sync.Once
 	results     []BranchResult
 }
@@ -144,6 +154,7 @@ func NewFanOut(ctx context.Context, branches []Branch, stall time.Duration) *Fan
 	}
 	f := &FanOut{
 		stall:       stall,
+		abandon:     DefaultFanOutAbandon,
 		stallErr:    fmt.Errorf("stalled: no progress for %s", stall),
 		endStallErr: fmt.Errorf("stalled: upload did not finish within %s after the end of the stream", stall),
 	}
@@ -204,8 +215,11 @@ func (f *FanOut) Write(p []byte) (int, error) {
 // waits until every upload has returned and reports how each branch ended,
 // in branch order. A live branch gets at most the stall duration, shared by
 // all of them, to finish after the end of the stream; one that does not is
-// cancelled and reported as stalled. With a non-nil err no branch reports
-// success. It is safe to call more than once.
+// cancelled and reported as stalled. A detached branch whose upload still
+// does not return within the abandon bound (shared as well) is abandoned:
+// its goroutine is left running, its result is the detach error and Close
+// returns anyway. With a non-nil err no branch reports success. It is safe
+// to call more than once.
 func (f *FanOut) Close(err error) []BranchResult {
 	f.closeOnce.Do(func() {
 		live := make([]bool, len(f.branches))
@@ -215,24 +229,63 @@ func (f *FanOut) Close(err error) []BranchResult {
 				_ = b.pw.CloseWithError(err) // nil → EOF
 			}
 		}
-		grace, cancelGrace := context.WithTimeout(context.Background(), f.stall)
-		defer cancelGrace()
+		grace := time.NewTimer(f.stall)
+		defer grace.Stop()
+		expired := false
 		for i, b := range f.branches {
-			if live[i] {
+			if !live[i] {
+				continue
+			}
+			if !expired {
 				select {
 				case <-b.done:
-				case <-grace.Done():
-					select {
-					case <-b.done:
-					default:
-						b.detach(f.endStallErr, true)
-					}
+					continue
+				case <-grace.C:
+					expired = true
 				}
 			}
-			<-b.done // detached branches had their context cancelled
+			select {
+			case <-b.done:
+			default:
+				b.detach(f.endStallErr, true)
+			}
+		}
+		// Every branch that is not done has been detached (its context is
+		// cancelled); wait for those uploads, up to the abandon bound.
+		bound := time.NewTimer(f.abandon)
+		defer bound.Stop()
+		gone := false
+		for _, b := range f.branches {
+			returned := false
+			if !gone {
+				select {
+				case <-b.done:
+					returned = true
+				case <-bound.C:
+					gone = true
+				}
+			}
+			if !returned {
+				select {
+				case <-b.done:
+					returned = true
+				default:
+				}
+			}
 			b.cancel()
-			r := BranchResult{Name: b.name, Bytes: b.bytes, Err: b.upErr}
-			if b.detached.Load() && (b.stalled || r.Err == nil) {
+			detached := b.detached.Load() // orders the reads of detErr and stalled
+			r := BranchResult{Name: b.name, Bytes: b.bytes}
+			if !returned {
+				// upErr is written by the upload goroutine, which is still
+				// running: it is never read here.
+				r.Err = fmt.Errorf("%w; the upload did not return within %s after it was cancelled and was left behind", b.detErr, f.abandon)
+				slog.Default().Warn("backup: abandoning an upload that does not return after being cancelled; it may stay blocked until olympos-server restarts",
+					"destination", b.name, "detach_error", b.detErr.Error())
+				f.results = append(f.results, r)
+				continue
+			}
+			r.Err = b.upErr
+			if detached && (b.stalled || r.Err == nil) {
 				r.Err = b.detErr
 			}
 			if r.Err == nil {

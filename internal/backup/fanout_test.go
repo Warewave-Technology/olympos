@@ -435,3 +435,52 @@ func TestFanOutContextCanceled(t *testing.T) {
 		t.Errorf("branch err = %v, want context.Canceled", res[0].Err)
 	}
 }
+
+// An upload that ignores its context and never returns (a hard NFS mount
+// whose server is gone blocks write/fsync in the kernel) must not hang
+// Close: the branch is abandoned after the detach bound and reported as
+// stalled, and the healthy branches still succeed.
+func TestFanOutUploadIgnoresContext(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		read bool // reads the whole stream, then hangs (finalizing)
+	}{{"before reading", false}, {"after the stream", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			data := randomBytes(t, 16<<10)
+			a, c := &sink{}, &sink{}
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			hung := Branch{Name: "nfs", Upload: func(_ context.Context, r io.Reader) error {
+				if tc.read {
+					if _, err := io.Copy(io.Discard, r); err != nil {
+						return err
+					}
+				}
+				<-release // ignores ctx, like a write blocked in the kernel
+				return nil
+			}}
+			f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hung, {Name: "c", Upload: c.upload}}, 50*time.Millisecond)
+			f.abandon = 50 * time.Millisecond
+			if err := writeChunks(f, data, 8<<10); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			closed := make(chan []BranchResult, 1)
+			go func() { closed <- f.Close(nil) }()
+			var res []BranchResult
+			select {
+			case res = <-closed:
+			case <-time.After(10 * time.Second):
+				t.Fatal("Close did not return")
+			}
+			if res[0].Err != nil || res[2].Err != nil {
+				t.Fatalf("healthy branches failed: a=%v c=%v", res[0].Err, res[2].Err)
+			}
+			if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), "stalled:") || !strings.Contains(res[1].Err.Error(), "did not return") {
+				t.Fatalf("hung err = %v", res[1].Err)
+			}
+			if !bytes.Equal(a.bytes(), data) || !bytes.Equal(c.bytes(), data) {
+				t.Error("healthy branches did not receive the full stream")
+			}
+		})
+	}
+}

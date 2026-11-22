@@ -139,7 +139,9 @@ an object like a destination group.
 - The slowest live branch sets the pace (no unbounded buffering). A destination that stalls rather than
   fails is detached as `stalled` (added during implementation): a member that accepts no data for 10
   minutes, or does not finish within 10 minutes after the end of the stream, gets a failed copy and the
-  others go on.
+  others go on. An upload that does not return within 30 seconds after it is detached (blocked in the kernel
+  on a hard NFS mount) is abandoned, so it never holds up the run; its goroutine stays until it returns or
+  the server restarts.
 - Two members that write to the same location (same kind and endpoint, account and container, bucket or NFS
   path, and the same prefix) are refused when a group is saved and when a member destination is edited
   (added during implementation): such a "copy" would be the same object twice in one place.

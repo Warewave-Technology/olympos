@@ -430,6 +430,26 @@ func TestWorkerGroupEngineFailsMidStream(t *testing.T) {
 	}
 }
 
+// A mixed group: one copy fails early (its upload gives up after 100 bytes),
+// then the engine fails after writing. The copy that left the stream early
+// keeps its own upload error; only the copy that took the whole stream is
+// attributed to the engine.
+func TestWorkerGroupEarlyDetachThenEngineFails(t *testing.T) {
+	db := testutil.DB(t)
+	g := seedGroup(t, db, jobOpts{options: `{"fail_after_write":true}`})
+	g.B1.failAfter = 100
+	run := queue(t, db, g.Job, "manual", nil)
+	claimAndRun(t, g.W, run)
+	if r := loadRun(t, db, run); r.Status != "failed" || r.Error != "dump failed after writing" {
+		t.Fatalf("run: %+v", r)
+	}
+	cs := loadCopies(t, db, run)
+	if len(cs) != 2 || cs[0].Status != "failed" || cs[0].Error != "upload: connection reset by peer" ||
+		cs[1].Status != "failed" || cs[1].Error != "dump failed after writing" {
+		t.Fatalf("copies: %+v", cs)
+	}
+}
+
 // Ruling B: a copy whose manifest failed keeps its blob path, size and
 // checksum (the blob exists); with no succeeded copy the run takes them.
 func TestWorkerManifestFailureKeepsBlob(t *testing.T) {
