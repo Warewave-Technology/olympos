@@ -44,9 +44,14 @@ bench:
   enabled: false
   maxParallel: 3
   namespace: olympos-bench
-  # Image is pinned by digest inside the agent binary; this is used only for
-  # the Kyverno PolicyException image match.
-  imagePattern: "docker.io/aquasec/kube-bench:*@sha256:*"
+  # The kube-bench image is pinned by digest inside the agent binary.
+  # imageRepository pulls that same digest from a mirror instead of Docker
+  # Hub: ghcr.io/warewave-technology/kube-bench (copied and signed by each
+  # Olympos release) or your own copy. A repository only, no tag or digest.
+  imageRepository: ""
+  # Image match of the legacy Kyverno PolicyException; "" follows
+  # imageRepository (<repository>:*@sha256:*).
+  imagePattern: ""
   # Kyverno exceptions for the kube-bench pods (only needed when Kyverno
   # policies would block them in the olympos-bench namespace).
   kyverno:

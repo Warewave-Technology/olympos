@@ -194,6 +194,33 @@ succeeds when none of the listed files is present (with a renamed download, for 
 
 Pin images by digest in production (`image.digest` in the chart values).
 
+### The kube-bench image
+
+kube-bench (opt-in per cluster, `bench.enabled`) runs `docker.io/aquasec/kube-bench`, pinned by digest in the
+agent binary: an agent only ever starts that exact image. The kube-bench project does not sign its images, so
+there is no upstream signature to check. Instead, each Olympos release copies the pinned index, byte for byte,
+to `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity above. The signature says
+that an Olympos release pinned this digest; it does not come from the kube-bench project.
+
+```bash
+# The digest the agent pins (also printed by scripts/kube-bench-pin.sh print)
+D=sha256:75506f222d1eb6ce2a751a5533bdc0a3b54c898e2e49e7751d0ee22cfb862679
+cosign verify ghcr.io/warewave-technology/kube-bench@$D --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+```
+
+To pull from the mirror instead of Docker Hub, install the agent with
+`--set bench.imageRepository=ghcr.io/warewave-technology/kube-bench`. For a registry you run, copy the image
+with its signature and point the agent at it; the digest stays the pinned one whatever the repository:
+
+```bash
+cosign copy ghcr.io/warewave-technology/kube-bench@$D registry.example.com/mirror/kube-bench:v0.16.0
+helm upgrade olympos-agent … --reuse-values --set bench.imageRepository=registry.example.com/mirror/kube-bench
+```
+
+Clusters that enforce image signatures with Kyverno (1.17 or later) can apply
+[deploy/kyverno/kube-bench-signature.yaml](../deploy/kyverno/kube-bench-signature.yaml): it admits pods in
+`olympos-bench` only with an image signed by an Olympos release (adjust its `glob` for your own mirror).
+
 ## 3. Agents
 
 In the UI: **Dashboard › Add cluster** → name, labels, kube-bench opt-in → copy the generated Helm

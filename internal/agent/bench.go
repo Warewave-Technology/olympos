@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,14 +26,42 @@ import (
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 )
 
-// KubeBenchImage is the kube-bench image, pinned by digest (SPEC §12.3.2).
-// The digest is the multi-arch index of docker.io/aquasec/kube-bench:v0.16.0
-// (Docker Hub, pushed 2026-08-05). To update: pick a release tag, read its
-// index digest (`crane digest docker.io/aquasec/kube-bench:<tag>` or
-// `docker buildx imagetools inspect`), verify it (optionally with cosign),
-// update both the tag and the digest here and in the Kyverno PolicyException
-// of the agent chart, and re-check BenchProfiles against the release's cfg/.
-const KubeBenchImage = "docker.io/aquasec/kube-bench:v0.16.0@sha256:75506f222d1eb6ce2a751a5533bdc0a3b54c898e2e49e7751d0ee22cfb862679"
+// The kube-bench image, pinned by digest (SPEC §12.3.2): the multi-arch index
+// of docker.io/aquasec/kube-bench:v0.16.0 (Docker Hub, pushed 2026-08-05).
+// Upstream images are not signed. Each Olympos release copies this exact
+// index to ghcr.io/warewave-technology/kube-bench and signs it with the
+// release identity (docs/install.md › The kube-bench image); the agent may pull
+// from that mirror or another one (bench.imageRepository), the digest stays
+// this one. To update: pick a release tag, set the tag and digest here
+// (`scripts/kube-bench-pin.sh check` compares them with Docker Hub) and
+// re-check BenchProfiles against the release's cfg/.
+const (
+	KubeBenchRepository = "docker.io/aquasec/kube-bench"
+	KubeBenchTag        = "v0.16.0"
+	KubeBenchDigest     = "sha256:75506f222d1eb6ce2a751a5533bdc0a3b54c898e2e49e7751d0ee22cfb862679"
+)
+
+// KubeBenchImage is the default image reference: Docker Hub, tag and digest.
+const KubeBenchImage = KubeBenchRepository + ":" + KubeBenchTag + "@" + KubeBenchDigest
+
+// BenchImage is the pinned kube-bench image pulled from repo (a mirror of
+// KubeBenchRepository; "" is Docker Hub). The digest is always KubeBenchDigest.
+func BenchImage(repo string) string {
+	if repo == "" {
+		repo = KubeBenchRepository
+	}
+	return repo + ":" + KubeBenchTag + "@" + KubeBenchDigest
+}
+
+// validBenchRepository accepts a repository without a tag or digest
+// (registry ports are fine: registry.example:5000/kube-bench).
+func validBenchRepository(repo string) bool {
+	if repo == "" {
+		return true
+	}
+	last := repo[strings.LastIndex(repo, "/")+1:]
+	return strings.Contains(repo, "/") && !strings.ContainsAny(repo, "@ \t") && !strings.Contains(last, ":") && repo == strings.ToLower(repo)
+}
 
 // Bench limits.
 const (
@@ -108,7 +137,7 @@ func newBenchRunner(kube kubernetes.Interface, cfg Config, log *slog.Logger) *be
 	if ns == "" {
 		ns = "olympos-bench"
 	}
-	b := &benchRunner{kube: kube, ns: ns, image: KubeBenchImage, log: log, sem: make(chan struct{}, n), poll: 3 * time.Second}
+	b := &benchRunner{kube: kube, ns: ns, image: BenchImage(cfg.BenchImageRepository), log: log, sem: make(chan struct{}, n), poll: 3 * time.Second}
 	b.readLogs = func(ctx context.Context, pod string) (io.ReadCloser, error) {
 		limit := int64(benchMaxLog)
 		return b.kube.CoreV1().Pods(b.ns).GetLogs(pod, &corev1.PodLogOptions{Container: benchContainer, LimitBytes: &limit}).Stream(ctx)

@@ -31,6 +31,47 @@ func TestBenchImagePinnedByDigest(t *testing.T) {
 	}
 }
 
+// A mirror changes where the image is pulled from, never which image it is.
+func TestBenchImageMirror(t *testing.T) {
+	if got := BenchImage(""); got != KubeBenchImage {
+		t.Fatalf("default: %s", got)
+	}
+	want := "ghcr.io/warewave-technology/kube-bench:" + KubeBenchTag + "@" + KubeBenchDigest
+	if got := BenchImage("ghcr.io/warewave-technology/kube-bench"); got != want {
+		t.Fatalf("mirror: %s", got)
+	}
+	for repo, ok := range map[string]bool{
+		"":                                       true,
+		"ghcr.io/warewave-technology/kube-bench": true,
+		"registry.example:5000/mirror/kube-bench": true,
+		"kube-bench":                     false, // no registry
+		"ghcr.io/x/kube-bench:v0.17.0":   false, // a tag
+		"ghcr.io/x/kube-bench@sha256:00": false, // a digest
+		"ghcr.io/X/Kube-Bench":           false, // not a valid reference
+		"ghcr.io/x/kube bench":           false,
+	} {
+		if validBenchRepository(repo) != ok {
+			t.Errorf("validBenchRepository(%q) = %v, want %v", repo, !ok, ok)
+		}
+	}
+}
+
+func TestConfigBenchImageRepository(t *testing.T) {
+	t.Setenv("OLYMPOS_SERVER", "olympos.example:8443")
+	t.Setenv("OLYMPOS_BENCH_IMAGE_REPOSITORY", "ghcr.io/warewave-technology/kube-bench")
+	c, err := ConfigFromEnv()
+	if err != nil || c.BenchImageRepository != "ghcr.io/warewave-technology/kube-bench" {
+		t.Fatalf("config %+v, %v", c.BenchImageRepository, err)
+	}
+	if b := newBenchRunner(fake.NewSimpleClientset(), c, slog.Default()); b.image != BenchImage(c.BenchImageRepository) {
+		t.Fatalf("runner image %s", b.image)
+	}
+	t.Setenv("OLYMPOS_BENCH_IMAGE_REPOSITORY", "ghcr.io/x/kube-bench:latest")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "without tag or digest") {
+		t.Fatalf("a tag must be refused: %v", err)
+	}
+}
+
 // Golden assertions on the compiled-in Job spec (SPEC §12.3.3).
 func TestBenchJobSpec(t *testing.T) {
 	runID := "7d1c2a64-1d7b-4c43-9a59-3f1c8f1b0c2e"

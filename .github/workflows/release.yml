@@ -75,7 +75,7 @@ jobs:
         if: env.PUBLISH == 'true'
         with: {registry: ghcr.io, username: "${{ github.actor }}", password: "${{ secrets.GITHUB_TOKEN }}"}
       - uses: sigstore/cosign-installer@v3
-        if: env.SIGN == 'true'
+        if: env.PUBLISH == 'true'
       - uses: anchore/sbom-action/download-syft@v0
         if: env.PUBLISH == 'true'
       - name: Build (both architectures); on a tag push, sign, attest
@@ -100,6 +100,21 @@ jobs:
             fi
             echo "$c=$digest" >> digests.txt
           done
+      # Upstream kube-bench images are not signed: the release copies the
+      # digest the agent pins to its own registry and signs it there
+      # (docs/install.md › The kube-bench image). The check also fails a dry run
+      # when the upstream tag was moved.
+      - name: kube-bench; on a tag push, mirror and sign
+        run: |
+          set -euo pipefail
+          scripts/kube-bench-pin.sh check
+          [ "$PUBLISH" = true ] || exit 0
+          scripts/kube-bench-pin.sh mirror $REGISTRY/kube-bench
+          ref=$REGISTRY/kube-bench@$(scripts/kube-bench-pin.sh print | sed 's/.*@//')
+          if [ "$SIGN" = true ]; then
+            cosign sign --yes $ref
+            cosign verify $ref --certificate-identity-regexp "$CERT_ID" --certificate-oidc-issuer "$CERT_ISSUER" >/dev/null
+          fi
       - uses: actions/upload-artifact@v7
         if: env.PUBLISH == 'true'
         with: {name: image-sboms, path: "sbom-*.json\ndigests.txt"}
