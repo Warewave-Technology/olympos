@@ -26,27 +26,31 @@ type Retention struct {
 // DefaultRetention matches the column default.
 var DefaultRetention = Retention{Daily: 7, Weekly: 4, Monthly: 12}
 
-// Job is a backup_jobs row joined with its target, cluster and destination.
+// Job is a backup_jobs row joined with its target, cluster and destination
+// (or destination group).
 type Job struct {
-	ID               uuid.UUID
-	Target           inventory.Target
-	ClusterLabels    map[string]string
-	ClusterStatus    string
-	TransferMode     string
-	EgressRatePerGB  *float64
-	CredentialID     *uuid.UUID
-	DestinationID    uuid.UUID
-	DestinationName  string
-	EngineOptions    json.RawMessage
-	Cron             string
-	Timezone         string
-	Retention        Retention
-	Enabled          bool
-	PausedReason     string
-	NotifyChannelID  *uuid.UUID
-	NotifyOnSuccess  bool
-	LastScheduledFor *time.Time
-	CreatedAt        time.Time
+	ID              uuid.UUID
+	Target          inventory.Target
+	ClusterLabels   map[string]string
+	ClusterStatus   string
+	TransferMode    string
+	EgressRatePerGB *float64
+	CredentialID    *uuid.UUID
+	// Exactly one of DestinationID and DestinationGroupID is set;
+	// DestinationName is the destination's or the group's name.
+	DestinationID      *uuid.UUID
+	DestinationGroupID *uuid.UUID
+	DestinationName    string
+	EngineOptions      json.RawMessage
+	Cron               string
+	Timezone           string
+	Retention          Retention
+	Enabled            bool
+	PausedReason       string
+	NotifyChannelID    *uuid.UUID
+	NotifyOnSuccess    bool
+	LastScheduledFor   *time.Time
+	CreatedAt          time.Time
 }
 
 // TargetInfo converts the job's target for engines.
@@ -60,12 +64,12 @@ func (j *Job) TargetInfo() TargetInfo {
 		Service: t.Service, Port: t.Port, Engine: t.Engine, VaultProvider: t.VaultProvider, TLSServerName: name}
 }
 
-const jobSelectBase = `SELECT j.id, j.credential_id, j.destination_id, d.name, j.engine_options, j.cron, j.timezone, j.retention,
-	j.enabled, j.paused_reason, j.notify_channel_id, j.notify_on_success, j.last_scheduled_for, j.created_at,
+const jobSelectBase = `SELECT j.id, j.credential_id, j.destination_id, j.destination_group_id, COALESCE(d.name, g.name, ''),
+	j.engine_options, j.cron, j.timezone, j.retention, j.enabled, j.paused_reason, j.notify_channel_id, j.notify_on_success, j.last_scheduled_for, j.created_at,
 	t.id, t.cluster_id, c.name, c.labels, c.status, c.transfer_mode, c.egress_rate_per_gb::float8, t.namespace, t.service, t.port,
 	t.port_name, t.engine, t.vault_provider, t.tls_server_name, t.detected_version, t.tls_ok, t.status, t.first_seen_at, t.last_seen_at
 	FROM backup_jobs j JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
-	JOIN destinations d ON d.id = j.destination_id`
+	LEFT JOIN destinations d ON d.id = j.destination_id LEFT JOIN destination_groups g ON g.id = j.destination_group_id`
 
 const jobSelect = jobSelectBase + ` WHERE j.deleted_at IS NULL`
 
@@ -73,8 +77,8 @@ func scanJob(row pgx.Row) (*Job, error) {
 	var j Job
 	var ret []byte
 	t := &j.Target
-	if err := row.Scan(&j.ID, &j.CredentialID, &j.DestinationID, &j.DestinationName, &j.EngineOptions, &j.Cron, &j.Timezone, &ret,
-		&j.Enabled, &j.PausedReason, &j.NotifyChannelID, &j.NotifyOnSuccess, &j.LastScheduledFor, &j.CreatedAt,
+	if err := row.Scan(&j.ID, &j.CredentialID, &j.DestinationID, &j.DestinationGroupID, &j.DestinationName,
+		&j.EngineOptions, &j.Cron, &j.Timezone, &ret, &j.Enabled, &j.PausedReason, &j.NotifyChannelID, &j.NotifyOnSuccess, &j.LastScheduledFor, &j.CreatedAt,
 		&t.ID, &t.ClusterID, &t.ClusterName, &j.ClusterLabels, &j.ClusterStatus, &j.TransferMode, &j.EgressRatePerGB,
 		&t.Namespace, &t.Service, &t.Port, &t.PortName, &t.Engine, &t.VaultProvider, &t.TLSServerName, &t.DetectedVersion,
 		&t.TLSOK, &t.Status, &t.FirstSeenAt, &t.LastSeenAt); err != nil {
@@ -206,7 +210,12 @@ func MonthlyEstimate(avgWireBytes float64, spec schedule.Spec, now time.Time) in
 func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now time.Time) (*JobView, error) {
 	v := &JobView{ID: j.ID, Target: j.Target, Engine: j.Target.Engine, EngineOptions: j.EngineOptions, Cron: j.Cron, Timezone: j.Timezone,
 		Retention: j.Retention, Enabled: j.Enabled, PausedReason: j.PausedReason, NotifyChannelID: j.NotifyChannelID, NotifyOnSuccess: j.NotifyOnSuccess, CreatedAt: j.CreatedAt}
-	v.Destination.ID, v.Destination.Name = j.DestinationID, j.DestinationName
+	v.Destination.Name = j.DestinationName
+	if j.DestinationID != nil {
+		v.Destination.ID = *j.DestinationID
+	} else if j.DestinationGroupID != nil {
+		v.Destination.ID = *j.DestinationGroupID
+	}
 	if j.CredentialID != nil {
 		cv, err := creds.View(ctx, q, *j.CredentialID)
 		if err != nil {

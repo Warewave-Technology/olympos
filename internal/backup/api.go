@@ -404,8 +404,8 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 		fields["target_id"] = "cannot be changed; create a new job"
 	}
 	dest := j.DestinationID
-	if in.DestinationID != nil && *in.DestinationID != dest {
-		dest = *in.DestinationID
+	if in.DestinationID != nil && (dest == nil || *in.DestinationID != *dest) {
+		dest = in.DestinationID
 		changed = append(changed, "destination_id")
 	}
 	cron, tz := j.Cron, j.Timezone

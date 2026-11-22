@@ -5,8 +5,6 @@ import (
 
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -254,7 +252,7 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 
 // outcome is how a run ended.
 type outcome struct {
-	status string // succeeded | failed | missed
+	status string // succeeded | partial | failed | missed
 	err    string // already scrubbed
 	// quiet: no notification (a failed attempt that is retried, F18).
 	quiet bool
@@ -265,6 +263,19 @@ type outcome struct {
 	blobPath string
 	sha256   string
 	tier     string
+	// copies: one per destination the run wrote to (or tried to).
+	copies []copyResult
+}
+
+// fromFirstCopy fills the run's blob columns from its first succeeded copy
+// (copies are in destination_ids order), so existing readers keep working.
+func (o *outcome) fromFirstCopy() {
+	for _, c := range o.copies {
+		if c.Status == "succeeded" {
+			o.blobPath, o.bytes, o.sha256, o.tier = c.BlobPath, c.Bytes, c.SHA256, c.Tier
+			return
+		}
+	}
 }
 
 // finished carries what metrics need after commit.
@@ -284,9 +295,10 @@ func (f finished) observe() {
 	}
 }
 
-// finishRunTx records the terminal state (the row freezes afterwards) and
-// emits backup.failed / backup.succeeded in the same transaction. Test runs
-// do not notify.
+// finishRunTx records the terminal state and the run's copies (the rows
+// freeze afterwards) and emits backup.failed / backup.succeeded in the same
+// transaction. The run's blob_path, bytes, sha256 and tier come from its
+// first succeeded copy. Test runs do not notify.
 func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (finished, error) {
 	var jobID uuid.UUID
 	var trigger, ns, svc, cluster, engine string
@@ -299,6 +311,7 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	if err != nil {
 		return finished{}, err
 	}
+	o.fromFirstCopy()
 	steps, _ := json.Marshal(nonNilSteps(o.steps))
 	tag, err := tx.Exec(ctx, `UPDATE backup_runs SET status = $2, finished_at = now(), bytes = $3, wire_bytes = $4, blob_path = $5,
 		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9 WHERE id = $1 AND finished_at IS NULL`,
@@ -309,9 +322,20 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	if tag.RowsAffected() == 0 {
 		return finished{}, nil
 	}
+	for _, c := range o.copies {
+		var cStarted *time.Time
+		if !c.StartedAt.IsZero() {
+			cStarted = &c.StartedAt
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status, blob_path, bytes, sha256, tier, error,
+			started_at, finished_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,COALESCE($10, now()))`,
+			runID, c.DestinationID, c.Status, c.BlobPath, c.Bytes, c.SHA256, c.Tier, c.Err, cStarted, nonZeroTime(c.FinishedAt)); err != nil {
+			return finished{}, err
+		}
+	}
 	f := finished{engine: engine, status: o.status, started: started, ok: true}
-	if trigger == "test" {
-		return f, nil
+	if trigger == "test" || o.status == "partial" {
+		return f, nil // a partial run is neither backup.succeeded nor backup.failed
 	}
 	fields := map[string]string{"cluster": cluster, "target": ns + "/" + svc, "trigger": trigger}
 	ev := notify.Event{ChannelID: channel, Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
@@ -336,6 +360,13 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 		ev.Payload["reason"] = shortError(o.err)
 	}
 	return f, notify.Emit(ctx, tx, ev)
+}
+
+func nonZeroTime(t time.Time) *time.Time {
+	if t.IsZero() {
+		return nil
+	}
+	return &t
 }
 
 func shortError(s string) string {
@@ -377,6 +408,8 @@ func nonNilSteps(s []Step) []Step {
 
 // dryRunSteps turns a dry run's outcome into the checklist the wizard shows:
 // each stage that ran, with its result; stages after a failure are left out.
+// A run with copies gets an upload step per destination and a manifest step
+// per uploaded copy.
 func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 	var out []Step
 	add := func(name string, ok bool, detail string) { out = append(out, Step{Name: name, OK: ok, Detail: detail}) }
@@ -395,6 +428,9 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 		return out
 	}
 	add("credential", true, "Credential resolved")
+	if len(o.copies) > 0 {
+		return append(out, copySteps(o, rr)...)
+	}
 	if failed && strings.HasPrefix(o.err, "open destination") {
 		add("destination", false, o.err)
 		return out
@@ -403,21 +439,7 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 		add("engine", false, o.err)
 		return out
 	}
-	detail := "Connected and dumped the schema"
-	if rr != nil && rr.ServerVersion != "" {
-		detail += " · server " + rr.ServerVersion
-	}
-	if rr != nil && rr.ToolVersion != "" {
-		detail += " · " + rr.ToolVersion
-	}
-	if rr != nil && rr.TLS != nil {
-		if *rr.TLS {
-			detail += " · TLS verified"
-		} else {
-			detail += " · no TLS"
-		}
-	}
-	add("engine", true, detail)
+	add("engine", true, engineDetail(rr))
 	if failed && strings.HasPrefix(o.err, "upload manifest") {
 		add("upload", true, fmt.Sprintf("Wrote %s", humanBytes(o.bytes)))
 		add("manifest", false, o.err)
@@ -436,6 +458,69 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 	return out
 }
 
+// copySteps is the rest of the checklist for a run with copies: the
+// destinations when none could be opened, else the engine, one upload step
+// per destination and one manifest step per uploaded copy.
+func copySteps(o outcome, rr *RunResult) []Step {
+	var out []Step
+	add := func(name string, ok bool, detail string) { out = append(out, Step{Name: name, OK: ok, Detail: detail}) }
+	opened := false
+	for _, c := range o.copies {
+		opened = opened || !strings.HasPrefix(c.Err, "open destination")
+	}
+	if !opened {
+		for _, c := range o.copies {
+			add("destination", false, c.Name+": "+c.Err)
+		}
+		return out
+	}
+	// A failed run whose error is not its first copy's failed in the engine.
+	if o.status == "failed" && o.err != o.copies[0].Err {
+		add("engine", false, o.err)
+		return out
+	}
+	add("engine", true, engineDetail(rr))
+	uploaded := func(c copyResult) bool {
+		return c.Status == "succeeded" || strings.HasPrefix(c.Err, "upload manifest") || strings.HasPrefix(c.Err, "encode manifest")
+	}
+	for _, c := range o.copies {
+		switch {
+		case c.Status == "succeeded":
+			add("upload", true, fmt.Sprintf("Wrote %s to %s (%s on the wire)", humanBytes(c.Bytes), c.Name, humanBytes(o.wire)))
+		case uploaded(c):
+			add("upload", true, "Wrote the backup to "+c.Name)
+		default:
+			add("upload", false, c.Name+": "+c.Err)
+		}
+	}
+	for _, c := range o.copies {
+		if c.Status == "succeeded" {
+			add("manifest", true, "Manifest with checksum written to "+c.Name)
+		} else if uploaded(c) {
+			add("manifest", false, c.Name+": "+c.Err)
+		}
+	}
+	return out
+}
+
+func engineDetail(rr *RunResult) string {
+	detail := "Connected and dumped the schema"
+	if rr != nil && rr.ServerVersion != "" {
+		detail += " · server " + rr.ServerVersion
+	}
+	if rr != nil && rr.ToolVersion != "" {
+		detail += " · " + rr.ToolVersion
+	}
+	if rr != nil && rr.TLS != nil {
+		if *rr.TLS {
+			detail += " · TLS verified"
+		} else {
+			detail += " · no TLS"
+		}
+	}
+	return detail
+}
+
 // runRow is what Execute needs from backup_runs.
 type runRow struct {
 	id           uuid.UUID
@@ -443,6 +528,7 @@ type runRow struct {
 	trigger      string
 	scheduledFor *time.Time
 	startedAt    time.Time
+	repairOf     *uuid.UUID
 }
 
 // Execute runs one claimed run to completion and records the result.
@@ -451,8 +537,8 @@ func (w *Worker) Execute(ctx context.Context, runID uuid.UUID) {
 	defer w.active.Add(-1)
 	var r runRow
 	var started *time.Time
-	err := w.DB.QueryRow(ctx, `SELECT id, job_id, trigger, scheduled_for, started_at FROM backup_runs WHERE id = $1`, runID).
-		Scan(&r.id, &r.jobID, &r.trigger, &r.scheduledFor, &started)
+	err := w.DB.QueryRow(ctx, `SELECT id, job_id, trigger, scheduled_for, started_at, repair_of FROM backup_runs WHERE id = $1`, runID).
+		Scan(&r.id, &r.jobID, &r.trigger, &r.scheduledFor, &started, &r.repairOf)
 	if err != nil {
 		w.Log.Error("load backup run", "run_id", runID, "err", err)
 		return
@@ -564,15 +650,27 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	if !ok {
 		return fail(fmt.Sprintf("no backup engine registered for %q", job.Target.Engine)), nil, job
 	}
-	tier := "test"
-	if r.trigger != "test" {
-		if tier, err = w.tier(ctx, job, r); err != nil {
-			return fail(tr.scrub("decide retention tier: " + err.Error())), nil, job
-		}
-	}
-	writer, err := w.Blobs.ForDestination(ctx, job.DestinationID)
+	dests, err := runDestinations(ctx, w.DB, r.id)
 	if err != nil {
-		return fail(tr.scrub("open destination: " + err.Error())), nil, job
+		return fail(tr.scrub("resolve destinations: " + err.Error())), nil, job
+	}
+	if len(dests) == 0 {
+		if r.repairOf != nil {
+			return fail(errNothingToRepair), nil, job
+		}
+		return fail("the job has no destination"), nil, job
+	}
+	tiers, err := w.tiers(ctx, job, r, dests)
+	if err != nil {
+		return fail(tr.scrub("decide retention tier: " + err.Error())), nil, job
+	}
+	var group *ManifestGroup
+	if job.DestinationGroupID != nil {
+		members, err := groupMembers(ctx, w.DB, *job.DestinationGroupID)
+		if err != nil {
+			return fail(tr.scrub("load destination group: " + err.Error())), nil, job
+		}
+		group = &ManifestGroup{Name: job.DestinationName, Members: members}
 	}
 	credFn := func(ctx context.Context) (Credential, error) {
 		if job.CredentialID != nil {
@@ -589,83 +687,40 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	t := targetFromJob(job)
 	ec, wc := newEngineContext(w.Dialer, t, job.EngineOptions, credFn, r.trigger == "test")
 
-	path := BlobPath(writer.Prefix(), job.Target.ClusterName, job.Target.Namespace, job.Target.Service, eng.Name(), r.startedAt, r.id, eng.Ext())
-	tags := map[string]string{TierTag: tier}
-	pr, pw := io.Pipe()
-	type engRes struct {
-		rr  *RunResult
-		err error
+	path := func(prefix string) string {
+		return BlobPath(prefix, job.Target.ClusterName, job.Target.Namespace, job.Target.Service, eng.Name(), r.startedAt, r.id, eng.Ext())
 	}
-	resc := make(chan engRes, 1)
-	var engineFailed atomic.Bool
-	go func() {
-		rr, err := eng.Run(ctx, ec, pw)
-		if err != nil {
-			engineFailed.Store(true)
+	manifest := func(d destRef, b ManifestBlob, tier string) Manifest {
+		return Manifest{
+			Format: ManifestFormat, RunID: r.id, JobID: job.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
+			StartedAt: r.startedAt.UTC(), FinishedAt: time.Now().UTC(),
+			Cluster: ManifestCluster{ID: job.Target.ClusterID, Name: job.Target.ClusterName},
+			Target: ManifestTarget{ID: job.Target.ID, Namespace: job.Target.Namespace, Service: job.Target.Service, Port: job.Target.Port,
+				TLSServerName: ec.TLSServerName},
+			Engine: eng.Name(), EngineOptions: redactOptions(job.EngineOptions),
+			Blob: b, WireBytes: wc.total(), TransferMode: job.TransferMode, Test: r.trigger == "test",
+			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
 		}
-		_ = pw.CloseWithError(err) // nil → EOF
-		resc <- engRes{rr, err}
-	}()
-	ch := &countingHash{h: sha256.New()}
-	_, upErr := writer.Upload(ctx, path, io.TeeReader(pr, ch), eng.ContentType(), tags)
-	// Root cause: did the upload fail on its own, or because the engine
-	// failed (the pipe hands the engine error to the uploader)?
-	uploadFirst := upErr != nil && !engineFailed.Load()
-	if upErr != nil {
-		_ = pr.CloseWithError(upErr)
-	} else {
-		// Drain anything the uploader did not read (should be nothing).
-		_, _ = io.Copy(ch, pr)
 	}
-	res := <-resc
-	o := outcome{bytes: ch.n, wire: wc.total(), tier: tier}
+	rr, copies, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
+	o := outcome{wire: wc.total(), tier: tiers[dests[0].ID], copies: copies}
+	o.fromFirstCopy()
+	o.status = runStatus(engErr, copies)
 	switch {
-	case uploadFirst:
-		// The engine failed because the upload did.
-		o.status, o.err = "failed", tr.scrub("upload: "+upErr.Error())
-		return o, res.rr, job
-	case res.err != nil:
-		msg := res.err.Error()
-		if errors.Is(res.err, gateway.ErrAgentOffline) {
+	case engErr != nil:
+		msg := engErr.Error()
+		if errors.Is(engErr, gateway.ErrAgentOffline) {
 			msg = errAgentOffline
 		}
-		o.status, o.err = "failed", tr.scrub(msg)
-		return o, res.rr, job
-	case upErr != nil:
-		o.status, o.err = "failed", tr.scrub("upload: "+upErr.Error())
-		return o, res.rr, job
-	case ctx.Err() != nil:
-		o.status, o.err = "failed", "interrupted: server shutting down"
-		return o, res.rr, job
+		o.err = tr.scrub(msg)
+	case o.status == "failed" && ctx.Err() != nil:
+		o.err = "interrupted: server shutting down"
+	case o.status == "failed":
+		// Every copy failed: the first one is the root cause.
+		o.err = copies[0].Err
+	case o.status == "partial":
+		o.err = tr.scrub(copiesError(copies))
 	}
-	rr := res.rr
-	if rr == nil {
-		rr = &RunResult{}
-	}
-	o.sha256 = hex.EncodeToString(ch.h.Sum(nil))
-	o.blobPath = path
-	finishedAt := time.Now().UTC()
-	m := Manifest{
-		Format: ManifestFormat, RunID: r.id, JobID: job.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
-		StartedAt: r.startedAt.UTC(), FinishedAt: finishedAt,
-		Cluster: ManifestCluster{ID: job.Target.ClusterID, Name: job.Target.ClusterName},
-		Target: ManifestTarget{ID: job.Target.ID, Namespace: job.Target.Namespace, Service: job.Target.Service, Port: job.Target.Port,
-			TLSServerName: ec.TLSServerName},
-		Engine: eng.Name(), EngineOptions: redactOptions(job.EngineOptions),
-		Blob:      ManifestBlob{Path: path, ContentType: eng.ContentType(), Ext: eng.Ext(), Size: o.bytes, SHA256: o.sha256},
-		WireBytes: o.wire, TransferMode: job.TransferMode, TLS: rr.TLS, ServerVersion: rr.ServerVersion, ToolVersion: rr.ToolVersion,
-		Details: rr.Details, Test: r.trigger == "test",
-	}
-	mb, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		o.status, o.err = "failed", "encode manifest: "+err.Error()
-		return o, rr, job
-	}
-	if _, err := writer.Upload(ctx, ManifestPath(path, r.id), bytes.NewReader(mb), "application/json", tags); err != nil {
-		o.status, o.err = "failed", tr.scrub("upload manifest: "+err.Error())
-		return o, rr, job
-	}
-	o.status = "succeeded"
 	return o, rr, job
 }
 
@@ -690,13 +745,12 @@ func redactOptions(raw json.RawMessage) json.RawMessage {
 	return b
 }
 
-// tier decides the GFS tier at write time (SPEC §10.3): the first
-// successful scheduled run of the month (job time zone) is monthly, else the
-// first of the ISO week is weekly, else daily. Manual runs are daily.
-func (w *Worker) tier(ctx context.Context, j *Job, r *runRow) (string, error) {
-	if r.trigger != "schedule" {
-		return "daily", nil
-	}
+// tiers decides the GFS tier of each copy at write time (SPEC §10.3): the
+// first successful scheduled copy of the month (job time zone) on a
+// destination is monthly, else the first of the ISO week is weekly, else
+// daily. Manual runs are daily, test runs test.
+func (w *Worker) tiers(ctx context.Context, j *Job, r *runRow, dests []destRef) (map[uuid.UUID]string, error) {
+	out := make(map[uuid.UUID]string, len(dests))
 	loc, err := time.LoadLocation(j.Timezone)
 	if err != nil {
 		loc = time.UTC
@@ -705,24 +759,44 @@ func (w *Worker) tier(ctx context.Context, j *Job, r *runRow) (string, error) {
 	if r.scheduledFor != nil {
 		ref = *r.scheduledFor
 	}
-	return TierFor(ctx, w.DB, j.ID, r.id, ref, loc)
+	for _, d := range dests {
+		switch r.trigger {
+		case "test":
+			out[d.ID] = "test"
+		case "schedule":
+			t, err := TierForDestination(ctx, w.DB, j.ID, r.id, d.ID, ref, loc)
+			if err != nil {
+				return nil, err
+			}
+			out[d.ID] = t
+		default:
+			out[d.ID] = "daily"
+		}
+	}
+	return out, nil
 }
 
-// TierFor implements the GFS decision for a run at ref.
+// TierFor implements the GFS decision for a run at ref, counting the job's
+// succeeded scheduled runs.
 func TierFor(ctx context.Context, q store.Querier, jobID, runID uuid.UUID, ref time.Time, loc *time.Location) (string, error) {
+	return gfsTier(ref, loc, func(from, to time.Time) (int, error) {
+		var n int
+		err := q.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND id <> $2 AND trigger = 'schedule'
+			AND status = 'succeeded' AND COALESCE(scheduled_for, started_at) >= $3 AND COALESCE(scheduled_for, started_at) < $4`,
+			jobID, runID, from, to).Scan(&n)
+		return n, err
+	})
+}
+
+// gfsTier is monthly when count finds nothing in ref's month (in loc), else
+// weekly when it finds nothing in ref's ISO week, else daily.
+func gfsTier(ref time.Time, loc *time.Location, count func(from, to time.Time) (int, error)) (string, error) {
 	t := ref.In(loc)
 	monthStart := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc)
 	monthEnd := monthStart.AddDate(0, 1, 0)
 	wd := (int(t.Weekday()) + 6) % 7 // Monday = 0 (ISO week)
 	weekStart := time.Date(t.Year(), t.Month(), t.Day()-wd, 0, 0, 0, 0, loc)
 	weekEnd := weekStart.AddDate(0, 0, 7)
-	count := func(from, to time.Time) (int, error) {
-		var n int
-		err := q.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND id <> $2 AND trigger = 'schedule'
-			AND status = 'succeeded' AND COALESCE(scheduled_for, started_at) >= $3 AND COALESCE(scheduled_for, started_at) < $4`,
-			jobID, runID, from, to).Scan(&n)
-		return n, err
-	}
 	n, err := count(monthStart, monthEnd)
 	if err != nil {
 		return "", err

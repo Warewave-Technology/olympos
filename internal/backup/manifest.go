@@ -37,6 +37,22 @@ type Manifest struct {
 	ToolVersion   string          `json:"tool_version,omitempty"`
 	Details       map[string]any  `json:"details,omitempty"`
 	Test          bool            `json:"test,omitempty"`
+	// Destination is where this copy was written; Group is set when the
+	// job writes to a destination group (every member has its own copy).
+	Destination *ManifestDestination `json:"destination,omitempty"`
+	Group       *ManifestGroup       `json:"group,omitempty"`
+}
+
+// ManifestDestination identifies the destination holding this copy.
+type ManifestDestination struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"`
+}
+
+// ManifestGroup names the destination group and its members, in order.
+type ManifestGroup struct {
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
 }
 
 // ManifestCluster identifies the source cluster.
