@@ -388,3 +388,56 @@ func TestDestinationPatchKeepsGroupLocationsDistinct(t *testing.T) {
 		t.Fatalf("rename: %d", code)
 	}
 }
+
+// A destination no job uses any more but that holds copies of backup runs
+// is kept (the copy rows keep its restore commands valid): the delete says
+// so, and the view counts those runs.
+func TestDestinationDeleteKeepsCopies(t *testing.T) {
+	e := apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
+		return []server.Module{&destinations.API{DB: e.DB, Log: e.Log, KV: e.KV, Env: e.Envelope}}
+	}})
+	ctx := context.Background()
+	admin := e.Login(e.Principal("ada", "Member", "admin"))
+	f := &groupFixture{t: t, e: e, id: map[string]string{}}
+	f.nfs("old", "/var/lib/olympos/nfs/old/olympos", "prod")
+	f.nfs("new", "/var/lib/olympos/nfs/new/olympos", "prod")
+
+	// A job wrote two runs to "old", then moved to "new".
+	var job string
+	if err := e.DB.QueryRow(ctx, `INSERT INTO backup_jobs (system, destination_id, cron, timezone) VALUES ('olympos-self', $1, '0 2 * * *', 'UTC') RETURNING id::text`, f.id["old"]).Scan(&job); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"succeeded", "failed"} {
+		var run string
+		if err := e.DB.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, finished_at) VALUES ($1, 'manual', $2, now()) RETURNING id::text`, job, status).Scan(&run); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.DB.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status) VALUES ($1, $2, $3)`, run, f.id["old"], status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.DB.Exec(ctx, `UPDATE backup_jobs SET destination_id = $2 WHERE id = $1`, job, f.id["new"]); err != nil {
+		t.Fatal(err)
+	}
+
+	var dv destinations.View
+	if code := admin.Do("GET", "/api/v1/destinations/"+f.id["old"], nil, &dv); code != 200 || dv.Jobs != 0 || dv.Copies != 2 {
+		t.Fatalf("view: %d jobs=%d copies=%d", code, dv.Jobs, dv.Copies)
+	}
+	var list struct{ Items []destinations.View }
+	admin.Do("GET", "/api/v1/destinations", nil, &list)
+	for _, d := range list.Items {
+		if want := map[string]int{"old": 2, "new": 0}[d.Name]; d.Copies != want {
+			t.Errorf("list %s copies = %d, want %d", d.Name, d.Copies, want)
+		}
+	}
+	var del struct{ Error string }
+	if code := admin.Do("DELETE", "/api/v1/destinations/"+f.id["old"], nil, &del); code != 409 ||
+		del.Error != "destination holds copies of 2 backup run(s); it is kept so their restore commands stay valid" {
+		t.Fatalf("delete: %d %+v", code, del)
+	}
+	if code := admin.Do("DELETE", "/api/v1/destinations/"+f.id["new"], nil, &del); code != 409 ||
+		del.Error != "destination is used by 1 backup job(s); move or delete them first" {
+		t.Fatalf("delete used: %d %+v", code, del)
+	}
+}

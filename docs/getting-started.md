@@ -177,8 +177,10 @@ somewhere else.
 
    ![Destinations and groups](images/start-23-destination-groups.png)
 
-   A destination that is in a group cannot be deleted, and neither can a group that a job uses. A member you
-   add later gets only new runs; existing backups are not copied to it.
+   A destination that is in a group cannot be deleted, and neither can a group that a job uses. A destination
+   that holds copies of backup runs stays too, even when no job uses it any more: the runs' restore commands
+   point at it (its *Delete* says how many runs). A member you add later gets only new runs; existing backups
+   are not copied to it.
 
 3. **Use the group in a job.** Configure `payments-pg` in the `edge` cluster as in step 5 (user `backup`,
    password `edge-pg-password`). In step 3 of the wizard, choose `lab-copies`. **Edit** on **Backups › Jobs**

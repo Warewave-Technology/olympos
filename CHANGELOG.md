@@ -39,6 +39,10 @@ All notable changes to this project are documented here. The format follows
   destination has no such copy of the job yet. Copies of one run can carry different tiers.
 - The 24-hour counts on *Backups* and the Dashboard count original runs only: repair runs are not counted,
   and a partial run counts as succeeded once a repair has written its missing copies.
+- A destination that holds copies of backup runs (`copies` on the destination) cannot be deleted, even when
+  no job uses it any more: those runs' restore commands point at it. The refusal says so (409 *destination
+  holds copies of N backup run(s)*) and the *Delete* confirmation explains it. Destinations that only hold
+  runs from before this release can still be deleted.
 - A run's restore commands use the destination the run was written to. Before, they used the job's current
   destination, so after a job moved to another destination, older runs showed commands for the wrong
   storage. Runs from before this release still use the job's destination.

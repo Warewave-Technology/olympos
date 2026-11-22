@@ -123,7 +123,11 @@ type View struct {
 	LastTest         *Report    `json:"last_test"`
 	Jobs             int        `json:"jobs"`
 	Groups           int        `json:"groups"`
-	CreatedAt        time.Time  `json:"created_at"`
+	// Copies counts the backup runs with a copy record on this destination
+	// (succeeded or failed). Such a destination cannot be deleted: the
+	// records keep those runs' restore commands pointing at it.
+	Copies    int       `json:"copies"`
+	CreatedAt time.Time `json:"created_at"`
 	// Warnings are returned by create/patch/test when the saved destination
 	// needs attention (e.g. the credential can delete). Never silent.
 	Warnings []string `json:"warnings,omitempty"`
@@ -142,7 +146,8 @@ const viewSelect = `SELECT d.id, d.name, d.kind, d.prefix, d.endpoint_override, 
 	COALESCE(k.kind, ''), COALESCE(k.keyvault_name, ''), COALESCE(k.secret_name, ''), d.path,
 	d.last_test_at, d.last_test_ok, d.last_test_report, d.created_at,
 	(SELECT count(*) FROM backup_jobs j WHERE j.destination_id = d.id),
-	(SELECT count(*) FROM destination_group_members m WHERE m.destination_id = d.id)
+	(SELECT count(*) FROM destination_group_members m WHERE m.destination_id = d.id),
+	(SELECT count(*) FROM backup_run_copies rc WHERE rc.destination_id = d.id)
 	FROM destinations d LEFT JOIN credentials c ON c.id = d.sas_credential_id LEFT JOIN credentials k ON k.id = d.secret_credential_id`
 
 func scanViews(rows pgx.Rows) ([]View, error) {
@@ -156,7 +161,7 @@ func scanViews(rows pgx.Rows) ([]View, error) {
 			&v.SASSource, &kvName, &secName, &v.SASExpiresAt, &v.SASPermissions,
 			&v.Bucket, &v.Region, &v.PathStyle, &v.AccessKeyID,
 			&v.SecretKeySource, &kKV, &kSec, &v.Path,
-			&v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs, &v.Groups); err != nil {
+			&v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs, &v.Groups, &v.Copies); err != nil {
 			return nil, err
 		}
 		if v.SASSource == "keyvault_ref" {
@@ -942,7 +947,8 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	errInUse := errors.New("in use")
 	errInGroup := errors.New("in a group")
-	var jobs, groups int
+	errHasCopies := errors.New("holds copies")
+	var jobs, groups, copies int
 	err := store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
 		cur, err := loadRow(r.Context(), tx, id, true)
 		if err != nil {
@@ -959,6 +965,14 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		}
 		if jobs > 0 {
 			return errInUse
+		}
+		// Copy rows keep pointing at the destination (restore guides need
+		// them), so a destination that holds copies stays.
+		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM backup_run_copies WHERE destination_id = $1`, id).Scan(&copies); err != nil {
+			return err
+		}
+		if copies > 0 {
+			return errHasCopies
 		}
 		if _, err := tx.Exec(r.Context(), `DELETE FROM destinations WHERE id = $1`, id); err != nil {
 			return err
@@ -980,8 +994,10 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, fmt.Sprintf("destination is in %d destination group(s); remove it there first", groups))
 	case errors.Is(err, errInUse):
 		httpx.Error(w, http.StatusConflict, fmt.Sprintf("destination is used by %d backup job(s); move or delete them first", jobs))
+	case errors.Is(err, errHasCopies):
+		httpx.Error(w, http.StatusConflict, fmt.Sprintf("destination holds copies of %d backup run(s); it is kept so their restore commands stay valid", copies))
 	case errors.As(err, &pg) && pg.Code == "23503":
-		httpx.Error(w, http.StatusConflict, "destination is used by backup jobs; move or delete them first")
+		httpx.Error(w, http.StatusConflict, "destination is still referenced by backup jobs or runs")
 	case err != nil:
 		httpx.Internal(w, r, a.Log, err)
 	default:

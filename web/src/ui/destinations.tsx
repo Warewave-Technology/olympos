@@ -33,6 +33,14 @@ export function usedByLabel(d: Pick<Destination, 'jobs' | 'groups'>): string {
   return d.groups ? `${jobs} · in ${plural(d.groups, 'group')}` : jobs;
 }
 
+/** Why the server refuses to delete a destination, or null when it may go (same order as the API). */
+export function deleteRefusal(d: Pick<Destination, 'jobs' | 'groups' | 'copies'>): string | null {
+  if (d.groups) return `It is in ${plural(d.groups, 'destination group')}; remove it there first.`;
+  if (d.jobs > 0) return d.jobs === 1 ? '1 backup job uses it; move it to another destination first.' : `${plural(d.jobs, 'backup job')} use it; move them to another destination first.`;
+  if (d.copies) return `It holds copies of ${plural(d.copies, 'backup run')}. It is kept so their restore commands stay valid.`;
+  return null;
+}
+
 export function endpointHost(url: string | undefined): string {
   if (!url) return '';
   try {

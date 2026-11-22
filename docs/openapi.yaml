@@ -254,12 +254,14 @@ paths:
       responses:
         "200": {description: Updated (check `warnings`), content: {application/json: {schema: {$ref: "#/components/schemas/Destination"}}}}
         "409": {description: Name already used}
-        "422": {description: Invalid input or destination test failed, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTestFailed"}}}}
+        "422":
+          description: "Invalid input (`fields`), destination test failed (`test`), or the new location is already used by another member of a group this destination is in (`fields`, keyed by the changed location field: path, bucket, account, container, endpoint_override or prefix)."
+          content: {application/json: {schema: {oneOf: [{$ref: "#/components/schemas/DestinationTestFailed"}, {$ref: "#/components/schemas/FieldErrors"}]}}}
     delete:
       tags: [backups]
       responses:
         "204": {description: Deleted}
-        "409": {description: Used by backup jobs or a member of a destination group}
+        "409": {description: "Used by backup jobs, a member of a destination group, or holds copies of backup runs (`copies` > 0): such a destination is kept so the restore commands of those runs stay valid."}
   /destinations/{id}/test:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
@@ -1307,6 +1309,7 @@ components:
         last_test: {$ref: "#/components/schemas/DestinationTest"}
         jobs: {type: integer}
         groups: {type: integer, description: Number of destination groups this destination is a member of}
+        copies: {type: integer, description: "Number of backup runs with a copy record (succeeded or failed) on this destination. A destination with copies cannot be deleted: the records keep those runs' restore commands pointing at it."}
         created_at: {type: string, format: date-time}
         warnings: {type: array, items: {type: string}, description: "Only on create/patch responses: things the admin must see (credential can delete, account SAS, expiry < 14 days)"}
     DestinationGroupInput:
@@ -1372,6 +1375,12 @@ components:
             notes: {type: array, items: {type: string}}
         error: {type: string}
         probe_path: {type: string, description: "{prefix}/.olympos-probe/<uuid>"}
+    FieldErrors:
+      type: object
+      description: A 422 body that names the refused fields.
+      properties:
+        error: {type: string}
+        fields: {type: object, additionalProperties: {type: string}, description: Field name to the reason it was refused}
     DestinationTestFailed:
       type: object
       properties:

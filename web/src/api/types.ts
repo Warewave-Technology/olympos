@@ -282,6 +282,8 @@ export interface Destination {
   jobs: number;
   /** Number of destination groups this destination is a member of. */
   groups?: number;
+  /** Backup runs with a copy record on this destination; such a destination cannot be deleted. */
+  copies?: number;
   created_at?: string;
   /** Only on create/patch responses. */
   warnings?: string[];

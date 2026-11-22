@@ -7,7 +7,7 @@ import { MeProvider } from '../auth/me';
 import * as mockDb from '../mocks/db';
 import { DestinationDialog, joinMountPath } from '../pages/settings/DestinationDialog';
 import { DestinationGroupsCard } from '../pages/settings/DestinationGroupDialog';
-import { usedByLabel } from '../ui/destinations';
+import { deleteRefusal, usedByLabel } from '../ui/destinations';
 import { ToastProvider } from '../ui/kit';
 
 type Call = { method: string; path: string; body: unknown };
@@ -357,5 +357,26 @@ describe('destination groups', () => {
     expect(usedByLabel(dests[1])).toBe('1 job · in 1 group');
     expect(usedByLabel(saved({ jobs: 0, groups: 0 }))).toBe('0 jobs');
     expect(usedByLabel(saved({ jobs: 3 }))).toBe('3 jobs');
+  });
+});
+
+describe('destination delete', () => {
+  it('explains why the server keeps a destination that holds copies, and keeps Delete disabled', async () => {
+    const user = userEvent.setup();
+    renderDialog(saved({ id: 'd4', name: 'old-nas', kind: 'nfs', auth: 'none', path: '/mnt/nas/olympos', jobs: 0, groups: 0, copies: 12 }));
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const confirm = screen.getByRole('alertdialog', { name: 'Delete old-nas?' });
+    const del = within(confirm).getByRole('button', { name: 'Delete destination' });
+    expect(del).toBeDisabled();
+    expect(del).toHaveAccessibleDescription('It cannot be deleted. It holds copies of 12 backup runs. It is kept so their restore commands stay valid.');
+    expect(writes()).toEqual([]);
+  });
+
+  it('names jobs and groups first, and lets an unused destination go', () => {
+    expect(deleteRefusal(saved({ jobs: 0, groups: 2, copies: 3 }))).toBe('It is in 2 destination groups; remove it there first.');
+    expect(deleteRefusal(saved({ jobs: 1, copies: 3 }))).toBe('1 backup job uses it; move it to another destination first.');
+    expect(deleteRefusal(saved({ jobs: 4 }))).toBe('4 backup jobs use it; move them to another destination first.');
+    expect(deleteRefusal(saved({ jobs: 0, copies: 1 }))).toBe('It holds copies of 1 backup run. It is kept so their restore commands stay valid.');
+    expect(deleteRefusal(saved({ jobs: 0, groups: 0, copies: 0 }))).toBeNull();
   });
 });
