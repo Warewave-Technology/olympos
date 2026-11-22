@@ -46,6 +46,16 @@ type fakeInspector struct {
 	leak    bool // the error carries the secret
 	secrets []string
 	calls   int
+	// checkMsg is what CheckBackup returns; checked the details it saw.
+	checkMsg string
+	checked  []map[string]any
+}
+
+func (f *fakeInspector) CheckBackup(details map[string]any, r *restore.TargetReport) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checked = append(f.checked, details)
+	return f.checkMsg
 }
 
 func (f *fakeInspector) InspectRestoreTarget(ctx context.Context, ec backup.EngineContext, dbs []string) (*restore.TargetReport, error) {
@@ -707,6 +717,18 @@ func TestOpenRules(t *testing.T) {
 		t.Fatalf("defaults and notes: %+v", rq)
 	}
 	pgInspector.set(restore.TargetReport{Superuser: true}, nil, false)
+
+	// The engine compares the backup's manifest details with the target.
+	pgInspector.mu.Lock()
+	pgInspector.checkMsg, pgInspector.checked = "the backup was made by pg_dump 17; the target runs PostgreSQL 16", nil
+	pgInspector.mu.Unlock()
+	field(e.pgInput(e.pgTarget2), "target_id", "made by pg_dump 17; the target runs PostgreSQL 16")
+	pgInspector.mu.Lock()
+	if len(pgInspector.checked) == 0 || pgInspector.checked[len(pgInspector.checked)-1]["databases"] == nil {
+		t.Fatalf("CheckBackup details: %v", pgInspector.checked)
+	}
+	pgInspector.checkMsg = ""
+	pgInspector.mu.Unlock()
 
 	// The target's check failed: the error is scrubbed of the password.
 	pgInspector.set(restore.TargetReport{}, errors.New("FATAL: password authentication failed"), true)

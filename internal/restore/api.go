@@ -157,9 +157,12 @@ type evaluation struct {
 	target   targetInfo
 	clusters Clusters
 	// mayOpen: the caller passed CheckOpen; later failures are explained.
-	mayOpen   bool
-	src       *backup.RestoreSource
-	inBackup  []string
+	mayOpen  bool
+	src      *backup.RestoreSource
+	inBackup []string
+	// details: the backup's engine metadata (manifest details; PostgreSQL
+	// only), for BackupChecker.
+	details   map[string]any
 	databases []string
 	opts      Options
 	report    *TargetReport
@@ -289,12 +292,12 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 
 	// The databases the backup holds (read from the copy).
 	if ev.src != nil && hasDatabases(engine) {
-		dbs, err := a.backupDatabases(ctx, engine, ev.src)
+		dbs, details, err := a.backupDatabases(ctx, engine, ev.src)
 		if err != nil {
 			a.Log.Warn("restore: backup manifest not readable", "run_id", in.RunID, "destination_id", ev.src.DestinationID, "err", err.Error())
 			fields["copy_destination_id"] = "the backup's manifest could not be read: " + err.Error()
 		} else {
-			ev.inBackup = dbs
+			ev.inBackup, ev.details = dbs, details
 		}
 	}
 	if ev.src != nil && (ev.inBackup != nil || !hasDatabases(engine)) {
@@ -340,6 +343,9 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 			return ev, internalErr(rerr)
 		}
 		return ev, invalid(msg, map[string]string{"target_id": msg})
+	}
+	if msg := checkBackup(engine, ev.details, rep); msg != "" {
+		fields["target_id"] = msg
 	}
 	ev.report = rep
 	ev.opts.ServerVersion = rep.ServerVersion
@@ -508,45 +514,49 @@ func (a *API) refUse(ctx context.Context, sub *authz.Subject, clusterID uuid.UUI
 }
 
 // backupDatabases lists the databases in the copy: PostgreSQL from the
-// sidecar manifest (details.databases), ClickHouse from manifest.json in
-// the archive. Errors are already scrubbed by the blob reader.
-func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.RestoreSource) ([]string, error) {
+// sidecar manifest (details.databases, with the details returned too),
+// ClickHouse from manifest.json in the archive. Errors are already scrubbed
+// by the blob reader.
+func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.RestoreSource) ([]string, map[string]any, error) {
 	rd, err := a.Blobs.ReaderFor(ctx, src.DestinationID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	switch engine {
 	case "postgresql":
 		o, err := rd.Open(ctx, backup.ManifestPath(src.BlobPath, src.CopyRunID))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer o.Close()
 		if o.Size() > maxSidecarManifest {
-			return nil, errors.New("the manifest is too large")
+			return nil, nil, errors.New("the manifest is too large")
 		}
 		b, err := io.ReadAll(io.NewSectionReader(o, 0, o.Size()))
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		var m struct {
 			Details struct {
 				Databases []string `json:"databases"`
 			} `json:"details"`
 		}
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil, errors.New("the manifest is not valid JSON")
+		var all struct {
+			Details map[string]any `json:"details"`
 		}
-		return nonNil(m.Details.Databases), nil
+		if json.Unmarshal(b, &m) != nil || json.Unmarshal(b, &all) != nil {
+			return nil, nil, errors.New("the manifest is not valid JSON")
+		}
+		return nonNil(m.Details.Databases), all.Details, nil
 	case "clickhouse":
 		o, err := rd.Open(ctx, src.BlobPath)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		defer o.Close()
 		zr, err := zip.NewReader(o, o.Size())
 		if err != nil {
-			return nil, fmt.Errorf("the backup is not a readable zip archive: %s", err.Error())
+			return nil, nil, fmt.Errorf("the backup is not a readable zip archive: %s", err.Error())
 		}
 		for _, f := range zr.File {
 			if f.Name != "manifest.json" {
@@ -554,16 +564,16 @@ func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.Re
 			}
 			rc, err := f.Open()
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 			defer rc.Close()
 			// Read to the end so the zip reader checks the entry's CRC.
 			b, err := io.ReadAll(io.LimitReader(rc, maxArchiveManifest+1))
 			if err != nil {
-				return nil, fmt.Errorf("manifest.json: %s", err.Error())
+				return nil, nil, fmt.Errorf("manifest.json: %s", err.Error())
 			}
 			if len(b) > maxArchiveManifest {
-				return nil, errors.New("manifest.json is too large")
+				return nil, nil, errors.New("manifest.json is too large")
 			}
 			var m struct {
 				Databases []struct {
@@ -571,17 +581,17 @@ func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.Re
 				} `json:"databases"`
 			}
 			if err := json.Unmarshal(b, &m); err != nil {
-				return nil, errors.New("manifest.json is not valid JSON")
+				return nil, nil, errors.New("manifest.json is not valid JSON")
 			}
 			out := []string{}
 			for _, d := range m.Databases {
 				out = append(out, d.Name)
 			}
-			return out, nil
+			return out, nil, nil
 		}
-		return nil, errors.New("the archive has no manifest.json")
+		return nil, nil, errors.New("the archive has no manifest.json")
 	}
-	return []string{}, nil
+	return []string{}, nil, nil
 }
 
 func nonNil(s []string) []string {

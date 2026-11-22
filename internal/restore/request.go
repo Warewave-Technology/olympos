@@ -131,6 +131,27 @@ type TargetInspector interface {
 	InspectRestoreTarget(ctx context.Context, ec backup.EngineContext, databases []string) (*TargetReport, error)
 }
 
+// BackupChecker is optionally implemented by a TargetInspector: it compares
+// the backup's engine metadata (the manifest's details) with what the
+// inspector found and returns why the target cannot take this backup ("":
+// it can). Its finding is shown on the target_id field when a request is
+// checked or opened (PostgreSQL: a dump of a newer major than the server).
+type BackupChecker interface {
+	CheckBackup(details map[string]any, r *TargetReport) string
+}
+
+// checkBackup runs the engine inspector's BackupChecker, if any.
+func checkBackup(engine string, details map[string]any, r *TargetReport) string {
+	insp, ok := InspectorFor(engine)
+	if !ok || details == nil || r == nil {
+		return ""
+	}
+	if c, ok := insp.(BackupChecker); ok {
+		return c.CheckBackup(details, r)
+	}
+	return ""
+}
+
 var (
 	inspectorsMu sync.RWMutex
 	inspectors   = map[string]TargetInspector{}

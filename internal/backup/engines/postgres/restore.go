@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,6 +17,12 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/restore"
+)
+
+var (
+	_ backup.Restorer         = (*Engine)(nil)
+	_ restore.TargetInspector = (*Engine)(nil)
+	_ restore.BackupChecker   = (*Engine)(nil)
 )
 
 func init() {
@@ -131,6 +139,63 @@ func (e *Engine) InspectRestoreTarget(ctx context.Context, ec backup.EngineConte
 		return nil, err
 	}
 	return &restore.TargetReport{Existing: st.existing, Superuser: st.si.superuser, ServerVersion: st.si.version}, nil
+}
+
+// restoreTool picks pg_restore by the target server's major: the lowest
+// major >= the server's (its own major when that pg_restore is installed;
+// the image ships 13–17), so a PostgreSQL 16 → 16 restore runs pg_restore
+// 16. pg_restore reads archives of its own major or older, and a dump of a
+// newer major than the server holds SQL the server may not know, so a dump
+// newer than the target's major is refused. pg_restore 17 and newer also
+// cannot restore into a server older than 17 at all (it sets
+// transaction_timeout); that is refused too, when no pg_restore of the
+// server's own major is installed.
+func restoreTool(ctx context.Context, dir string, dumpMajor, serverMajor int) (*Tool, error) {
+	if msg := dumpMajorProblem(dumpMajor, serverMajor); msg != "" {
+		return nil, errors.New(msg)
+	}
+	tool, err := FindRestoreTool(ctx, dir, serverMajor)
+	if err != nil {
+		return nil, err
+	}
+	if tool.Major >= 17 && serverMajor < 17 {
+		return nil, fmt.Errorf("no pg_restore %d is installed, and pg_restore %d cannot restore into PostgreSQL %d "+
+			"(it sets transaction_timeout, unknown before PostgreSQL 17)", serverMajor, tool.Major, serverMajor)
+	}
+	return tool, nil
+}
+
+// dumpMajorProblem is why a dump of dumpMajor cannot be restored into a
+// server of serverMajor ("": it can).
+func dumpMajorProblem(dumpMajor, serverMajor int) string {
+	if dumpMajor > serverMajor {
+		return fmt.Sprintf("the backup was made by pg_dump %d; the target runs PostgreSQL %d: a dump is only restored into "+
+			"PostgreSQL %d or newer", dumpMajor, serverMajor, dumpMajor)
+	}
+	return ""
+}
+
+// CheckBackup implements restore.BackupChecker: the backup's pg_dump major
+// (manifest details.pg_dump_major) against the target's server major, so
+// the maker sees a refused version pair before the approval. Restore checks
+// the archive's own header again.
+func (e *Engine) CheckBackup(details map[string]any, r *restore.TargetReport) string {
+	var dump int
+	switch v := details["pg_dump_major"].(type) {
+	case float64:
+		dump = int(v)
+	case int:
+		dump = v
+	case json.Number:
+		n, _ := v.Int64()
+		dump = int(n)
+	}
+	m := regexp.MustCompile(`^(\d+)`).FindStringSubmatch(r.ServerVersion)
+	if dump <= 0 || m == nil {
+		return ""
+	}
+	server, _ := strconv.Atoi(m[1])
+	return dumpMajorProblem(dump, server)
 }
 
 // restoreOptions are the request's options the engine reads
@@ -363,8 +428,8 @@ func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup
 		return fail("the database exists on the target with user objects in it; nothing was written")
 	}
 
-	// The archive's header picks pg_restore: its major must be >= the
-	// dump's, and preferably >= the server's.
+	// The archive's header tells the dump's major before any pg_restore
+	// runs (see restoreTool).
 	r, err := f.Open()
 	if err != nil {
 		return fail("open the archive entry: %v", err)
@@ -374,19 +439,9 @@ func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup
 	if err != nil {
 		return fail("%v", err)
 	}
-	tool, err := FindRestoreTool(ctx, s.toolDir, max(hdr.DumpMajor, st.si.major()))
+	tool, err := restoreTool(ctx, s.toolDir, hdr.DumpMajor, st.si.major())
 	if err != nil {
-		tool, err = FindRestoreTool(ctx, s.toolDir, hdr.DumpMajor)
-	}
-	if err != nil {
-		return fail("%v", err)
-	}
-	if server := st.si.major(); tool.Major >= 17 && server < 17 {
-		// pg_restore 17 sets transaction_timeout, which older servers
-		// reject: it would fail after CREATE DATABASE.
-		return fail("the backup was made by pg_dump %s and needs pg_restore %d, which cannot restore into PostgreSQL %d "+
-			"(it sets transaction_timeout, unknown before PostgreSQL 17); restore it into PostgreSQL %d or newer; nothing was written",
-			hdr.DumpVersion, tool.Major, server, tool.Major)
+		return fail("%v; nothing was written", err)
 	}
 
 	// The schema pass: the TOC's tables and the database's own entries.

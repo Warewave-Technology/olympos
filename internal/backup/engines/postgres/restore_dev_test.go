@@ -31,8 +31,9 @@ import (
 // The restore tests back a seeded database of the dev Postgres (`make
 // dev-db`, PostgreSQL 16) up with the engine and restore it into a new
 // PostgreSQL 17 server in a container, over verified TLS like a new target
-// in e2e-tls mode. pg_restore 17 (CI's and the image's newest) cannot
-// restore into 16, which is tested too.
+// in e2e-tls mode: this machine's and CI's tools are pg 17 only, so the
+// pg_dump 17 archive cannot go into 16 (refused, tested too). The choice of
+// pg_restore by the target's major is unit-tested with stub tools.
 
 func devDSN() string {
 	if dsn := os.Getenv("OLYMPOS_TEST_PG_DSN"); dsn != "" {
@@ -499,14 +500,14 @@ func TestRestoreDev(t *testing.T) {
 		}
 	})
 
-	t.Run("pg_restore 17 into PostgreSQL 16 is refused before writing", func(t *testing.T) {
+	t.Run("a pg_dump 17 backup into PostgreSQL 16 is refused before writing", func(t *testing.T) {
 		execAll(t, admin, fmt.Sprintf(`ALTER DATABASE %s RENAME TO %s_orig`, src, src))
 		res, _, err := runOn(devContext(du, devUser, devPW, nil), true, map[string]any{"globals": false})
 		if err != nil {
 			t.Fatal(err)
 		}
 		it := item(t, res, src)
-		if it.Status != "failed" || !strings.Contains(it.Error, "cannot restore into PostgreSQL 16") || len(res.Created) != 0 {
+		if it.Status != "failed" || !strings.Contains(it.Error, "the backup was made by pg_dump 17; the target runs PostgreSQL 16") || len(res.Created) != 0 {
 			t.Fatalf("result %+v", res)
 		}
 		if queryOne[bool](t, admin, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, src) {

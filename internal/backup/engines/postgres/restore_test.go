@@ -2,10 +2,15 @@ package postgres
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/Warewave-Technology/olympos/internal/restore"
 )
 
 func TestReadArchiveHeader(t *testing.T) {
@@ -115,6 +120,75 @@ func TestDescribeStmtHasNoSecrets(t *testing.T) {
 	} {
 		if got := describeStmt(in); got != want {
 			t.Errorf("%s: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// fakeTools is a <major>/bin layout of stub tools that print their version.
+func fakeTools(t *testing.T, majors ...int) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, m := range majors {
+		bin := filepath.Join(dir, fmt.Sprint(m), "bin")
+		if err := os.MkdirAll(bin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, tool := range []string{"pg_dump", "pg_dumpall", "pg_restore"} {
+			script := fmt.Sprintf("#!/bin/sh\necho '%s (PostgreSQL) %d.9'\n", tool, m)
+			if err := os.WriteFile(filepath.Join(bin, tool), []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	return dir
+}
+
+func TestRestoreToolFollowsTheTargetMajor(t *testing.T) {
+	t.Setenv("PATH", "") // no pg_dump from PATH
+	ctx := context.Background()
+	all := fakeTools(t, 13, 16, 17)
+	for _, c := range []struct{ dump, server, want int }{
+		{16, 16, 16}, // disaster recovery: same major
+		{16, 17, 17}, // upgrade
+		{13, 15, 16}, // the lowest major >= the server's
+		{13, 13, 13},
+	} {
+		tool, err := restoreTool(ctx, all, c.dump, c.server)
+		if err != nil || tool.Major != c.want || !strings.HasSuffix(tool.PgRestore, fmt.Sprintf("/%d/bin/pg_restore", c.want)) {
+			t.Errorf("dump %d, server %d: %+v %v", c.dump, c.server, tool, err)
+		}
+	}
+	for _, c := range []struct {
+		dir          string
+		dump, server int
+		want         string
+	}{
+		{all, 17, 16, "the backup was made by pg_dump 17; the target runs PostgreSQL 16"},
+		{fakeTools(t, 17), 16, 16, "no pg_restore 16 is installed, and pg_restore 17 cannot restore into PostgreSQL 16"},
+		{all, 16, 18, "no pg_restore with major version >= 18"},
+	} {
+		if _, err := restoreTool(ctx, c.dir, c.dump, c.server); err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("dump %d, server %d: %v, want %q", c.dump, c.server, err, c.want)
+		}
+	}
+}
+
+func TestCheckBackupComparesMajors(t *testing.T) {
+	e := &Engine{}
+	for _, c := range []struct {
+		details map[string]any
+		server  string
+		want    string
+	}{
+		{map[string]any{"pg_dump_major": float64(17)}, "16.15", "the backup was made by pg_dump 17; the target runs PostgreSQL 16"},
+		{map[string]any{"pg_dump_major": float64(16)}, "16.15", ""},
+		{map[string]any{"pg_dump_major": float64(16)}, "17.2 (Debian 17.2-1.pgdg120+1)", ""},
+		{map[string]any{"pg_dump_major": float64(13)}, "9.6.24", "the target runs PostgreSQL 9"},
+		{map[string]any{"databases": []any{"shop"}}, "16.15", ""}, // older manifests
+	} {
+		got := e.CheckBackup(c.details, &restore.TargetReport{ServerVersion: c.server})
+		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
+			t.Errorf("%v on %s: %q, want %q", c.details, c.server, got, c.want)
 		}
 	}
 }
