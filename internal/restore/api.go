@@ -198,9 +198,11 @@ func internalErr(err error) *evalError {
 // stored (docs/design/ui-restore.md "Rules checked when a request is
 // opened"). Nothing is sent to the target unless the caller may open the
 // request and every input check passed; the target is then inspected with
-// the given credential, without writing anything. tr tracks the secrets
-// handed to the inspector (the caller zeroes them).
-func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, tr *backup.SecretScrubber) (*evaluation, *evalError) {
+// the given credential, without writing anything, and the check is
+// recorded (restore.checked). open: the request is being opened, so the
+// justification is checked too (before the target is contacted). tr tracks
+// the secrets handed to the inspector (the caller zeroes them).
+func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open bool, tr *backup.SecretScrubber) (*evaluation, *evalError) {
 	ev := &evaluation{}
 	unknownRun := invalid("invalid restore request", map[string]string{"run_id": "unknown run"})
 	err := a.DB.QueryRow(ctx, `SELECT r.status, r.trigger, j.target_id, COALESCE(t.engine, ''), COALESCE(t.cluster_id, '00000000-0000-0000-0000-000000000000'),
@@ -278,7 +280,7 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, tr *b
 			fields["credential"] = "not used for a Vault restore; give a token of the new Vault"
 		}
 		switch {
-		case strings.TrimSpace(in.VaultToken) == "":
+		case in.VaultToken == "":
 			fields["vault_token"] = "required"
 		case len(in.VaultToken) > maxVaultToken:
 			fields["vault_token"] = "too long"
@@ -328,6 +330,11 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, tr *b
 		}
 		ev.databases = dbs
 	}
+	if open {
+		if msg := approvals.ValidateJustification(in.Justification); msg != "" {
+			fields["justification"] = msg
+		}
+	}
 	if len(fields) > 0 {
 		return ev, invalid("invalid restore request", fields)
 	}
@@ -362,6 +369,9 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, tr *b
 	if err != nil {
 		msg := "the target check failed: " + tr.Scrub(err.Error())
 		a.Log.Warn("restore: target check failed", "target_id", in.TargetID, "err", msg)
+		if rerr := a.recordCheck(ctx, sub, in, ev, open, msg); rerr != nil {
+			return ev, internalErr(rerr)
+		}
 		return ev, invalid(msg, map[string]string{"target_id": msg})
 	}
 	if rep.Existing == nil {
@@ -376,10 +386,35 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, tr *b
 		g := su && (in.Globals == nil || *in.Globals)
 		ev.opts.Superuser, ev.opts.Globals = &su, &g
 	}
+	problem := ""
 	if len(fields) > 0 {
-		return ev, invalid("the target cannot take this restore", fields)
+		problem = "the target cannot take this restore"
+	}
+	if err := a.recordCheck(ctx, sub, in, ev, open, problem); err != nil {
+		return ev, internalErr(err)
+	}
+	if problem != "" {
+		return ev, invalid(problem, fields)
 	}
 	return ev, nil
+}
+
+// recordCheck writes restore.checked: the request's credential reached the
+// target (it was tested), whatever the outcome. problem is the scrubbed
+// reason the check failed ("" when it passed).
+func (a *API) recordCheck(ctx context.Context, sub *authz.Subject, in *Input, ev *evaluation, open bool, problem string) error {
+	d := map[string]any{"run_id": in.RunID, "ok": problem == "", "opening": open}
+	if problem != "" {
+		d["error"] = problem
+	}
+	if ev.report != nil {
+		d["server_version"] = ev.report.ServerVersion
+	}
+	actor := sub.Principal.ID
+	return store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
+		return activity.Record(ctx, tx, activity.Entry{ActorID: &actor, Action: "restore.checked", ObjectType: "target",
+			ObjectID: in.TargetID, ClusterID: &ev.target.clusterID, Details: d})
+	})
 }
 
 func engineName(e string) string {
@@ -517,6 +552,8 @@ func (a *API) decodeInput(w http.ResponseWriter, r *http.Request) (*Input, bool)
 		return nil, false
 	}
 	in.TargetID = strings.TrimSpace(in.TargetID)
+	// Inspected and sealed as given, without surrounding whitespace.
+	in.VaultToken = strings.TrimSpace(in.VaultToken)
 	return &in, true
 }
 
@@ -529,7 +566,7 @@ func (a *API) check(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tr := &backup.SecretScrubber{}
 	defer tr.Zero()
-	ev, eerr := a.evaluate(ctx, sub, in, tr)
+	ev, eerr := a.evaluate(ctx, sub, in, false, tr)
 	// Who may not open this request learns nothing more than an error.
 	if eerr != nil && (eerr.code != http.StatusUnprocessableEntity || !ev.mayOpen) {
 		eerr.write(w, r, a.Log)
@@ -542,17 +579,6 @@ func (a *API) check(w http.ResponseWriter, r *http.Request) {
 	}
 	if ev.src != nil {
 		res.CopyDestinationID, res.CopyRunID = &ev.src.DestinationID, &ev.src.CopyRunID
-	}
-	if ev.report != nil {
-		// The credential reached the target: record the check.
-		err := store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
-			return httpx.Record(r, tx, "restore.checked", "target", in.TargetID, &ev.target.clusterID,
-				map[string]any{"run_id": in.RunID, "ok": res.OK, "server_version": ev.report.ServerVersion})
-		})
-		if err != nil {
-			httpx.Internal(w, r, a.Log, err)
-			return
-		}
 	}
 	httpx.JSON(w, http.StatusOK, res)
 }
@@ -568,16 +594,7 @@ func (a *API) create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tr := &backup.SecretScrubber{}
 	defer tr.Zero()
-	ev, eerr := a.evaluate(ctx, sub, in, tr)
-	if eerr == nil {
-		if msg := approvals.ValidateJustification(in.Justification); msg != "" {
-			eerr = invalid("invalid restore request", map[string]string{"justification": msg})
-		}
-	} else if eerr.code == http.StatusUnprocessableEntity && ev.mayOpen {
-		if msg := approvals.ValidateJustification(in.Justification); msg != "" {
-			eerr.fields["justification"] = msg
-		}
-	}
+	ev, eerr := a.evaluate(ctx, sub, in, true, tr)
 	if eerr != nil {
 		eerr.write(w, r, a.Log)
 		return

@@ -12,6 +12,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/httpx"
 	"github.com/Warewave-Technology/olympos/internal/secrets"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -64,11 +65,12 @@ func scanRequest(row pgx.Row) (*Request, error) {
 	return rq, nil
 }
 
-// visible: read on the backup's cluster or on the target's cluster. Either
-// side has a reason to see a restore: the data comes from one and lands in
-// the other (the databases it creates are visible on the target anyway).
+// visible: read on the backup's cluster, where the data comes from. A
+// reader of the target's cluster only does not see the source's names, run
+// or databases. The maker (read there) and every valid checker (operate on
+// both clusters) do.
 func visible(sub *authz.Subject, c Clusters) bool {
-	return sub.Can(authz.PermRead, c.Run) || sub.Can(authz.PermRead, c.Target)
+	return sub.Can(authz.PermRead, c.Run)
 }
 
 // loadRequest loads a request without any scope check.
@@ -102,7 +104,10 @@ type Filter struct {
 	Limit        int
 }
 
-// ListRequests returns the requests visible to sub, newest first.
+// ListRequests returns the requests visible to sub, newest first. Scope is
+// applied in SQL (the backup's cluster among those sub may read), and
+// waiting_for_me pages on until Limit matching requests are found, so no
+// visible request is dropped by the limit.
 func ListRequests(ctx context.Context, q store.Querier, sub *authz.Subject, f Filter, now time.Time) ([]*Request, error) {
 	if f.Limit <= 0 || f.Limit > 500 {
 		f.Limit = 200
@@ -110,41 +115,51 @@ func ListRequests(ctx context.Context, q store.Querier, sub *authz.Subject, f Fi
 	if f.WaitingForMe {
 		f.Status = string(StatusPending)
 	}
-	rows, err := q.Query(ctx, requestSelect+`
-		WHERE ($1 = '' OR rr.status = $1) AND ($2::uuid IS NULL OR rr.maker_principal_id = $2) AND ($3::uuid IS NULL OR rr.source_run_id = $3)
-		ORDER BY rr.created_at DESC, rr.id LIMIT $4`, f.Status, f.MakerID, f.RunID, f.Limit*4)
+	readable, err := httpx.ScopedClusters(ctx, q, sub, authz.PermRead)
 	if err != nil {
 		return nil, err
 	}
-	var all []*Request
-	for rows.Next() {
-		rq, err := scanRequest(rows)
-		if err != nil {
-			rows.Close()
-			return nil, err
-		}
-		if visible(sub, rq.clusters) {
-			all = append(all, rq)
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
 	out := []*Request{}
-	for _, rq := range all {
-		if err := fill(ctx, q, rq, sub, now); err != nil {
+	for offset := 0; ; offset += f.Limit {
+		rows, err := q.Query(ctx, requestSelect+`
+			WHERE sc.id = ANY($1) AND ($2 = '' OR rr.status = $2) AND ($3::uuid IS NULL OR rr.maker_principal_id = $3)
+			  AND ($4::uuid IS NULL OR rr.source_run_id = $4)
+			ORDER BY rr.created_at DESC, rr.id LIMIT $5 OFFSET $6`, readable, f.Status, f.MakerID, f.RunID, f.Limit, offset)
+		if err != nil {
 			return nil, err
 		}
-		if f.WaitingForMe && !rq.CanApprove {
-			continue
+		var page []*Request
+		for rows.Next() {
+			rq, err := scanRequest(rows)
+			if err != nil {
+				rows.Close()
+				return nil, err
+			}
+			page = append(page, rq)
 		}
-		out = append(out, rq)
-		if len(out) >= f.Limit {
-			break
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		for _, rq := range page {
+			if !visible(sub, rq.clusters) {
+				continue // labels changed since ScopedClusters; never show
+			}
+			if err := fill(ctx, q, rq, sub, now); err != nil {
+				return nil, err
+			}
+			if f.WaitingForMe && !rq.CanApprove {
+				continue
+			}
+			out = append(out, rq)
+			if len(out) >= f.Limit {
+				return out, nil
+			}
+		}
+		if len(page) < f.Limit {
+			return out, nil
 		}
 	}
-	return out, nil
 }
 
 // fill adds the principals and what sub may do with the request.

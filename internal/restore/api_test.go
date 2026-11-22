@@ -665,7 +665,12 @@ func TestOpenRules(t *testing.T) {
 	field(with("credential", map[string]any{"source": "stored", "username": "postgres"}), "credential.password", "required")
 	field(with("vault_token", canaryToken), "vault_token", "only for a Vault")
 	field(with("tls_ca_pem", "not a pem"), "tls_ca_pem", "no PEM")
+	// Refused input never reaches the target, a short justification included.
+	calls := pgInspector.calls
 	field(with("justification", "short"), "justification", "at least")
+	if pgInspector.calls != calls {
+		t.Fatal("the target was inspected for a request with a refused justification")
+	}
 
 	// Inspector findings: a database with data is never overwritten.
 	pgInspector.set(restore.TargetReport{Superuser: true, Existing: map[string]bool{"shop": true, "postgres": false}}, nil, false)
@@ -722,7 +727,7 @@ func TestVaultRequest(t *testing.T) {
 	e.exec(`INSERT INTO vaults (target_id, provider, status) VALUES ($1, 'hashicorp', 'configured')`, configured)
 	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
 	checker := e.login("bob", "operator")
-	in := map[string]any{"run_id": run, "target_id": tgt, "vault_token": canaryToken, "justification": "Restore the vault after the outage"}
+	in := map[string]any{"run_id": run, "target_id": tgt, "vault_token": " \n" + canaryToken + "\n ", "justification": "Restore the vault after the outage"}
 
 	field := func(in map[string]any, key, want string) {
 		t.Helper()
@@ -872,6 +877,50 @@ func TestCheck(t *testing.T) {
 	if code := e.do(maker, "POST", "/api/v1/restores/check", in, &res); code != 200 || res.OK || !strings.Contains(res.Fields["target_id"], "auth failed") {
 		t.Fatalf("check inspector error: %d %+v", code, res)
 	}
+	// Every call of the inspector is recorded, a failed one with its
+	// (scrubbed) reason; so is a findings failure and an inspection at open.
+	type checked struct {
+		OK  bool   `json:"ok"`
+		Err string `json:"error"`
+	}
+	audit := func() []checked {
+		rows, err := e.DB.Query(context.Background(), `SELECT details FROM activity_log WHERE action = 'restore.checked' ORDER BY at, id`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []checked
+		for rows.Next() {
+			var c checked
+			var b []byte
+			if err := rows.Scan(&b); err != nil {
+				t.Fatal(err)
+			}
+			_ = json.Unmarshal(b, &c)
+			out = append(out, c)
+		}
+		return out
+	}
+	var failedAuth, findings, passed int
+	for _, c := range audit() {
+		switch {
+		case c.OK:
+			passed++
+		case strings.Contains(c.Err, "auth failed"):
+			failedAuth++
+		case strings.Contains(c.Err, "cannot take"):
+			findings++
+		}
+	}
+	if passed != 1 || failedAuth != 1 || findings != 1 {
+		t.Fatalf("restore.checked rows: %+v", audit())
+	}
+	pgInspector.set(restore.TargetReport{Superuser: true}, nil, false)
+	open := e.pgInput(e.pgTarget)
+	e.open(maker, open)
+	if n := len(audit()); n != 4 {
+		t.Fatalf("restore.checked after open: %d", n)
+	}
 	e.noCanary()
 }
 
@@ -881,13 +930,31 @@ func TestVisibility(t *testing.T) {
 	rq := e.open(maker, e.pgInput(e.pgTarget))
 	id := rq.ID.String()
 	var list struct{ Items []restore.Request }
-	for name, grant := range map[string]string{"run-side": "viewer@env=prod", "target-side": "viewer@env=stage"} {
-		c := e.login(name, grant)
-		if code := e.do(c, "GET", "/api/v1/restores/"+id, nil, nil); code != 200 {
-			t.Fatalf("%s reader: %d", name, code)
+	// Read on the backup's cluster sees it.
+	runSide := e.login("run-side", "viewer@env=prod")
+	if code := e.do(runSide, "GET", "/api/v1/restores/"+id, nil, nil); code != 200 {
+		t.Fatalf("run-side reader: %d", code)
+	}
+	if e.do(runSide, "GET", "/api/v1/restores", nil, &list); len(list.Items) != 1 {
+		t.Fatalf("run-side list: %+v", list.Items)
+	}
+	// Read (even admin) on the target's cluster only does not: the source's
+	// names, run and databases stay hidden.
+	for _, c := range []*apitest.Client{e.login("target-side", "viewer@env=stage"), e.login("target-admin", "admin@env=stage")} {
+		for _, p := range []string{"", "/approve", "/reject", "/cancel"} {
+			method := "POST"
+			if p == "" {
+				method = "GET"
+			}
+			if code := e.do(c, method, "/api/v1/restores/"+id+p, map[string]string{"comment": "x"}, nil); code != http.StatusNotFound {
+				t.Fatalf("target-side %s %s: %d", method, p, code)
+			}
 		}
-		if e.do(c, "GET", "/api/v1/restores", nil, &list); len(list.Items) != 1 {
-			t.Fatalf("%s list: %+v", name, list.Items)
+		code, body := c.Raw("GET", "/api/v1/restores", nil)
+		for _, leak := range []string{id, e.pgRun.String(), "orders-pg", "prod", "billing"} {
+			if code != 200 || strings.Contains(body, leak) {
+				t.Fatalf("target-side list leaks %q: %d %s", leak, code, body)
+			}
 		}
 	}
 	out := e.login("out", "admin@env=other")
@@ -909,4 +976,38 @@ func TestVisibility(t *testing.T) {
 	if got.CanApprove || got.CanCancel || got.ApproveDisabledReason == "" {
 		t.Fatalf("viewer: %+v", got)
 	}
+}
+
+// Lists never lose visible requests to the limit: invisible ones are
+// filtered in SQL, and waiting_for_me pages on.
+func TestListLimit(t *testing.T) {
+	e := newEnv(t)
+	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
+	visibleRq := e.open(maker, e.pgInput(e.pgTarget))
+
+	// Five newer requests from a cluster prod readers cannot see.
+	other := e.cluster("other", "other")
+	src := e.target(other, "orders-pg-o", "postgresql", "")
+	run := e.run(src, "succeeded", "manual", "zip", map[string]any{"databases": []string{"shop"}})
+	otherMaker := e.login("olga", "viewer@env=other", "operator@env=stage")
+	for i := 0; i < 5; i++ {
+		in := e.pgInput(e.pgTarget)
+		in["run_id"], in["databases"] = run, []string{"shop"}
+		e.open(otherMaker, in)
+	}
+	var list struct{ Items []restore.Request }
+	if e.do(e.login("prod-reader", "viewer@env=prod"), "GET", "/api/v1/restores?limit=1", nil, &list); len(list.Items) != 1 || list.Items[0].ID != visibleRq.ID {
+		t.Fatalf("limit=1 behind invisible requests: %+v", list.Items)
+	}
+
+	// Waiting for me: the checker's own five newer requests do not hide the
+	// one waiting for them.
+	checker := e.login("bob", "operator@env=prod", "operator@env=stage")
+	for i := 0; i < 5; i++ {
+		e.open(checker, e.pgInput(e.pgTarget2))
+	}
+	if e.do(checker, "GET", "/api/v1/restores?waiting_for_me=1&limit=1", nil, &list); len(list.Items) != 1 || list.Items[0].ID != visibleRq.ID {
+		t.Fatalf("waiting_for_me behind own requests: %+v", list.Items)
+	}
+	e.noCanary()
 }

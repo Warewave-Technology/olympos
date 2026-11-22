@@ -149,7 +149,7 @@ func TestAuthzMatrix(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], ids["restore"], "prod-secret-cluster"}
+	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], ids["restore"], ids["run"], "prod-secret-cluster"}
 	// Readable by every signed-in reader by design: global configuration
 	// that cluster-scoped operators pick from (destinations, notification
 	// channels; no secret material in the views; docs/security-review-v0.1.md).
@@ -244,10 +244,17 @@ func seedProd(t *testing.T, db *store.DB) map[string]string {
 		t.Fatal(err)
 	}
 	q("cr", `INSERT INTO change_requests (vault_id, maker_principal_id, justification, expires_at) VALUES ($1, $2, 'rotate', now() + interval '1 day') RETURNING id::text`, ids["vault"], maker)
-	// A restore of the prod run into another prod target.
-	newTarget := targetid.Compute(ids["cluster"], "shop", "orders-pg-new", 5432)
+	// A restore of the prod run into a target of an env=other cluster: the
+	// out-of-scope viewer reads the target's cluster but not the backup's,
+	// so the request (source names, run, databases) must stay hidden.
+	var otherCluster string
+	if err := db.QueryRow(ctx, `INSERT INTO clusters (name, labels, status, last_seen_at) VALUES ('dr-cluster', '{"env":"other"}', 'online', now()) RETURNING id::text`).
+		Scan(&otherCluster); err != nil {
+		t.Fatal(err)
+	}
+	newTarget := targetid.Compute(otherCluster, "shop", "orders-pg-new", 5432)
 	if _, err := db.Exec(ctx, `INSERT INTO targets (id, cluster_id, namespace, service, port, engine) VALUES ($1,$2,'shop','orders-pg-new',5432,'postgresql')`,
-		newTarget, ids["cluster"]); err != nil {
+		newTarget, otherCluster); err != nil {
 		t.Fatal(err)
 	}
 	q("restore", `INSERT INTO restore_requests (source_run_id, source_destination_id, source_copy_run_id, engine, target_id, maker_principal_id,

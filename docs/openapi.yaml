@@ -655,7 +655,7 @@ paths:
   /restores:
     get:
       tags: [approvals]
-      summary: "Restore requests visible to the caller (read on the backup's cluster or on the target's cluster), newest first."
+      summary: "Restore requests visible to the caller (read on the backup's cluster; read on the target's cluster alone is not enough), newest first."
       parameters:
         - {name: status, in: query, schema: {type: string, enum: [pending, approved, running, succeeded, failed, rejected, expired, cancelled]}}
         - {name: waiting_for_me, in: query, description: "1 or true: pending requests the caller may approve", schema: {type: string}}
@@ -697,8 +697,8 @@ paths:
         Run the open-time checks of a restore for the dialog without storing anything: the run and copy, the
         target, the databases in the backup, and (when the input is complete) the target inspected over its
         tunnel with the given credential, which tests it. Nothing is written to the target. Same permissions as
-        opening; justification is not checked. Recorded in the activity log as restore.checked when the
-        target was reached.
+        opening; justification is not checked. Every inspection of the target (here or when opening) is
+        recorded in the activity log as restore.checked, with the scrubbed reason when it failed.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RestoreInput"}}}}
       responses:
         "200": {description: "Checks ran: ok, or ok=false with error and fields", content: {application/json: {schema: {$ref: "#/components/schemas/RestoreCheck"}}}}
@@ -710,7 +710,7 @@ paths:
       tags: [approvals]
       responses:
         "200": {description: Restore request, content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
-        "404": {description: Missing or outside scope}
+        "404": {description: "Missing, or the caller lacks read on the backup's cluster"}
   /restores/{id}/approve:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
@@ -1788,8 +1788,8 @@ components:
         globals: {type: [boolean, "null"], description: "PostgreSQL only: restore roles from globals.sql (default on; off without a superuser credential)"}
         tls_ca_pem: {type: string, description: "PEM CA bundle to verify the target's certificate (shown to the checker)"}
         credential: {$ref: "#/components/schemas/CredentialInput", description: "PostgreSQL, ClickHouse: the target's admin login"}
-        vault_token: {type: string, writeOnly: true, description: "Vault/OpenBao: a token of the new Vault that may call sys/storage/raft/snapshot-force; sealed until the request ends"}
-        justification: {type: string, description: 10–2000 characters (not checked by /restores/check)}
+        vault_token: {type: string, writeOnly: true, description: "Vault/OpenBao: a token of the new Vault that may call sys/storage/raft/snapshot-force; surrounding whitespace is trimmed; sealed until the request ends"}
+        justification: {type: string, description: "10–2000 characters, checked before the target is contacted (not checked by /restores/check)"}
         break_glass: {type: boolean, description: Admins on both clusters start the request without a checker}
     RestoreOptions:
       type: object
