@@ -1498,7 +1498,7 @@ components:
         blob_path: {type: string}
         sha256: {type: string}
         error: {type: string, description: "Secrets scrubbed; agent_disconnected: … when the agent was gone (retried after the reconnect, see attempt)"}
-        attempt: {type: integer, description: "1 = first attempt; > 1 = retried after the agent reconnected (F18, max 3, inside half the interval to the next activation)"}
+        attempt: {type: integer, description: "Counts every run queued for one activation (or manual request): 1 = the first; +1 for each retry after an agent disconnect (F18, retried below attempt 3, inside half the interval to the next activation) and for each repair of a partial run (repair_of set)"}
         created_at: {type: string, format: date-time}
         repair_of: {type: [string, "null"], format: uuid, description: "The run whose missing copies this run completes"}
         not_before: {type: [string, "null"], format: date-time, description: "A queued run is not started before then; set on repairs (5 min after the partial run, 30 min after the first repair, 2 h after the second), null = as soon as a worker is free"}

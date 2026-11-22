@@ -220,7 +220,7 @@ activity log still gets one row per item.
 |---|---|---|---|
 | `backup.failed` | A backup run failed (attempts that are retried stay quiet). Also fires for a failed `olympos-self` run, when a job is paused because its target is gone, and when the repairs of a [partial run](#partial-backups-and-repairs) give up. | *Backup failed: ns/svc* · cluster, target, trigger, error (and *missing* when repairs gave up). *Backup failed: Olympos database (olympos-self)*. *Backup paused: target ns/svc is gone* · reason. | No |
 | `backup.partial` | A run of a job that writes to a destination group wrote some copies but not all. Also fires for `olympos-self`. Not opt-in: route it like `backup.failed`. | *Backup incomplete: ns/svc* · cluster, target, trigger, missing, error, next_attempt (when a repair is queued). *Backup incomplete: Olympos database (olympos-self)*. | No |
-| `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away. | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
+| `backup.missed` | A scheduled run did not start (scheduler down, or overlap), or a run was marked missed after the agent stayed away (a repair that ends missed sends `backup.failed` when it gives up instead). | *Backup missed: ns/svc*, with *(N runs)* when several slots were missed · cluster, target, scheduled_for, count. | One message per job for a batch of missed slots |
 | `backup.succeeded` | A backup run succeeded, or a repair run wrote every missing copy of a partial run. **Opt-in** (see below). | *Backup succeeded: ns/svc* · cluster, target, trigger, size, tier. | No |
 | `cr.opened` | A Vault change request was opened and waits for approval. | *Change request waiting for approval* (link only). | No |
 | `cr.approved` | A change request was approved. | *Change request approved* · Vault. | No |
@@ -277,8 +277,12 @@ and scheduled time, and its `repair_of` field names the original run. While it w
 - When no repair is left (three used, or the next one would start after the window), the last repair
   sends `backup.failed` with the destinations that are still missing. The next scheduled run writes to
   every member again.
-- If the agent disconnects during a repair, its retry is the same repair: it waits for the reconnect, as
-  any run does, and does not count as another repair.
+- If the agent disconnects during a repair, the disconnect rule for every run applies: below attempt 3
+  (in practice the first repair) the repair is retried once the agent is back, and that retry is the
+  same repair, not another one. A repair that is not retried (attempt 3 or later, or the window is over)
+  ends `missed`, without `backup.missed`: the chain goes on as after a failed repair, so the next repair
+  is queued with its delay, or, when none is left, the repair sends `backup.failed` with the missing
+  destinations.
 - Test runs (the wizard's dry run) are never repaired. A run that fails entirely is not retried, as before.
 
 Besides the message fields, the stored event (`outbox.payload`) carries `job_id` and `run_id`.

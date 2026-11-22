@@ -112,7 +112,7 @@ func loadRetryRun(ctx context.Context, tx pgx.Tx, runID uuid.UUID) (retryRun, er
 }
 
 // queueRepairTx queues a repair after a finished partial run, or after a
-// repair that ended partial or failed: a run that writes only to the
+// repair that ended partial, failed or missed: a run that writes only to the
 // missing set (see missingDestinationsTx, restricted to the job's current
 // destinations), with repair_of = the original run, the same trigger,
 // scheduled_for and retry window (so each copy gets the tier it would have
@@ -130,7 +130,9 @@ func queueRepairTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, now time.Tim
 	if err != nil {
 		return nil, err
 	}
-	due := r.status == "partial" || r.repairOf != nil && r.status == "failed"
+	// A repair that ended missed (the agent stayed away past the disconnect
+	// limit) goes on like a failed one.
+	due := r.status == "partial" || r.repairOf != nil && (r.status == "failed" || r.status == "missed")
 	if r.trigger == "test" || !due {
 		return nil, nil
 	}

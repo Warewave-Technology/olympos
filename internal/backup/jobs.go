@@ -134,7 +134,9 @@ type Run struct {
 	SHA256        string     `json:"sha256"`
 	Error         string     `json:"error"`
 	CreatedAt     time.Time  `json:"created_at"`
-	// Attempt > 1: a retry after the agent reconnected (F18).
+	// Attempt counts every run queued for one activation (or manual
+	// request): 1 for the first, +1 for each retry after an agent disconnect
+	// (F18) and for each repair of a partial run.
 	Attempt int `json:"attempt"`
 	// Steps: dry-run checklist (F10); empty for other runs.
 	Steps []Step `json:"steps"`

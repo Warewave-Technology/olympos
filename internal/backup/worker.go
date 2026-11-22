@@ -120,8 +120,9 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) Active() int { return int(w.active.Load()) }
 
 // Claim picks the oldest queued run this replica can execute and marks it
-// running; a run whose not_before is still ahead is left in the queue. Runs of offline clusters are failed with agent_offline. Returns
-// uuid.Nil when nothing is claimable.
+// running; a run whose not_before is still ahead is left in the queue. Runs
+// of offline clusters are failed with agent_offline. Returns uuid.Nil when
+// nothing is claimable.
 func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 	_, per := w.limits()
 	var claimed uuid.UUID
@@ -443,10 +444,11 @@ func (n runNotice) addPayload(p map[string]any) {
 //     to repair emit nothing.
 //   - A partial run emits backup.partial with its missing destinations,
 //     whether a repair is queued and when it starts.
-//   - A repair that ends partial or failed is quiet while another repair is
-//     queued; when none is (MaxRepairs used, or the next one would start
-//     after the window), it gives up with backup.failed naming the copies
-//     still missing.
+//   - A repair that ends partial, failed or missed (agent away past the
+//     disconnect limit) is quiet while another repair is queued; when none
+//     is (MaxRepairs used, or the next one would start after the window),
+//     it gives up with backup.failed naming the copies still missing, never
+//     backup.missed.
 //   - Otherwise succeeded, missed and failed map to their events (a
 //     succeeded repair completed every missing copy). backup.succeeded is
 //     opt-in: the caller checks the job's setting.
@@ -471,7 +473,7 @@ func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now
 			return runNotice{}, err
 		}
 		n.Type, n.Missing, n.RepairQueued, n.NextAttemptAt = notify.BackupPartial, destNames(missing), next != nil, next
-	case repairOf != nil && (o.status == "partial" || o.status == "failed"):
+	case repairOf != nil && (o.status == "partial" || o.status == "failed" || o.status == "missed"):
 		next, err := queueRepairTx(ctx, tx, runID, now)
 		if err != nil || next != nil {
 			return runNotice{}, err

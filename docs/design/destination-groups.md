@@ -170,13 +170,16 @@ an object like a destination group.
   30 min, 2 h, so at most `MaxRepairs` = 3 repairs. `now` is when the run before it finished; k is 1 + the
   repairs of that original run that have a `not_before`. A repair whose `not_before` would be after
   `retry_until` is not queued. Both runners skip queued runs whose `not_before` is still ahead.
-- A repair run ends `succeeded` (every missing copy written), `partial` (some), or `failed` (none, for any
-  reason: upload, engine, credential); a `partial` or `failed` repair queues the next repair while the
-  delays and the window allow. Repairs exist only after a `partial` run: a plain run that fails entirely is
-  not retried, as today.
-- Agent disconnects keep their current rule (`disconnectedOutcome`, `MaxAttempts`), for plain and repair
-  runs alike; the retry of a disconnected repair keeps `repair_of` and the missing set, has no
-  `not_before` (it starts when the agent is back) and so counts as the same repair.
+- A repair run ends `succeeded` (every missing copy written), `partial` (some), `failed` (none, for any
+  reason: upload, engine, credential) or `missed` (agent away past the disconnect limit); a `partial`,
+  `failed` or `missed` repair queues the next repair while the delays and the window allow. Repairs exist
+  only after a `partial` run: a plain run that fails entirely is not retried, as today.
+- Agent disconnects keep their current rule (`disconnectedOutcome`, `attempt < MaxAttempts` inside the
+  window), for plain and repair runs alike; the retry of a disconnected repair keeps `repair_of` and the
+  missing set, has no `not_before` (it starts when the agent is back) and so counts as the same repair.
+  Only the first repair (attempt 2) can get such a retry. A repair that is not retried ends `missed` and
+  continues the chain like a failed repair: the next spaced repair is queued when the window allows,
+  else it gives up with `backup.failed` (`repair_of`, missing destinations), never `backup.missed`.
 - A repair waiting for its `not_before` does not make the job busy (*Run now* and dry runs are accepted)
   and is not the job's `last_run`. The partial run's detail carries `next_repair_at`; `backup.partial`
   carries `next_attempt_at`.

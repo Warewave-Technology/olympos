@@ -399,6 +399,64 @@ func TestRepairDisconnectedKeepsSubset(t *testing.T) {
 	waitsFor(t, next, backup.RepairDelays[1], before, time.Now())
 }
 
+// The second repair (attempt 3) is past the disconnect retry limit: when the
+// agent drops during it, it ends missed and the repair chain goes on like
+// after a failed repair (the third repair, 2 hours later), or, when the
+// window is too short for it, gives up with backup.failed (never
+// backup.missed).
+func TestRepairMissedContinuesChain(t *testing.T) {
+	for _, giveUp := range []bool{false, true} {
+		t.Run(map[bool]string{false: "next repair", true: "gives up"}[giveUp], func(t *testing.T) {
+			db := testutil.DB(t)
+			ctx := context.Background()
+			g := seedGroup(t, db, jobOpts{cron: yearly})
+			orig, _ := partialRun(t, db, g)
+			r1 := onlyRepair(t, db, g.Job, orig, 2, g.Dest2)
+			claimRepair(t, g.W, db, r1.ID)
+			r2 := onlyRepair(t, db, g.Job, orig, 3, g.Dest2)
+			dueNow(t, db, r2.ID)
+			if giveUp {
+				// one hour left: no room for the third repair (2 h)
+				if _, err := db.Exec(ctx, `UPDATE backup_runs SET retry_until = now() + interval '1 hour' WHERE id = $1`, r2.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			id, err := g.W.Claim(ctx)
+			if err != nil || id != r2.ID {
+				t.Fatalf("claim: %s %v", id, err)
+			}
+			d := g.W.Dialer.(*fakeDialer)
+			d.mu.Lock()
+			d.connected[g.ClusterID] = false
+			d.mu.Unlock()
+			before := time.Now()
+			g.W.Execute(ctx, id)
+			if r := loadRun(t, db, r2.ID); r.Status != "missed" {
+				t.Fatalf("repair 2: %+v", r)
+			}
+			if ev := events(t, db, "backup.missed"); len(ev) != 0 {
+				t.Fatalf("a missed repair is not a missed backup: %+v", ev)
+			}
+			if !giveUp {
+				r3 := onlyRepair(t, db, g.Job, orig, 4, g.Dest2)
+				waitsFor(t, r3, backup.RepairDelays[2], before, time.Now())
+				if ev := events(t, db, "backup.failed"); len(ev) != 0 {
+					t.Fatalf("quiet while another repair is queued: %+v", ev)
+				}
+				return
+			}
+			if q := queuedRuns(t, db, g.Job); len(q) != 0 {
+				t.Fatalf("no third repair: %+v", q)
+			}
+			ev := events(t, db, "backup.failed")
+			if len(ev) != 1 || ev[0].Payload["run_id"] != r2.ID.String() || ev[0].Payload["repair_of"] != orig.String() ||
+				len(strs(ev[0].Payload["missing_destinations"])) != 1 || strs(ev[0].Payload["missing_destinations"])[0] != "dest-b" {
+				t.Fatalf("backup.failed: %+v", ev)
+			}
+		})
+	}
+}
+
 // A plain run interrupted by a disconnect is retried as a plain run: its
 // retry resolves the job's destinations again.
 func TestDisconnectedPlainRunRetry(t *testing.T) {
