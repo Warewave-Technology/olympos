@@ -143,6 +143,8 @@ type session struct {
 	guard   bool
 	rootCAs *x509.CertPool
 	cred    backup.Credential
+	// toolDir is the engine's pg_dump layout (restores pick pg_restore).
+	toolDir string
 }
 
 func (e *Engine) open(ctx context.Context, ec backup.EngineContext) (*session, error) {
@@ -487,8 +489,13 @@ func quote(v string) string {
 // conninfo is the libpq connection string; host is the TLS name (verified
 // by libpq) while hostaddr is replaced per process by the local bridge.
 func (s *session) conninfo(db string, ssl [][2]string) [][2]string {
+	return s.conninfoFor(db, ssl, "olympos-backup")
+}
+
+// conninfoFor is conninfo with the application_name the target sees.
+func (s *session) conninfoFor(db string, ssl [][2]string, app string) [][2]string {
 	kv := [][2]string{{"host", s.serverName()}, {"user", s.cred.Username}, {"dbname", db},
-		{"gssencmode", "disable"}, {"application_name", "olympos-backup"}, {"connect_timeout", "30"}}
+		{"gssencmode", "disable"}, {"application_name", app}, {"connect_timeout", "30"}}
 	return append(kv, ssl...)
 }
 

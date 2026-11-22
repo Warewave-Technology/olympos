@@ -14,10 +14,14 @@ import (
 	"time"
 )
 
-// Tool is a resolved pg_dump binary (pg_dumpall lives next to it).
+// Tool is a resolved pg_dump binary (pg_dumpall and pg_restore live next
+// to it).
 type Tool struct {
 	PgDump    string
 	PgDumpAll string
+	// PgRestore is required by restores (FindRestoreTool); FindTool sets it
+	// when present.
+	PgRestore string
 	Major     int
 	Version   string // e.g. "pg_dump (PostgreSQL) 17.4"
 }
@@ -55,6 +59,16 @@ func executable(p string) bool {
 // with {major} (RHEL PGDG /usr/pgsql-{major}/bin). Falls back to pg_dump on
 // PATH when its major is high enough.
 func FindTool(ctx context.Context, dir string, serverMajor int) (*Tool, error) {
+	return findTool(ctx, dir, serverMajor, false)
+}
+
+// FindRestoreTool is FindTool for restores: pg_restore must be there too,
+// with a major >= minMajor (the archive's pg_dump, or the server's).
+func FindRestoreTool(ctx context.Context, dir string, minMajor int) (*Tool, error) {
+	return findTool(ctx, dir, minMajor, true)
+}
+
+func findTool(ctx context.Context, dir string, serverMajor int, needRestore bool) (*Tool, error) {
 	type cand struct {
 		major int
 		bin   string
@@ -86,7 +100,7 @@ func FindTool(ctx context.Context, dir string, serverMajor int) (*Tool, error) {
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].major < cands[j].major })
 	var tried []string
 	for _, c := range cands {
-		if t, err := toolIn(ctx, filepath.Join(c.bin, "pg_dump"), serverMajor); err == nil {
+		if t, err := toolIn(ctx, filepath.Join(c.bin, "pg_dump"), serverMajor, needRestore); err == nil {
 			return t, nil
 		} else {
 			tried = append(tried, err.Error())
@@ -96,26 +110,37 @@ func FindTool(ctx context.Context, dir string, serverMajor int) (*Tool, error) {
 		if abs, err := filepath.Abs(p); err == nil {
 			p = abs
 		}
-		t, err := toolIn(ctx, p, serverMajor)
+		t, err := toolIn(ctx, p, serverMajor, needRestore)
 		if err == nil {
 			return t, nil
 		}
 		tried = append(tried, err.Error())
 	}
-	msg := fmt.Sprintf("no pg_dump with major version >= %d found in %s (<major>/bin or {major} layouts) or PATH", serverMajor, dir)
+	what := "pg_dump"
+	if needRestore {
+		what = "pg_restore"
+	}
+	msg := fmt.Sprintf("no %s with major version >= %d found in %s (<major>/bin or {major} layouts) or PATH", what, serverMajor, dir)
 	if len(tried) > 0 {
 		msg += " (" + strings.Join(tried, "; ") + ")"
 	}
 	return nil, errors.New(msg)
 }
 
-func toolIn(ctx context.Context, pgDump string, serverMajor int) (*Tool, error) {
+func toolIn(ctx context.Context, pgDump string, serverMajor int, needRestore bool) (*Tool, error) {
 	if !executable(pgDump) {
 		return nil, fmt.Errorf("%s: not executable", pgDump)
 	}
 	all := filepath.Join(filepath.Dir(pgDump), "pg_dumpall")
 	if !executable(all) {
 		return nil, fmt.Errorf("%s: not executable", all)
+	}
+	restore := filepath.Join(filepath.Dir(pgDump), "pg_restore")
+	if !executable(restore) {
+		if needRestore {
+			return nil, fmt.Errorf("%s: not executable", restore)
+		}
+		restore = ""
 	}
 	v, major, err := toolVersion(ctx, pgDump)
 	if err != nil {
@@ -124,7 +149,7 @@ func toolIn(ctx context.Context, pgDump string, serverMajor int) (*Tool, error) 
 	if major < serverMajor {
 		return nil, fmt.Errorf("%s is version %d, server is %d", pgDump, major, serverMajor)
 	}
-	return &Tool{PgDump: pgDump, PgDumpAll: all, Major: major, Version: v}, nil
+	return &Tool{PgDump: pgDump, PgDumpAll: all, PgRestore: restore, Major: major, Version: v}, nil
 }
 
 // systemRootsFile finds a CA bundle for libpq < 16 (no sslrootcert=system).
