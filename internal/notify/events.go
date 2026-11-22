@@ -23,6 +23,13 @@ const (
 	CRRejected          = "cr.rejected"
 	CRExpired           = "cr.expired"
 	CRFailed            = "cr.failed"
+	RestoreRequested    = "restore.requested"
+	RestoreApproved     = "restore.approved"
+	RestoreRejected     = "restore.rejected"
+	RestoreStarted      = "restore.started"
+	RestoreSucceeded    = "restore.succeeded"
+	RestoreFailed       = "restore.failed"
+	RestoreBreakGlass   = "restore.break_glass"
 	VaultUnmanagedWrite = "vault.unmanaged_write"
 	AuditNewFindings    = "audit.new_findings"
 	VulnCritical        = "vuln.critical"
@@ -40,6 +47,7 @@ const (
 // opt-in: it has no default route.
 var Catalog = []string{
 	BackupFailed, BackupPartial, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
+	RestoreRequested, RestoreApproved, RestoreRejected, RestoreStarted, RestoreSucceeded, RestoreFailed, RestoreBreakGlass,
 	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, SecretFindings, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
 }
 

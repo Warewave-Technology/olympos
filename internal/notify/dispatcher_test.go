@@ -140,6 +140,18 @@ func TestCatalog(t *testing.T) {
 		entries[1].Description != "A backup was written to some of its destinations but not all." || !notify.Known(notify.BackupPartial) {
 		t.Errorf("backup.partial entry: %+v", entries[1])
 	}
+	// Restore events (docs/design/ui-restore.md): all in the catalog, none
+	// opt-in (restore.failed and restore.break_glass must never be missed).
+	listed := map[string]bool{}
+	for _, e := range entries {
+		listed[e.EventType] = true
+	}
+	for _, ev := range []string{"restore.requested", "restore.approved", "restore.rejected", "restore.started", "restore.succeeded",
+		"restore.failed", "restore.break_glass"} {
+		if !listed[ev] || !notify.Known(ev) || notify.IsOptIn(ev) {
+			t.Errorf("%s: listed %v, known %v, opt-in %v", ev, listed[ev], notify.Known(ev), notify.IsOptIn(ev))
+		}
+	}
 }
 
 func TestDispatchRouting(t *testing.T) {
