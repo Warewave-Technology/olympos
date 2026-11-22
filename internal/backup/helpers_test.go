@@ -148,6 +148,8 @@ type fakeBlobs struct {
 	blobs  map[string][]byte
 	tags   map[string]map[string]string
 	fail   error
+	// failOnly > 0: only that many uploads fail with fail, later ones work.
+	failOnly int
 	// failAfter > 0: Upload reads that many bytes, then fails (with fail, or
 	// a connection reset when fail is nil).
 	failAfter int64
@@ -199,8 +201,16 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 		}
 		return blob.UploadResult{}, errors.New("connection reset by peer")
 	}
-	if f.fail != nil {
-		return blob.UploadResult{}, f.fail
+	f.mu.Lock()
+	failErr := f.fail
+	if failErr != nil && f.failOnly > 0 {
+		if f.failOnly--; f.failOnly == 0 {
+			f.fail = nil
+		}
+	}
+	f.mu.Unlock()
+	if failErr != nil {
+		return blob.UploadResult{}, failErr
 	}
 	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
 		return blob.UploadResult{}, f.failManifest

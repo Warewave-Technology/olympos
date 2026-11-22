@@ -133,7 +133,7 @@ func groupMembers(ctx context.Context, q store.Querier, groupID uuid.UUID) ([]st
 	return out, rows.Err()
 }
 
-// TierForDestination is TierFor for the copy on one destination: it counts
+// TierForDestination is the GFS tier of the copy on one destination: it counts
 // this job's scheduled runs (other than runID) with a succeeded copy on
 // destID, plus succeeded scheduled runs without copy rows (from before
 // destination groups), which count for every destination.

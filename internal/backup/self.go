@@ -1,14 +1,10 @@
 package backup
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"path/filepath"
@@ -21,7 +17,6 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Warewave-Technology/olympos/internal/blob"
-	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/schedule"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -60,18 +55,21 @@ func (s *SelfBackup) now() time.Time {
 	return time.Now()
 }
 
-// SelfJob is the olympos-self job (API shape).
+// SelfJob is the olympos-self job (API shape). Exactly one of
+// DestinationID and DestinationGroupID is set; DestinationName is the name
+// of that destination or group.
 type SelfJob struct {
-	ID              uuid.UUID  `json:"id"`
-	DestinationID   uuid.UUID  `json:"destination_id"`
-	DestinationName string     `json:"destination_name"`
-	Cron            string     `json:"cron"`
-	Timezone        string     `json:"timezone"`
-	Retention       Retention  `json:"retention"`
-	Enabled         bool       `json:"enabled"`
-	NotifyChannelID *uuid.UUID `json:"notify_channel_id"`
-	CreatedAt       time.Time  `json:"created_at"`
-	lastScheduled   *time.Time
+	ID                 uuid.UUID  `json:"id"`
+	DestinationID      *uuid.UUID `json:"destination_id"`
+	DestinationGroupID *uuid.UUID `json:"destination_group_id"`
+	DestinationName    string     `json:"destination_name"`
+	Cron               string     `json:"cron"`
+	Timezone           string     `json:"timezone"`
+	Retention          Retention  `json:"retention"`
+	Enabled            bool       `json:"enabled"`
+	NotifyChannelID    *uuid.UUID `json:"notify_channel_id"`
+	CreatedAt          time.Time  `json:"created_at"`
+	lastScheduled      *time.Time
 }
 
 // LoadSelfJob returns the olympos-self job, or store.ErrNotFound before the
@@ -79,10 +77,11 @@ type SelfJob struct {
 func LoadSelfJob(ctx context.Context, q store.Querier) (*SelfJob, error) {
 	var j SelfJob
 	var ret []byte
-	err := q.QueryRow(ctx, `SELECT j.id, j.destination_id, d.name, j.cron, j.timezone, j.retention, j.enabled, j.notify_channel_id,
-		j.created_at, j.last_scheduled_for
-		FROM backup_jobs j JOIN destinations d ON d.id = j.destination_id WHERE j.system = $1`, SelfSystem).
-		Scan(&j.ID, &j.DestinationID, &j.DestinationName, &j.Cron, &j.Timezone, &ret, &j.Enabled, &j.NotifyChannelID,
+	err := q.QueryRow(ctx, `SELECT j.id, j.destination_id, j.destination_group_id, COALESCE(d.name, g.name, ''), j.cron, j.timezone,
+		j.retention, j.enabled, j.notify_channel_id, j.created_at, j.last_scheduled_for
+		FROM backup_jobs j LEFT JOIN destinations d ON d.id = j.destination_id LEFT JOIN destination_groups g ON g.id = j.destination_group_id
+		WHERE j.system = $1`, SelfSystem).
+		Scan(&j.ID, &j.DestinationID, &j.DestinationGroupID, &j.DestinationName, &j.Cron, &j.Timezone, &ret, &j.Enabled, &j.NotifyChannelID,
 			&j.CreatedAt, &j.lastScheduled)
 	if err != nil {
 		return nil, store.NotFound(err)
@@ -93,7 +92,8 @@ func LoadSelfJob(ctx context.Context, q store.Querier) (*SelfJob, error) {
 }
 
 // Run is the leader loop: it queues scheduled runs and executes queued
-// runs of the olympos-self job, one at a time.
+// runs of the olympos-self job, one at a time. Repairs of partial runs are
+// queued runs of the job too, so this loop runs them.
 func (s *SelfBackup) Run(ctx context.Context) {
 	iv := s.Tick
 	if iv <= 0 {
@@ -206,18 +206,11 @@ func parseSelfDSN(dsn, password string) (*selfTarget, error) {
 	return t, nil
 }
 
-type runInfo struct {
-	id, jobID    uuid.UUID
-	trigger      string
-	scheduledFor *time.Time
-	startedAt    time.Time
-}
-
 func (s *SelfBackup) execute(ctx context.Context, runID uuid.UUID) {
-	var r runInfo
+	var r runRow
 	r.id = runID
-	if err := s.DB.QueryRow(ctx, `SELECT job_id, trigger, scheduled_for, started_at FROM backup_runs WHERE id = $1`, runID).
-		Scan(&r.jobID, &r.trigger, &r.scheduledFor, &r.startedAt); err != nil {
+	if err := s.DB.QueryRow(ctx, `SELECT job_id, trigger, scheduled_for, started_at, repair_of FROM backup_runs WHERE id = $1`, runID).
+		Scan(&r.jobID, &r.trigger, &r.scheduledFor, &r.startedAt, &r.repairOf); err != nil {
 		s.Log.Error("load olympos-self run", "run_id", runID, "err", err)
 		return
 	}
@@ -234,65 +227,65 @@ func (s *SelfBackup) execute(ctx context.Context, runID uuid.UUID) {
 			}
 		}
 	}()
-	o, j := s.perform(ctx, r)
+	o := s.perform(ctx, &r)
 	stop()
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
+	// The same finish as job runs: copy rows, repair, event (self texts).
+	var f finished
 	err := store.Tx(fctx, s.DB, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(fctx, `UPDATE backup_runs SET status = $2, finished_at = now(), bytes = $3, wire_bytes = $4, blob_path = $5,
-			sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END WHERE id = $1 AND finished_at IS NULL`,
-			runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier)
-		if err != nil || tag.RowsAffected() == 0 || o.status == "succeeded" {
-			return err
-		}
-		var channel *uuid.UUID
-		if j != nil {
-			channel = j.NotifyChannelID
-		}
-		return notify.Emit(fctx, tx, notify.Event{Type: notify.BackupFailed, Key: notify.BackupFailed + ":" + runID.String(), ChannelID: channel,
-			Title: "Backup failed: Olympos database (olympos-self)", Link: "/backups?self=1&run=" + runID.String(),
-			Fields:  map[string]string{"target": "olympos-self", "trigger": r.trigger, "error": o.err},
-			Payload: map[string]any{"job_id": r.jobID.String(), "run_id": runID.String()}})
+		var err error
+		f, err = finishRunTx(fctx, tx, runID, o)
+		return err
 	})
 	if err != nil {
 		s.Log.Error("finish olympos-self run", "run_id", runID, "err", err)
 		return
 	}
+	f.observeCopies() // self runs are not in the run metrics
 	s.Log.Info("olympos-self backup finished", "run_id", runID, "status", o.status, "bytes", o.bytes, "error", o.err)
 }
 
-func (s *SelfBackup) perform(ctx context.Context, r runInfo) (outcome, *SelfJob) {
+// perform dumps the database once and streams it to every destination of
+// the run (runDestinations: the job's destination or group members, or a
+// repair's missing set), like a job run.
+func (s *SelfBackup) perform(ctx context.Context, r *runRow) outcome {
 	fail := func(msg string) outcome { return outcome{status: "failed", err: msg} }
 	j, err := LoadSelfJob(ctx, s.DB)
 	if err != nil {
-		return fail("job not found"), nil
+		return fail("job not found")
 	}
 	tt, err := parseSelfDSN(s.DSN, s.Password)
 	if err != nil {
-		return fail(err.Error()), j
+		return fail(err.Error())
 	}
 	defer zeroBytes(tt.password)
+	scrub := func(msg string) string { return scrubPassword(msg, tt.password) }
 	eng, ok := EngineFor("postgresql")
 	if !ok {
-		return fail("the postgresql engine is not registered"), j
+		return fail("the postgresql engine is not registered")
 	}
-	tier := "daily"
-	if r.trigger == "schedule" {
-		loc, err := time.LoadLocation(j.Timezone)
-		if err != nil {
-			loc = time.UTC
-		}
-		ref := r.startedAt
-		if r.scheduledFor != nil {
-			ref = *r.scheduledFor
-		}
-		if tier, err = TierFor(ctx, s.DB, j.ID, r.id, ref, loc); err != nil {
-			return fail("decide retention tier: " + err.Error()), j
-		}
-	}
-	writer, err := s.Blobs.ForDestination(ctx, j.DestinationID)
+	dests, err := runDestinations(ctx, s.DB, r.id)
 	if err != nil {
-		return fail("open destination: " + err.Error()), j
+		return fail(scrub("resolve destinations: " + err.Error()))
+	}
+	if len(dests) == 0 {
+		if r.repairOf != nil {
+			return fail(errNothingToRepair)
+		}
+		return fail("the job has no destination")
+	}
+	tiers, err := copyTiers(ctx, s.DB, j.ID, j.Timezone, r, dests)
+	if err != nil {
+		return fail(scrub("decide retention tier: " + err.Error()))
+	}
+	var group *ManifestGroup
+	if j.DestinationGroupID != nil {
+		members, err := groupMembers(ctx, s.DB, *j.DestinationGroupID)
+		if err != nil {
+			return fail(scrub("load destination group: " + err.Error()))
+		}
+		group = &ManifestGroup{Name: j.DestinationName, Members: members}
 	}
 	opts, _ := json.Marshal(map[string]any{"databases": []string{tt.db}, "globals": false})
 	ec := EngineContext{
@@ -310,67 +303,23 @@ func (s *SelfBackup) perform(ctx context.Context, r runInfo) (outcome, *SelfJob)
 			return Credential{Username: tt.user, Secret: append([]byte(nil), tt.password...)}, nil
 		},
 	}
-	path := BlobPath(writer.Prefix(), selfCluster, selfNamespace, selfService, eng.Name(), r.startedAt, r.id, eng.Ext())
-	tags := map[string]string{TierTag: tier}
-	pr, pw := io.Pipe()
-	type engRes struct {
-		rr  *RunResult
-		err error
+	path := func(prefix string) string {
+		return BlobPath(prefix, selfCluster, selfNamespace, selfService, eng.Name(), r.startedAt, r.id, eng.Ext())
 	}
-	resc := make(chan engRes, 1)
-	go func() {
-		rr, err := eng.Run(ctx, ec, pw)
-		_ = pw.CloseWithError(err)
-		resc <- engRes{rr, err}
-	}()
-	ch := &countingHash{h: sha256.New()}
-	_, upErr := writer.Upload(ctx, path, io.TeeReader(pr, ch), eng.ContentType(), tags)
-	if upErr != nil {
-		_ = pr.CloseWithError(upErr)
-	} else {
-		_, _ = io.Copy(io.Discard, pr)
+	manifest := func(d destRef, b ManifestBlob, tier string) Manifest {
+		return Manifest{
+			Format: ManifestFormat, RunID: r.id, JobID: j.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
+			StartedAt: r.startedAt.UTC(), FinishedAt: time.Now().UTC(),
+			Cluster: ManifestCluster{Name: selfCluster},
+			Target:  ManifestTarget{ID: SelfSystem, Namespace: selfNamespace, Service: selfService, Port: tt.port, TLSServerName: tt.host},
+			Engine:  eng.Name(), EngineOptions: opts,
+			Blob: b, WireBytes: b.Size, TransferMode: "direct", // no tunnel: wire = bytes
+			Details:     map[string]any{"system": SelfSystem, "database": tt.db},
+			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
+		}
 	}
-	res := <-resc
-	o := outcome{bytes: ch.n, wire: ch.n, tier: tier} // no tunnel: wire = bytes
-	switch {
-	case res.err != nil:
-		o.status, o.err = "failed", scrubPassword(res.err.Error(), tt.password)
-		return o, j
-	case upErr != nil:
-		o.status, o.err = "failed", scrubPassword("upload: "+upErr.Error(), tt.password)
-		return o, j
-	}
-	rr := res.rr
-	if rr == nil {
-		rr = &RunResult{}
-	}
-	o.sha256 = hex.EncodeToString(ch.h.Sum(nil))
-	o.blobPath = path
-	details := map[string]any{"system": SelfSystem, "database": tt.db}
-	for k, v := range rr.Details {
-		details[k] = v
-	}
-	m := Manifest{
-		Format: ManifestFormat, RunID: r.id, JobID: j.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
-		StartedAt: r.startedAt.UTC(), FinishedAt: time.Now().UTC(),
-		Cluster: ManifestCluster{Name: selfCluster},
-		Target:  ManifestTarget{ID: SelfSystem, Namespace: selfNamespace, Service: selfService, Port: tt.port, TLSServerName: tt.host},
-		Engine:  eng.Name(), EngineOptions: opts,
-		Blob:      ManifestBlob{Path: path, ContentType: eng.ContentType(), Ext: eng.Ext(), Size: o.bytes, SHA256: o.sha256},
-		WireBytes: o.wire, TransferMode: "direct", TLS: rr.TLS, ServerVersion: rr.ServerVersion, ToolVersion: rr.ToolVersion,
-		Details: details,
-	}
-	mb, err := json.MarshalIndent(m, "", "  ")
-	if err != nil {
-		o.status, o.err = "failed", "encode manifest: "+err.Error()
-		return o, j
-	}
-	if _, err := writer.Upload(ctx, ManifestPath(path, r.id), bytes.NewReader(mb), "application/json", tags); err != nil {
-		o.status, o.err = "failed", "upload manifest: "+err.Error()
-		return o, j
-	}
-	o.status = "succeeded"
-	return o, j
+	_, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, s.Blobs.ForDestination, path, tiers, manifest, scrub)
+	return copiesOutcome(ctx, copies, streamed, streamed, tiers[dests[0].ID], engErr, scrub)
 }
 
 func scrubPassword(msg string, pw []byte) string {

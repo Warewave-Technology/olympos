@@ -305,6 +305,12 @@ func (f finished) observe() {
 	if f.started != nil {
 		metrics.BackupDuration.WithLabelValues(f.engine, f.status).Observe(time.Since(*f.started).Seconds())
 	}
+	f.observeCopies()
+}
+
+// observeCopies counts the run's copies only (the olympos-self runner,
+// whose runs are not in the run metrics).
+func (f finished) observeCopies() {
 	for _, c := range f.copies {
 		metrics.BackupCopies.WithLabelValues(c.Name, c.Status).Inc()
 	}
@@ -313,16 +319,18 @@ func (f finished) observe() {
 // finishRunTx records the terminal state and the run's copies (the rows
 // freeze afterwards), queues a repair when one is due and emits the run's
 // event (settleRunTx) in the same transaction. The run's blob_path, bytes,
-// sha256 and tier come from its first succeeded copy.
+// sha256 and tier come from its first succeeded copy. Both runners use it:
+// a run of the olympos-self job (no target) gets the self event texts.
 func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (finished, error) {
 	var jobID uuid.UUID
-	var trigger, ns, svc, cluster, engine string
+	var trigger, system, ns, svc, cluster, engine string
 	var channel *uuid.UUID
 	var started *time.Time
 	var notifySuccess bool
-	err := tx.QueryRow(ctx, `SELECT r.job_id, r.trigger, r.started_at, j.notify_channel_id, j.notify_on_success, t.namespace, t.service, c.name, t.engine
-		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
-		WHERE r.id = $1`, runID).Scan(&jobID, &trigger, &started, &channel, &notifySuccess, &ns, &svc, &cluster, &engine)
+	err := tx.QueryRow(ctx, `SELECT r.job_id, r.trigger, r.started_at, j.notify_channel_id, j.notify_on_success, j.system,
+		COALESCE(t.namespace, ''), COALESCE(t.service, ''), COALESCE(c.name, ''), COALESCE(t.engine, 'postgresql')
+		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id LEFT JOIN clusters c ON c.id = t.cluster_id
+		WHERE r.id = $1`, runID).Scan(&jobID, &trigger, &started, &channel, &notifySuccess, &system, &ns, &svc, &cluster, &engine)
 	if err != nil {
 		return finished{}, err
 	}
@@ -356,30 +364,37 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	if n.Type == "" || n.Type == notify.BackupSucceeded && !notifySuccess {
 		return f, nil // backup.succeeded is opt-in per job
 	}
-	fields := map[string]string{"cluster": cluster, "target": ns + "/" + svc, "trigger": trigger}
+	subject, errText := ns+"/"+svc, shortError(o.err)
+	fields := map[string]string{"cluster": cluster, "target": subject, "trigger": trigger}
 	ev := notify.Event{Type: n.Type, Key: n.Type + ":" + runID.String(), ChannelID: channel,
 		Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
 		Payload: map[string]any{"job_id": jobID.String(), "run_id": runID.String()}}
+	if system == SelfSystem {
+		// The self runner always sent the whole error.
+		subject, errText = "Olympos database ("+SelfSystem+")", o.err
+		fields = map[string]string{"target": SelfSystem, "trigger": trigger}
+		ev.Link, ev.Fields = "/backups?self=1&run="+runID.String(), fields
+	}
 	n.addPayload(ev.Payload)
 	switch n.Type {
 	case notify.BackupSucceeded:
-		ev.Title = fmt.Sprintf("Backup succeeded: %s/%s", ns, svc)
+		ev.Title = "Backup succeeded: " + subject
 		fields["size"] = humanBytes(o.bytes)
 		fields["tier"] = o.tier
 	case notify.BackupPartial:
-		ev.Title = fmt.Sprintf("Backup incomplete: %s/%s", ns, svc)
+		ev.Title = "Backup incomplete: " + subject
 		fields["missing"] = strings.Join(n.Missing, ", ")
-		fields["error"] = shortError(o.err)
+		fields["error"] = errText
 	case notify.BackupMissed:
-		ev.Title = fmt.Sprintf("Backup missed: %s/%s", ns, svc)
-		fields["error"] = shortError(o.err)
+		ev.Title = "Backup missed: " + subject
+		fields["error"] = errText
 		ev.Payload["reason"] = shortError(o.err)
 	default:
-		ev.Title = fmt.Sprintf("Backup failed: %s/%s", ns, svc)
+		ev.Title = "Backup failed: " + subject
 		if n.Missing != nil {
 			fields["missing"] = strings.Join(n.Missing, ", ")
 		}
-		fields["error"] = shortError(o.err)
+		fields["error"] = errText
 		ev.Payload["reason"] = shortError(o.err)
 	}
 	return f, notify.Emit(ctx, tx, ev)
@@ -773,7 +788,7 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 		}
 		return fail("the job has no destination"), nil, job
 	}
-	tiers, err := w.tiers(ctx, job, r, dests)
+	tiers, err := copyTiers(ctx, w.DB, job.ID, job.Timezone, r, dests)
 	if err != nil {
 		return fail(tr.scrub("decide retention tier: " + err.Error())), nil, job
 	}
@@ -816,8 +831,16 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 		}
 	}
 	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
-	o := outcome{bytes: streamed, wire: wc.total(), tier: tiers[dests[0].ID], copies: copies}
-	o.fromFirstCopy() // without a succeeded copy, bytes stays what was streamed
+	return copiesOutcome(ctx, copies, streamed, wc.total(), tiers[dests[0].ID], engErr, tr.scrub), rr, job
+}
+
+// copiesOutcome is the outcome of a run from what streamCopies returned
+// (both runners): its status from the engine and the copies, its error and
+// its blob columns from the first succeeded copy (without one, bytes stays
+// what was streamed).
+func copiesOutcome(ctx context.Context, copies []copyResult, streamed, wire int64, tier string, engErr error, scrub func(string) string) outcome {
+	o := outcome{bytes: streamed, wire: wire, tier: tier, copies: copies}
+	o.fromFirstCopy()
 	o.status = runStatus(engErr, copies)
 	switch {
 	case engErr != nil:
@@ -825,16 +848,16 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 		if errors.Is(engErr, gateway.ErrAgentOffline) {
 			msg = errAgentOffline
 		}
-		o.err, o.engineFailed = tr.scrub(msg), true
+		o.err, o.engineFailed = scrub(msg), true
 	case o.status == "failed" && ctx.Err() != nil:
 		o.err, o.engineFailed = "interrupted: server shutting down", true
 	case o.status == "failed":
 		// Every copy failed: the first one is the root cause.
 		o.err = copies[0].Err
 	case o.status == "partial":
-		o.err = tr.scrub(copiesError(copies))
+		o.err = scrub(copiesError(copies))
 	}
-	return o, rr, job
+	return o
 }
 
 // jobSelectAny is jobSelect without the deleted filter (a run of a job
@@ -858,13 +881,13 @@ func redactOptions(raw json.RawMessage) json.RawMessage {
 	return b
 }
 
-// tiers decides the GFS tier of each copy at write time (SPEC §10.3): the
-// first successful scheduled copy of the month (job time zone) on a
+// copyTiers decides the GFS tier of each copy at write time (SPEC §10.3):
+// the first successful scheduled copy of the month (job time zone tz) on a
 // destination is monthly, else the first of the ISO week is weekly, else
 // daily. Manual runs are daily, test runs test.
-func (w *Worker) tiers(ctx context.Context, j *Job, r *runRow, dests []destRef) (map[uuid.UUID]string, error) {
+func copyTiers(ctx context.Context, q store.Querier, jobID uuid.UUID, tz string, r *runRow, dests []destRef) (map[uuid.UUID]string, error) {
 	out := make(map[uuid.UUID]string, len(dests))
-	loc, err := time.LoadLocation(j.Timezone)
+	loc, err := time.LoadLocation(tz)
 	if err != nil {
 		loc = time.UTC
 	}
@@ -877,7 +900,7 @@ func (w *Worker) tiers(ctx context.Context, j *Job, r *runRow, dests []destRef) 
 		case "test":
 			out[d.ID] = "test"
 		case "schedule":
-			t, err := TierForDestination(ctx, w.DB, j.ID, r.id, d.ID, ref, loc)
+			t, err := TierForDestination(ctx, q, jobID, r.id, d.ID, ref, loc)
 			if err != nil {
 				return nil, err
 			}
@@ -887,18 +910,6 @@ func (w *Worker) tiers(ctx context.Context, j *Job, r *runRow, dests []destRef) 
 		}
 	}
 	return out, nil
-}
-
-// TierFor implements the GFS decision for a run at ref, counting the job's
-// succeeded scheduled runs.
-func TierFor(ctx context.Context, q store.Querier, jobID, runID uuid.UUID, ref time.Time, loc *time.Location) (string, error) {
-	return gfsTier(ref, loc, func(from, to time.Time) (int, error) {
-		var n int
-		err := q.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND id <> $2 AND trigger = 'schedule'
-			AND status = 'succeeded' AND COALESCE(scheduled_for, started_at) >= $3 AND COALESCE(scheduled_for, started_at) < $4`,
-			jobID, runID, from, to).Scan(&n)
-		return n, err
-	})
 }
 
 // gfsTier is monthly when count finds nothing in ref's month (in loc), else

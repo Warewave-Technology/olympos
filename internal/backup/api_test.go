@@ -672,3 +672,77 @@ func TestRestoreGuideAfterJobMoved(t *testing.T) {
 		t.Fatalf("new run after move: %+v %q", b.Restore, b.DestinationName)
 	}
 }
+
+// The self-backup takes a destination or a destination group, like a job:
+// exactly one, an unknown group is a field error, choosing one clears the
+// other and an unrelated change keeps it.
+func TestSelfBackupAPIGroups(t *testing.T) {
+	a := newAPI(t)
+	e := a.e
+	admin := e.Login(e.Principal("root", "Member", "admin"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	put := func(in map[string]any) (int, backup.SelfView, map[string]string) {
+		var b struct {
+			backup.SelfView
+			Fields map[string]string `json:"fields"`
+		}
+		code := admin.Do("PUT", "/api/v1/backup/self", in, &b)
+		return code, b.SelfView, b.Fields
+	}
+	for _, c := range []struct {
+		name  string
+		in    map[string]any
+		field string
+		want  string
+	}{
+		{"neither", map[string]any{}, "destination_id", "Choose where the Olympos database is backed up."},
+		{"both", map[string]any{"destination_id": d1, "destination_group_id": g}, "destination_id", "Choose a destination or a destination group, not both."},
+		{"unknown group", map[string]any{"destination_group_id": uuid.New()}, "destination_group_id", "Unknown destination group."},
+		{"unknown destination", map[string]any{"destination_id": uuid.New()}, "destination_id", "Unknown destination."},
+	} {
+		if code, _, fields := put(c.in); code != http.StatusUnprocessableEntity || fields[c.field] != c.want {
+			t.Errorf("%s: %d %v", c.name, code, fields)
+		}
+	}
+
+	code, v, _ := put(map[string]any{"destination_group_id": g})
+	if code != http.StatusOK || v.Job == nil || v.Job.DestinationID != nil || v.Job.DestinationGroupID == nil || *v.Job.DestinationGroupID != g ||
+		v.Job.DestinationName != "pair" {
+		t.Fatalf("configure with a group: %d %+v", code, v.Job)
+	}
+	if code, v, _ = put(map[string]any{"cron": "0 3 * * *"}); code != http.StatusOK || v.Job.DestinationGroupID == nil || v.Job.Cron != "0 3 * * *" {
+		t.Fatalf("unrelated change: %d %+v", code, v.Job)
+	}
+	if code, _, fields := put(map[string]any{"destination_id": d1, "destination_group_id": g}); code != http.StatusUnprocessableEntity ||
+		fields["destination_id"] != "Choose a destination or a destination group, not both." {
+		t.Fatalf("both on update: %d %v", code, fields)
+	}
+	if code, v, _ = put(map[string]any{"destination_id": d1}); code != http.StatusOK || v.Job.DestinationGroupID != nil ||
+		v.Job.DestinationID == nil || *v.Job.DestinationID != d1 || v.Job.DestinationName != "d1" {
+		t.Fatalf("switch to a destination: %d %+v", code, v.Job)
+	}
+	if code, v, _ = put(map[string]any{"destination_group_id": g}); code != http.StatusOK || v.Job.DestinationID != nil || v.Job.DestinationGroupID == nil {
+		t.Fatalf("switch back to the group: %d %+v", code, v.Job)
+	}
+	var details []byte
+	if err := e.DB.QueryRow(context.Background(), `SELECT details FROM activity_log WHERE action = 'backup.self_updated' ORDER BY at DESC LIMIT 1`).
+		Scan(&details); err != nil {
+		t.Fatal(err)
+	}
+	mustContain(t, string(details), `"destination_group_id": "`+g.String()+`"`)
+
+	// ?copy= picks the copy the restore guide is built from.
+	run := seedRun(t, a, v.Job.ID, "succeeded", nil, seedCopy{d1, "succeeded", "p/a.zip"}, seedCopy{d2, "succeeded", "p/b.zip"})
+	var sv backup.SelfView
+	if code := admin.Do("GET", "/api/v1/backup/self?copy="+d2.String(), nil, &sv); code != http.StatusOK || sv.Restore == nil ||
+		!sv.Restore.Copies[1].Selected || !strings.Contains(guideCommands(sv.Restore), "p/b.zip") {
+		t.Fatalf("self restore from the second copy: %d %+v", code, sv.Restore)
+	}
+	if len(sv.Runs) != 1 || sv.Runs[0].ID != run || len(sv.Runs[0].Copies) != 2 {
+		t.Fatalf("self runs: %+v", sv.Runs)
+	}
+	if code := admin.Do("GET", "/api/v1/backup/self?copy="+uuid.New().String(), nil, nil); code != http.StatusUnprocessableEntity {
+		t.Fatalf("copy without a succeeded copy there: %d", code)
+	}
+}

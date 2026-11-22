@@ -418,8 +418,11 @@ paths:
     get:
       tags: [backups]
       summary: The built-in olympos-self job (Olympos' own database) and its last 20 runs. Global read.
+      parameters:
+        - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from. Default: the first succeeded copy in member order."}
       responses:
         "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
+        "422": {description: "copy is not a destination id, or the latest restorable run has no successful copy in that destination"}
     put:
       tags: [backups]
       summary: Configure the olympos-self job (global admin). There is no DELETE; the job is built in.
@@ -429,7 +432,8 @@ paths:
             schema:
               type: object
               properties:
-                destination_id: {type: string}
+                destination_id: {type: string, description: "Write to one destination. Exactly one of destination_id and destination_group_id when the job is first configured; later, setting one clears the other and leaving both out keeps the current one."}
+                destination_group_id: {type: string, description: "Write the dump to every destination of a group (docs/design/destination-groups.md)."}
                 cron: {type: string, description: "Default 30 2 * * *"}
                 timezone: {type: string}
                 retention: {$ref: "#/components/schemas/Retention"}
@@ -438,7 +442,7 @@ paths:
       responses:
         "200": {description: Self-backup, content: {application/json: {schema: {$ref: "#/components/schemas/SelfBackup"}}}}
         "403": {description: Not a global admin}
-        "422": {description: Field errors}
+        "422": {description: "Field errors (destination_id: neither or both of destination_id and destination_group_id, or an unknown destination; destination_group_id: an unknown group)"}
   /backup/self/run:
     post:
       tags: [backups]
@@ -1463,16 +1467,17 @@ components:
           - type: object
             properties:
               id: {type: string}
-              destination_id: {type: string}
-              destination_name: {type: string}
+              destination_id: {type: [string, "null"], description: "Set when the job writes to one destination"}
+              destination_group_id: {type: [string, "null"], description: "Set when the job writes to every destination of a group"}
+              destination_name: {type: string, description: "Name of the destination or the group"}
               cron: {type: string}
               timezone: {type: string}
               retention: {$ref: "#/components/schemas/Retention"}
               enabled: {type: boolean}
               notify_channel_id: {type: [string, "null"]}
               created_at: {type: string, format: date-time}
-        runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}}
-        restore: {$ref: "#/components/schemas/RestoreGuide"}
+        runs: {type: array, items: {$ref: "#/components/schemas/BackupRun"}, description: "With copies, repair_of and destination_name like job runs; repairs are runs of the same job"}
+        restore: {$ref: "#/components/schemas/RestoreGuide", description: "Restore commands for the latest succeeded or partial original run (never a repair, which holds only the copies it completed), or null"}
     BackupRun:
       type: object
       properties:

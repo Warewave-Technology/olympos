@@ -361,7 +361,6 @@ func TestSelfViewRestoresPartial(t *testing.T) {
 	ctx := context.Background()
 	f := seed(t, db, "prod", nil, "online")
 	d2 := addDest(t, db, "dest-b")
-	// The self runner moves to groups later; copy rows are what counts here.
 	var job, run uuid.UUID
 	if err := db.QueryRow(ctx, `INSERT INTO backup_jobs (system, destination_id, cron) VALUES ('olympos-self', $1, '30 2 * * *') RETURNING id`,
 		f.DestID).Scan(&job); err != nil {
@@ -375,7 +374,7 @@ func TestSelfViewRestoresPartial(t *testing.T) {
 		($1, $2, 'failed', '', ''), ($1, $3, 'succeeded', 'olympos/self.zip', 'abc')`, run, f.DestID, d2); err != nil {
 		t.Fatal(err)
 	}
-	v, err := backup.LoadSelfView(ctx, db)
+	v, err := backup.LoadSelfView(ctx, db, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
