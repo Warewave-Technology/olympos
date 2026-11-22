@@ -622,9 +622,9 @@ code,
   line-clamp: 3;
   overflow: hidden;
 }
-/* .t.stack-sm: on phones each row is a card of label / value lines (labels from data-label). */
+/* .t.cards-sm: on phones each row is a card of label / value lines (labels from data-label). */
 @media (max-width: 640px) {
-  .t.stack-sm thead {
+  .t.cards-sm thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -632,21 +632,21 @@ code,
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  .t.stack-sm,
-  .t.stack-sm tbody,
-  .t.stack-sm tr,
-  .t.stack-sm td {
+  .t.cards-sm,
+  .t.cards-sm tbody,
+  .t.cards-sm tr,
+  .t.cards-sm td {
     display: block;
     width: 100%;
   }
-  .t.stack-sm tr {
+  .t.cards-sm tr {
     padding: 8px 0;
     border-bottom: 1px solid var(--border);
   }
-  .t.stack-sm tbody tr:last-child {
+  .t.cards-sm tbody tr:last-child {
     border-bottom: 0;
   }
-  .t.stack-sm td {
+  .t.cards-sm td {
     display: grid;
     grid-template-columns: 6.5rem minmax(0, 1fr);
     gap: 8px;
@@ -657,17 +657,17 @@ code,
     white-space: normal;
     text-align: left;
   }
-  .t.stack-sm td::before {
+  .t.cards-sm td::before {
     content: attr(data-label);
     color: var(--fg-muted);
     font-size: 11.5px;
     text-transform: uppercase;
     letter-spacing: 0.05em;
   }
-  .t.stack-sm td.err-cell {
+  .t.cards-sm td.err-cell {
     min-width: 0;
   }
-  .t.stack-sm td .inline-sm {
+  .t.cards-sm td .inline-sm {
     flex-wrap: wrap;
   }
 }

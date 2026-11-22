@@ -297,7 +297,7 @@ describe('partial backup runs', () => {
     expect(screen.getByText('Queued')).toBeInTheDocument();
   });
 
-  it('the run dialog lists every copy and switches the restore commands to another copy', async () => {
+  it('the run dialog lists every copy and offers only its own copies for restore', async () => {
     const { BackupRunDialog } = await import('../ui/BackupRunDialog');
     const copy = (over: Partial<BackupRunCopy>): BackupRunCopy => ({ destination_id: 'd1', destination_name: 'blob-weu-backups', destination_kind: 'azure_blob', status: 'succeeded', blob_path: 'p/a.zip', bytes: 3.1e9, sha256: '9f2c4a1e5d6c7b30', tier: 'daily', error: '', ...over });
     const run: BackupRun = {
@@ -342,13 +342,14 @@ describe('partial backup runs', () => {
 
     const picker = screen.getByRole('group', { name: 'Restore from copy' });
     expect(within(picker).getByRole('radio', { name: /blob-weu-backups/ })).toBeChecked();
-    const repaired = within(picker).getByRole('radio', { name: /minio-factory/ });
-    expect(repaired).not.toBeChecked();
-    expect(repaired.closest('label')).toHaveTextContent('Completed later by a repair, taken at');
+    // the destination whose copy failed in this run is listed but cannot be chosen
+    const failed = within(picker).getByRole('radio', { name: /minio-factory/ });
+    expect(failed).toBeDisabled();
+    expect(failed).not.toBeChecked();
+    expect(failed.closest('label')).toHaveTextContent('This run has no copy here.');
     expect(screen.getByText('az storage blob download --name p/a.zip')).toBeInTheDocument();
-    await user.click(repaired);
-    expect(await screen.findByText('aws s3 cp s3://olympos-backups/p/b.zip .')).toBeInTheDocument();
-    expect(urls.at(-1)).toBe('/api/v1/backup/runs/r1?copy=d2');
-    expect(within(picker).getByRole('radio', { name: /minio-factory/ })).toBeChecked();
+    // the copy a repair wrote there is restored from that repair run
+    await user.click(within(picker).getByRole('button', { name: 'open the repair run' }));
+    await vi.waitFor(() => expect(urls.at(-1)).toBe('/api/v1/backup/runs/r2'));
   });
 });

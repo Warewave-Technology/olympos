@@ -33,8 +33,9 @@ All notable changes to this project are documented here. The format follows
   after the end of the stream, is detached so the other copies can finish. An upload that does not return
   within 30 seconds after that (blocked in the kernel on a hard NFS mount) is abandoned and logged.
 - Restore from a chosen copy: *Restore from copy* on a run and on the *Olympos database* card, and
-  `?copy=<destination id>` on `GET /api/v1/backup/runs/{id}` and `GET /api/v1/backup/self`. Copies that a
-  repair completed are offered too.
+  `?copy=<destination id>` on `GET /api/v1/backup/runs/{id}` and `GET /api/v1/backup/self`. A destination
+  whose copy failed in the run is listed but cannot be chosen; a copy a repair wrote there is restored from
+  the repair run (in the API, `?copy=` on the original run still returns it).
 - Metric `olympos_backup_copies_total{destination,status}`; `olympos_backup_runs_total` counts
   `status="partial"`.
 

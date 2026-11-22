@@ -32,12 +32,13 @@ S3: `aws s3 cp s3://<bucket>/<path>/<run_id>.zip .`; NFS: copy from the mounted 
 
 **When `olympos-self` writes to a destination group**, every member holds its own copy of each dump, so
 losing one storage account or bucket does not lose Olympos. Restore from whichever copy you can reach. The
-copies a run wrote itself have the same path below each member's prefix; a copy marked *Completed later by
-a repair* is the exception: it comes from a later dump, named after the repair run, with its own checksum
+copies a run wrote itself have the same path below each member's prefix; a copy a repair wrote later is the
+exception: it comes from a later dump, named after the repair run, with its own checksum
 ([Restoring backups](restore.md#backups-with-several-copies)). Each copy's manifest names its
 `destination` and the `group`; check `sha256` against that copy's own manifest. While the server is up,
 *Restore commands* on the *Olympos database* card has a *Restore from copy* choice
-(`GET /api/v1/backup/self?copy=<destination id>` in the API):
+(`GET /api/v1/backup/self?copy=<destination id>` in the API). A member whose copy failed in that run is
+listed as *Failed*; when a repair wrote one there later, *use the repair's copy* switches the commands to it:
 
 ![Restore the Olympos database from a copy](images/start-30-olympos-restore-copy.png)
 

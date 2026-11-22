@@ -26,13 +26,6 @@ export function DestinationsPage() {
     <SettingsLayout
       current="destinations"
       sub="Destinations · the Olympos server is the only writer to backup storage"
-      actions={
-        canAdmin && (
-          <button type="button" className="btn pri" onClick={openNew}>
-            New destination
-          </button>
-        )
-      }
     >
       <section className="card" aria-labelledby="dst-t">
         <div className="card-head">
@@ -40,6 +33,11 @@ export function DestinationsPage() {
             <h2 id="dst-t">Destinations</h2>
             <div className="desc">Azure Blob containers, S3 buckets (AWS or S3-compatible) and NFS shares mounted into the server.</div>
           </div>
+          {canAdmin && (
+            <button type="button" className="btn pri" onClick={openNew}>
+              New destination
+            </button>
+          )}
         </div>
         <DataTable
           label="Destinations"
