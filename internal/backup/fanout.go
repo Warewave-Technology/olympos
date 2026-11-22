@@ -42,6 +42,21 @@ type BranchResult struct {
 	Err   error
 }
 
+// eofReader records whether the upload read the stream to its end, so an
+// upload that returns nil without having seen EOF is not taken for a success.
+type eofReader struct {
+	r   io.Reader
+	eof atomic.Bool
+}
+
+func (e *eofReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if err == io.EOF {
+		e.eof.Store(true)
+	}
+	return n, err
+}
+
 type fanBranch struct {
 	name   string
 	pr     *io.PipeReader
@@ -70,10 +85,18 @@ func (b *fanBranch) detach(err error, stalled bool) {
 }
 
 // write feeds p to the branch. Every segment must be accepted within stall,
-// otherwise the branch is detached.
-func (b *fanBranch) write(p []byte, stall time.Duration) {
-	stallErr := fmt.Errorf("stalled: no progress for %s", stall)
-	t := time.AfterFunc(stall, func() { b.detach(stallErr, true) })
+// otherwise the branch is detached with stallErr. Once the last segment is
+// in, the branch can no longer be detached by this write's timer.
+func (b *fanBranch) write(p []byte, stall time.Duration, stallErr error) {
+	var mu sync.Mutex
+	finished := false
+	t := time.AfterFunc(stall, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !finished {
+			b.detach(stallErr, true)
+		}
+	})
 	defer t.Stop()
 	for len(p) > 0 {
 		n, err := b.pw.Write(p[:min(len(p), fanOutSegment)])
@@ -83,6 +106,9 @@ func (b *fanBranch) write(p []byte, stall time.Duration) {
 			return
 		}
 		p = p[n:]
+		if len(p) == 0 {
+			break
+		}
 		if !t.Stop() {
 			// The timer fired while the segment went through; detach waits
 			// for the callback if it is still running.
@@ -91,6 +117,9 @@ func (b *fanBranch) write(p []byte, stall time.Duration) {
 		}
 		t.Reset(stall)
 	}
+	mu.Lock()
+	finished = true
+	mu.Unlock()
 }
 
 // FanOut is an io.Writer that streams the same bytes to several uploads at
@@ -99,10 +128,12 @@ func (b *fanBranch) write(p []byte, stall time.Duration) {
 // nothing is buffered beyond the chunk being written. Write and Close must
 // not be called concurrently.
 type FanOut struct {
-	branches  []*fanBranch
-	stall     time.Duration
-	closeOnce sync.Once
-	results   []BranchResult
+	branches    []*fanBranch
+	stall       time.Duration
+	stallErr    error // a branch refused a write for stall
+	endStallErr error // a branch did not finish after the end of the stream
+	closeOnce   sync.Once
+	results     []BranchResult
 }
 
 // NewFanOut starts one upload per branch. stall is how long a branch may
@@ -111,7 +142,11 @@ func NewFanOut(ctx context.Context, branches []Branch, stall time.Duration) *Fan
 	if stall <= 0 {
 		stall = DefaultFanOutStall
 	}
-	f := &FanOut{stall: stall}
+	f := &FanOut{
+		stall:       stall,
+		stallErr:    fmt.Errorf("stalled: no progress for %s", stall),
+		endStallErr: fmt.Errorf("stalled: upload did not finish within %s after the end of the stream", stall),
+	}
 	for _, br := range branches {
 		bctx, cancel := context.WithCancel(ctx)
 		pr, pw := io.Pipe()
@@ -119,7 +154,11 @@ func NewFanOut(ctx context.Context, branches []Branch, stall time.Duration) *Fan
 		f.branches = append(f.branches, b)
 		go func() {
 			defer close(b.done)
-			err := br.Upload(bctx, pr)
+			er := &eofReader{r: pr}
+			err := br.Upload(bctx, er)
+			if err == nil && !er.eof.Load() {
+				err = errUploadEnded
+			}
 			b.upErr = err
 			if err == nil {
 				err = errUploadEnded // a write after this must fail, not block
@@ -131,8 +170,8 @@ func NewFanOut(ctx context.Context, branches []Branch, stall time.Duration) *Fan
 }
 
 // Write sends p to every live branch and returns when all of them have taken
-// it or been detached. It fails, wrapping ErrAllBranchesFailed and the first
-// branch's error, only when no branch is left.
+// it or been detached. It fails only when no branch is left; the error wraps
+// ErrAllBranchesFailed and the error of the first branch in branch order.
 func (f *FanOut) Write(p []byte) (int, error) {
 	var wg sync.WaitGroup
 	for _, b := range f.branches {
@@ -142,7 +181,7 @@ func (f *FanOut) Write(p []byte) (int, error) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			b.write(p, f.stall)
+			b.write(p, f.stall, f.stallErr)
 		}()
 	}
 	wg.Wait()
@@ -163,20 +202,41 @@ func (f *FanOut) Write(p []byte) (int, error) {
 
 // Close ends the stream for every live branch (with err, or EOF when nil),
 // waits until every upload has returned and reports how each branch ended,
-// in branch order. It is safe to call more than once.
+// in branch order. A live branch gets at most the stall duration, shared by
+// all of them, to finish after the end of the stream; one that does not is
+// cancelled and reported as stalled. With a non-nil err no branch reports
+// success. It is safe to call more than once.
 func (f *FanOut) Close(err error) []BranchResult {
 	f.closeOnce.Do(func() {
-		for _, b := range f.branches {
+		live := make([]bool, len(f.branches))
+		for i, b := range f.branches {
 			if !b.detached.Load() {
+				live[i] = true
 				_ = b.pw.CloseWithError(err) // nil → EOF
 			}
 		}
-		for _, b := range f.branches {
-			<-b.done
+		grace, cancelGrace := context.WithTimeout(context.Background(), f.stall)
+		defer cancelGrace()
+		for i, b := range f.branches {
+			if live[i] {
+				select {
+				case <-b.done:
+				case <-grace.Done():
+					select {
+					case <-b.done:
+					default:
+						b.detach(f.endStallErr, true)
+					}
+				}
+			}
+			<-b.done // detached branches had their context cancelled
 			b.cancel()
 			r := BranchResult{Name: b.name, Bytes: b.bytes, Err: b.upErr}
 			if b.detached.Load() && (b.stalled || r.Err == nil) {
 				r.Err = b.detErr
+			}
+			if r.Err == nil {
+				r.Err = err
 			}
 			f.results = append(f.results, r)
 		}

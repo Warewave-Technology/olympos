@@ -273,8 +273,148 @@ func TestFanOutUploadReturnsEarly(t *testing.T) {
 	if res[0].Err != nil {
 		t.Fatalf("a: %v", res[0].Err)
 	}
-	if res[1].Err == nil {
-		t.Fatal("early branch reported success")
+	if !errors.Is(res[1].Err, errUploadEnded) {
+		t.Fatalf("early branch err = %v, want errUploadEnded", res[1].Err)
+	}
+	if !bytes.Equal(a.bytes(), data) {
+		t.Error("a did not receive the full stream")
+	}
+}
+
+// An upload that returns nil without ever seeing EOF is a failure, even when
+// no write ran into its closed pipe (it returned after the last byte).
+func TestFanOutNilWithoutEOF(t *testing.T) {
+	data := randomBytes(t, 4<<10)
+	b := Branch{Name: "b", Upload: func(_ context.Context, r io.Reader) error {
+		_, err := io.ReadFull(r, make([]byte, len(data)))
+		return err
+	}}
+	f := NewFanOut(context.Background(), []Branch{b}, 0)
+	if _, err := f.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	res := f.Close(nil)
+	if !errors.Is(res[0].Err, errUploadEnded) {
+		t.Fatalf("err = %v, want errUploadEnded", res[0].Err)
+	}
+}
+
+// When the engine fails, no branch may report success, even one that
+// swallowed the error and returned nil.
+func TestFanOutCloseWithErrorNoSuccess(t *testing.T) {
+	errX := errors.New("engine failed")
+	swallow := Branch{Name: "swallow", Upload: func(_ context.Context, r io.Reader) error {
+		_, _ = io.Copy(io.Discard, r)
+		return nil
+	}}
+	f := NewFanOut(context.Background(), []Branch{swallow}, 0)
+	if _, err := f.Write(randomBytes(t, 1<<10)); err != nil {
+		t.Fatal(err)
+	}
+	if res := f.Close(errX); res[0].Err == nil {
+		t.Fatal("branch reported success although the stream failed")
+	}
+}
+
+// A branch that reads steadily but slowly is not stalled, even when one Write
+// carries far more than it can take within a single stall window.
+func TestFanOutMultiSegmentSlowReader(t *testing.T) {
+	data := randomBytes(t, 2<<20)
+	var got bytes.Buffer
+	slow := Branch{Name: "slow", Upload: func(_ context.Context, r io.Reader) error {
+		buf := make([]byte, 128<<10)
+		for {
+			n, err := r.Read(buf)
+			got.Write(buf[:n])
+			if err == io.EOF {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}}
+	fast := &sink{}
+	f := NewFanOut(context.Background(), []Branch{slow, {Name: "fast", Upload: fast.upload}}, 100*time.Millisecond)
+	if _, err := f.Write(data); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	for _, r := range f.Close(nil) {
+		if r.Err != nil || r.Bytes != int64(len(data)) {
+			t.Errorf("branch %s: err=%v bytes=%d", r.Name, r.Err, r.Bytes)
+		}
+	}
+	if !bytes.Equal(got.Bytes(), data) {
+		t.Error("slow branch received different bytes")
+	}
+}
+
+// A branch that stops reading partway is detached, keeping what it accepted.
+func TestFanOutStallAfterSomeBytes(t *testing.T) {
+	data := randomBytes(t, 64<<10)
+	a := &sink{}
+	partial := Branch{Name: "partial", Upload: func(ctx context.Context, r io.Reader) error {
+		if _, err := io.ReadFull(r, make([]byte, 8<<10)); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, partial}, 50*time.Millisecond)
+	if err := writeChunks(f, data, 8<<10); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	res := f.Close(nil)
+	if res[0].Err != nil {
+		t.Fatalf("a: %v", res[0].Err)
+	}
+	if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), "stalled:") {
+		t.Fatalf("partial err = %v", res[1].Err)
+	}
+	if res[1].Bytes != 8<<10 {
+		t.Errorf("partial bytes = %d, want %d", res[1].Bytes, 8<<10)
+	}
+}
+
+// An upload that hangs after reading the whole stream (finalizing) must not
+// hang Close: it is cancelled after the stall duration and reported.
+func TestFanOutStallAfterEOF(t *testing.T) {
+	data := randomBytes(t, 16<<10)
+	a, c := &sink{}, &sink{}
+	var returned atomic.Bool
+	hang := Branch{Name: "hang", Upload: func(ctx context.Context, r io.Reader) error {
+		if _, err := io.Copy(io.Discard, r); err != nil {
+			return err
+		}
+		<-ctx.Done()
+		returned.Store(true)
+		return ctx.Err()
+	}}
+	f := NewFanOut(context.Background(), []Branch{{Name: "a", Upload: a.upload}, hang, {Name: "c", Upload: c.upload}}, 50*time.Millisecond)
+	if err := writeChunks(f, data, 8<<10); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	closed := make(chan []BranchResult, 1)
+	go func() { closed <- f.Close(nil) }()
+	var res []BranchResult
+	select {
+	case res = <-closed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not return")
+	}
+	if res[0].Err != nil || res[2].Err != nil {
+		t.Fatalf("healthy branches failed: a=%v c=%v", res[0].Err, res[2].Err)
+	}
+	want := "stalled: upload did not finish within 50ms after the end of the stream"
+	if res[1].Err == nil || !strings.HasPrefix(res[1].Err.Error(), want) {
+		t.Fatalf("hang err = %v", res[1].Err)
+	}
+	if res[1].Bytes != int64(len(data)) {
+		t.Errorf("hang bytes = %d, want %d", res[1].Bytes, len(data))
+	}
+	if !returned.Load() {
+		t.Error("Close returned before the hung upload did")
 	}
 }
 
