@@ -60,6 +60,30 @@ func runDestIDs(t *testing.T, db *store.DB, run uuid.UUID) []uuid.UUID {
 	return ids
 }
 
+// runSteps returns a run's status, its dry-run steps and their names as
+// "+name" (ok) or "-name", space separated.
+func runSteps(t *testing.T, db *store.DB, run uuid.UUID) (string, []backup.Step, string) {
+	t.Helper()
+	var status string
+	var raw []byte
+	if err := db.QueryRow(context.Background(), `SELECT status, steps FROM backup_runs WHERE id = $1`, run).Scan(&status, &raw); err != nil {
+		t.Fatal(err)
+	}
+	var steps []backup.Step
+	if err := json.Unmarshal(raw, &steps); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, s := range steps {
+		sign := "+"
+		if !s.OK {
+			sign = "-"
+		}
+		names = append(names, sign+s.Name)
+	}
+	return status, steps, strings.Join(names, " ")
+}
+
 func payloadSHA() string {
 	sum := sha256.Sum256(fakePayload)
 	return hex.EncodeToString(sum[:])
@@ -332,24 +356,8 @@ func TestDryRunStepsPerDestination(t *testing.T) {
 	run := queue(t, db, g.Job, "test", nil)
 	claimAndRun(t, g.W, run)
 
-	var status string
-	var raw []byte
-	if err := db.QueryRow(context.Background(), `SELECT status, steps FROM backup_runs WHERE id = $1`, run).Scan(&status, &raw); err != nil {
-		t.Fatal(err)
-	}
-	var steps []backup.Step
-	if err := json.Unmarshal(raw, &steps); err != nil {
-		t.Fatal(err)
-	}
-	var names []string
-	for _, s := range steps {
-		sign := "+"
-		if !s.OK {
-			sign = "-"
-		}
-		names = append(names, sign+s.Name)
-	}
-	if status != "partial" || strings.Join(names, " ") != "+agent +credential +engine +upload -upload +manifest" {
+	status, steps, names := runSteps(t, db, run)
+	if status != "partial" || names != "+agent +credential +engine +upload -upload +manifest" {
 		t.Fatalf("%s: %v", status, names)
 	}
 	if !strings.Contains(steps[3].Detail, "to dest") || !strings.Contains(steps[4].Detail, "dest-b") ||
@@ -394,5 +402,106 @@ func TestWorkerRepairDestinations(t *testing.T) {
 	}
 	if cs := loadCopies(t, db, rep2); len(cs) != 0 {
 		t.Fatalf("empty repair copies: %+v", cs)
+	}
+}
+
+// An engine that fails after writing is an engine failure on every copy
+// that was still receiving the stream, however the writer wrapped the error
+// it read.
+func TestWorkerGroupEngineFailsMidStream(t *testing.T) {
+	db := testutil.DB(t)
+	g := seedGroup(t, db, jobOpts{options: `{"fail_after_write":true}`})
+	g.B2.wrapReadErr = true
+	run := queue(t, db, g.Job, "manual", nil)
+	claimAndRun(t, g.W, run)
+	if r := loadRun(t, db, run); r.Status != "failed" || r.Error != "dump failed after writing" || r.Bytes != int64(len(fakePayload)) {
+		t.Fatalf("run: %+v", r)
+	}
+	cs := loadCopies(t, db, run)
+	if len(cs) != 2 || cs[0].Status != "failed" || cs[0].Error != "dump failed after writing" ||
+		cs[1].Status != "failed" || cs[1].Error != "dump failed after writing" {
+		t.Fatalf("copies: %+v", cs)
+	}
+
+	test := queue(t, db, g.Job, "test", nil)
+	claimAndRun(t, g.W, test)
+	if _, steps, names := runSteps(t, db, test); names != "+agent +credential -engine" || steps[2].Detail != "dump failed after writing" {
+		t.Fatalf("steps: %s %+v", names, steps)
+	}
+}
+
+// Ruling B: a copy whose manifest failed keeps its blob path, size and
+// checksum (the blob exists); with no succeeded copy the run takes them.
+func TestWorkerManifestFailureKeepsBlob(t *testing.T) {
+	db := testutil.DB(t)
+	f := seed(t, db, "prod", nil, "online")
+	b := newBlobs("olympos")
+	b.failManifest = errors.New("409 Conflict")
+	w := newWorker(t, db, newDialer(f.ClusterID), b)
+	run := queue(t, db, addJob(t, db, f, jobOpts{enabled: true}), "manual", nil)
+	claimAndRun(t, w, run)
+
+	r := loadRun(t, db, run)
+	if r.Status != "failed" || r.Error != "upload manifest: 409 Conflict" || r.BlobPath == "" || r.SHA != payloadSHA() ||
+		r.Bytes != int64(len(fakePayload)) || string(b.blobs[r.BlobPath]) != string(fakePayload) {
+		t.Fatalf("run: %+v", r)
+	}
+	cs := loadCopies(t, db, run)
+	if len(cs) != 1 || cs[0].Status != "failed" || cs[0].Error != "upload manifest: 409 Conflict" || cs[0].BlobPath != r.BlobPath ||
+		cs[0].SHA != r.SHA || cs[0].Bytes != r.Bytes {
+		t.Fatalf("copies: %+v", cs)
+	}
+}
+
+func TestWorkerGroupManifestFailureKeepsBlob(t *testing.T) {
+	db := testutil.DB(t)
+	g := seedGroup(t, db, jobOpts{})
+	g.B1.failManifest = errors.New("409 Conflict")
+	run := queue(t, db, g.Job, "manual", nil)
+	claimAndRun(t, g.W, run)
+
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "partial" || r.Error != "dest: upload manifest: 409 Conflict" || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	if cs[0].Status != "failed" || !strings.HasPrefix(cs[0].BlobPath, "a/") || cs[0].SHA != payloadSHA() || cs[0].Bytes != int64(len(fakePayload)) {
+		t.Fatalf("copy 1: %+v", cs[0])
+	}
+	if cs[1].Status != "succeeded" || r.BlobPath != cs[1].BlobPath {
+		t.Fatalf("the run takes the first succeeded copy: run %s, copies %+v", r.BlobPath, cs)
+	}
+}
+
+// Ruling C: an engine error that leaks the secret mid-stream is scrubbed in
+// every copy row too.
+func TestWorkerCopyErrorsScrubbed(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	g := seedGroup(t, db, jobOpts{options: `{"fail_after_write":true,"leak_secret":true}`})
+	g.B2.wrapReadErr = true
+	const canary = "Canary-Pw-5d02e7"
+	credID, err := g.W.Creds.Insert(ctx, db, backup.CredentialInput{Source: backup.SourceStored, Username: "backup", Password: canary})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `UPDATE backup_jobs SET credential_id = $2 WHERE id = $1`, g.Job, credID); err != nil {
+		t.Fatal(err)
+	}
+	run := queue(t, db, g.Job, "manual", nil)
+	claimAndRun(t, g.W, run)
+
+	r := loadRun(t, db, run)
+	if r.Status != "failed" || strings.Contains(r.Error, canary) || !strings.Contains(r.Error, "dump failed after writing") {
+		t.Fatalf("run: %+v", r)
+	}
+	cs := loadCopies(t, db, run)
+	if len(cs) != 2 {
+		t.Fatalf("copies: %+v", cs)
+	}
+	for _, c := range cs {
+		if strings.Contains(c.Error, canary) || !strings.Contains(c.Error, "dump failed after writing") {
+			t.Fatalf("copy error: %q", c.Error)
+		}
 	}
 }

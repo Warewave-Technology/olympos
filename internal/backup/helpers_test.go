@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -35,6 +36,8 @@ type fakeOpts struct {
 	LeakSecret bool `json:"leak_secret"`
 	NoTLS      bool `json:"no_tls"`
 	Payload    int  `json:"payload"`
+	// FailAfterWrite: write the payload, then fail.
+	FailAfterWrite bool `json:"fail_after_write"`
 }
 
 var fakePayload = bytes.Repeat([]byte("olympos-backup-"), 1000)
@@ -84,6 +87,13 @@ func (fakeEngine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer)
 	}
 	if _, err := w.Write(fakePayload); err != nil {
 		return nil, err
+	}
+	if o.FailAfterWrite {
+		msg := "dump failed after writing"
+		if o.LeakSecret {
+			msg += ": password=" + string(c.Secret)
+		}
+		return nil, errors.New(msg)
 	}
 	tls := !o.NoTLS && ec.UseTLS
 	return &backup.RunResult{ServerVersion: "fake 1.0", ToolVersion: "fakedump 2", TLS: &tls, Details: map[string]any{"restore": "cat"}}, nil
@@ -143,7 +153,12 @@ type fakeBlobs struct {
 	failAfter int64
 	// openErr is what ForDestination returns for this destination.
 	openErr error
-	dests   map[uuid.UUID]*fakeBlobs
+	// failManifest fails manifest uploads only (the data blob is stored).
+	failManifest error
+	// wrapReadErr wraps a read error without %w, as the Azure and S3
+	// writers do.
+	wrapReadErr bool
+	dests       map[uuid.UUID]*fakeBlobs
 }
 
 func newBlobs(prefix string) *fakeBlobs {
@@ -187,8 +202,14 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	if f.fail != nil {
 		return blob.UploadResult{}, f.fail
 	}
+	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
+		return blob.UploadResult{}, f.failManifest
+	}
 	b, err := io.ReadAll(r)
 	if err != nil {
+		if f.wrapReadErr {
+			return blob.UploadResult{}, fmt.Errorf("upload %s: %s", path, err)
+		}
 		return blob.UploadResult{}, err
 	}
 	f.mu.Lock()

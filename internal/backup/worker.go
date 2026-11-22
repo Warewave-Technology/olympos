@@ -265,14 +265,25 @@ type outcome struct {
 	tier     string
 	// copies: one per destination the run wrote to (or tried to).
 	copies []copyResult
+	// engineFailed: the run failed in the engine (or was interrupted), not
+	// in its copies; the dry-run checklist stops at the engine.
+	engineFailed bool
 }
 
 // fromFirstCopy fills the run's blob columns from its first succeeded copy
 // (copies are in destination_ids order), so existing readers keep working.
+// Without one, it takes the first copy whose data blob was written (its
+// manifest failed), as a single-destination run always did.
 func (o *outcome) fromFirstCopy() {
 	for _, c := range o.copies {
 		if c.Status == "succeeded" {
 			o.blobPath, o.bytes, o.sha256, o.tier = c.BlobPath, c.Bytes, c.SHA256, c.Tier
+			return
+		}
+	}
+	for _, c := range o.copies {
+		if c.BlobPath != "" {
+			o.blobPath, o.bytes, o.sha256 = c.BlobPath, c.Bytes, c.SHA256
 			return
 		}
 	}
@@ -408,8 +419,9 @@ func nonNilSteps(s []Step) []Step {
 
 // dryRunSteps turns a dry run's outcome into the checklist the wizard shows:
 // each stage that ran, with its result; stages after a failure are left out.
-// A run with copies gets an upload step per destination and a manifest step
-// per uploaded copy.
+// A run with several destinations gets an upload step per destination and
+// a manifest step per uploaded copy; a single-destination run reads as it
+// always did.
 func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 	var out []Step
 	add := func(name string, ok bool, detail string) { out = append(out, Step{Name: name, OK: ok, Detail: detail}) }
@@ -428,7 +440,7 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 		return out
 	}
 	add("credential", true, "Credential resolved")
-	if len(o.copies) > 0 {
+	if len(o.copies) > 1 {
 		return append(out, copySteps(o, rr)...)
 	}
 	if failed && strings.HasPrefix(o.err, "open destination") {
@@ -450,7 +462,9 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 		return out
 	}
 	dest := "the destination"
-	if job != nil && job.DestinationName != "" {
+	if len(o.copies) == 1 {
+		dest = o.copies[0].Name
+	} else if job != nil && job.DestinationName != "" {
 		dest = job.DestinationName
 	}
 	add("upload", true, fmt.Sprintf("Wrote %s to %s (%s on the wire)", humanBytes(o.bytes), dest, humanBytes(o.wire)))
@@ -458,7 +472,7 @@ func dryRunSteps(o outcome, rr *RunResult, job *Job) []Step {
 	return out
 }
 
-// copySteps is the rest of the checklist for a run with copies: the
+// copySteps is the rest of the checklist for a run with several copies: the
 // destinations when none could be opened, else the engine, one upload step
 // per destination and one manifest step per uploaded copy.
 func copySteps(o outcome, rr *RunResult) []Step {
@@ -474,8 +488,7 @@ func copySteps(o outcome, rr *RunResult) []Step {
 		}
 		return out
 	}
-	// A failed run whose error is not its first copy's failed in the engine.
-	if o.status == "failed" && o.err != o.copies[0].Err {
+	if o.engineFailed {
 		add("engine", false, o.err)
 		return out
 	}
@@ -712,9 +725,9 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 		if errors.Is(engErr, gateway.ErrAgentOffline) {
 			msg = errAgentOffline
 		}
-		o.err = tr.scrub(msg)
+		o.err, o.engineFailed = tr.scrub(msg), true
 	case o.status == "failed" && ctx.Err() != nil:
-		o.err = "interrupted: server shutting down"
+		o.err, o.engineFailed = "interrupted: server shutting down", true
 	case o.status == "failed":
 		// Every copy failed: the first one is the root cause.
 		o.err = copies[0].Err

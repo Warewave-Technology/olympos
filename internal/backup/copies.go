@@ -31,7 +31,9 @@ type destRef struct {
 }
 
 // copyResult is how the copy on one destination ended; it becomes a
-// backup_run_copies row. Failed copies carry only the error and times.
+// backup_run_copies row. A failed copy carries the error and times, plus
+// blob path, size and checksum when its data blob was written (only its
+// manifest failed; the blob stays, Olympos never deletes).
 type copyResult struct {
 	DestinationID uuid.UUID
 	Name          string
@@ -268,7 +270,11 @@ func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []des
 		o := live[j]
 		c := &copies[o.i]
 		if res.Err != nil {
-			if engErr != nil && errors.Is(res.Err, engErr) {
+			// A branch that took the whole stream was still live when the
+			// engine failed: the engine is the cause, however the writer
+			// wrapped the error it read. Branches detached earlier keep
+			// their own error.
+			if engErr != nil && res.Bytes == total {
 				c.Err = scrub(engErr.Error())
 			} else {
 				c.Err = scrub("upload: " + res.Err.Error())
@@ -296,11 +302,12 @@ func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []des
 			err = errors.New("encode manifest: " + err.Error())
 		}
 		c.FinishedAt = time.Now().UTC()
+		c.BlobPath, c.Bytes, c.SHA256 = o.path, total, sum
 		if err != nil {
 			c.Err = err.Error()
 			continue
 		}
-		c.Status, c.BlobPath, c.Bytes, c.SHA256, c.Tier = "succeeded", o.path, total, sum, tier
+		c.Status, c.Tier = "succeeded", tier
 	}
 	return rr, copies, total, engErr
 }
