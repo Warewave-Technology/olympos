@@ -265,7 +265,7 @@ Provider detection from `providerID` prefix: `azure://` → Azure, `aws://` → 
 Derived:
 - **Version matrix**: count of clusters per API minor version; versions past upstream EOL flagged (maintain a small EOL table in code, updatable).
 - **Version skew**: any node `kubeletVersion` minor < API minor.
-- **Needs attention strip** (Dashboard top, hidden when empty): agent offline > 5 min, backup failed/missed, pending approvals for the current user, EOL versions, new critical CVEs. Each item links to the relevant page.
+- **Needs attention strip** (Dashboard top, hidden when empty): agent offline > 5 min, backup failed/missed/incomplete, pending approvals for the current user, EOL versions, new critical CVEs. Each item links to the relevant page.
 
 Snapshots every 60 s (agent pushes diffs; full snapshot every 10 min).
 
@@ -353,10 +353,16 @@ credentials(id, kind[stored|keyvault_ref], keyvault_name, secret_name,
 destinations(id, name, kind[azure_blob], account, container, prefix,
              auth[managed_identity|sas_token], sas_credential_id null, sas_expires_at null)
 
-backup_jobs(id, target_id, credential_id, destination_id, engine_options jsonb,
-            cron, timezone, retention jsonb, enabled, notify_channel_id, created_by)
-backup_runs(id, job_id, trigger[schedule|manual|test], status[queued|running|succeeded|failed|missed],
-            started_at, finished_at, bytes, wire_bytes, blob_path, sha256, error)  -- append-only after finish
+destination_groups(id, name, description)                          -- §10.3.2
+destination_group_members(group_id, destination_id, position)      -- 2 to 4 per group
+
+backup_jobs(id, target_id, credential_id, destination_id null, destination_group_id null, engine_options jsonb,
+            cron, timezone, retention jsonb, enabled, notify_channel_id, created_by)  -- exactly one destination target
+backup_runs(id, job_id, trigger[schedule|manual|test], status[queued|running|succeeded|partial|failed|missed],
+            started_at, finished_at, bytes, wire_bytes, blob_path, sha256, error,
+            repair_of null, destination_ids uuid[])  -- append-only after finish
+backup_run_copies(run_id, destination_id, status[succeeded|failed], blob_path, bytes, sha256, tier, error,
+                  started_at, finished_at)  -- one per destination written; append-only
 
 vaults(id, target_id, provider, version, kv_mounts jsonb, auth_method[approle],
        role_id, secret_id_ref /*key vault*/, configured_by, configured_at, status)
@@ -412,7 +418,7 @@ sessions(id, principal_id, created_at, last_seen_at, expires_at, csrf_token)
 Candidates (auto-discovered) → **Configure wizard** (4 steps: Target · Credentials · Destination & schedule · Review & test run) → job enabled.
 - Step 1 shows target, detected version, TLS status.
 - Step 2: credential source = Key Vault reference (default, recommended) or Stored in Olympos; username; DB list. "Test connection" runs a real check through the tunnel and shows privileges.
-- Step 3: destination, cron + timezone, retention, notification channel; shows next run times.
+- Step 3: destination **or destination group** (§10.3.2), cron + timezone, retention, notification channel; shows next run times.
 - Step 4: summary + **dry run** (small test backup, e.g. schema-only for Postgres) before "Enable".
 
 ### 10.2 Engines
@@ -453,8 +459,18 @@ Both options are used **only by the server**. No SAS or Blob credential is ever 
 6. Azure Policy: deny public network access and shared key re-enablement (MI option).
 7. Diagnostic logs → Log Analytics; alert on any data-plane operation by a principal other than the server MI.
 
+### 10.3.2 Destination groups
+A **destination group** is a named, ordered list of **2 to 4 destinations** of any kinds (Azure Blob, S3, NFS mixed freely), managed in Settings › Destinations › Groups with the same permissions as destinations. A backup job, and the built-in `olympos-self` job, writes to exactly one destination **or** one group.
+
+- **One dump per run, written to every member.** The engine runs once; the server streams its output to all members at the same time (still no temp file, §10.2). The sha256 and size are computed once, so every copy of a run has the same bytes, and each copy is verified against them.
+- **Same location refused.** Two members that would write to the same place (same kind and endpoint, account and container, bucket, or NFS path, and the same prefix) are refused when a group is saved and when a member destination is edited.
+- **Per-copy results.** Each destination's result is stored (`backup_run_copies`: blob path, bytes, sha256, tier, error, times) and shown on the run. Every copy has its own `{run_id}.manifest.json` next to its blob, with `destination` (name, kind) and `group` (name, members in order).
+- **Retention is unchanged:** lifecycle rules in each storage, by the `olympos-tier` tag (§10.3). The GFS tier is decided **per destination** (it counts that destination's successful scheduled copies of the job), so copies of one run can carry different tiers and a destination that missed copies still gets its weekly and monthly ones.
+- A destination in a group, or a group used by a job, cannot be deleted. A member added later receives only new runs; existing backups are not copied to it.
+- The restore guide is built per copy: the reader picks the copy, the commands use that copy's destination (§10.4).
+
 ### 10.4 Restore
-Out of scope for v1 UI, but manifests MUST contain everything needed to restore. Document manual restore commands per engine in `docs/restore.md`.
+Out of scope for v1 UI, but manifests MUST contain everything needed to restore. Document manual restore commands per engine in `docs/restore.md`. For a destination group run, every successful copy is a full backup; the restore guide offers each one, including copies completed later by a repair run (§10.5), which come from a later dump and have their own run id and sha256.
 
 ### 10.5 Scheduler
 - Single active scheduler via Postgres advisory lock (multiple server replicas allowed).
@@ -462,6 +478,9 @@ Out of scope for v1 UI, but manifests MUST contain everything needed to restore.
 - Workers pull queued runs with `SELECT … FOR UPDATE SKIP LOCKED`. Concurrency limits: global and per cluster.
 - **Missed runs**: on startup and each loop, any scheduled_for in the past with no run → `missed` + `backup.missed` event.
 - Cluster offline at run time → run `failed` with reason `agent_offline`.
+- **Run status from copies** (§10.3.2): every copy written → `succeeded`; at least one written and at least one not → `partial`; none written, or the engine failed → `failed`. `partial` is never shown or counted as a success: it has its own badge, its own event (`backup.partial`, warning) and its own count in the 24-hour summaries, which count original runs only (a partial run counts as succeeded once a repair has written its missing copies). It does count as a restorable backup for "last backup".
+- **Repair runs.** After a `partial` run, inside the job's retry window (half the interval to the next activation, as for agent disconnects) and within three attempts in all (the partial run and at most two repairs), a repair run is queued at once. It dumps again and writes **only** to the destinations without a copy that the job still writes to. It keeps the original run's `trigger` and `scheduled_for` (so each copy gets the tier it would have had) and points at the original run with `repair_of`. A repair that ends `partial` or `failed` queues the next one while the window and attempts allow. The partial run stays `partial` as the record of what happened. A repair that writes every missing copy emits `backup.succeeded` (opt-in) with `repair_of`; one that gives up emits `backup.failed` with `repair_of` and the missing destinations. Test runs are never repaired; a run that fails entirely is not retried (unchanged).
+- **Stall detection.** A member that accepts no data for 10 minutes, or does not finish within 10 minutes after the end of the stream, is detached as `stalled` and its copy fails; the other members go on (the slowest live member sets the pace, nothing is buffered without bound). When every member has failed, the engine is stopped and the run fails.
 
 ### 10.6 Dead man's switch
 After every scheduler loop, if `deadMansSwitch.url` set, `GET` it. If Olympos itself is down, the external monitor alerts (e.g. Heimdall/UptimeRobot-style). Documented as strongly recommended.
@@ -595,7 +614,7 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 ## 14. Notifications
 
 - Slack app (bot token in Key Vault, `chat:write` scope). Channel objects defined once, reused by any module.
-- **Event catalog** (v1): `backup.failed`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`.
+- **Event catalog** (v1): `backup.failed`, `backup.partial`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`.
 - Routing: `notification_routes(event_type → channel)`; jobs/schedules can override with their own channel.
 - **Transactional outbox**: events written in the same DB transaction as the state change; a dispatcher delivers with retries + backoff. At-least-once; messages carry an idempotency key.
 - Messages: Block Kit, short, with a link to the object. **No interactive buttons.** Never include secret values, fingerprints are fine.
@@ -691,7 +710,7 @@ GET    /api/v1/activity
 
 ## 17. Olympos's own operability
 
-- `/metrics` (Prometheus): agents online, tunnel count, backup run durations/results, scheduler lag, outbox backlog, CR counts.
+- `/metrics` (Prometheus): agents online, tunnel count, backup run durations/results, backup copies per destination and result, scheduler lag, outbox backlog, CR counts.
 - `/healthz`, `/readyz`. Structured JSON logs (slog) with redaction.
 - Every user action → `activity_log`.
 

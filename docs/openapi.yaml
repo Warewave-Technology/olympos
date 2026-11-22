@@ -1407,10 +1407,9 @@ components:
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}
-        notify_on_success: {type: boolean, description: "Send backup.succeeded for this job (default false; routed like other events, job channel overrides)"}
         enabled: {type: boolean}
         notify_channel_id: {type: [string, "null"]}
-        notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3)."}
+        notify_on_success: {type: boolean, description: "Also send backup.succeeded for this job (wizard step 3; default false). Routed like other events; the job's channel overrides the routing."}
     BackupJob:
       type: object
       properties:

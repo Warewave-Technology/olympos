@@ -2,7 +2,7 @@
 
 Decisions taken during implementation that changed or extended a **MUST** in `SPEC.md`. Every row has an
 owner decision. Part 1 lists the deviations found while building M1–M6 (reviewed against SPEC on 2026-11-19,
-"v1 release fixes"); part 2 the changes made by those fixes.
+"v1 release fixes"); part 2 the changes made by those fixes; part 3 the changes made after v0.1.0.
 
 ## 1. Deviations (M1–M6)
 
@@ -49,3 +49,9 @@ owner decision. Part 1 lists the deviations found while building M1–M6 (review
 | 2026-11-19 | Review #2 | §9 | `kv://` references users enter: Olympos' own secrets are never resolved for a user; global admins may reference others; everyone else only what a `keyVault.references` rule (glob on `<vault>/<secret>` + cluster label scope) allows. | Olympos' identity reads the whole vault. |
 | 2026-11-19 | Review #3–#8 | §11.4, §11.5 | Approve authorizes before locking and waits for the vault lock at most 15 s (409); unknown Vault outcomes stay `applying` for the reconciler; a request unverifiable for 24 h fails as `unverified` and is scrubbed. | Pool exhaustion by any viewer; failures recorded for writes that landed. |
 | 2026-11-20 | Final checklist A2 | §0 (2), §0 (6) | Wording only, to match approved behaviour: the agent also reads its own identity Secret, and with the opt-in inventory its `list` permission could read values (F3, accepted trade-off); on NFS the server can technically delete (#13). | Every absolute claim must be literally true. |
+
+## 3. After v0.1.0
+
+| # | Date | Section | Change | Reason | Approval |
+|---|---|---|---|---|---|
+| 18 | 2026-11-22 | §6, §8, §10.1, §10.3.2 (new), §10.4, §10.5, §14, §17 | Destination groups: a job or `olympos-self` writes to one destination or to a group of 2 to 4 destinations of any kinds. One dump per run is streamed to every member and verified per copy; members writing to the same location are refused. Per-copy results (`backup_run_copies`), run status `partial`, repair runs inside the retry window that write only the missing copies (`repair_of`), stall detection (10 minutes), GFS tier decided per destination, restore guide per copy, event `backup.partial`, *Needs attention* item *Backup incomplete*, metric `olympos_backup_copies_total`. | A 3-2-1 setup needs a second, independent copy of the same backup, most of all for `olympos-self` (issue #32). | Approved (owner, 2026-11-22), design docs/design/destination-groups.md, PR #34 |

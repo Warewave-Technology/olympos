@@ -1,6 +1,7 @@
 # Destination groups: one backup, several destinations
 
-Status: design, approved by the owner on 2026-11-22. Tracks issue #32 (milestone v0.2).
+Status: design approved by the owner on 2026-11-22; implemented on branch feat/destination-groups (PRs to
+follow). Tracks issue #32 (milestone v0.2).
 
 ## Intent
 
@@ -136,8 +137,13 @@ an object like a destination group.
 - A branch whose upload fails is closed and detached; its error is kept; writes continue to the others.
   When every branch has failed, the engine context is cancelled and the run fails with the first upload
   error as the root cause (today's `uploadFirst` logic, generalised).
-- The slowest live branch sets the pace (no unbounded buffering). This is accepted: a destination that
-  stalls rather than fails is bounded by the upload timeouts each blob writer already has.
+- The slowest live branch sets the pace (no unbounded buffering). A destination that stalls rather than
+  fails is detached as `stalled` (added during implementation): a member that accepts no data for 10
+  minutes, or does not finish within 10 minutes after the end of the stream, gets a failed copy and the
+  others go on.
+- Two members that write to the same location (same kind and endpoint, account and container, bucket or NFS
+  path, and the same prefix) are refused when a group is saved and when a member destination is edited
+  (added during implementation): such a "copy" would be the same object twice in one place.
 - After the data blob, each successful branch writes its manifest next to its blob. A manifest failure fails
   that copy only.
 

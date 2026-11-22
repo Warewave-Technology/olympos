@@ -1,8 +1,8 @@
 # Getting started: Olympos on your laptop
 
 This guide runs Olympos in a local lab and walks through what a new installation does: add clusters, back
-up a database, change a Vault secret with a second person's approval, and run audits and image scans. It
-takes about 30 minutes and needs no Azure account.
+up a database, write each backup to two destinations, change a Vault secret with a second person's
+approval, and run audits and image scans. It takes about 40 minutes and needs no Azure account.
 
 The lab uses a **development build**: sign-in without Entra ID (dev login) and a local key vault instead of
 Azure Key Vault. Release builds have neither. To install Olympos for real, see
@@ -149,7 +149,84 @@ restore into a new server. Restore is manual in v0.1; the full procedure is in [
 
 ![Restore commands of a run](images/start-12-backup-restore-commands.png)
 
-## 6. Connect a Vault
+## 6. Write each backup to two destinations
+
+A single copy of a backup is lost with its storage account, bucket or credential. A **destination group**
+writes every run to two to four destinations: one dump, streamed to all of them at once, each copy checked
+by size and SHA-256. The members can be of any kind, for example Azure Blob in your region and S3 or NFS
+somewhere else.
+
+1. **Add a second destination.** Under **Settings › Destinations › New destination**, add the lab's Azurite
+   (an Azure Blob emulator). The SAS can read, create, write and tag, but not delete.
+
+   | Field | Lab value |
+   |---|---|
+   | Kind | Azure Blob |
+   | Name | `lab-azurite` |
+   | Storage account | `devstoreaccount1` |
+   | Container | `backups` |
+   | Endpoint override | `http://azurite.olympos.svc:10000/devstoreaccount1` |
+   | Authentication | **SAS token**, **Store in Olympos**, the `SAS:` value from `ENV.md` |
+
+2. **Create the group.** Under **Groups** on the same page, choose **New group**, name it `lab-copies` and
+   add `lab-minio` and `lab-azurite`. The first member is the copy the restore commands use by default.
+   Two members that write to the same place (same container or bucket and prefix) are refused: that would
+   not be a second copy.
+
+   ![New destination group](images/start-22-destination-group.png)
+
+   ![Destinations and groups](images/start-23-destination-groups.png)
+
+   A destination that is in a group cannot be deleted, and neither can a group that a job uses. A member you
+   add later gets only new runs; existing backups are not copied to it.
+
+3. **Use the group in a job.** Configure `payments-pg` in the `edge` cluster as in step 5 (user `backup`,
+   password `edge-pg-password`). In step 3 of the wizard, choose `lab-copies`. **Edit** on **Backups › Jobs**
+   moves an existing job to a group the same way.
+
+   ![Wizard: a destination group](images/start-24-backup-group.png)
+
+   The dry run writes to every member and checks each copy. **Enable backup** needs all of them.
+
+   ![Wizard: dry run with two copies](images/start-25-backup-group-dry-run.png)
+
+4. **Run it.** **Run now** on **Backups › Jobs**. The run's details list the **Copies**, one per destination,
+   with the same SHA-256. **Restore from copy** chooses which copy the restore commands download.
+
+   ![A run with two copies](images/start-26-run-copies.png)
+
+Retention stays with the storage: each destination's lifecycle rules delete by the `olympos-tier` tag.
+Olympos decides the tier for each destination on its own, so copies of one run can have different tiers,
+and a destination that missed some runs still gets its weekly and monthly copies.
+
+The Olympos database can go to a group too: on **Backups**, choose **Change** on the *Olympos database*
+card and pick `lab-copies` ([Restoring Olympos](restore-olympos.md)).
+
+### When one destination fails
+
+To take the next screenshots, Azurite was made unreachable for one run (the tour takes the endpoints away
+from its Service, see `web/scripts/docs-tour.mjs`). The other destination still gets its copy. The run ends **Partial** (amber, never green), the Dashboard shows *Backup incomplete* and Olympos
+sends a `backup.partial` event ([Findings and events](findings-and-events.md#partial-backups-and-repairs)).
+
+![Needs attention: backup incomplete](images/start-27-backup-incomplete.png)
+
+Olympos then starts a **repair run** right away: a new dump, written only to the destinations that are
+missing. It is marked *Repair* under **Runs**. The partial run stays Partial, as the record of what
+happened, and its details say which copy a repair completed. Once the repair has written every missing
+copy, *Backup incomplete* goes away.
+
+![A partial run and its repair](images/start-28-partial-and-repair.png)
+
+![The partial run's copies](images/start-29-partial-run.png)
+
+A repaired copy comes from a later dump, so its SHA-256 differs from the other copies. Repairs follow each
+other at once, at most two of them (three attempts in all), inside the job's retry window (half the time
+to its next scheduled run). They cover a short interruption. If the destination stays down, the last
+repair sends `backup.failed` with the missing destination, and the next scheduled run (or **Run now**)
+writes to every member again. [Troubleshooting](troubleshooting.md#a-backup-is-incomplete-partial) lists
+the usual causes.
+
+## 7. Connect a Vault
 
 Vaults are discovered like databases. On **Vaults**, select `vault` in the `lab` cluster and choose
 **Configure**. Paste its root token from `ENV.md`, then **List KV mounts** and choose which KV v2 mounts
@@ -164,7 +241,7 @@ Olympos now shows the vault's paths and keys, never the values, not even to admi
 
 ![A secret's keys](images/start-13-vaults.png)
 
-## 7. Change a secret with approval
+## 8. Change a secret with approval
 
 Every Vault change needs a second person (maker/checker). Nobody can approve their own request, admins
 included.
@@ -199,7 +276,7 @@ included.
 
    ![Applied](images/start-20-change-applied.png)
 
-## 8. Run audits
+## 9. Run audits
 
 **Audit › New schedule** runs Kubescape (NSA, CIS, MITRE), Polaris or kube-bench on the clusters whose
 labels match the scope. Kubescape and Polaris read the cluster through the agent's read-only API proxy;
@@ -218,7 +295,7 @@ it. Olympos never deletes these reports, so add a lifecycle rule for `audit/` on
 
 ![Raw reports](images/audit-raw-reports.png)
 
-## 9. Look at security
+## 10. Look at security
 
 **Security** shows, per cluster, the running images with their CVEs (scanned by digest with Trivy on the
 server), Kyverno policy results, NetworkPolicy coverage and credentials found in ConfigMaps.
@@ -245,7 +322,7 @@ agent reported and explains which rule allowed or denied it.
 
 ![A Kyverno policy](images/security-kyverno-policy.png)
 
-## 10. Clean up
+## 11. Clean up
 
 ```bash
 ./test/e2e/env.sh down    # deletes both kind clusters

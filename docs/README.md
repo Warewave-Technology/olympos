@@ -10,7 +10,7 @@ screenshot, no Azure account needed.
 | [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, run audits and image scans |
 | [Access](access.md) | Roles, scopes, granting access, guests and the first admin |
 | [Findings and events](findings-and-events.md) | What each finding, *Needs attention* item and notification means, and how to fix it |
-| [Restoring backups](restore.md) | PostgreSQL, ClickHouse and Vault/OpenBao restores, the backup format and manifests |
+| [Restoring backups](restore.md) | PostgreSQL, ClickHouse and Vault/OpenBao restores, the backup format and manifests, choosing a copy |
 | [Restoring Olympos itself](restore-olympos.md) | Recovering the server from its `olympos-self` backup |
 | [Runbook: Vault break-glass](runbooks/vault-break-glass.md) | When Olympos' Vault access is lost or must be bypassed |
 

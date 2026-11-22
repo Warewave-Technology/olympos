@@ -83,4 +83,4 @@ Find your object ID in the Entra admin center (*Users › your user › Object I
 Every Vault change needs two different people: the maker opens the request, someone else with
 `vault-approver` in the vault's cluster scope approves it. Olympos compares people by tenant and object ID,
 in code and in the database, and no role bypasses it: an admin cannot approve their own request either.
-[Getting started](getting-started.md#7-change-a-secret-with-approval) shows the whole flow.
+[Getting started](getting-started.md#8-change-a-secret-with-approval) shows the whole flow.

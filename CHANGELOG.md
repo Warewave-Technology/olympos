@@ -6,7 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Destination groups** ([#32](https://github.com/Warewave-Technology/olympos/issues/32)): a named list of
+  two to four destinations of any kinds (Azure Blob, S3, NFS), under *Settings › Destinations › Groups*
+  (`/api/v1/destination-groups`). A backup job, or the Olympos database backup, writes to one destination or
+  to a group: wizard step 3, job edit and the *Olympos database* card (`destination_group_id` in the API).
+  Each run makes one dump and streams it to every member at once; each copy is verified by size and
+  SHA-256. Two members that write to the same location are refused. A destination in a group, and a group
+  that a job uses, cannot be deleted. See `docs/getting-started.md` (step 6).
+- Per-copy results: a *Copies* table on each run (`copies` in run responses), and manifests name their
+  `destination` and `group`.
+- Run status **Partial**: some copies written, not all. Amber badge and *Runs* filter, its own count in the
+  24-hour summaries, the event `backup.partial` (not opt-in), and the *Needs attention* items *Backup
+  incomplete* (`backup_partial`) and *Olympos backup incomplete* (`self_backup_partial`).
+- **Repair runs**: right after a partial run, inside the job's retry window and within three attempts in
+  all, a new dump is written to the missing destinations only (`repair_of` names the original run). A
+  repair that completes every copy sends `backup.succeeded` (opt-in); one that gives up sends
+  `backup.failed` with the missing destinations.
+- Stall detection: a destination that takes no data for 10 minutes, or does not finish within 10 minutes
+  after the end of the stream, is detached so the other copies can finish.
+- Restore from a chosen copy: *Restore from copy* on a run and on the *Olympos database* card, and
+  `?copy=<destination id>` on `GET /api/v1/backup/runs/{id}` and `GET /api/v1/backup/self`. Copies that a
+  repair completed are offered too.
+- Metric `olympos_backup_copies_total{destination,status}`; `olympos_backup_runs_total` counts
+  `status="partial"`.
+
+### Changed
+- The retention tier (`olympos-tier`) is decided per destination: a copy is `monthly` or `weekly` when that
+  destination has no such copy of the job yet. Copies of one run can carry different tiers.
+- The 24-hour counts on *Backups* and the Dashboard count original runs only: repair runs are not counted,
+  and a partial run counts as succeeded once a repair has written its missing copies.
+- A run's restore commands use the destination the run was written to. Before, they used the job's current
+  destination, so after a job moved to another destination, older runs showed commands for the wrong
+  storage. Runs from before this release still use the job's destination.
+
+### Upgrade notes
+- Migration `00022` runs at start. Existing jobs, runs and single-destination backups are unchanged.
+
 ### Documentation
+- `docs/openapi.yaml` listed `notify_on_success` twice in `BackupJobInput`, which strict YAML parsers
+  reject.
 - The Graph permission `User.ReadBasic.All` was documented on the Entra app registration, where it has no
   effect: Olympos calls Graph as the server's managed identity (or service principal), so the person search
   and the daily principal sync failed with `403 Forbidden`. `docs/azure.md` now assigns the Graph app role to
