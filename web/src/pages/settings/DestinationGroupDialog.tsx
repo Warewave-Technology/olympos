@@ -17,10 +17,10 @@ const MAX_MEMBERS = 4;
 
 const groupsQuery = { queryKey: ['destination-groups'], queryFn: () => api.get<ItemList<DestinationGroup>>('/destination-groups') };
 
-/** Members in order: "1 [Azure Blob] blob-weu-backups → 2 [S3] minio-factory". */
-
 /** Why a group cannot be deleted. */
 const inUse = (jobs: number) => `Used by ${plural(jobs, 'job')}. Move ${jobs === 1 ? 'it' : 'them'} first.`;
+
+/** Members in order: "1 [Azure Blob] blob-weu-backups → 2 [S3] minio-factory". */
 export function GroupMembers({ group }: { group: Pick<DestinationGroup, 'members'> }) {
   return (
     <span className="member-path">

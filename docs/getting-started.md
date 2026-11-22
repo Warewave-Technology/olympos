@@ -237,7 +237,7 @@ export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig-env
 # Point the Service at no pod: new connections are refused, the data stays.
 kubectl --context kind-olympos-lab -n olympos patch service azurite --type merge \
   -p '{"spec":{"selector":{"app":"azurite-off"}}}'
-sleep 100   # Olympos's idle connections to Azurite close after 90 s
+sleep 100   # Olympos' idle connections to Azurite close after 90 s
 # Backups › Jobs › Run now on payments-pg, wait until the run is Partial, then:
 kubectl --context kind-olympos-lab -n olympos patch service azurite --type merge \
   -p '{"spec":{"selector":{"app":"azurite"}}}'

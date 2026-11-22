@@ -370,7 +370,7 @@ export interface BackupRun {
   blob_path: string;
   sha256: string;
   error: string;
-  /** > 1: retried after the agent reconnected. */
+  /** Counts every run queued for one activation: 1 = the first, +1 per retry after an agent disconnect and per repair (repair_of set). */
   attempt?: number;
   /** The destination the run wrote to when it wrote to exactly one, else the job's destination or group name. */
   destination_name?: string;

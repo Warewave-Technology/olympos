@@ -198,10 +198,24 @@ const partialRun = (over: Partial<BackupRun> & { next_repair_at?: string | null 
 
 describe('repair note of a partial run', () => {
   it('says when the queued repair starts', async () => {
-    await renderRunDialog(partialRun({ next_repair_at: '2026-11-22T02:11:40Z' }));
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    await renderRunDialog(partialRun({ next_repair_at: at }));
     const note = await screen.findByText(/Repair queued: next attempt at/);
-    expect(note).toHaveTextContent(`Repair queued: next attempt at ${dateTime('2026-11-22T02:11:40Z')}`);
+    expect(note).toHaveTextContent(`Repair queued: next attempt at ${dateTime(at)}`);
     expect(screen.queryByText(/when they are used up/)).not.toBeInTheDocument();
+  });
+
+  it('a repair that is due but not started yet is not "next attempt at" a past time', async () => {
+    const past = new Date(Date.now() - 60_000).toISOString();
+    await renderRunDialog(partialRun({ next_repair_at: past }));
+    expect(await screen.findByText(/Repair due now; it starts when a worker is free \(and the agent is connected\)\./)).toBeInTheDocument();
+    expect(screen.queryByText(/next attempt at/)).not.toBeInTheDocument();
+  });
+
+  it('the dialog of a waiting repair says when it starts', async () => {
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    await renderRunDialog(partialRun({ id: 'r2', status: 'queued', error: '', repair_of: 'r1', not_before: at, copies: [], restore: null } as never));
+    expect(await screen.findByText(`Queued · starts ${dateTime(at)}`)).toHaveClass('badge');
   });
 
   it('without a queued repair, says what happens to the missing copy', async () => {

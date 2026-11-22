@@ -194,6 +194,13 @@ function RepairNote({ run, onOpen }: { run: BackupRunDetail; onOpen: (id: string
       </div>
     );
   }
+  if (run.next_repair_at && Date.parse(run.next_repair_at) <= Date.now()) {
+    return (
+      <div className="note warn">
+        Not every copy was written. Repair due now; it starts when a worker is free (and the agent is connected). It writes only to the destinations that failed.
+      </div>
+    );
+  }
   if (run.next_repair_at) {
     return (
       <div className="note warn">
@@ -240,7 +247,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
               <dt>Result</dt>
               <dd>
                 {/* the status alone: a long error would run past the dialog in a badge */}
-                <RunBadge run={{ status: run.status, error: '' }} />
+                <RunBadge run={{ status: run.status, error: '', not_before: run.not_before }} />
                 {isGroupRun(run) && (
                   <span className="muted small">
                     {' '}
