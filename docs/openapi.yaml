@@ -259,13 +259,49 @@ paths:
       tags: [backups]
       responses:
         "204": {description: Deleted}
-        "409": {description: Used by backup jobs}
+        "409": {description: Used by backup jobs or a member of a destination group}
   /destinations/{id}/test:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [backups]
       responses:
         "200": {description: Report, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationTest"}}}}
+
+  /destination-groups:
+    get:
+      tags: [backups]
+      summary: Destination groups (readable by any role, like destinations). Members are in position order; `jobs` is only a count.
+      responses:
+        "200":
+          description: Destination groups
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/DestinationGroup"}}}}}}
+    post:
+      tags: [backups]
+      summary: Create a destination group (admin, scope all). A backup job that targets a group writes one dump to every member. 2 to 4 distinct destinations, any mix of kinds; two members must not write to the same location.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroupInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "403": {description: Not an admin with scope all}
+        "422": {description: "Invalid input (fields: name, description, member_ids)"}
+  /destination-groups/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [backups]
+      responses:
+        "200": {description: Destination group, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "404": {description: Unknown group}
+    patch:
+      tags: [backups]
+      summary: Partial update (absent fields keep their value). `member_ids` replaces the member list and its order; existing backups are not copied to an added destination, and nothing is deleted from a removed one.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroupInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/DestinationGroup"}}}}
+        "422": {description: "Invalid input (fields: name, description, member_ids)"}
+    delete:
+      tags: [backups]
+      responses:
+        "204": {description: Deleted (the member destinations stay)}
+        "409": {description: Used by backup jobs}
 
   # ------------------------------------------------------------ backups (M2)
   /backup/jobs:
@@ -1263,8 +1299,39 @@ components:
         last_test_ok: {type: [boolean, "null"]}
         last_test: {$ref: "#/components/schemas/DestinationTest"}
         jobs: {type: integer}
+        groups: {type: integer, description: Number of destination groups this destination is a member of}
         created_at: {type: string, format: date-time}
         warnings: {type: array, items: {type: string}, description: "Only on create/patch responses: things the admin must see (credential can delete, account SAS, expiry < 14 days)"}
+    DestinationGroupInput:
+      type: object
+      description: Create requires `name` and `member_ids`; patch takes any of them.
+      properties:
+        name: {type: string, maxLength: 80}
+        description: {type: string, maxLength: 500}
+        member_ids:
+          type: array
+          minItems: 2
+          maxItems: 4
+          items: {type: string, format: uuid}
+          description: Destination ids in order (the first is the default restore copy). Distinct, existing, and no two writing to the same location (same kind, location and prefix).
+    DestinationGroup:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        description: {type: string}
+        members:
+          type: array
+          description: In position order.
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              name: {type: string}
+              kind: {type: string, enum: [azure_blob, s3, nfs]}
+        jobs: {type: integer, description: "Number of backup jobs that use the group (deleted jobs included). Never the jobs themselves."}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
     DestinationMount:
       type: object
       description: A volume mounted into the server for NFS destinations (Helm value nfsMounts).

@@ -65,6 +65,7 @@ func (a *API) Routes(r chi.Router) {
 		r.Delete("/{id}", a.delete)
 		r.Post("/{id}/test", a.testSaved)
 	})
+	a.routesGroups(r)
 }
 
 // SecretSourceInput is a Key Vault reference or a value to store.
@@ -121,6 +122,7 @@ type View struct {
 	LastTestOK       *bool      `json:"last_test_ok"`
 	LastTest         *Report    `json:"last_test"`
 	Jobs             int        `json:"jobs"`
+	Groups           int        `json:"groups"`
 	CreatedAt        time.Time  `json:"created_at"`
 	// Warnings are returned by create/patch/test when the saved destination
 	// needs attention (e.g. the credential can delete). Never silent.
@@ -139,7 +141,8 @@ const viewSelect = `SELECT d.id, d.name, d.kind, d.prefix, d.endpoint_override, 
 	d.bucket, d.region, d.path_style, d.access_key_id,
 	COALESCE(k.kind, ''), COALESCE(k.keyvault_name, ''), COALESCE(k.secret_name, ''), d.path,
 	d.last_test_at, d.last_test_ok, d.last_test_report, d.created_at,
-	(SELECT count(*) FROM backup_jobs j WHERE j.destination_id = d.id)
+	(SELECT count(*) FROM backup_jobs j WHERE j.destination_id = d.id),
+	(SELECT count(*) FROM destination_group_members m WHERE m.destination_id = d.id)
 	FROM destinations d LEFT JOIN credentials c ON c.id = d.sas_credential_id LEFT JOIN credentials k ON k.id = d.secret_credential_id`
 
 func scanViews(rows pgx.Rows) ([]View, error) {
@@ -153,7 +156,7 @@ func scanViews(rows pgx.Rows) ([]View, error) {
 			&v.SASSource, &kvName, &secName, &v.SASExpiresAt, &v.SASPermissions,
 			&v.Bucket, &v.Region, &v.PathStyle, &v.AccessKeyID,
 			&v.SecretKeySource, &kKV, &kSec, &v.Path,
-			&v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs); err != nil {
+			&v.LastTestAt, &v.LastTestOK, &report, &v.CreatedAt, &v.Jobs, &v.Groups); err != nil {
 			return nil, err
 		}
 		if v.SASSource == "keyvault_ref" {
@@ -923,11 +926,18 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	errInUse := errors.New("in use")
-	var jobs int
+	errInGroup := errors.New("in a group")
+	var jobs, groups int
 	err := store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
 		cur, err := loadRow(r.Context(), tx, id, true)
 		if err != nil {
 			return err
+		}
+		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM destination_group_members WHERE destination_id = $1`, id).Scan(&groups); err != nil {
+			return err
+		}
+		if groups > 0 {
+			return errInGroup
 		}
 		if err := tx.QueryRow(r.Context(), `SELECT count(*) FROM backup_jobs WHERE destination_id = $1`, id).Scan(&jobs); err != nil {
 			return err
@@ -951,6 +961,8 @@ func (a *API) delete(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpx.NotFound(w)
+	case errors.Is(err, errInGroup):
+		httpx.Error(w, http.StatusConflict, fmt.Sprintf("destination is in %d destination group(s); remove it there first", groups))
 	case errors.Is(err, errInUse):
 		httpx.Error(w, http.StatusConflict, fmt.Sprintf("destination is used by %d backup job(s); move or delete them first", jobs))
 	case errors.As(err, &pg) && pg.Code == "23503":
