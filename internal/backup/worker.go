@@ -293,6 +293,7 @@ func (o *outcome) fromFirstCopy() {
 type finished struct {
 	engine, status string
 	started        *time.Time
+	copies         []copyResult
 	ok             bool
 }
 
@@ -304,12 +305,15 @@ func (f finished) observe() {
 	if f.started != nil {
 		metrics.BackupDuration.WithLabelValues(f.engine, f.status).Observe(time.Since(*f.started).Seconds())
 	}
+	for _, c := range f.copies {
+		metrics.BackupCopies.WithLabelValues(c.Name, c.Status).Inc()
+	}
 }
 
 // finishRunTx records the terminal state and the run's copies (the rows
-// freeze afterwards) and emits backup.failed / backup.succeeded in the same
-// transaction. The run's blob_path, bytes, sha256 and tier come from its
-// first succeeded copy. Test runs do not notify.
+// freeze afterwards), queues a repair when one is due and emits the run's
+// event (settleRunTx) in the same transaction. The run's blob_path, bytes,
+// sha256 and tier come from its first succeeded copy.
 func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (finished, error) {
 	var jobID uuid.UUID
 	var trigger, ns, svc, cluster, engine string
@@ -344,33 +348,129 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 			return finished{}, err
 		}
 	}
-	f := finished{engine: engine, status: o.status, started: started, ok: true}
-	if trigger == "test" || o.status == "partial" {
-		return f, nil // a partial run is neither backup.succeeded nor backup.failed
+	f := finished{engine: engine, status: o.status, started: started, copies: o.copies, ok: true}
+	n, err := settleRunTx(ctx, tx, runID, o, time.Now())
+	if err != nil {
+		return finished{}, err
+	}
+	if n.Type == "" || n.Type == notify.BackupSucceeded && !notifySuccess {
+		return f, nil // backup.succeeded is opt-in per job
 	}
 	fields := map[string]string{"cluster": cluster, "target": ns + "/" + svc, "trigger": trigger}
-	ev := notify.Event{ChannelID: channel, Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
+	ev := notify.Event{Type: n.Type, Key: n.Type + ":" + runID.String(), ChannelID: channel,
+		Link: "/backups?job=" + jobID.String() + "&run=" + runID.String(), Fields: fields,
 		Payload: map[string]any{"job_id": jobID.String(), "run_id": runID.String()}}
-	if o.status == "succeeded" && !notifySuccess || o.quiet {
-		return f, nil // backup.succeeded is opt-in per job; retried attempts stay quiet
-	}
-	if o.status == "succeeded" {
-		ev.Type, ev.Key = notify.BackupSucceeded, "backup.succeeded:"+runID.String()
+	n.addPayload(ev.Payload)
+	switch n.Type {
+	case notify.BackupSucceeded:
 		ev.Title = fmt.Sprintf("Backup succeeded: %s/%s", ns, svc)
 		fields["size"] = humanBytes(o.bytes)
 		fields["tier"] = o.tier
-	} else if o.status == "missed" {
-		ev.Type, ev.Key = notify.BackupMissed, "backup.missed:"+runID.String()
+	case notify.BackupPartial:
+		ev.Title = fmt.Sprintf("Backup incomplete: %s/%s", ns, svc)
+		fields["missing"] = strings.Join(n.Missing, ", ")
+		fields["error"] = shortError(o.err)
+	case notify.BackupMissed:
 		ev.Title = fmt.Sprintf("Backup missed: %s/%s", ns, svc)
 		fields["error"] = shortError(o.err)
 		ev.Payload["reason"] = shortError(o.err)
-	} else {
-		ev.Type, ev.Key = notify.BackupFailed, "backup.failed:"+runID.String()
+	default:
 		ev.Title = fmt.Sprintf("Backup failed: %s/%s", ns, svc)
+		if n.Missing != nil {
+			fields["missing"] = strings.Join(n.Missing, ", ")
+		}
 		fields["error"] = shortError(o.err)
 		ev.Payload["reason"] = shortError(o.err)
 	}
 	return f, notify.Emit(ctx, tx, ev)
+}
+
+// runNotice is the event a finished run emits (settleRunTx).
+type runNotice struct {
+	// Type is a notify.Backup* event type, or "" for none.
+	Type string
+	// RepairOf is the original run when the run is a repair.
+	RepairOf *uuid.UUID
+	// Missing names the destinations without a copy, in destination_ids
+	// order (backup.partial, and backup.failed of a repair that gives up).
+	Missing []string
+	// RepairQueued: a repair of the partial run is queued (backup.partial).
+	RepairQueued bool
+}
+
+// addPayload adds the notice's payload keys to p.
+func (n runNotice) addPayload(p map[string]any) {
+	if n.RepairOf != nil {
+		p["repair_of"] = n.RepairOf.String()
+	}
+	if n.Missing != nil {
+		p["missing_destinations"] = n.Missing
+	}
+	if n.Type == notify.BackupPartial {
+		p["repair_queued"] = n.RepairQueued
+	}
+}
+
+// settleRunTx runs after a run's status and copies are recorded, in the same
+// transaction: it queues a repair when one is due (queueRepairTx) and
+// decides which event the run emits.
+//   - Test runs, retried attempts (o.quiet) and a repair with nothing left
+//     to repair emit nothing.
+//   - A partial run emits backup.partial with its missing destinations and
+//     whether a repair is queued.
+//   - A repair that ends partial or failed is quiet while another repair is
+//     queued; when none is (window over, attempts used up), it gives up
+//     with backup.failed naming the copies still missing.
+//   - Otherwise succeeded, missed and failed map to their events (a
+//     succeeded repair completed every missing copy). backup.succeeded is
+//     opt-in: the caller checks the job's setting.
+func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now time.Time) (runNotice, error) {
+	var trigger string
+	var repairOf *uuid.UUID
+	if err := tx.QueryRow(ctx, `SELECT trigger, repair_of FROM backup_runs WHERE id = $1`, runID).Scan(&trigger, &repairOf); err != nil {
+		return runNotice{}, err
+	}
+	if trigger == "test" || o.quiet || repairOf != nil && o.err == errNothingToRepair {
+		return runNotice{}, nil
+	}
+	n := runNotice{RepairOf: repairOf}
+	switch {
+	case o.status == "partial" && repairOf == nil:
+		queued, err := queueRepairTx(ctx, tx, runID, now)
+		if err != nil {
+			return runNotice{}, err
+		}
+		missing, err := missingDestinationsTx(ctx, tx, runID, false)
+		if err != nil {
+			return runNotice{}, err
+		}
+		n.Type, n.Missing, n.RepairQueued = notify.BackupPartial, destNames(missing), queued
+	case repairOf != nil && (o.status == "partial" || o.status == "failed"):
+		queued, err := queueRepairTx(ctx, tx, runID, now)
+		if err != nil || queued {
+			return runNotice{}, err
+		}
+		missing, err := missingDestinationsTx(ctx, tx, *repairOf, true)
+		if err != nil || len(missing) == 0 {
+			return runNotice{}, err // nothing missing that the job still writes to
+		}
+		n.Type, n.Missing = notify.BackupFailed, destNames(missing)
+	case o.status == "succeeded":
+		n.Type = notify.BackupSucceeded
+	case o.status == "missed":
+		n.Type = notify.BackupMissed
+	default:
+		n.Type = notify.BackupFailed
+	}
+	return n, nil
+}
+
+func destNames(ds []destRef) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.Name
+	}
+	return out
 }
 
 func nonZeroTime(t time.Time) *time.Time {

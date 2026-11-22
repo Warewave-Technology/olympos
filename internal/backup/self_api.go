@@ -22,8 +22,8 @@ type SelfView struct {
 	Configured bool     `json:"configured"`
 	Job        *SelfJob `json:"job"`
 	Runs       []*Run   `json:"runs"`
-	// Restore: commands for the latest successful run (F19,
-	// docs/restore-olympos.md).
+	// Restore: commands for the latest restorable (succeeded or partial)
+	// run (F19, docs/restore-olympos.md).
 	Restore *RestoreGuide `json:"restore"`
 }
 
@@ -82,7 +82,7 @@ func LoadSelfView(ctx context.Context, q store.Querier) (*SelfView, error) {
 	}
 	rows.Close()
 	for _, run := range v.Runs {
-		if run.Status == "succeeded" && run.Trigger != "test" {
+		if (run.Status == "succeeded" || run.Status == "partial") && run.Trigger != "test" {
 			g, err := LoadRestoreGuide(ctx, q, run.ID, nil)
 			if err != nil {
 				return nil, err

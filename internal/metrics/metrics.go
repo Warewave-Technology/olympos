@@ -17,6 +17,9 @@ var (
 		Name: "olympos_backup_run_duration_seconds", Help: "Backup run duration.",
 		Buckets: prometheus.ExponentialBuckets(1, 2, 16),
 	}, []string{"engine", "status"})
+	BackupCopies = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "olympos_backup_copies_total", Help: "Finished backup copies by destination (name) and status.",
+	}, []string{"destination", "status"})
 	SchedulerLag = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "olympos_scheduler_lag_seconds", Help: "Delay between a run's scheduled time and when it was queued.",
 	})
@@ -39,5 +42,5 @@ var Registry = prometheus.NewRegistry()
 
 func init() {
 	Registry.MustRegister(prometheus.NewGoCollector(), prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}),
-		AgentsOnline, Tunnels, BackupRuns, BackupDuration, SchedulerLag, OutboxBacklog, ChangeRequests, AuditRuns, ImageScans)
+		AgentsOnline, Tunnels, BackupRuns, BackupDuration, BackupCopies, SchedulerLag, OutboxBacklog, ChangeRequests, AuditRuns, ImageScans)
 }

@@ -135,6 +135,11 @@ func TestCatalog(t *testing.T) {
 			t.Errorf("%s opt_in = %v", e.EventType, e.OptIn)
 		}
 	}
+	// backup.partial is listed next to backup.failed.
+	if notify.BackupPartial != "backup.partial" || entries[1].EventType != notify.BackupPartial || entries[0].EventType != notify.BackupFailed ||
+		entries[1].Description != "A backup was written to some of its destinations but not all." || !notify.Known(notify.BackupPartial) {
+		t.Errorf("backup.partial entry: %+v", entries[1])
+	}
 }
 
 func TestDispatchRouting(t *testing.T) {

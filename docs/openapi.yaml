@@ -371,8 +371,8 @@ paths:
                         candidates: {type: integer, description: targets without a job}
                         jobs: {type: integer}
                         jobs_enabled: {type: integer}
-                        last_24h: {type: object, properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}}}
-                        last_success_at: {type: [string, "null"], format: date-time}
+                        last_24h: {type: object, description: "runs by outcome; partial = wrote some of its copies, counted on its own (not as succeeded)", properties: {succeeded: {type: integer}, failed: {type: integer}, missed: {type: integer}, partial: {type: integer}}}
+                        last_success_at: {type: [string, "null"], format: date-time, description: finish time of the newest restorable run (succeeded or partial)}
                         bytes_30d: {type: integer}
   /backup/runs:
     get:
@@ -1174,7 +1174,7 @@ components:
           items:
             type: object
             properties:
-              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, kek_purgeable, kek_recovery_unknown]}
+              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, backup_partial, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, self_backup_partial, kek_purgeable, kek_recovery_unknown]}
               severity: {type: string, enum: [crit, warn]}
               label: {type: string}
               detail: {type: string}

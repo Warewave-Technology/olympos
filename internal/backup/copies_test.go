@@ -196,8 +196,8 @@ func TestWorkerGroupPartial(t *testing.T) {
 	if len(g.B2.blobs) != 0 {
 		t.Fatalf("failed copy wrote: %v", keysOf(g.B2.blobs))
 	}
-	if ev := events(t, db, "backup.%"); len(ev) != 0 {
-		t.Fatalf("partial emits neither succeeded nor failed: %+v", ev)
+	if ev := events(t, db, "backup.%"); len(ev) != 1 || ev[0].Type != "backup.partial" {
+		t.Fatalf("partial emits backup.partial only, never succeeded or failed: %+v", ev)
 	}
 }
 

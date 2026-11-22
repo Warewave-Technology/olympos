@@ -48,7 +48,8 @@ func TestClusterSummariesAPI(t *testing.T) {
 	run("succeeded", "schedule", now.Add(-3*time.Hour), at(2*time.Hour), 100)
 	run("failed", "schedule", now.Add(-90*time.Minute), at(80*time.Minute), 0)
 	run("missed", "schedule", now.Add(-4*time.Hour), nil, 0)
-	run("succeeded", "test", now.Add(-time.Minute), at(30*time.Second), 7) // connection test: ignored
+	run("partial", "schedule", now.Add(-time.Hour), at(50*time.Minute), 70) // restorable: the last backup, not ok
+	run("succeeded", "test", now.Add(-time.Minute), at(30*time.Second), 7)  // connection test: ignored
 
 	all := e.Login(e.Principal("root", "Member", "viewer")) // scope "all"
 	var resp struct{ Items []backup.ClusterSummary }
@@ -66,10 +67,10 @@ func TestClusterSummariesAPI(t *testing.T) {
 	if p.Targets != 2 || p.Candidates != 1 || p.Jobs != 1 || p.JobsEnabled != 1 {
 		t.Errorf("prod counts = %+v", p)
 	}
-	if p.Last24h != (backup.RunCounts{Succeeded: 1, Failed: 1, Missed: 1}) || p.Bytes30d != 150 {
+	if p.Last24h != (backup.RunCounts{Succeeded: 1, Failed: 1, Missed: 1, Partial: 1}) || p.Bytes30d != 150 {
 		t.Errorf("prod runs = %+v bytes=%d", p.Last24h, p.Bytes30d)
 	}
-	if p.LastSuccessAt == nil || p.LastSuccessAt.Sub(*at(2 * time.Hour)).Abs() > time.Second {
+	if p.LastSuccessAt == nil || p.LastSuccessAt.Sub(*at(50 * time.Minute)).Abs() > time.Second {
 		t.Errorf("last success = %v", p.LastSuccessAt)
 	}
 	if d := rows["dev-kind"]; d.Targets != 1 || d.Candidates != 1 || d.Jobs != 0 || d.LastSuccessAt != nil {

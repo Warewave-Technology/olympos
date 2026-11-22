@@ -11,6 +11,7 @@ type CatalogEntry struct {
 
 var descriptions = map[string]string{
 	BackupFailed:        "A backup run failed.",
+	BackupPartial:       "A backup was written to some of its destinations but not all.",
 	BackupMissed:        "A scheduled backup run did not start (scheduler down or overlap).",
 	BackupSucceeded:     "A backup run succeeded. Opt-in: noisy, off unless routed explicitly.",
 	CROpened:            "A Vault change request was opened and waits for approval.",
