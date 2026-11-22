@@ -42,41 +42,108 @@ export function RestoreSteps({ guide }: { guide: RestoreGuide }) {
 /** The run that wrote the guide's own copies: they come first, repairs after. */
 const guideRunId = (guide: RestoreGuide, runId?: string) => runId ?? guide.copies?.[0]?.run_id;
 
-function copyHint(c: RestoreCopy, i: number, ownRun: string | undefined): string {
-  const at = relDateTime(c.taken_at);
-  if (ownRun && c.run_id !== ownRun) return `Completed later by a repair, taken at ${at}`;
-  return i === 0 ? `First successful copy in member order · taken ${at}` : `Taken ${at}`;
+/** One line of the copy selector: a destination of this run, its own copy and a later repair's copy. */
+type CopyOption = { destination_id: string; name: string; kind: RestoreCopy['kind']; own?: RestoreCopy; repair?: RestoreCopy };
+
+/**
+ * The run's destinations in member order: the run's copy rows when known (a failed one stays in the
+ * list, disabled), otherwise the guide's own copies. Repair copies hang off the destination they
+ * completed and are never offered as if this run had written them.
+ */
+function copyOptions(guide: RestoreGuide, own: string | undefined, runCopies?: BackupRunCopy[]): CopyOption[] {
+  const copies = guide.copies ?? [];
+  const mine = (d: string) => copies.find((c) => c.destination_id === d && (!own || c.run_id === own));
+  const repair = (d: string) => copies.filter((c) => c.destination_id === d && own && c.run_id !== own).at(-1);
+  const rows = runCopies?.length
+    ? runCopies.map((c) => ({ destination_id: c.destination_id, name: c.destination_name, kind: c.destination_kind }))
+    : copies.filter((c) => !own || c.run_id === own).map((c) => ({ destination_id: c.destination_id, name: c.name, kind: c.kind }));
+  return rows.map((r) => ({ ...r, own: mine(r.destination_id), repair: repair(r.destination_id) }));
 }
 
 /**
- * Restore commands with a copy selector when the run has more than one succeeded copy.
+ * Restore commands with a copy selector when the run wrote to more than one destination. A
+ * destination whose copy failed in this run is listed but cannot be chosen; when a repair completed
+ * it later, `onOpenRepair` opens that repair run (or, without it, the repair's copy is selected).
  * `onSelect` refetches the guide for that destination (`?copy=<destination id>`).
  */
-export function RestoreWithCopies({ guide, runId, onSelect, pending, error }: { guide: RestoreGuide; runId?: string; onSelect: (destinationId: string) => void; pending?: boolean; error?: unknown }) {
-  const copies = guide.copies ?? [];
+export function RestoreWithCopies({
+  guide,
+  runId,
+  runCopies,
+  onSelect,
+  onOpenRepair,
+  pending,
+  error,
+}: {
+  guide: RestoreGuide;
+  runId?: string;
+  runCopies?: BackupRunCopy[];
+  onSelect: (destinationId: string) => void;
+  onOpenRepair?: (runId: string) => void;
+  pending?: boolean;
+  error?: unknown;
+}) {
   const own = guideRunId(guide, runId);
+  const options = copyOptions(guide, own, runCopies);
+  const selected = (guide.copies ?? []).find((c) => c.selected);
+  const fromRepair = selected && own && selected.run_id !== own ? selected : undefined;
+  const firstOwn = options.find((o) => o.own)?.destination_id;
   return (
     <div className="stack-sm" style={{ gap: 12 }}>
-      {copies.length > 1 && (
+      {options.length > 1 && (
         <fieldset className="opts" aria-busy={pending || undefined}>
           <legend className="lbl">Restore from copy</legend>
-          {copies.map((c, i) => (
-            <label className="opt" key={`${c.destination_id}-${c.run_id}`}>
-              <input type="radio" name="restore-copy" checked={c.selected} onChange={() => onSelect(c.destination_id)} disabled={pending} />
-              <span style={{ minWidth: 0 }}>
-                <span className="inline-sm">
-                  <span className="t1 mono">{c.name}</span>
-                  <KindBadge kind={c.kind} />
+          {options.map((o) => {
+            const hintId = `copy-hint-${o.destination_id}`;
+            return (
+              <label className="opt" key={o.destination_id}>
+                <input
+                  type="radio"
+                  name="restore-copy"
+                  checked={!!o.own && !!o.own.selected}
+                  onChange={() => onSelect(o.destination_id)}
+                  disabled={pending || !o.own}
+                  aria-describedby={hintId}
+                />
+                <span style={{ minWidth: 0 }}>
+                  <span className="inline-sm">
+                    <span className="t1 mono">{o.name}</span>
+                    <KindBadge kind={o.kind} />
+                    {!o.own && <Badge tone="crit">Failed</Badge>}
+                  </span>
+                  <span className="t2" id={hintId}>
+                    {o.own
+                      ? `${o.destination_id === firstOwn ? 'First successful copy in member order · ' : ''}taken ${relDateTime(o.own.taken_at)}`
+                      : 'This run has no copy here.'}
+                    {!o.own && o.repair && (
+                      <>
+                        {' '}
+                        A repair wrote one at {relDateTime(o.repair.taken_at)}:{' '}
+                        <button
+                          type="button"
+                          className="link-btn"
+                          disabled={pending}
+                          onClick={() => (onOpenRepair ? onOpenRepair(o.repair!.run_id) : onSelect(o.destination_id))}
+                        >
+                          {onOpenRepair ? 'open the repair run' : 'use the repair\'s copy'}
+                        </button>
+                      </>
+                    )}
+                  </span>
                 </span>
-                <span className="t2">{copyHint(c, i, own)}</span>
-              </span>
-            </label>
-          ))}
+              </label>
+            );
+          })}
         </fieldset>
       )}
-      {copies.length > 1 && (
+      {fromRepair && (
+        <p className="small" style={{ margin: 0 }}>
+          Commands use the copy a repair wrote to <span className="mono">{fromRepair.name}</span> at {relDateTime(fromRepair.taken_at)}: a later dump than this run.
+        </p>
+      )}
+      {options.length > 1 && (
         <p className="muted small" style={{ margin: 0 }}>
-          Commands use the selected copy&apos;s destination. Failed copies are not listed.
+          Commands use the selected copy&apos;s destination. A destination whose copy failed in this run cannot be chosen.
         </p>
       )}
       <FormError error={error} />
@@ -115,9 +182,9 @@ export function CopiesTable({ copies, isRepair, title = 'Copies', id = 'run-copi
       <h3 id={id} className="small" style={{ margin: '0 0 8px', fontWeight: 600 }}>
         {title}
       </h3>
-      {/* stack-sm: one card per copy on phones, so the error is never off-screen; explicit roles keep the table semantics there */}
+      {/* cards-sm: one card per copy on phones, so the error is never off-screen; explicit roles keep the table semantics there */}
       <div className="boxed tight table-wrap">
-        <table className="t stack-sm" role="table" aria-labelledby={id}>
+        <table className="t cards-sm" role="table" aria-labelledby={id}>
           <thead>
             <tr role="row">
               <th role="columnheader">Destination</th>
@@ -283,7 +350,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             {(isGroupRun(run) || !!run.repair_of) && run.copies && run.copies.length > 0 && <CopiesTable copies={run.copies} isRepair={!!run.repair_of} />}
             <RepairNote run={run} onOpen={open} />
             {run.restore ? (
-              <RestoreWithCopies guide={run.restore} runId={run.id} onSelect={setCopy} pending={q.isPlaceholderData} />
+              <RestoreWithCopies guide={run.restore} runId={run.id} runCopies={run.copies} onSelect={setCopy} onOpenRepair={open} pending={q.isPlaceholderData} />
             ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (
               <p className="muted small">Dry runs only check the setup; they are not restorable backups.</p>
             ) : (

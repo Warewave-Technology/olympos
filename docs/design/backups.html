@@ -142,13 +142,13 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
 <legend class="lbl">Restore from copy</legend>
 <label class="opt on"><input type="radio" name="copy" checked style="margin-top: 2px"><span><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span><br><span class="muted" style="font-size: 12px">First successful copy in member order &middot; taken 02:00</span></span></label>
-<label class="opt"><input type="radio" name="copy" style="margin-top: 2px"><span><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span><br><span class="muted" style="font-size: 12px">Completed later by a repair, taken at 02:21</span></span></label>
+<label class="opt" style="opacity: 0.7; cursor: not-allowed"><input type="radio" name="copy" disabled style="margin-top: 2px"><span><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span> <span class="badge crit">Failed</span><br><span class="muted" style="font-size: 12px">This run has no copy here. A repair wrote one at 02:21: <a href="#">open the repair run</a></span></span></label>
 </fieldset>
 <pre class="code" style="margin-top: 12px">az storage blob download --auth-mode login --account-name stolympweu01 \
   --container-name backups --name billing-pg/2026-11-22T02-00-00Z/billing.dump \
   --file backup.dump
 sha256sum backup.dump   # must match the sha256 of this copy: 9f2c4a1e&hellip;7b30</pre>
-<div class="muted" style="font-size: 12px; margin-top: 8px">Commands use the selected copy's destination. Failed copies are not listed.</div>
+<div class="muted" style="font-size: 12px; margin-top: 8px">Commands use the selected copy's destination. A destination whose copy failed in this run cannot be chosen.</div>
 </div>
 <div style="display: flex; justify-content: flex-end"><button class="btn">Close</button></div>
 </section>

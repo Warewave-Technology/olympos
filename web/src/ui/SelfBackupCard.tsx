@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api, errorMessage } from '../api/client';
-import type { BackupRun, Destination, DestinationGroup, ItemList, SelfBackup, SelfBackupInput } from '../api/types';
+import type { BackupRun, BackupRunCopy, Destination, DestinationGroup, ItemList, SelfBackup, SelfBackupInput } from '../api/types';
 import { useCan } from '../auth/me';
 import { describeCron } from '../lib/cron';
 import { age, bytes, relDateTime } from '../lib/format';
@@ -194,7 +194,7 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
               )}
             </div>
             {showRestore && v.restore && (
-              <SelfRestore guide={v.restore} runId={lastOk?.id} onClose={() => setShowRestore(false)} />
+              <SelfRestore guide={v.restore} runId={lastOk?.id} runCopies={lastOk?.copies} onClose={() => setShowRestore(false)} />
             )}
           </>
         )}
@@ -204,7 +204,7 @@ export function SelfBackupCard({ focus }: { focus?: boolean }) {
 }
 
 /** Restore commands of the latest restorable dump; another copy refetches `/backup/self?copy=`. */
-function SelfRestore({ guide, runId, onClose }: { guide: NonNullable<SelfBackup['restore']>; runId?: string; onClose: () => void }) {
+function SelfRestore({ guide, runId, runCopies, onClose }: { guide: NonNullable<SelfBackup['restore']>; runId?: string; runCopies?: BackupRunCopy[]; onClose: () => void }) {
   const [copy, setCopy] = useState('');
   const q = useQuery({
     queryKey: ['backup-self', { copy }],
@@ -215,7 +215,7 @@ function SelfRestore({ guide, runId, onClose }: { guide: NonNullable<SelfBackup[
   const shown = (copy && q.data?.restore) || guide;
   return (
     <Modal open onClose={onClose} size="xl" eyebrow="olympos-self" title="Restore the Olympos database" description="Latest restorable dump. The same Key Vault (KEK) is required.">
-      <RestoreWithCopies guide={shown} runId={runId} onSelect={setCopy} pending={q.isFetching} error={q.isError ? q.error : undefined} />
+      <RestoreWithCopies guide={shown} runId={runId} runCopies={runCopies} onSelect={setCopy} pending={q.isFetching} error={q.isError ? q.error : undefined} />
     </Modal>
   );
 }

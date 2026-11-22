@@ -18,17 +18,19 @@ a complete backup with its own manifest, so restore from whichever copy you can 
 
 - **Choosing a copy.** A run's details list its *Copies* (destination, status, size, SHA-256, tier, error).
   *Restore from copy* picks the copy the commands are built from; they then download from that copy's
-  destination. The default is the first successful copy in the group's member order. Failed copies are not
-  offered, even when their data blob was written (only the manifest failed, so the copy cannot be
-  verified).
+  destination. The default is the first successful copy in the group's member order. A destination whose
+  copy failed in this run is listed as *Failed* and cannot be chosen, even when its data blob was written
+  (only the manifest failed, so the copy cannot be verified).
 - **The same in the API.** `GET /api/v1/backup/runs/{id}?copy=<destination id>` returns the run with the
   restore guide for that copy; `restore.copies` lists every copy it can be built from, with `selected` on
   the one in use. For `olympos-self`, use `GET /api/v1/backup/self?copy=<destination id>`. A destination
   without a successful copy of the run answers `422`.
 - **Copies completed by a repair.** When a run was `partial`, a repair run writes the missing copies later:
   5 minutes after the run, or after 30 minutes or 2 hours more when the first repairs failed
-  ([Findings and events](findings-and-events.md#partial-backups-and-repairs)). The original run offers
-  those copies too, marked *Completed later by a repair*. A repaired copy is a **different, later dump**:
+  ([Findings and events](findings-and-events.md#partial-backups-and-repairs)). In the original run's
+  *Restore from copy*, that destination stays *Failed*; its line says when a repair wrote a copy there and
+  links to the repair run, whose details have the restore commands for it. A repaired copy is a
+  **different, later dump**:
   its blob and manifest are named after the repair run (`<repair_run_id>.<ext>`,
   `<repair_run_id>.manifest.json`, in the folder of the day the repair started), and its `sha256` differs
   from the other copies. Verify it against its own manifest.
