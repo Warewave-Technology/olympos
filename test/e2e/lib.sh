@@ -24,6 +24,18 @@ init_vault() { # deploy binary
 # clusters, Olympos database and local key vault wiped, lab Vault/OpenBao
 # uninitialized again (their data is an emptyDir). Expects $WORK and the lab
 # kubeconfig in $KUBECONFIG. Safe to run when nothing is installed yet.
+# reset_olympos_db stops the server and drops its database and local key
+# vault: the bundled PostgreSQL and both volumes go, helm upgrade recreates
+# them (the password Secret is kept). Also drops the pre-F17 external lab DB.
+reset_olympos_db() {
+  kubectl -n olympos scale deploy/olympos --replicas=0 >/dev/null 2>&1 || true
+  kubectl -n olympos wait --for=delete pod -l app.kubernetes.io/name=olympos-server --timeout=120s >/dev/null 2>&1 || true
+  kubectl -n olympos delete statefulset olympos-postgresql olympos-db --ignore-not-found --wait=true >/dev/null
+  kubectl -n olympos delete service olympos-db --ignore-not-found >/dev/null
+  kubectl -n olympos wait --for=delete pod/olympos-postgresql-0 --timeout=120s >/dev/null 2>&1 || true
+  kubectl -n olympos delete pvc data-olympos-postgresql-0 olympos-localkv --ignore-not-found --wait=true >/dev/null
+}
+
 reset_olympos() {
   local edge="$WORK/kubeconfig-edge" crb
   log "resetting Olympos (agents, database, local key vault, lab vaults)"
@@ -36,14 +48,7 @@ reset_olympos() {
     KUBECONFIG=$edge kubectl delete namespace olympos-system olympos-bench --ignore-not-found --wait=true --timeout=180s >/dev/null 2>&1 || true
     for crb in $(KUBECONFIG=$edge kubectl get clusterrolebinding,clusterrole -o name 2>/dev/null | grep olympos-agent- || true); do KUBECONFIG=$edge kubectl delete "$crb" >/dev/null; done
   fi
-  kubectl -n olympos scale deploy/olympos --replicas=0 >/dev/null 2>&1 || true
-  kubectl -n olympos wait --for=delete pod -l app.kubernetes.io/name=olympos-server --timeout=120s >/dev/null 2>&1 || true
-  # The bundled PostgreSQL and its volume go; helm upgrade recreates them
-  # (the password Secret is kept). Also drop the pre-F17 external lab DB.
-  kubectl -n olympos delete statefulset olympos-postgresql olympos-db --ignore-not-found --wait=true >/dev/null
-  kubectl -n olympos delete service olympos-db --ignore-not-found >/dev/null
-  kubectl -n olympos wait --for=delete pod/olympos-postgresql-0 --timeout=120s >/dev/null 2>&1 || true
-  kubectl -n olympos delete pvc data-olympos-postgresql-0 olympos-localkv --ignore-not-found --wait=true >/dev/null
+  reset_olympos_db
   kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null 2>&1 || true
   rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json"
 }

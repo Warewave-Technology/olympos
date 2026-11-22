@@ -11,6 +11,12 @@ cd "$(dirname "$0")/../.."
 export SETUP_ONLY=1
 ./test/e2e/run.sh   # lab + targets + HEAD images, Olympos reset
 export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig
+# run.sh started HEAD, which migrated the bundled database. A release refuses
+# a schema newer than its own (no downgrades), so the release under test
+# starts on an empty database, as a real installation of it would.
+WORK=$PWD/test/e2e/.work
+source test/e2e/lib.sh
+reset_olympos_db
 v=${from#v}
 src=$(mktemp -d)
 git worktree add --detach "$src" "$from" >/dev/null
