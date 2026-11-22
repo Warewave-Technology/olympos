@@ -539,7 +539,11 @@ func TestSelfBackupRepairSkippedWhenDisabled(t *testing.T) {
 	}
 	cancel()
 	runs := e.selfRuns(t)
-	if len(runs) != 2 || runs[1].ID != repair || runs[1].Status != "failed" || runs[1].Error != "skipped: the job is disabled" || len(loadCopies(t, e.db, repair)) != 0 {
+	var copies int
+	if err := e.db.QueryRow(ctx, `SELECT count(*) FROM backup_run_copies WHERE run_id = $1`, repair).Scan(&copies); err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 2 || runs[1].ID != repair || runs[1].Status != "failed" || runs[1].Error != "skipped: the job is disabled" || copies != 0 {
 		t.Fatalf("runs: %+v", runs)
 	}
 	if ev := events(t, e.db, "backup.%"); len(ev) != 0 {
