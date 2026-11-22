@@ -390,7 +390,7 @@ paths:
     get:
       tags: [backups]
       parameters:
-        - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from. Default: the first succeeded copy in member order."}
+        - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from: the run's own copy there, else the newest copy a repair completed there. Default: the first succeeded copy of the run in member order."}
       responses:
         "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}}}]}}}}
         "422": {description: "copy is not a destination id, or the run has no successful copy in that destination"}
@@ -1442,7 +1442,7 @@ components:
           items: {type: object, properties: {title: {type: string}, commands: {type: string}, note: {type: string}}}
         copies:
           type: array
-          description: "The succeeded copies of the run in member order (a failed copy is never listed, even when its data blob landed). The selected one is what the steps are built from."
+          description: "The succeeded copies of the run in member order (a failed copy is never listed, even when its data blob landed), then, for an original run, the succeeded copies its repairs completed later, by repair start. The selected one is what the steps are built from (blob path, destination, and the manifest of the run that wrote it). copy=<destination id> selects the run's own copy there, else the newest repair copy there. A repair run's guide lists its own copies only."
           items:
             type: object
             properties:
@@ -1450,6 +1450,8 @@ components:
               name: {type: string}
               kind: {type: string, enum: [azure_blob, s3, nfs]}
               selected: {type: boolean}
+              run_id: {type: string, format: uuid, description: "The run that wrote this copy: the guide's run, or one of its repairs (the copy was completed later by a repair)"}
+              taken_at: {type: [string, "null"], format: date-time, description: "When the run that wrote this copy started"}
     AuditSettings:
       type: object
       properties:

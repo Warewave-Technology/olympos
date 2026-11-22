@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -27,11 +28,15 @@ type RestoreGuide struct {
 }
 
 // RestoreCopy is one succeeded copy of a run that a guide can be built from.
+// RunID is the run that wrote it: the guide's run, or one of its repairs
+// (the copy was completed later); TakenAt is when that run started.
 type RestoreCopy struct {
-	DestinationID uuid.UUID `json:"destination_id"`
-	Name          string    `json:"name"`
-	Kind          string    `json:"kind"`
-	Selected      bool      `json:"selected"`
+	DestinationID uuid.UUID  `json:"destination_id"`
+	Name          string     `json:"name"`
+	Kind          string     `json:"kind"`
+	Selected      bool       `json:"selected"`
+	RunID         uuid.UUID  `json:"run_id"`
+	TakenAt       *time.Time `json:"taken_at"`
 }
 
 // RestoreStep is one titled block of shell commands.
@@ -58,6 +63,7 @@ type guideSource struct {
 	copy      RestoreCopy
 	dest      guideInput // destination fields only
 	blob, sum string
+	repair    bool // written by a repair of the guide's run
 }
 
 const guideDestCols = `d.id, d.name, d.kind, d.account, d.container, d.endpoint_override, d.bucket, d.region, d.path`
@@ -69,28 +75,40 @@ func (s *guideSource) dests() []any {
 
 // LoadRestoreGuide builds the guide of a succeeded or partial, non-test run;
 // nil for other runs. A run with copy rows restores from one of its
-// succeeded copies and that copy's destination: the one on destID, else the
-// first in member order. A failed copy is never a source, even when its data
-// blob landed (its manifest did not). Runs from before destination groups
-// have no copy rows; they use the job's destination. With destID set and no
+// succeeded copies and that copy's destination. An original run also offers
+// the succeeded copies its repairs wrote (for that destination they are the
+// only copy of this activation), after its own copies, by repair start. The
+// copy used is the run's own on destID, else the newest repair copy there,
+// else (destID nil) the first one; the commands use that copy's blob and the
+// manifest of the run that wrote it. A failed copy is never a source, even
+// when its data blob landed (its manifest did not). A repair run's guide
+// offers its own copies only. Runs from before destination groups have no
+// copy rows; they use the job's destination. With destID set and no
 // succeeded copy there, the error is ErrNoSuccessfulCopy.
 func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, destID *uuid.UUID) (*RestoreGuide, error) {
 	var in guideInput
 	var status, trigger, runBlob, runSum string
 	var jobID uuid.UUID
 	var order []uuid.UUID
+	var repairOf *uuid.UUID
+	var started *time.Time
 	var opts []byte
-	err := q.QueryRow(ctx, `SELECT r.job_id, r.status, r.trigger, r.blob_path, r.sha256, r.destination_ids, COALESCE(t.engine, 'postgresql'),
-		COALESCE(t.vault_provider, ''), COALESCE(t.namespace, 'olympos'), COALESCE(t.service, 'olympos-db'), j.engine_options
+	err := q.QueryRow(ctx, `SELECT r.job_id, r.status, r.trigger, r.blob_path, r.sha256, r.destination_ids, r.repair_of, r.started_at,
+		COALESCE(t.engine, 'postgresql'), COALESCE(t.vault_provider, ''), COALESCE(t.namespace, 'olympos'), COALESCE(t.service, 'olympos-db'),
+		j.engine_options
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id WHERE r.id = $1`, runID).
-		Scan(&jobID, &status, &trigger, &runBlob, &runSum, &order, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts)
+		Scan(&jobID, &status, &trigger, &runBlob, &runSum, &order, &repairOf, &started, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts)
 	if err != nil {
 		return nil, store.NotFound(err)
 	}
 
-	rows, err := q.Query(ctx, `SELECT `+guideDestCols+`, c.status, c.blob_path, c.sha256
-		FROM backup_run_copies c JOIN destinations d ON d.id = c.destination_id WHERE c.run_id = $1
-		ORDER BY COALESCE(array_position($2::uuid[], c.destination_id), 1000), d.name`, runID, order)
+	// The run's own copies in destination_ids order, then (original runs
+	// only) the succeeded copies of its repairs by repair start.
+	rows, err := q.Query(ctx, `SELECT `+guideDestCols+`, c.status, c.blob_path, c.sha256, c.run_id, x.started_at
+		FROM backup_run_copies c JOIN backup_runs x ON x.id = c.run_id JOIN destinations d ON d.id = c.destination_id
+		WHERE c.run_id = $1 OR $3 AND x.repair_of = $1 AND c.status = 'succeeded'
+		ORDER BY c.run_id <> $1, CASE WHEN c.run_id = $1 THEN COALESCE(array_position($2::uuid[], c.destination_id), 1000) ELSE 0 END,
+		  x.started_at, COALESCE(array_position($2::uuid[], c.destination_id), 1000), d.name`, runID, order, repairOf == nil)
 	if err != nil {
 		return nil, err
 	}
@@ -99,11 +117,12 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	for rows.Next() {
 		var s guideSource
 		var cs string
-		if err := rows.Scan(append(s.dests(), &cs, &s.blob, &s.sum)...); err != nil {
+		if err := rows.Scan(append(s.dests(), &cs, &s.blob, &s.sum, &s.copy.RunID, &s.copy.TakenAt)...); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		hasCopies = true
+		s.repair = s.copy.RunID != runID
+		hasCopies = hasCopies || !s.repair
 		if cs == "succeeded" && s.blob != "" {
 			s.copy.Kind = s.dest.kind
 			sources = append(sources, s)
@@ -115,7 +134,7 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	}
 	if !hasCopies && status == "succeeded" && runBlob != "" {
 		// From before destination groups: the job's destination.
-		s := guideSource{blob: runBlob, sum: runSum}
+		s := guideSource{blob: runBlob, sum: runSum, copy: RestoreCopy{RunID: runID, TakenAt: started}}
 		err := q.QueryRow(ctx, `SELECT `+guideDestCols+` FROM backup_jobs j JOIN destinations d ON d.id = j.destination_id WHERE j.id = $1`, jobID).
 			Scan(s.dests()...)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -131,10 +150,19 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	}
 
 	pick := -1
-	for i, s := range sources {
-		if destID == nil || s.copy.DestinationID == *destID {
+	switch {
+	case destID == nil && len(sources) > 0:
+		pick = 0
+	case destID != nil:
+		for i, s := range sources {
+			if s.copy.DestinationID != *destID {
+				continue
+			}
 			pick = i
-			break
+			if !s.repair {
+				break // the run's own copy there
+			}
+			// Repairs come last, oldest first: the last match is the newest.
 		}
 	}
 	if pick < 0 {
@@ -146,7 +174,7 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	s := sources[pick]
 	in.kind, in.account, in.container, in.endpoint, in.bucket, in.region, in.nfsPath =
 		s.dest.kind, s.dest.account, s.dest.container, s.dest.endpoint, s.dest.bucket, s.dest.region, s.dest.nfsPath
-	in.blobPath, in.sha256, in.runID = s.blob, s.sum, runID
+	in.blobPath, in.sha256, in.runID = s.blob, s.sum, s.copy.RunID
 	_ = json.Unmarshal(opts, &in.options)
 	g := buildRestoreGuide(in)
 	for i, c := range sources {

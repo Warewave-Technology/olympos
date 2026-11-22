@@ -746,3 +746,62 @@ func TestSelfBackupAPIGroups(t *testing.T) {
 		t.Fatalf("copy without a succeeded copy there: %d", code)
 	}
 }
+
+// The guide of an original run also offers the copies its repairs wrote:
+// for that destination they are the only copy of this activation. Each copy
+// names the run that wrote it and when that run started.
+func TestRestoreGuideRepairCopies(t *testing.T) {
+	a := newAPI(t)
+	e := a.e
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	job := addJob(t, e.DB, a.prod, jobOpts{group: &g})
+	orig := seedRun(t, a, job, "partial", nil, seedCopy{d1, "succeeded", "p1/orig.zip"}, seedCopy{d2, "failed", ""})
+	rep := seedRun(t, a, job, "succeeded", &orig, seedCopy{d2, "succeeded", "p2/rep.zip"})
+	var repStarted time.Time
+	if err := e.DB.QueryRow(context.Background(), `SELECT started_at FROM backup_runs WHERE id = $1`, rep).Scan(&repStarted); err != nil {
+		t.Fatal(err)
+	}
+	get := func(id uuid.UUID, query string) runBody {
+		t.Helper()
+		var b runBody
+		if code := op.Do("GET", "/api/v1/backup/runs/"+id.String()+query, nil, &b); code != http.StatusOK {
+			t.Fatalf("GET run %s%s: %d %+v", id, query, code, b)
+		}
+		return b
+	}
+
+	b := get(orig, "")
+	c := b.Restore.Copies
+	if len(c) != 2 || c[0].DestinationID != d1 || c[0].RunID != orig || !c[0].Selected || c[0].TakenAt == nil ||
+		c[1].DestinationID != d2 || c[1].RunID != rep || c[1].Selected || c[1].TakenAt == nil || !c[1].TakenAt.Equal(repStarted) {
+		t.Fatalf("copies: %+v", c)
+	}
+	mustContain(t, guideCommands(b.Restore), "p1/orig.zip")
+	mustContain(t, guideCommands(b.Restore), backup.ManifestPath("p1/orig.zip", orig))
+
+	// ?copy= on the repaired destination: the repair's blob and manifest.
+	b = get(orig, "?copy="+d2.String())
+	cmds := guideCommands(b.Restore)
+	if !b.Restore.Copies[1].Selected || b.Restore.Copies[0].Selected || strings.Contains(cmds, "orig.zip") {
+		t.Fatalf("copy=d2: %+v\n%s", b.Restore.Copies, cmds)
+	}
+	mustContain(t, cmds, "p2/rep.zip")
+	mustContain(t, cmds, backup.ManifestPath("p2/rep.zip", rep))
+	mustContain(t, cmds, "'c2'")
+
+	// The repair's own detail lists its own copy only.
+	b = get(rep, "")
+	if len(b.Restore.Copies) != 1 || b.Restore.Copies[0].RunID != rep || b.Restore.Copies[0].DestinationID != d2 {
+		t.Fatalf("repair guide: %+v", b.Restore.Copies)
+	}
+
+	// Two repair copies on one destination: ?copy= takes the newest.
+	rep2 := seedRun(t, a, job, "succeeded", &orig, seedCopy{d2, "succeeded", "p2/rep2.zip"})
+	b = get(orig, "?copy="+d2.String())
+	if c := b.Restore.Copies; len(c) != 3 || c[1].RunID != rep || c[2].RunID != rep2 || !c[2].Selected {
+		t.Fatalf("copies with two repairs: %+v", c)
+	}
+	mustContain(t, guideCommands(b.Restore), backup.ManifestPath("p2/rep2.zip", rep2))
+}

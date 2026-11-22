@@ -308,16 +308,23 @@ func TestSelfBackupPartialRepair(t *testing.T) {
 	if len(v.Runs) != 2 || v.Runs[0].RepairOf == nil || len(v.Runs[1].Copies) != 2 || v.Runs[1].Copies[1].Status != "failed" {
 		t.Fatalf("self view runs: %+v", v.Runs)
 	}
-	// A succeeded repair only holds the repaired copy: the guide is built
-	// from the original run.
-	if v.Restore == nil || len(v.Restore.Copies) != 1 || v.Restore.Copies[0].DestinationID != e.d1 {
-		t.Fatalf("restore guide: %+v", v.Restore)
+	// The guide is built from the original run and also offers the copy
+	// the repair completed.
+	c := v.Restore.Copies
+	if len(c) != 2 || c[0].DestinationID != e.d1 || c[0].RunID != orig.ID || !c[0].Selected ||
+		c[1].DestinationID != e.d2 || c[1].RunID != rep.ID || c[1].TakenAt == nil {
+		t.Fatalf("restore guide copies: %+v", c)
 	}
-	var cmds strings.Builder
-	for _, st := range v.Restore.Steps {
-		cmds.WriteString(st.Commands)
+	mustContain(t, guideText(v.Restore), backup.ManifestPath(orig.BlobPath, orig.ID))
+	v2, err := backup.LoadSelfView(context.Background(), e.db, &e.d2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	mustContain(t, cmds.String(), orig.ID.String())
+	if len(v2.Restore.Copies) != 2 || !v2.Restore.Copies[1].Selected {
+		t.Fatalf("copy on dest2 not selected: %+v", v2.Restore.Copies)
+	}
+	mustContain(t, guideText(v2.Restore), rep.BlobPath)
+	mustContain(t, guideText(v2.Restore), backup.ManifestPath(rep.BlobPath, rep.ID))
 }
 
 // A repair that keeps failing gives up with backup.failed (self title)
@@ -364,6 +371,14 @@ func TestSelfBackupFailedEvent(t *testing.T) {
 		fields["target"] != backup.SelfSystem || fields["trigger"] != "manual" || fields["error"] != runs[0].Error || fields["cluster"] != nil {
 		t.Fatalf("backup.failed: %+v", p)
 	}
+}
+
+func guideText(g *backup.RestoreGuide) string {
+	var b strings.Builder
+	for _, s := range g.Steps {
+		b.WriteString(s.Commands + "\n")
+	}
+	return b.String()
 }
 
 func selfView(t *testing.T, db *store.DB) backup.SelfView {
