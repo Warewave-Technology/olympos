@@ -3,11 +3,13 @@ package backup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
@@ -19,6 +21,17 @@ import (
 type RestoreGuide struct {
 	Doc   string        `json:"doc"` // docs/restore.md anchor
 	Steps []RestoreStep `json:"steps"`
+	// Copies: the destinations the run can be restored from, in member
+	// order, with the one the steps are built from selected.
+	Copies []RestoreCopy `json:"copies"`
+}
+
+// RestoreCopy is one succeeded copy of a run that a guide can be built from.
+type RestoreCopy struct {
+	DestinationID uuid.UUID `json:"destination_id"`
+	Name          string    `json:"name"`
+	Kind          string    `json:"kind"`
+	Selected      bool      `json:"selected"`
 }
 
 // RestoreStep is one titled block of shell commands.
@@ -36,28 +49,111 @@ type guideInput struct {
 	options                                                     map[string]any
 }
 
-// LoadRestoreGuide builds the guide of a succeeded, non-test run; nil for
-// other runs.
-func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID) (*RestoreGuide, error) {
+// ErrNoSuccessfulCopy is returned when a restore guide is asked for a
+// destination in which the run has no successful copy.
+var ErrNoSuccessfulCopy = errors.New("this run has no successful copy in that destination")
+
+// guideSource is one destination a run can be restored from.
+type guideSource struct {
+	copy      RestoreCopy
+	dest      guideInput // destination fields only
+	blob, sum string
+}
+
+const guideDestCols = `d.id, d.name, d.kind, d.account, d.container, d.endpoint_override, d.bucket, d.region, d.path`
+
+func (s *guideSource) dests() []any {
+	d := &s.dest
+	return []any{&s.copy.DestinationID, &s.copy.Name, &d.kind, &d.account, &d.container, &d.endpoint, &d.bucket, &d.region, &d.nfsPath}
+}
+
+// LoadRestoreGuide builds the guide of a succeeded or partial, non-test run;
+// nil for other runs. A run with copy rows restores from one of its
+// succeeded copies and that copy's destination: the one on destID, else the
+// first in member order. A failed copy is never a source, even when its data
+// blob landed (its manifest did not). Runs from before destination groups
+// have no copy rows; they use the job's destination. With destID set and no
+// succeeded copy there, the error is ErrNoSuccessfulCopy.
+func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, destID *uuid.UUID) (*RestoreGuide, error) {
 	var in guideInput
-	var status, trigger string
+	var status, trigger, runBlob, runSum string
+	var jobID uuid.UUID
+	var order []uuid.UUID
 	var opts []byte
-	err := q.QueryRow(ctx, `SELECT r.status, r.trigger, r.blob_path, r.sha256, COALESCE(t.engine, 'postgresql'), COALESCE(t.vault_provider, ''),
-		COALESCE(t.namespace, 'olympos'), COALESCE(t.service, 'olympos-db'), j.engine_options,
-		d.kind, d.account, d.container, d.endpoint_override, d.bucket, d.region, d.path
-		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN destinations d ON d.id = j.destination_id
-		LEFT JOIN targets t ON t.id = j.target_id WHERE r.id = $1`, runID).
-		Scan(&status, &trigger, &in.blobPath, &in.sha256, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts,
-			&in.kind, &in.account, &in.container, &in.endpoint, &in.bucket, &in.region, &in.nfsPath)
+	err := q.QueryRow(ctx, `SELECT r.job_id, r.status, r.trigger, r.blob_path, r.sha256, r.destination_ids, COALESCE(t.engine, 'postgresql'),
+		COALESCE(t.vault_provider, ''), COALESCE(t.namespace, 'olympos'), COALESCE(t.service, 'olympos-db'), j.engine_options
+		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id WHERE r.id = $1`, runID).
+		Scan(&jobID, &status, &trigger, &runBlob, &runSum, &order, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts)
 	if err != nil {
 		return nil, store.NotFound(err)
 	}
-	if status != "succeeded" || trigger == "test" || in.blobPath == "" {
+
+	rows, err := q.Query(ctx, `SELECT `+guideDestCols+`, c.status, c.blob_path, c.sha256
+		FROM backup_run_copies c JOIN destinations d ON d.id = c.destination_id WHERE c.run_id = $1
+		ORDER BY COALESCE(array_position($2::uuid[], c.destination_id), 1000), d.name`, runID, order)
+	if err != nil {
+		return nil, err
+	}
+	hasCopies := false
+	var sources []guideSource
+	for rows.Next() {
+		var s guideSource
+		var cs string
+		if err := rows.Scan(append(s.dests(), &cs, &s.blob, &s.sum)...); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		hasCopies = true
+		if cs == "succeeded" && s.blob != "" {
+			s.copy.Kind = s.dest.kind
+			sources = append(sources, s)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if !hasCopies && status == "succeeded" && runBlob != "" {
+		// From before destination groups: the job's destination.
+		s := guideSource{blob: runBlob, sum: runSum}
+		err := q.QueryRow(ctx, `SELECT `+guideDestCols+` FROM backup_jobs j JOIN destinations d ON d.id = j.destination_id WHERE j.id = $1`, jobID).
+			Scan(s.dests()...)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		if err == nil {
+			s.copy.Kind = s.dest.kind
+			sources = append(sources, s)
+		}
+	}
+	if status != "succeeded" && status != "partial" || trigger == "test" {
+		sources = nil
+	}
+
+	pick := -1
+	for i, s := range sources {
+		if destID == nil || s.copy.DestinationID == *destID {
+			pick = i
+			break
+		}
+	}
+	if pick < 0 {
+		if destID != nil {
+			return nil, ErrNoSuccessfulCopy
+		}
 		return nil, nil
 	}
-	in.runID = runID
+	s := sources[pick]
+	in.kind, in.account, in.container, in.endpoint, in.bucket, in.region, in.nfsPath =
+		s.dest.kind, s.dest.account, s.dest.container, s.dest.endpoint, s.dest.bucket, s.dest.region, s.dest.nfsPath
+	in.blobPath, in.sha256, in.runID = s.blob, s.sum, runID
 	_ = json.Unmarshal(opts, &in.options)
-	return buildRestoreGuide(in), nil
+	g := buildRestoreGuide(in)
+	for i, c := range sources {
+		c.copy.Selected = i == pick
+		g.Copies = append(g.Copies, c.copy)
+	}
+	return g, nil
 }
 
 func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }

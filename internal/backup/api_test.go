@@ -5,6 +5,7 @@ package backup_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -383,5 +384,291 @@ func TestSchedulePreviewAPI(t *testing.T) {
 	}
 	if code := c.Do("GET", "/api/v1/backup/schedule-preview?cron=nope", nil, &verr); code != 422 || verr.Fields["cron"] == "" {
 		t.Fatalf("bad cron: %d %+v", code, verr)
+	}
+}
+
+// destWith adds a destination whose container is distinct, so a restore
+// guide shows which destination it was built from.
+func destWith(t *testing.T, a *apiEnv, name, container string) uuid.UUID {
+	t.Helper()
+	id := addDest(t, a.e.DB, name)
+	if _, err := a.e.DB.Exec(context.Background(), `UPDATE destinations SET container = $2 WHERE id = $1`, id, container); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type seedCopy struct {
+	dest   uuid.UUID
+	status string
+	blob   string
+}
+
+// seedRun inserts a finished run with the given copies (in destination_ids order).
+func seedRun(t *testing.T, a *apiEnv, jobID uuid.UUID, status string, repairOf *uuid.UUID, copies ...seedCopy) uuid.UUID {
+	t.Helper()
+	ctx := context.Background()
+	var ids []uuid.UUID
+	blob, sum := "", ""
+	for _, c := range copies {
+		ids = append(ids, c.dest)
+		if c.status == "succeeded" && blob == "" {
+			blob, sum = c.blob, "sum-"+c.blob
+		}
+	}
+	var id uuid.UUID
+	if err := a.e.DB.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, blob_path, sha256, bytes, repair_of, destination_ids)
+		VALUES ($1, 'manual', $2, now(), now(), $3, $4, 10, $5, $6) RETURNING id`, jobID, status, blob, sum, repairOf, ids).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range copies {
+		sum := ""
+		if c.blob != "" {
+			sum = "sum-" + c.blob
+		}
+		if _, err := a.e.DB.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status, blob_path, bytes, sha256, tier, error)
+			VALUES ($1,$2,$3,$4,10,$5,'daily',$6)`, id, c.dest, c.status, c.blob, sum, map[string]string{"failed": "upload manifest: boom"}[c.status]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
+func guideCommands(g *backup.RestoreGuide) string {
+	var b strings.Builder
+	for _, s := range g.Steps {
+		b.WriteString(s.Commands + "\n")
+	}
+	return b.String()
+}
+
+type runBody struct {
+	backup.Run
+	Restore *backup.RestoreGuide `json:"restore"`
+	Error   string               `json:"error"`
+	Fields  map[string]string    `json:"fields"`
+}
+
+// Destination groups: create and patch validation, the job view shapes, and
+// the PATCH of destination_id on a group job (it used to hit the CHECK).
+func TestJobsAPIGroups(t *testing.T) {
+	a := newAPI(t)
+	e := a.e
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	cred := map[string]any{"source": "stored", "username": "backup", "password": canaryPW}
+	create := func(extra map[string]any) (int, string) {
+		in := map[string]any{"target_id": a.prod.TargetID, "cron": "0 2 * * *", "credential": cred}
+		for k, v := range extra {
+			in[k] = v
+		}
+		return op.Raw("POST", "/api/v1/backup/jobs", in)
+	}
+	var verr struct{ Fields map[string]string }
+	for _, c := range []struct {
+		name  string
+		extra map[string]any
+		field string
+		want  string
+	}{
+		{"neither", nil, "destination_id", "choose a destination or a destination group"},
+		{"both", map[string]any{"destination_id": d1, "destination_group_id": g}, "destination_id", "choose a destination or a destination group"},
+		{"unknown group", map[string]any{"destination_group_id": uuid.New()}, "destination_group_id", "unknown destination group"},
+		{"unknown destination", map[string]any{"destination_id": uuid.New()}, "destination_id", "unknown destination"},
+	} {
+		verr.Fields = nil
+		code, raw := create(c.extra)
+		_ = json.Unmarshal([]byte(raw), &verr)
+		if code != http.StatusUnprocessableEntity || verr.Fields[c.field] != c.want {
+			t.Errorf("%s: %d %s", c.name, code, raw)
+		}
+	}
+
+	code, raw := create(map[string]any{"destination_group_id": g})
+	if code != http.StatusCreated {
+		t.Fatalf("create group job: %d %s", code, raw)
+	}
+	var shape map[string]json.RawMessage
+	_ = json.Unmarshal([]byte(raw), &shape)
+	if string(shape["destination"]) != "null" {
+		t.Fatalf("destination of a group job: %s", shape["destination"])
+	}
+	var job backup.JobView
+	_ = json.Unmarshal([]byte(raw), &job)
+	if job.Destination != nil || job.DestinationGroup == nil || job.DestinationGroup.ID != g || job.DestinationGroup.Name != "pair" ||
+		strings.Join(job.DestinationGroup.Members, ",") != "d1,d2" {
+		t.Fatalf("group job view: %+v", job)
+	}
+	path := "/api/v1/backup/jobs/" + job.ID.String()
+
+	// Switching to one destination clears the group, and back.
+	var v backup.JobView
+	if code := op.Do("PATCH", path, map[string]any{"destination_id": d1}, &v); code != http.StatusOK ||
+		v.DestinationGroup != nil || v.Destination == nil || v.Destination.ID != d1 || v.Destination.Name != "d1" {
+		t.Fatalf("patch to destination: %d %+v", code, v)
+	}
+	if code := op.Do("PATCH", path, map[string]any{"destination_id": d2}, &v); code != http.StatusOK || v.Destination == nil || v.Destination.ID != d2 {
+		t.Fatalf("patch destination: %d %+v", code, v)
+	}
+	v = backup.JobView{}
+	if code := op.Do("PATCH", path, map[string]any{"destination_group_id": g}, &v); code != http.StatusOK ||
+		v.Destination != nil || v.DestinationGroup == nil || v.DestinationGroup.ID != g {
+		t.Fatalf("patch to group: %d %+v", code, v)
+	}
+	// PATCH destination_id on a group job (the CHECK used to turn this into a 500).
+	if code := op.Do("PATCH", path, map[string]any{"destination_id": d1}, &v); code != http.StatusOK || v.DestinationGroup != nil {
+		t.Fatalf("patch destination of a group job: %d %+v", code, v)
+	}
+	op.Do("PATCH", path, map[string]any{"destination_group_id": g}, nil)
+	verr.Fields = nil
+	if code := op.Do("PATCH", path, map[string]any{"destination_id": d1, "destination_group_id": g}, &verr); code != http.StatusUnprocessableEntity ||
+		verr.Fields["destination_id"] != "choose a destination or a destination group" {
+		t.Fatalf("patch both: %d %+v", code, verr)
+	}
+	verr.Fields = nil
+	if code := op.Do("PATCH", path, map[string]any{"destination_group_id": uuid.New()}, &verr); code != http.StatusUnprocessableEntity ||
+		verr.Fields["destination_group_id"] != "unknown destination group" {
+		t.Fatalf("patch unknown group: %d %+v", code, verr)
+	}
+	// An unrelated patch leaves the group alone.
+	v = backup.JobView{}
+	if code := op.Do("PATCH", path, map[string]any{"enabled": false}, &v); code != http.StatusOK || v.DestinationGroup == nil || v.Destination != nil {
+		t.Fatalf("patch enabled: %d %+v", code, v)
+	}
+}
+
+// Runs carry their copies; the restore guide is built from a succeeded copy
+// of the run, never from a failed one and never from the job's current
+// destination.
+func TestRunCopiesAndRestoreGuide(t *testing.T) {
+	a := newAPI(t)
+	e := a.e
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	devOp := e.Login(e.Principal("dev", "Member", "operator@env=dev"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	job := addJob(t, e.DB, a.prod, jobOpts{group: &g})
+	get := func(id uuid.UUID, query string) (int, runBody) {
+		var b runBody
+		code := op.Do("GET", "/api/v1/backup/runs/"+id.String()+query, nil, &b)
+		return code, b
+	}
+
+	// Partial: the first copy failed after its data blob landed (manifest
+	// failed), only the second one is a restore source.
+	partial := seedRun(t, a, job, "partial", nil,
+		seedCopy{d1, "failed", "olympos/p.tar"}, seedCopy{d2, "succeeded", "olympos/p.tar"})
+	code, b := get(partial, "")
+	if code != http.StatusOK || len(b.Copies) != 2 || b.Copies[0].DestinationID != d1 || b.Copies[0].DestinationName != "d1" ||
+		b.Copies[0].DestinationKind != "azure_blob" || b.Copies[0].Status != "failed" || b.Copies[0].Error != "upload manifest: boom" ||
+		b.Copies[1].DestinationID != d2 || b.Copies[1].Status != "succeeded" || b.Copies[1].Tier != "daily" || b.Copies[1].Bytes != 10 {
+		t.Fatalf("copies: %d %+v", code, b.Copies)
+	}
+	if b.DestinationName != "pair" || b.RepairOf != nil {
+		t.Fatalf("run: %q %v", b.DestinationName, b.RepairOf)
+	}
+	if b.Restore == nil || !strings.Contains(guideCommands(b.Restore), "--container-name 'c2'") || strings.Contains(guideCommands(b.Restore), "'c1'") {
+		t.Fatalf("partial guide: %+v", b.Restore)
+	}
+	if len(b.Restore.Copies) != 1 || b.Restore.Copies[0].DestinationID != d2 || !b.Restore.Copies[0].Selected {
+		t.Fatalf("partial guide copies: %+v", b.Restore.Copies)
+	}
+	// The failed copy is not a source, even when named.
+	code, b = get(partial, "?copy="+d1.String())
+	if code != http.StatusUnprocessableEntity || !strings.Contains(b.Error, "no successful copy in that destination") {
+		t.Fatalf("copy=failed: %d %+v", code, b)
+	}
+	if code, _ := get(partial, "?copy="+uuid.NewString()); code != http.StatusUnprocessableEntity {
+		t.Fatalf("copy=unrelated: %d", code)
+	}
+	if code, _ := get(partial, "?copy=nope"); code != http.StatusUnprocessableEntity {
+		t.Fatalf("copy=garbage: %d", code)
+	}
+
+	// Succeeded on both: the first in member order is the default, ?copy= picks the other.
+	both := seedRun(t, a, job, "succeeded", nil,
+		seedCopy{d1, "succeeded", "olympos/b1.tar"}, seedCopy{d2, "succeeded", "olympos/b2.tar"})
+	_, b = get(both, "")
+	if b.Restore == nil || !strings.Contains(guideCommands(b.Restore), "--container-name 'c1'") || !strings.Contains(guideCommands(b.Restore), "olympos/b1.tar") ||
+		len(b.Restore.Copies) != 2 || !b.Restore.Copies[0].Selected || b.Restore.Copies[1].Selected {
+		t.Fatalf("default copy: %+v", b.Restore)
+	}
+	code, b = get(both, "?copy="+d2.String())
+	if code != http.StatusOK || b.Restore == nil || !strings.Contains(guideCommands(b.Restore), "--container-name 'c2'") ||
+		!strings.Contains(guideCommands(b.Restore), "olympos/b2.tar") || !strings.Contains(guideCommands(b.Restore), "sum-olympos/b2.tar") ||
+		b.Restore.Copies[0].Selected || !b.Restore.Copies[1].Selected {
+		t.Fatalf("?copy=: %d %+v", code, b.Restore)
+	}
+
+	// A failed run has no guide.
+	failed := seedRun(t, a, job, "failed", nil, seedCopy{d1, "failed", ""}, seedCopy{d2, "failed", ""})
+	if _, b = get(failed, ""); b.Restore != nil {
+		t.Fatalf("failed run guide: %+v", b.Restore)
+	}
+
+	// A repair run points at its original.
+	rep := seedRun(t, a, job, "succeeded", &partial, seedCopy{d1, "succeeded", "olympos/r.tar"})
+	_, b = get(rep, "")
+	if b.RepairOf == nil || *b.RepairOf != partial || b.DestinationName != "d1" {
+		t.Fatalf("repair run: %v %q", b.RepairOf, b.DestinationName)
+	}
+
+	// The list carries copies too.
+	var list struct{ Items []backup.Run }
+	op.Do("GET", "/api/v1/backup/runs?job_id="+job.String(), nil, &list)
+	n := map[uuid.UUID]int{}
+	for _, r := range list.Items {
+		if r.Copies == nil {
+			t.Errorf("run %s: copies is null", r.ID)
+		}
+		n[r.ID] = len(r.Copies)
+	}
+	if len(list.Items) != 4 || n[partial] != 2 || n[both] != 2 || n[rep] != 1 {
+		t.Fatalf("list copies: %v", n)
+	}
+	// Scope is unchanged.
+	if code := devOp.Do("GET", "/api/v1/backup/runs/"+partial.String(), nil, nil); code != http.StatusNotFound {
+		t.Fatalf("dev operator: %d", code)
+	}
+}
+
+// Review Focus 4: a run from before destination groups (no copy rows) keeps
+// today's guide, and a new run keeps its own destination after the job moved.
+func TestRestoreGuideAfterJobMoved(t *testing.T) {
+	a := newAPI(t)
+	e, ctx := a.e, context.Background()
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	job := addJob(t, e.DB, a.prod, jobOpts{})
+	if _, err := e.DB.Exec(ctx, `UPDATE backup_jobs SET destination_id = $2 WHERE id = $1`, job, d1); err != nil {
+		t.Fatal(err)
+	}
+	// Old run: no copy rows, no destination_ids.
+	var old uuid.UUID
+	if err := e.DB.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, blob_path, sha256, bytes)
+		VALUES ($1, 'schedule', 'succeeded', now(), now(), 'olympos/old.tar', 'oldsum', 10) RETURNING id`, job).Scan(&old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := seedRun(t, a, job, "succeeded", nil, seedCopy{d1, "succeeded", "olympos/new.tar"})
+
+	var b runBody
+	op.Do("GET", "/api/v1/backup/runs/"+old.String(), nil, &b)
+	if b.Restore == nil || !strings.Contains(guideCommands(b.Restore), "--container-name 'c1'") || len(b.Copies) != 0 || b.Copies == nil ||
+		b.DestinationName != "d1" || len(b.Restore.Copies) != 1 || b.Restore.Copies[0].DestinationID != d1 || !b.Restore.Copies[0].Selected {
+		t.Fatalf("old run: %+v %+v", b.Restore, b.Copies)
+	}
+	if code := op.Do("GET", "/api/v1/backup/runs/"+old.String()+"?copy="+d2.String(), nil, nil); code != http.StatusUnprocessableEntity {
+		t.Fatalf("old run, other destination: %d", code)
+	}
+
+	// Move the job to d2: the new run still restores from d1, and says so.
+	if code := op.Do("PATCH", "/api/v1/backup/jobs/"+job.String(), map[string]any{"destination_id": d2}, nil); code != http.StatusOK {
+		t.Fatalf("move job: %d", code)
+	}
+	b = runBody{}
+	op.Do("GET", "/api/v1/backup/runs/"+fresh.String(), nil, &b)
+	if b.Restore == nil || !strings.Contains(guideCommands(b.Restore), "--container-name 'c1'") || b.DestinationName != "d1" {
+		t.Fatalf("new run after move: %+v %q", b.Restore, b.DestinationName)
 	}
 }

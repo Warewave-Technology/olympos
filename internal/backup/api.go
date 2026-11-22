@@ -92,16 +92,19 @@ func (o *optUUID) UnmarshalJSON(b []byte) error {
 
 // JobInput is BackupJobInput (all fields optional for PATCH).
 type JobInput struct {
-	TargetID        *string          `json:"target_id"`
-	Credential      *CredentialInput `json:"credential"`
-	DestinationID   *uuid.UUID       `json:"destination_id"`
-	EngineOptions   json.RawMessage  `json:"engine_options"`
-	Cron            *string          `json:"cron"`
-	Timezone        *string          `json:"timezone"`
-	Retention       *Retention       `json:"retention"`
-	Enabled         *bool            `json:"enabled"`
-	NotifyChannelID optUUID          `json:"notify_channel_id"`
-	NotifyOnSuccess *bool            `json:"notify_on_success"`
+	TargetID      *string          `json:"target_id"`
+	Credential    *CredentialInput `json:"credential"`
+	DestinationID *uuid.UUID       `json:"destination_id"`
+	// DestinationGroupID is an alternative to DestinationID: the job writes
+	// to every destination of the group.
+	DestinationGroupID *uuid.UUID      `json:"destination_group_id"`
+	EngineOptions      json.RawMessage `json:"engine_options"`
+	Cron               *string         `json:"cron"`
+	Timezone           *string         `json:"timezone"`
+	Retention          *Retention      `json:"retention"`
+	Enabled            *bool           `json:"enabled"`
+	NotifyChannelID    optUUID         `json:"notify_channel_id"`
+	NotifyOnSuccess    *bool           `json:"notify_on_success"`
 }
 
 // needsCredential reports whether jobs for engine need a user credential
@@ -148,6 +151,10 @@ func (a *API) refUse(ctx context.Context, s *authz.Subject, clusterID uuid.UUID)
 	return secrets.RefUse{GlobalAdmin: s.CanGlobal(authz.PermAdmin), Labels: labels}, nil
 }
 
+// errChooseDestination is the field error for a job with both or neither of
+// destination_id and destination_group_id.
+const errChooseDestination = "choose a destination or a destination group"
+
 func (a *API) checkRefs(ctx context.Context, in *JobInput, fields map[string]string) error {
 	if in.DestinationID != nil {
 		var ok bool
@@ -156,6 +163,15 @@ func (a *API) checkRefs(ctx context.Context, in *JobInput, fields map[string]str
 		}
 		if !ok {
 			fields["destination_id"] = "unknown destination"
+		}
+	}
+	if in.DestinationGroupID != nil {
+		var ok bool
+		if err := a.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM destination_groups WHERE id = $1)`, *in.DestinationGroupID).Scan(&ok); err != nil {
+			return err
+		}
+		if !ok {
+			fields["destination_group_id"] = "unknown destination group"
 		}
 	}
 	if in.NotifyChannelID.V != nil {
@@ -298,8 +314,8 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 			fields["target_id"] = "Configure this vault first (Vaults › Configure): snapshot backups use its Olympos AppRole."
 		}
 	}
-	if in.DestinationID == nil {
-		fields["destination_id"] = "required"
+	if (in.DestinationID == nil) == (in.DestinationGroupID == nil) {
+		fields["destination_id"] = errChooseDestination
 	}
 	cron, tz := "", "UTC"
 	if in.Cron != nil {
@@ -363,18 +379,22 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 			}
 			credID = &cid
 		}
-		if err := tx.QueryRow(ctx, `INSERT INTO backup_jobs (target_id, credential_id, destination_id, engine_options, cron, timezone,
+		if err := tx.QueryRow(ctx, `INSERT INTO backup_jobs (target_id, credential_id, destination_id, destination_group_id, engine_options, cron, timezone,
 			retention, enabled, notify_channel_id, created_by, last_scheduled_for, notify_on_success)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, CASE WHEN $8 THEN now() END, $11) RETURNING id`,
-			*in.TargetID, credID, *in.DestinationID, opts, cron, tz, retB, enabled, in.NotifyChannelID.V, httpx.ActorID(r),
-			in.NotifyOnSuccess != nil && *in.NotifyOnSuccess).Scan(&id); err != nil {
+			VALUES ($1,$2,$3,$12,$4,$5,$6,$7,$8,$9,$10, CASE WHEN $8 THEN now() END, $11) RETURNING id`,
+			*in.TargetID, credID, in.DestinationID, opts, cron, tz, retB, enabled, in.NotifyChannelID.V, httpx.ActorID(r),
+			in.NotifyOnSuccess != nil && *in.NotifyOnSuccess, in.DestinationGroupID).Scan(&id); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE targets SET status = 'configured' WHERE id = $1 AND status = 'candidate'`, *in.TargetID); err != nil {
 			return err
 		}
-		details := map[string]any{"target_id": *in.TargetID, "destination_id": in.DestinationID.String(), "cron": cron,
-			"timezone": tz, "enabled": enabled}
+		details := map[string]any{"target_id": *in.TargetID, "cron": cron, "timezone": tz, "enabled": enabled}
+		if in.DestinationID != nil {
+			details["destination_id"] = in.DestinationID.String()
+		} else {
+			details["destination_group_id"] = in.DestinationGroupID.String()
+		}
 		if in.Credential != nil {
 			details["credential_source"] = in.Credential.Source
 		}
@@ -403,10 +423,20 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 	if in.TargetID != nil && *in.TargetID != j.Target.ID {
 		fields["target_id"] = "cannot be changed; create a new job"
 	}
-	dest := j.DestinationID
-	if in.DestinationID != nil && (dest == nil || *in.DestinationID != *dest) {
-		dest = in.DestinationID
-		changed = append(changed, "destination_id")
+	// Choosing one of destination and group clears the other.
+	dest, group := j.DestinationID, j.DestinationGroupID
+	if in.DestinationID != nil && in.DestinationGroupID != nil {
+		fields["destination_id"] = errChooseDestination
+	} else if in.DestinationID != nil {
+		if dest == nil || *in.DestinationID != *dest {
+			changed = append(changed, "destination_id")
+		}
+		dest, group = in.DestinationID, nil
+	} else if in.DestinationGroupID != nil {
+		if group == nil || *in.DestinationGroupID != *group {
+			changed = append(changed, "destination_group_id")
+		}
+		dest, group = nil, in.DestinationGroupID
 	}
 	cron, tz := j.Cron, j.Timezone
 	if in.Cron != nil && *in.Cron != cron {
@@ -486,11 +516,11 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 			}
 			credID = &cid
 		}
-		if _, err := tx.Exec(ctx, `UPDATE backup_jobs SET credential_id = $2, destination_id = $3, engine_options = $4, cron = $5,
+		if _, err := tx.Exec(ctx, `UPDATE backup_jobs SET credential_id = $2, destination_id = $3, destination_group_id = $12, engine_options = $4, cron = $5,
 			timezone = $6, retention = $7, enabled = $8, notify_channel_id = $9,
 			last_scheduled_for = CASE WHEN $10 THEN now() ELSE last_scheduled_for END,
 			notify_on_success = COALESCE($11, notify_on_success) WHERE id = $1`,
-			j.ID, credID, dest, opts, cron, tz, retB, enabled, notifyCh, resetSchedule, in.NotifyOnSuccess); err != nil {
+			j.ID, credID, dest, opts, cron, tz, retB, enabled, notifyCh, resetSchedule, in.NotifyOnSuccess, group); err != nil {
 			return err
 		}
 		if in.Credential != nil && j.CredentialID != nil {
@@ -651,6 +681,11 @@ func (a *API) listRuns(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
+	rows.Close()
+	if err := attachCopies(ctx, a.DB, out...); err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"items": out})
 }
 
@@ -672,8 +707,22 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w)
 		return
 	}
-	// F19: ready-to-copy restore commands for a successful run.
-	guide, err := LoadRestoreGuide(r.Context(), a.DB, id)
+	// ?copy=<destination id> picks the copy the restore guide is built from.
+	var copyDest *uuid.UUID
+	if s := r.URL.Query().Get("copy"); s != "" {
+		u, err := uuid.Parse(s)
+		if err != nil {
+			httpx.FieldErrors(w, "invalid filter", map[string]string{"copy": "must be a destination id"})
+			return
+		}
+		copyDest = &u
+	}
+	// F19: ready-to-copy restore commands for a successful or partial run.
+	guide, err := LoadRestoreGuide(r.Context(), a.DB, id, copyDest)
+	if errors.Is(err, ErrNoSuccessfulCopy) {
+		httpx.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
 	if err != nil {
 		httpx.Internal(w, r, a.Log, err)
 		return

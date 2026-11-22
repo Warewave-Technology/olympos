@@ -138,54 +138,136 @@ type Run struct {
 	Attempt int `json:"attempt"`
 	// Steps: dry-run checklist (F10); empty for other runs.
 	Steps []Step `json:"steps"`
+	// RepairOf: the run whose missing copies this run completes.
+	RepairOf *uuid.UUID `json:"repair_of"`
+	// DestinationName: the destination the run wrote to when it wrote to
+	// exactly one, else the job's destination or group name at read time.
+	DestinationName string `json:"destination_name"`
+	// Copies: one result per destination, in the order the run wrote them;
+	// empty for runs from before destination groups.
+	Copies []RunCopy `json:"copies"`
 
 	clusterID     uuid.UUID
 	clusterLabels map[string]string
+	destIDs       []uuid.UUID
+}
+
+// RunCopy is the result of a run on one destination.
+type RunCopy struct {
+	DestinationID   uuid.UUID `json:"destination_id"`
+	DestinationName string    `json:"destination_name"`
+	DestinationKind string    `json:"destination_kind"`
+	Status          string    `json:"status"` // succeeded | failed
+	BlobPath        string    `json:"blob_path"`
+	Bytes           int64     `json:"bytes"`
+	SHA256          string    `json:"sha256"`
+	Tier            string    `json:"tier"`
+	Error           string    `json:"error"`
 }
 
 const runSelect = `SELECT r.id, r.job_id, t.service, c.name, t.engine, r.trigger, r.status, r.scheduled_for, r.tier,
-	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, r.attempt, r.steps, c.id, c.labels
-	FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id`
+	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, r.attempt, r.steps, c.id, c.labels,
+	r.repair_of, r.destination_ids, COALESCE(d.name, g.name, '')
+	FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
+	LEFT JOIN destinations d ON d.id = j.destination_id LEFT JOIN destination_groups g ON g.id = j.destination_group_id`
 
 func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.JobID, &r.TargetService, &r.ClusterName, &r.Engine, &r.Trigger, &r.Status, &r.ScheduledFor, &r.Tier,
-		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.Attempt, &r.Steps, &r.clusterID, &r.clusterLabels)
+		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.Attempt, &r.Steps, &r.clusterID, &r.clusterLabels,
+		&r.RepairOf, &r.destIDs, &r.DestinationName)
 	if err != nil {
 		return nil, err
 	}
+	r.Copies = []RunCopy{}
 	return &r, nil
 }
 
-// LoadRun loads one run.
+// attachCopies loads the copies of runs with one query and sets each run's
+// Copies (in destination_ids order) and DestinationName.
+func attachCopies(ctx context.Context, q store.Querier, runs ...*Run) error {
+	if len(runs) == 0 {
+		return nil
+	}
+	byID := make(map[uuid.UUID]*Run, len(runs))
+	ids := make([]uuid.UUID, 0, len(runs))
+	for _, r := range runs {
+		byID[r.ID] = r
+		ids = append(ids, r.ID)
+	}
+	rows, err := q.Query(ctx, `SELECT c.run_id, c.destination_id, d.name, d.kind, c.status, c.blob_path, c.bytes, c.sha256, c.tier, c.error
+		FROM backup_run_copies c JOIN backup_runs r ON r.id = c.run_id JOIN destinations d ON d.id = c.destination_id
+		WHERE c.run_id = ANY($1) ORDER BY c.run_id, COALESCE(array_position(r.destination_ids, c.destination_id), 1000), d.name`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var runID uuid.UUID
+		var c RunCopy
+		if err := rows.Scan(&runID, &c.DestinationID, &c.DestinationName, &c.DestinationKind, &c.Status, &c.BlobPath, &c.Bytes, &c.SHA256, &c.Tier, &c.Error); err != nil {
+			return err
+		}
+		r := byID[runID]
+		r.Copies = append(r.Copies, c)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range runs {
+		if len(r.Copies) == 1 {
+			r.DestinationName = r.Copies[0].DestinationName
+		}
+	}
+	return nil
+}
+
+// LoadRun loads one run with its copies.
 func LoadRun(ctx context.Context, q store.Querier, id uuid.UUID) (*Run, error) {
 	r, err := scanRun(q.QueryRow(ctx, runSelect+` WHERE r.id = $1`, id))
-	return r, store.NotFound(err)
+	if err != nil {
+		return nil, store.NotFound(err)
+	}
+	return r, attachCopies(ctx, q, r)
+}
+
+// JobDestination is the destination of a job that writes to one.
+type JobDestination struct {
+	ID   uuid.UUID `json:"id"`
+	Name string    `json:"name"`
+}
+
+// JobDestinationGroup is the destination group of a job, with its member
+// names in position order.
+type JobDestinationGroup struct {
+	ID      uuid.UUID `json:"id"`
+	Name    string    `json:"name"`
+	Members []string  `json:"members"`
 }
 
 // JobView is the API shape of a job (BackupJob in openapi).
 type JobView struct {
-	ID          uuid.UUID        `json:"id"`
-	Target      inventory.Target `json:"target"`
-	Engine      string           `json:"engine"`
-	Credential  *CredentialView  `json:"credential"`
-	Destination struct {
-		ID   uuid.UUID `json:"id"`
-		Name string    `json:"name"`
-	} `json:"destination"`
-	EngineOptions         json.RawMessage `json:"engine_options"`
-	Cron                  string          `json:"cron"`
-	Timezone              string          `json:"timezone"`
-	Retention             Retention       `json:"retention"`
-	Enabled               bool            `json:"enabled"`
-	PausedReason          string          `json:"paused_reason"`
-	NotifyChannelID       *uuid.UUID      `json:"notify_channel_id"`
-	NotifyOnSuccess       bool            `json:"notify_on_success"`
-	NextRunAt             *time.Time      `json:"next_run_at"`
-	LastRun               *Run            `json:"last_run"`
-	EstimatedMonthlyBytes int64           `json:"estimated_monthly_bytes"`
-	EstimatedMonthlyCost  *float64        `json:"estimated_monthly_cost"`
-	CreatedAt             time.Time       `json:"created_at"`
+	ID         uuid.UUID        `json:"id"`
+	Target     inventory.Target `json:"target"`
+	Engine     string           `json:"engine"`
+	Credential *CredentialView  `json:"credential"`
+	// Destination is set for a job that writes to one destination,
+	// DestinationGroup for a job that writes to a group; the other is null.
+	Destination           *JobDestination      `json:"destination"`
+	DestinationGroup      *JobDestinationGroup `json:"destination_group"`
+	EngineOptions         json.RawMessage      `json:"engine_options"`
+	Cron                  string               `json:"cron"`
+	Timezone              string               `json:"timezone"`
+	Retention             Retention            `json:"retention"`
+	Enabled               bool                 `json:"enabled"`
+	PausedReason          string               `json:"paused_reason"`
+	NotifyChannelID       *uuid.UUID           `json:"notify_channel_id"`
+	NotifyOnSuccess       bool                 `json:"notify_on_success"`
+	NextRunAt             *time.Time           `json:"next_run_at"`
+	LastRun               *Run                 `json:"last_run"`
+	EstimatedMonthlyBytes int64                `json:"estimated_monthly_bytes"`
+	EstimatedMonthlyCost  *float64             `json:"estimated_monthly_cost"`
+	CreatedAt             time.Time            `json:"created_at"`
 }
 
 // estimateRuns is how many recent runs the transfer estimate averages.
@@ -210,11 +292,14 @@ func MonthlyEstimate(avgWireBytes float64, spec schedule.Spec, now time.Time) in
 func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now time.Time) (*JobView, error) {
 	v := &JobView{ID: j.ID, Target: j.Target, Engine: j.Target.Engine, EngineOptions: j.EngineOptions, Cron: j.Cron, Timezone: j.Timezone,
 		Retention: j.Retention, Enabled: j.Enabled, PausedReason: j.PausedReason, NotifyChannelID: j.NotifyChannelID, NotifyOnSuccess: j.NotifyOnSuccess, CreatedAt: j.CreatedAt}
-	v.Destination.Name = j.DestinationName
 	if j.DestinationID != nil {
-		v.Destination.ID = *j.DestinationID
+		v.Destination = &JobDestination{ID: *j.DestinationID, Name: j.DestinationName}
 	} else if j.DestinationGroupID != nil {
-		v.Destination.ID = *j.DestinationGroupID
+		members, err := groupMembers(ctx, q, *j.DestinationGroupID)
+		if err != nil {
+			return nil, fmt.Errorf("group members: %w", err)
+		}
+		v.DestinationGroup = &JobDestinationGroup{ID: *j.DestinationGroupID, Name: j.DestinationName, Members: append([]string{}, members...)}
 	}
 	if j.CredentialID != nil {
 		cv, err := creds.View(ctx, q, *j.CredentialID)
@@ -231,6 +316,11 @@ func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now
 	last, err := scanRun(q.QueryRow(ctx, runSelect+` WHERE r.job_id = $1 AND r.trigger <> 'test' ORDER BY r.created_at DESC LIMIT 1`, j.ID))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
+	}
+	if last != nil {
+		if err := attachCopies(ctx, q, last); err != nil {
+			return nil, err
+		}
 	}
 	v.LastRun = last
 	var avg *float64

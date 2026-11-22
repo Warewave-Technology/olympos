@@ -83,7 +83,7 @@ func LoadSelfView(ctx context.Context, q store.Querier) (*SelfView, error) {
 	rows.Close()
 	for _, run := range v.Runs {
 		if run.Status == "succeeded" && run.Trigger != "test" {
-			g, err := LoadRestoreGuide(ctx, q, run.ID)
+			g, err := LoadRestoreGuide(ctx, q, run.ID, nil)
 			if err != nil {
 				return nil, err
 			}
