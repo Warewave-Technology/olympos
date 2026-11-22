@@ -45,4 +45,5 @@ screenshot, no Azure account needed.
 | [The e2e lab](../test/e2e/README.md) | What the kind lab contains and how the e2e suite uses it |
 | [SECURITY.md](../SECURITY.md) | Reporting a vulnerability privately |
 
-`docs/design/` holds the HTML mockups the UI was built from; they are not user documentation.
+`docs/design/` holds the HTML mockups the UI was built from and the designs of features in progress
+([destination groups](design/destination-groups.md)); they are not user documentation.
