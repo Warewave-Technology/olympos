@@ -510,8 +510,8 @@ const stages = {
     await page.keyboard.press('Escape');
   },
 
-  // Azurite unreachable for one run: the run is Partial, and the repair run
-  // that follows at once writes the missing copy once Azurite is back.
+  // Azurite unreachable for one run: the run is Partial, and the first repair
+  // run, queued for 5 minutes later, writes the missing copy once Azurite is back.
   async partial() {
     const page = await signIn('admin');
     // Off the network, data kept (Azurite holds it in memory): the Service
@@ -522,23 +522,25 @@ const stages = {
       await page.waitForTimeout(100_000);
       partial = await runJob(page, 'payments-pg', (r) => !r.repair_of);
       if (partial.status !== 'partial') throw new Error(`expected a partial run, got ${partial.status}: ${partial.error}`);
-      await page.goto(URL);
-      const attention = page.getByRole('region', { name: 'Needs attention' });
-      await attention.getByText('Backup incomplete').waitFor({ timeout: 30_000 });
-      await shot(page, 'start-27-backup-incomplete', attention);
     } finally {
       azurite(true);
     }
-    // A repair run writes only the missing copy.
-    await waitRun(page, 'payments-pg', (r) => r.repair_of === partial.id && r.status === 'succeeded', 300_000);
+    await page.goto(URL);
+    const attention = page.getByRole('region', { name: 'Needs attention' });
+    await attention.getByText('Backup incomplete').waitFor({ timeout: 30_000 });
+    await shot(page, 'start-27-backup-incomplete', attention);
+    // The repair waits in the queue (Queued · starts …), and the partial run says when.
     await page.goto(`${URL}/backups?tab=runs`);
-    await page.getByRole('row').filter({ hasText: 'payments-pg' }).filter({ hasText: 'Repair' }).first().waitFor();
+    await page.getByRole('row').filter({ hasText: 'payments-pg' }).filter({ hasText: 'Repair' }).filter({ hasText: 'Queued · starts' }).first().waitFor();
     await shot(page, 'start-28-partial-and-repair');
     await openRun(page, 'payments-pg', (rows) => rows.filter({ hasText: 'Partial' }));
-    await page.getByRole('dialog').locator('.note').filter({ hasText: 'completed by a repair' }).waitFor();
+    await page.getByRole('dialog').locator('.note').filter({ hasText: 'Repair queued: next attempt at' }).waitFor();
     await dump(page, 'partial run dialog');
     await shot(page, 'start-29-partial-run', page.getByRole('dialog'));
     await page.keyboard.press('Escape');
+    // The repair starts 5 minutes after the partial run and writes only the missing copy.
+    const repair = await waitRun(page, 'payments-pg', (r) => r.repair_of === partial.id, 600_000);
+    if (repair.status !== 'succeeded') throw new Error(`repair ended ${repair.status}: ${repair.error}`);
 
     // Olympos' own database to the group as well.
     await page.goto(`${URL}/backups`);
