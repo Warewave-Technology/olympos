@@ -28,9 +28,10 @@ All notable changes to this project are documented here. The format follows
   waiting repair is `queued` with `not_before`; the partial run's details carry `next_repair_at`, and
   `backup.partial` carries `next_attempt_at`. It does not block *Run now*. A repair that completes every
   copy sends `backup.succeeded` (opt-in); one that gives up sends `backup.failed` with the missing
-  destinations.
+  destinations. A repair that comes due while its job is disabled or paused is skipped quietly.
 - Stall detection: a destination that takes no data for 10 minutes, or does not finish within 10 minutes
-  after the end of the stream, is detached so the other copies can finish.
+  after the end of the stream, is detached so the other copies can finish. An upload that does not return
+  within 30 seconds after that (blocked in the kernel on a hard NFS mount) is abandoned and logged.
 - Restore from a chosen copy: *Restore from copy* on a run and on the *Olympos database* card, and
   `?copy=<destination id>` on `GET /api/v1/backup/runs/{id}` and `GET /api/v1/backup/self`. Copies that a
   repair completed are offered too.
