@@ -702,9 +702,9 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
 		}
 	}
-	rr, copies, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
-	o := outcome{wire: wc.total(), tier: tiers[dests[0].ID], copies: copies}
-	o.fromFirstCopy()
+	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
+	o := outcome{bytes: streamed, wire: wc.total(), tier: tiers[dests[0].ID], copies: copies}
+	o.fromFirstCopy() // without a succeeded copy, bytes stays what was streamed
 	o.status = runStatus(engErr, copies)
 	switch {
 	case engErr != nil:

@@ -210,14 +210,15 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 // (its tag), manifest builds a copy's manifest (streamCopies fills in what
 // the engine reported) and scrub cleans error messages.
 //
-// engErr is the engine's own error; it is nil when the engine failed only
+// streamed is how many bytes the fan-out accepted (the run's size when no
+// copy succeeded). engErr is the engine's own error; it is nil when the engine failed only
 // because every upload had failed (the copies then hold the root cause).
 // When the engine failed before any data reached the uploads there are no
 // copies.
 func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []destRef,
 	open func(context.Context, uuid.UUID) (blob.Writer, error), path func(prefix string) string,
 	tiers map[uuid.UUID]string, manifest func(destRef, ManifestBlob, string) Manifest,
-	scrub func(string) string) (rr *RunResult, copies []copyResult, engErr error) {
+	scrub func(string) string) (rr *RunResult, copies []copyResult, streamed int64, engErr error) {
 	started := time.Now().UTC()
 	type opened struct {
 		i    int
@@ -243,7 +244,7 @@ func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []des
 		}})
 	}
 	if len(live) == 0 {
-		return nil, copies, nil
+		return nil, copies, 0, nil
 	}
 
 	ectx, cancel := context.WithCancel(ctx)
@@ -257,7 +258,7 @@ func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []des
 	if runErr != nil && !allFailed {
 		engErr = runErr
 		if total == 0 {
-			return rr, nil, engErr
+			return rr, nil, total, engErr
 		}
 	}
 	if rr == nil {
@@ -301,5 +302,5 @@ func streamCopies(ctx context.Context, eng Engine, ec EngineContext, dests []des
 		}
 		c.Status, c.BlobPath, c.Bytes, c.SHA256, c.Tier = "succeeded", o.path, total, sum, tier
 	}
-	return rr, copies, engErr
+	return rr, copies, total, engErr
 }

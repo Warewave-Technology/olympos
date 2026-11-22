@@ -200,12 +200,15 @@ func TestWorkerGroupAllFail(t *testing.T) {
 	db := testutil.DB(t)
 	g := seedGroup(t, db, jobOpts{})
 	g.B1.fail = errors.New("403 AuthorizationPermissionMismatch")
-	g.B2.fail, g.B2.failAfter = errors.New("503 ServerBusy"), 10
+	// Member 2 takes the whole stream, then fails to commit it.
+	g.B2.fail, g.B2.failAfter = errors.New("503 ServerBusy"), 1<<20
 	run := queue(t, db, g.Job, "manual", nil)
 	claimAndRun(t, g.W, run)
 
+	// Without a succeeded copy, bytes is what was streamed (as before).
 	r := loadRun(t, db, run)
-	if r.Status != "failed" || r.Error != "upload: 403 AuthorizationPermissionMismatch" || r.BlobPath != "" || r.SHA != "" {
+	if r.Status != "failed" || r.Error != "upload: 403 AuthorizationPermissionMismatch" || r.BlobPath != "" || r.SHA != "" ||
+		r.Bytes != int64(len(fakePayload)) {
 		t.Fatalf("run: %+v", r)
 	}
 	cs := loadCopies(t, db, run)
