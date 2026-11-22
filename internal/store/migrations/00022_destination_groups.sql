@@ -38,6 +38,9 @@ ALTER TABLE backup_runs ADD COLUMN repair_of uuid REFERENCES backup_runs(id);
 -- The destinations the run set out to write, fixed when it is queued
 -- (repairs) or starts (all others).
 ALTER TABLE backup_runs ADD COLUMN destination_ids uuid[];
+-- A queued run is not claimed before not_before (NULL = now): repairs wait
+-- 5 minutes, 30 minutes, then 2 hours after the run before them.
+ALTER TABLE backup_runs ADD COLUMN not_before timestamptz;
 CREATE INDEX backup_runs_repair_of ON backup_runs (repair_of) WHERE repair_of IS NOT NULL;
 
 CREATE TABLE backup_run_copies (
@@ -85,6 +88,7 @@ DROP TRIGGER olympos_backup_run_copies_freeze ON backup_run_copies;
 DROP FUNCTION olympos_backup_run_copies_freeze();
 DROP TABLE backup_run_copies;
 DROP INDEX backup_runs_repair_of;
+ALTER TABLE backup_runs DROP COLUMN not_before;
 ALTER TABLE backup_runs DROP COLUMN destination_ids;
 ALTER TABLE backup_runs DROP COLUMN repair_of;
 ALTER TABLE backup_runs DROP CONSTRAINT backup_runs_status_check;

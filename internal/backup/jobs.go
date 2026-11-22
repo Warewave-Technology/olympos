@@ -140,6 +140,9 @@ type Run struct {
 	Steps []Step `json:"steps"`
 	// RepairOf: the run whose missing copies this run completes.
 	RepairOf *uuid.UUID `json:"repair_of"`
+	// NotBefore: a queued run is not started before then (repairs wait
+	// RepairDelays); null = as soon as a worker is free.
+	NotBefore *time.Time `json:"not_before"`
 	// DestinationName: the destination the run wrote to when it wrote to
 	// exactly one, else the job's destination or group name at read time.
 	DestinationName string `json:"destination_name"`
@@ -167,7 +170,7 @@ type RunCopy struct {
 
 const runSelect = `SELECT r.id, r.job_id, t.service, c.name, t.engine, r.trigger, r.status, r.scheduled_for, r.tier,
 	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, r.attempt, r.steps, c.id, c.labels,
-	r.repair_of, r.destination_ids, COALESCE(d.name, g.name, '')
+	r.repair_of, r.destination_ids, COALESCE(d.name, g.name, ''), r.not_before
 	FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 	LEFT JOIN destinations d ON d.id = j.destination_id LEFT JOIN destination_groups g ON g.id = j.destination_group_id`
 
@@ -175,7 +178,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.JobID, &r.TargetService, &r.ClusterName, &r.Engine, &r.Trigger, &r.Status, &r.ScheduledFor, &r.Tier,
 		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.Attempt, &r.Steps, &r.clusterID, &r.clusterLabels,
-		&r.RepairOf, &r.destIDs, &r.DestinationName)
+		&r.RepairOf, &r.destIDs, &r.DestinationName, &r.NotBefore)
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +316,10 @@ func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now
 		n := spec.Next(now)
 		v.NextRunAt = &n
 	}
-	last, err := scanRun(q.QueryRow(ctx, runSelect+` WHERE r.job_id = $1 AND r.trigger <> 'test' ORDER BY r.created_at DESC LIMIT 1`, j.ID))
+	// A repair waiting for its not_before is not the last run yet: the job
+	// keeps showing the partial run it repairs.
+	last, err := scanRun(q.QueryRow(ctx, runSelect+` WHERE r.job_id = $1 AND r.trigger <> 'test'
+		AND NOT (r.status = 'queued' AND r.not_before IS NOT NULL AND r.not_before > now()) ORDER BY r.created_at DESC LIMIT 1`, j.ID))
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}

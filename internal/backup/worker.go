@@ -120,7 +120,7 @@ func (w *Worker) Run(ctx context.Context) {
 func (w *Worker) Active() int { return int(w.active.Load()) }
 
 // Claim picks the oldest queued run this replica can execute and marks it
-// running. Runs of offline clusters are failed with agent_offline. Returns
+// running; a run whose not_before is still ahead is left in the queue. Runs of offline clusters are failed with agent_offline. Returns
 // uuid.Nil when nothing is claimable.
 func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 	_, per := w.limits()
@@ -130,9 +130,11 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, lockClaim); err != nil {
 			return err
 		}
+		// A repair waits for its not_before (RepairDelays).
 		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until FROM backup_runs r
 			JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
-			WHERE r.status = 'queued' ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`)
+			WHERE r.status = 'queued' AND (r.not_before IS NULL OR r.not_before <= $1)
+			ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`, time.Now())
 		if err != nil {
 			return err
 		}
@@ -385,6 +387,9 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 		ev.Title = "Backup incomplete: " + subject
 		fields["missing"] = strings.Join(n.Missing, ", ")
 		fields["error"] = errText
+		if n.NextAttemptAt != nil {
+			fields["next_attempt"] = n.NextAttemptAt.UTC().Format(time.RFC3339)
+		}
 	case notify.BackupMissed:
 		ev.Title = "Backup missed: " + subject
 		fields["error"] = errText
@@ -409,8 +414,10 @@ type runNotice struct {
 	// Missing names the destinations without a copy, in destination_ids
 	// order (backup.partial, and backup.failed of a repair that gives up).
 	Missing []string
-	// RepairQueued: a repair of the partial run is queued (backup.partial).
-	RepairQueued bool
+	// RepairQueued: a repair of the partial run is queued (backup.partial),
+	// to start at NextAttemptAt.
+	RepairQueued  bool
+	NextAttemptAt *time.Time
 }
 
 // addPayload adds the notice's payload keys to p.
@@ -423,6 +430,9 @@ func (n runNotice) addPayload(p map[string]any) {
 	}
 	if n.Type == notify.BackupPartial {
 		p["repair_queued"] = n.RepairQueued
+		if n.NextAttemptAt != nil {
+			p["next_attempt_at"] = n.NextAttemptAt.UTC().Format(time.RFC3339)
+		}
 	}
 }
 
@@ -431,11 +441,12 @@ func (n runNotice) addPayload(p map[string]any) {
 // decides which event the run emits.
 //   - Test runs, retried attempts (o.quiet) and a repair with nothing left
 //     to repair emit nothing.
-//   - A partial run emits backup.partial with its missing destinations and
-//     whether a repair is queued.
+//   - A partial run emits backup.partial with its missing destinations,
+//     whether a repair is queued and when it starts.
 //   - A repair that ends partial or failed is quiet while another repair is
-//     queued; when none is (window over, attempts used up), it gives up
-//     with backup.failed naming the copies still missing.
+//     queued; when none is (MaxRepairs used, or the next one would start
+//     after the window), it gives up with backup.failed naming the copies
+//     still missing.
 //   - Otherwise succeeded, missed and failed map to their events (a
 //     succeeded repair completed every missing copy). backup.succeeded is
 //     opt-in: the caller checks the job's setting.
@@ -451,7 +462,7 @@ func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now
 	n := runNotice{RepairOf: repairOf}
 	switch {
 	case o.status == "partial" && repairOf == nil:
-		queued, err := queueRepairTx(ctx, tx, runID, now)
+		next, err := queueRepairTx(ctx, tx, runID, now)
 		if err != nil {
 			return runNotice{}, err
 		}
@@ -459,10 +470,10 @@ func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now
 		if err != nil {
 			return runNotice{}, err
 		}
-		n.Type, n.Missing, n.RepairQueued = notify.BackupPartial, destNames(missing), queued
+		n.Type, n.Missing, n.RepairQueued, n.NextAttemptAt = notify.BackupPartial, destNames(missing), next != nil, next
 	case repairOf != nil && (o.status == "partial" || o.status == "failed"):
-		queued, err := queueRepairTx(ctx, tx, runID, now)
-		if err != nil || queued {
+		next, err := queueRepairTx(ctx, tx, runID, now)
+		if err != nil || next != nil {
 			return runNotice{}, err
 		}
 		missing, err := missingDestinationsTx(ctx, tx, *repairOf, true)

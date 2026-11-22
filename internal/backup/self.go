@@ -93,7 +93,7 @@ func LoadSelfJob(ctx context.Context, q store.Querier) (*SelfJob, error) {
 
 // Run is the leader loop: it queues scheduled runs and executes queued
 // runs of the olympos-self job, one at a time. Repairs of partial runs are
-// queued runs of the job too, so this loop runs them.
+// queued runs of the job too, so this loop runs them once they are due.
 func (s *SelfBackup) Run(ctx context.Context) {
 	iv := s.Tick
 	if iv <= 0 {
@@ -152,11 +152,14 @@ func (s *SelfBackup) schedule(ctx context.Context) error {
 	})
 }
 
+// claim marks the oldest queued run of the job running; a repair waits for
+// its not_before (RepairDelays).
 func (s *SelfBackup) claim(ctx context.Context) (uuid.UUID, error) {
 	var id uuid.UUID
 	err := s.DB.QueryRow(ctx, `UPDATE backup_runs SET status = 'running', started_at = now() WHERE id = (
 		SELECT r.id FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id
-		WHERE j.system = $1 AND r.status = 'queued' ORDER BY r.created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id`, SelfSystem).Scan(&id)
+		WHERE j.system = $1 AND r.status = 'queued' AND (r.not_before IS NULL OR r.not_before <= $2)
+		ORDER BY r.created_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING id`, SelfSystem, s.now()).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return uuid.Nil, nil
 	}

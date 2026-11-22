@@ -444,9 +444,10 @@ func guideCommands(g *backup.RestoreGuide) string {
 
 type runBody struct {
 	backup.Run
-	Restore *backup.RestoreGuide `json:"restore"`
-	Error   string               `json:"error"`
-	Fields  map[string]string    `json:"fields"`
+	Restore      *backup.RestoreGuide `json:"restore"`
+	NextRepairAt *time.Time           `json:"next_repair_at"`
+	Error        string               `json:"error"`
+	Fields       map[string]string    `json:"fields"`
 }
 
 // Destination groups: create and patch validation, the job view shapes, and
@@ -630,6 +631,69 @@ func TestRunCopiesAndRestoreGuide(t *testing.T) {
 	// Scope is unchanged.
 	if code := devOp.Do("GET", "/api/v1/backup/runs/"+partial.String(), nil, nil); code != http.StatusNotFound {
 		t.Fatalf("dev operator: %d", code)
+	}
+}
+
+// A partial run's detail says when its queued repair is due
+// (next_repair_at, the repair's not_before), and a repair waiting for its
+// not_before does not block Run now or a dry run.
+func TestRunNextRepairAt(t *testing.T) {
+	a := newAPI(t)
+	e, ctx := a.e, context.Background()
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	d1, d2 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	job := addJob(t, e.DB, a.prod, jobOpts{group: &g})
+	partial := seedRun(t, a, job, "partial", nil, seedCopy{d1, "succeeded", "olympos/p1.tar"}, seedCopy{d2, "failed", ""})
+	get := func(id uuid.UUID) runBody {
+		var b runBody
+		if code := op.Do("GET", "/api/v1/backup/runs/"+id.String(), nil, &b); code != http.StatusOK {
+			t.Fatalf("get %s: %d", id, code)
+		}
+		return b
+	}
+	if b := get(partial); b.NextRepairAt != nil || b.NotBefore != nil {
+		t.Fatalf("no repair queued: %v %v", b.NextRepairAt, b.NotBefore)
+	}
+	due := time.Now().Add(5 * time.Minute).UTC().Truncate(time.Second)
+	var rep uuid.UUID
+	if err := e.DB.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, attempt, repair_of, destination_ids, not_before)
+		VALUES ($1, 'manual', 'queued', 2, $2, $3, $4) RETURNING id`, job, partial, []uuid.UUID{d2}, due).Scan(&rep); err != nil {
+		t.Fatal(err)
+	}
+	if b := get(partial); b.NextRepairAt == nil || !b.NextRepairAt.Equal(due) {
+		t.Fatalf("next_repair_at: %v, want %s", b.NextRepairAt, due)
+	}
+	if b := get(rep); b.NotBefore == nil || !b.NotBefore.Equal(due) || b.NextRepairAt != nil {
+		t.Fatalf("repair not_before: %v (next_repair_at %v)", b.NotBefore, b.NextRepairAt)
+	}
+	var list struct{ Items []backup.Run }
+	op.Do("GET", "/api/v1/backup/runs?job_id="+job.String(), nil, &list)
+	if len(list.Items) != 2 || list.Items[0].ID != rep || list.Items[0].NotBefore == nil {
+		t.Fatalf("list: %+v", list.Items)
+	}
+	// The job's last run is the partial one, not the repair waiting to start.
+	var jv backup.JobView
+	if code := op.Do("GET", "/api/v1/backup/jobs/"+job.String(), nil, &jv); code != http.StatusOK || jv.LastRun == nil || jv.LastRun.ID != partial {
+		t.Fatalf("last run: %d %+v", code, jv.LastRun)
+	}
+
+	// The waiting repair does not make the job busy; a run that is due does.
+	var run backup.Run
+	if code := op.Do("POST", "/api/v1/backup/jobs/"+job.String()+"/run", map[string]any{"trigger": "test"}, &run); code != http.StatusAccepted {
+		t.Fatalf("dry run while a repair waits: %d", code)
+	}
+	if code := op.Do("POST", "/api/v1/backup/jobs/"+job.String()+"/run", nil, nil); code != http.StatusConflict {
+		t.Fatalf("second run: %d", code)
+	}
+	if _, err := e.DB.Exec(ctx, `UPDATE backup_runs SET status = 'succeeded', finished_at = now() WHERE id = $1`, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.DB.Exec(ctx, `UPDATE backup_runs SET not_before = now() - interval '1 second' WHERE id = $1`, rep); err != nil {
+		t.Fatal(err)
+	}
+	if code := op.Do("POST", "/api/v1/backup/jobs/"+job.String()+"/run", nil, nil); code != http.StatusConflict {
+		t.Fatalf("run while a due repair is queued: %d", code)
 	}
 }
 

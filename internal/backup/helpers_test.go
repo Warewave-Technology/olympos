@@ -356,6 +356,9 @@ func events(t *testing.T, db *store.DB, typ string) []event {
 
 func ptr[T any](v T) *T { return &v }
 
+// yearly gives a retry window of weeks: half the time to the next 1 January.
+const yearly = "0 0 1 1 *"
+
 func mustContain(t *testing.T, s, sub string) {
 	t.Helper()
 	if !strings.Contains(s, sub) {

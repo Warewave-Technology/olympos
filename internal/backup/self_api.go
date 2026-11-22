@@ -83,7 +83,7 @@ func LoadSelfView(ctx context.Context, q store.Querier, copyDest *uuid.UUID) (*S
 	}
 	v.Configured, v.Job = true, j
 	rows, err := q.Query(ctx, `SELECT id, job_id, trigger, status, scheduled_for, tier, started_at, finished_at, bytes, wire_bytes,
-		blob_path, sha256, error, created_at, attempt, repair_of, destination_ids
+		blob_path, sha256, error, created_at, attempt, repair_of, destination_ids, not_before
 		FROM backup_runs WHERE job_id = $1 ORDER BY created_at DESC LIMIT 20`, j.ID)
 	if err != nil {
 		return nil, err
@@ -92,7 +92,7 @@ func LoadSelfView(ctx context.Context, q store.Querier, copyDest *uuid.UUID) (*S
 	for rows.Next() {
 		run := &Run{TargetService: selfService, ClusterName: selfCluster, Engine: "postgresql", DestinationName: j.DestinationName, Copies: []RunCopy{}}
 		if err := rows.Scan(&run.ID, &run.JobID, &run.Trigger, &run.Status, &run.ScheduledFor, &run.Tier, &run.StartedAt, &run.FinishedAt,
-			&run.Bytes, &run.WireBytes, &run.BlobPath, &run.SHA256, &run.Error, &run.CreatedAt, &run.Attempt, &run.RepairOf, &run.destIDs); err != nil {
+			&run.Bytes, &run.WireBytes, &run.BlobPath, &run.SHA256, &run.Error, &run.CreatedAt, &run.Attempt, &run.RepairOf, &run.destIDs, &run.NotBefore); err != nil {
 			return nil, err
 		}
 		v.Runs = append(v.Runs, run)
@@ -251,14 +251,13 @@ func (a *API) runSelf(w http.ResponseWriter, r *http.Request) {
 	}
 	var id uuid.UUID
 	err = store.Tx(ctx, a.DB, func(tx pgx.Tx) error {
-		var busy bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM backup_runs WHERE job_id = $1 AND status IN ('queued','running'))`, j.ID).Scan(&busy); err != nil {
+		busy, err := jobBusyTx(ctx, tx, j.ID)
+		if err != nil {
 			return err
 		}
 		if busy {
 			return errBusy
 		}
-		var err error
 		if id, err = QueueSelfRun(ctx, tx, j.ID); err != nil {
 			return err
 		}

@@ -347,7 +347,7 @@ paths:
             schema: {type: object, properties: {trigger: {type: string, enum: [manual, test], default: manual}}}
       responses:
         "202": {description: Queued, content: {application/json: {schema: {$ref: "#/components/schemas/BackupRun"}}}}
-        "409": {description: A run of this job is already queued or running, or the target is gone}
+        "409": {description: "A run of this job is already queued or running, or the target is gone. A repair waiting for its not_before does not count."}
   /backup/clusters:
     get:
       tags: [backups]
@@ -392,7 +392,7 @@ paths:
       parameters:
         - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from: the run's own copy there, else the newest copy a repair completed there. Default: the first succeeded copy of the run in member order."}
       responses:
-        "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}}}]}}}}
+        "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}, next_repair_at: {type: [string, "null"], format: date-time, description: "Partial run with a repair queued: when the repair starts (its not_before), else null"}}}]}}}}
         "422": {description: "copy is not a destination id, or the run has no successful copy in that destination"}
   /backup/test-connection:
     post:
@@ -449,7 +449,7 @@ paths:
       summary: Queue a manual olympos-self run (global operate).
       responses:
         "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {run_id: {type: string}}}}}}
-        "409": {description: Not configured yet, or a run is already queued/running}
+        "409": {description: "Not configured yet, or a run is already queued/running (a repair waiting for its not_before does not count)"}
   /backup/schedule-preview:
     get:
       tags: [backups]
@@ -1428,7 +1428,7 @@ components:
         notify_channel_id: {type: [string, "null"]}
         notify_on_success: {type: boolean}
         next_run_at: {type: [string, "null"], format: date-time}
-        last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}]}
+        last_run: {oneOf: [{$ref: "#/components/schemas/BackupRun"}, {type: "null"}], description: "Latest non-test run; a repair waiting for its not_before is skipped"}
         estimated_monthly_bytes: {type: integer, description: wire bytes of recent runs × frequency}
         estimated_monthly_cost: {type: [number, "null"], description: "estimated_monthly_bytes / GiB x cluster egress_rate_per_gb (when set)"}
         created_at: {type: string, format: date-time}
@@ -1501,6 +1501,7 @@ components:
         attempt: {type: integer, description: "1 = first attempt; > 1 = retried after the agent reconnected (F18, max 3, inside half the interval to the next activation)"}
         created_at: {type: string, format: date-time}
         repair_of: {type: [string, "null"], format: uuid, description: "The run whose missing copies this run completes"}
+        not_before: {type: [string, "null"], format: date-time, description: "A queued run is not started before then; set on repairs (5 min after the partial run, 30 min after the first repair, 2 h after the second), null = as soon as a worker is free"}
         destination_name: {type: string, description: "The destination the run wrote to when it wrote to exactly one, else the job's destination or group name"}
         copies:
           type: array

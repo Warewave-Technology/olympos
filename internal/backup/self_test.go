@@ -161,8 +161,10 @@ func newSelfGroup(t *testing.T) *selfEnv {
 	f := seed(t, db, "c1", nil, "online")
 	e := &selfEnv{db: db, d1: f.DestID, d2: addDest(t, db, "dest2"), channel: addChannel(t, db)}
 	g := addGroup(t, db, "self-pair", e.d1, e.d2)
+	// Yearly: a retry window of weeks, so every spaced repair fits whatever
+	// the time of day.
 	if err := db.QueryRow(ctx, `INSERT INTO backup_jobs (system, destination_group_id, cron, timezone, enabled, last_scheduled_for, notify_channel_id)
-		VALUES ('olympos-self', $1, '30 2 * * *', 'UTC', true, now(), $2) RETURNING id`, g, e.channel).Scan(&e.job); err != nil {
+		VALUES ('olympos-self', $1, $3, 'UTC', true, now(), $2) RETURNING id`, g, e.channel, yearly).Scan(&e.job); err != nil {
 		t.Fatal(err)
 	}
 	blobs := newBlobs("olympos")
@@ -175,18 +177,20 @@ func newSelfGroup(t *testing.T) *selfEnv {
 }
 
 type selfRun struct {
-	ID       uuid.UUID
-	Status   string
-	Error    string
-	Attempt  int
-	RepairOf *uuid.UUID
-	Dests    []uuid.UUID
-	BlobPath string
-	Tier     string
+	ID        uuid.UUID
+	Status    string
+	Error     string
+	Attempt   int
+	RepairOf  *uuid.UUID
+	Dests     []uuid.UUID
+	BlobPath  string
+	Tier      string
+	NotBefore *time.Time
 }
 
 // runSelf queues a manual run and runs the self loop until n runs of the
-// job have finished and none is queued or running.
+// job have finished and none is queued or running. Queued repairs are made
+// due at once (their not_before set in the past).
 func (e *selfEnv) runSelf(t *testing.T, n int) []selfRun {
 	t.Helper()
 	ctx := context.Background()
@@ -198,6 +202,10 @@ func (e *selfEnv) runSelf(t *testing.T, n int) []selfRun {
 	go e.runner.Run(rctx)
 	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
+		if _, err := e.db.Exec(ctx, `UPDATE backup_runs SET not_before = now() - interval '1 second'
+			WHERE job_id = $1 AND status = 'queued' AND not_before > now()`, e.job); err != nil {
+			t.Fatal(err)
+		}
 		var done, open int
 		_ = e.db.QueryRow(ctx, `SELECT count(*) FILTER (WHERE finished_at IS NOT NULL), count(*) FILTER (WHERE status IN ('queued','running'))
 			FROM backup_runs WHERE job_id = $1`, e.job).Scan(&done, &open)
@@ -207,8 +215,18 @@ func (e *selfEnv) runSelf(t *testing.T, n int) []selfRun {
 		time.Sleep(100 * time.Millisecond)
 	}
 	cancel()
-	rows, err := e.db.Query(ctx, `SELECT id, status, error, attempt, repair_of, destination_ids, blob_path, tier FROM backup_runs
-		WHERE job_id = $1 ORDER BY created_at`, e.job)
+	out := e.selfRuns(t)
+	if len(out) != n {
+		t.Fatalf("want %d runs, got %+v", n, out)
+	}
+	return out
+}
+
+// selfRuns returns the job's runs, oldest first.
+func (e *selfEnv) selfRuns(t *testing.T) []selfRun {
+	t.Helper()
+	rows, err := e.db.Query(context.Background(), `SELECT id, status, error, attempt, repair_of, destination_ids, blob_path, tier, not_before
+		FROM backup_runs WHERE job_id = $1 ORDER BY created_at`, e.job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,13 +234,13 @@ func (e *selfEnv) runSelf(t *testing.T, n int) []selfRun {
 	var out []selfRun
 	for rows.Next() {
 		var r selfRun
-		if err := rows.Scan(&r.ID, &r.Status, &r.Error, &r.Attempt, &r.RepairOf, &r.Dests, &r.BlobPath, &r.Tier); err != nil {
+		if err := rows.Scan(&r.ID, &r.Status, &r.Error, &r.Attempt, &r.RepairOf, &r.Dests, &r.BlobPath, &r.Tier, &r.NotBefore); err != nil {
 			t.Fatal(err)
 		}
 		out = append(out, r)
 	}
-	if len(out) != n {
-		t.Fatalf("want %d runs, got %+v", n, out)
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return out
 }
@@ -327,13 +345,47 @@ func TestSelfBackupPartialRepair(t *testing.T) {
 	mustContain(t, guideText(v2.Restore), backup.ManifestPath(rep.BlobPath, rep.ID))
 }
 
+// The self loop leaves a repair in the queue until its not_before.
+func TestSelfBackupRepairWaits(t *testing.T) {
+	e := newSelfGroup(t)
+	e.b2.fail, e.b2.failOnly = errors.New("disk full"), 1
+	ctx := context.Background()
+	if _, err := backup.QueueSelfRun(ctx, e.db, e.job); err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	before := time.Now()
+	go e.runner.Run(rctx)
+	var runs []selfRun
+	deadline := time.Now().Add(60 * time.Second)
+	for time.Now().Before(deadline) {
+		if runs = e.selfRuns(t); len(runs) == 2 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	after := time.Now()
+	time.Sleep(500 * time.Millisecond) // ten ticks of the loop
+	cancel()
+	runs = e.selfRuns(t)
+	if len(runs) != 2 || runs[0].Status != "partial" || runs[1].Status != "queued" || runs[1].RepairOf == nil {
+		t.Fatalf("runs: %+v", runs)
+	}
+	nb := runs[1].NotBefore
+	if nb == nil || nb.Before(before.Add(backup.RepairDelays[0]-time.Second)) || nb.After(after.Add(backup.RepairDelays[0]+time.Second)) {
+		t.Fatalf("repair not_before %v, want 5 minutes after the partial run", nb)
+	}
+}
+
 // A repair that keeps failing gives up with backup.failed (self title)
-// after MaxAttempts.
+// after MaxRepairs repairs.
 func TestSelfBackupRepairGivesUp(t *testing.T) {
 	e := newSelfGroup(t)
 	e.b2.fail = errors.New("disk full")
-	runs := e.runSelf(t, backup.MaxAttempts)
-	if runs[0].Status != "partial" || runs[1].Status != "failed" || runs[2].Status != "failed" || runs[2].Attempt != backup.MaxAttempts {
+	runs := e.runSelf(t, 1+backup.MaxRepairs)
+	last := runs[backup.MaxRepairs]
+	if runs[0].Status != "partial" || runs[1].Status != "failed" || runs[2].Status != "failed" || last.Status != "failed" || last.Attempt != 1+backup.MaxRepairs {
 		t.Fatalf("runs: %+v", runs)
 	}
 	ev := events(t, e.db, "backup.%")
@@ -342,7 +394,7 @@ func TestSelfBackupRepairGivesUp(t *testing.T) {
 	}
 	p := ev[1].Payload
 	fields, _ := p["fields"].(map[string]any)
-	if p["title"] != "Backup failed: Olympos database (olympos-self)" || p["link"] != "/backups?self=1&run="+runs[2].ID.String() ||
+	if p["title"] != "Backup failed: Olympos database (olympos-self)" || p["link"] != "/backups?self=1&run="+last.ID.String() ||
 		fields["target"] != backup.SelfSystem || fields["missing"] != "dest2" || p["repair_of"] != runs[0].ID.String() {
 		t.Fatalf("backup.failed: %+v", p)
 	}

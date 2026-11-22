@@ -608,8 +608,8 @@ func (a *API) runJob(w http.ResponseWriter, r *http.Request) {
 		if _, err := tx.Exec(ctx, `SELECT 1 FROM backup_jobs WHERE id = $1 FOR UPDATE`, j.ID); err != nil {
 			return err
 		}
-		var busy bool
-		if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM backup_runs WHERE job_id = $1 AND status IN ('queued','running'))`, j.ID).Scan(&busy); err != nil {
+		busy, err := jobBusyTx(ctx, tx, j.ID)
+		if err != nil {
 			return err
 		}
 		if busy {
@@ -727,10 +727,29 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
+	// A partial run with a repair queued: when the repair is due.
+	var next *time.Time
+	if run.RepairOf == nil && run.Status == "partial" {
+		if err := a.DB.QueryRow(r.Context(), `SELECT min(not_before) FROM backup_runs WHERE repair_of = $1 AND status = 'queued'`, id).Scan(&next); err != nil {
+			httpx.Internal(w, r, a.Log, err)
+			return
+		}
+	}
 	httpx.JSON(w, http.StatusOK, struct {
 		*Run
-		Restore *RestoreGuide `json:"restore"`
-	}{run, guide})
+		Restore      *RestoreGuide `json:"restore"`
+		NextRepairAt *time.Time    `json:"next_repair_at"`
+	}{run, guide, next})
+}
+
+// jobBusyTx reports whether a run of the job is running or queued and due:
+// a repair waiting for its not_before does not keep Run now or a dry run
+// from starting.
+func jobBusyTx(ctx context.Context, tx pgx.Tx, jobID uuid.UUID) (bool, error) {
+	var busy bool
+	err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM backup_runs WHERE job_id = $1
+		AND (status = 'running' OR status = 'queued' AND (not_before IS NULL OR not_before <= now())))`, jobID).Scan(&busy)
+	return busy, err
 }
 
 // TestConnectionInput is the body of POST /backup/test-connection.
