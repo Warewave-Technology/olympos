@@ -135,43 +135,29 @@ func CheckOpen(sub *authz.Subject, clusterLabels map[string]string) error {
 	return nil
 }
 
-// CheckDecide applies the maker/checker rule to approve and reject:
-//   - the request must be pending and not past its TTL;
-//   - the checker MUST NOT be the maker, compared by (tenant_id, object_id).
-//     No role bypasses this, admin included;
-//   - guests never approve;
-//   - the checker needs vault-approver in scope of the vault's cluster.
-func CheckDecide(sub *authz.Subject, maker authz.Principal, clusterLabels map[string]string, st Status, expiresAt, now time.Time) error {
-	if st != StatusPending {
-		return conflict(statusReason(st))
+// vaultMsgs keep the texts change requests have always shown.
+func vaultMsgs(st Status) ruleMsgs {
+	return ruleMsgs{
+		notPending: func() string { return statusReason(st) },
+		expired:    ReasonExpired,
+		own:        ReasonOwnRequest,
+		guest:      ReasonGuest,
+		noRole:     ReasonNoRole,
+		notMaker:   ReasonNotMaker,
 	}
-	if !now.Before(expiresAt) {
-		return conflict(ReasonExpired)
-	}
-	if sub == nil {
-		return deny(ReasonNoRole)
-	}
-	if sub.Principal.SameAs(maker) {
-		return deny(ReasonOwnRequest)
-	}
-	if sub.Principal.IsGuest() {
-		return deny(ReasonGuest)
-	}
-	if !sub.Can(authz.PermVaultApprove, clusterLabels) {
-		return deny(ReasonNoRole)
-	}
-	return nil
 }
 
-// CheckCancel: only the maker withdraws a pending request.
+// CheckDecide applies the maker/checker rule (DecideRule) to approve and
+// reject a change request; the checker needs vault-approver in scope of the
+// vault's cluster.
+func CheckDecide(sub *authz.Subject, maker authz.Principal, clusterLabels map[string]string, st Status, expiresAt, now time.Time) error {
+	allowed := sub != nil && sub.Can(authz.PermVaultApprove, clusterLabels)
+	return decideRule(sub, maker, st == StatusPending, expiresAt, now, allowed, vaultMsgs(st))
+}
+
+// CheckCancel: only the maker withdraws a pending request (CancelRule).
 func CheckCancel(sub *authz.Subject, maker authz.Principal, st Status) error {
-	if st != StatusPending {
-		return conflict(statusReason(st))
-	}
-	if sub == nil || !sub.Principal.SameAs(maker) {
-		return deny(ReasonNotMaker)
-	}
-	return nil
+	return cancelRule(sub, maker, st == StatusPending, vaultMsgs(st))
 }
 
 // ---------------------------------------------------------------- input
