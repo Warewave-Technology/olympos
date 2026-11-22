@@ -250,6 +250,44 @@ type JobDestinationGroup struct {
 	Members []string  `json:"members"`
 }
 
+// DestinationLastSuccess is when a job last wrote a successful copy to one of
+// its destinations (nil: never).
+type DestinationLastSuccess struct {
+	DestinationID uuid.UUID  `json:"destination_id"`
+	Name          string     `json:"name"`
+	LastSuccessAt *time.Time `json:"last_success_at"`
+}
+
+// destinationsLastSuccess lists a job's current destinations (its
+// destination, or its group's members in position order) with the finish
+// time of the latest succeeded copy of a non-test run (repairs included).
+// Runs from before destination groups have no copy rows: a succeeded one
+// counts for the job's destination when the job writes to one, as the
+// restore guide assumes for such runs.
+func destinationsLastSuccess(ctx context.Context, q store.Querier, jobID uuid.UUID) ([]DestinationLastSuccess, error) {
+	rows, err := q.Query(ctx, `SELECT d.id, d.name, GREATEST(
+			(SELECT max(c.finished_at) FROM backup_run_copies c JOIN backup_runs r ON r.id = c.run_id
+				WHERE r.job_id = j.id AND r.trigger <> 'test' AND c.destination_id = d.id AND c.status = 'succeeded'),
+			(SELECT max(r.finished_at) FROM backup_runs r WHERE j.destination_id = d.id AND r.job_id = j.id AND r.trigger <> 'test'
+				AND r.status = 'succeeded' AND NOT EXISTS (SELECT 1 FROM backup_run_copies c WHERE c.run_id = r.id)))
+		FROM backup_jobs j LEFT JOIN destination_group_members m ON m.group_id = j.destination_group_id
+		JOIN destinations d ON d.id = COALESCE(j.destination_id, m.destination_id)
+		WHERE j.id = $1 ORDER BY m.position`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []DestinationLastSuccess{}
+	for rows.Next() {
+		var l DestinationLastSuccess
+		if err := rows.Scan(&l.DestinationID, &l.Name, &l.LastSuccessAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 // JobView is the API shape of a job (BackupJob in openapi).
 type JobView struct {
 	ID         uuid.UUID        `json:"id"`
@@ -258,21 +296,24 @@ type JobView struct {
 	Credential *CredentialView  `json:"credential"`
 	// Destination is set for a job that writes to one destination,
 	// DestinationGroup for a job that writes to a group; the other is null.
-	Destination           *JobDestination      `json:"destination"`
-	DestinationGroup      *JobDestinationGroup `json:"destination_group"`
-	EngineOptions         json.RawMessage      `json:"engine_options"`
-	Cron                  string               `json:"cron"`
-	Timezone              string               `json:"timezone"`
-	Retention             Retention            `json:"retention"`
-	Enabled               bool                 `json:"enabled"`
-	PausedReason          string               `json:"paused_reason"`
-	NotifyChannelID       *uuid.UUID           `json:"notify_channel_id"`
-	NotifyOnSuccess       bool                 `json:"notify_on_success"`
-	NextRunAt             *time.Time           `json:"next_run_at"`
-	LastRun               *Run                 `json:"last_run"`
-	EstimatedMonthlyBytes int64                `json:"estimated_monthly_bytes"`
-	EstimatedMonthlyCost  *float64             `json:"estimated_monthly_cost"`
-	CreatedAt             time.Time            `json:"created_at"`
+	Destination      *JobDestination      `json:"destination"`
+	DestinationGroup *JobDestinationGroup `json:"destination_group"`
+	EngineOptions    json.RawMessage      `json:"engine_options"`
+	Cron             string               `json:"cron"`
+	Timezone         string               `json:"timezone"`
+	Retention        Retention            `json:"retention"`
+	Enabled          bool                 `json:"enabled"`
+	PausedReason     string               `json:"paused_reason"`
+	NotifyChannelID  *uuid.UUID           `json:"notify_channel_id"`
+	NotifyOnSuccess  bool                 `json:"notify_on_success"`
+	NextRunAt        *time.Time           `json:"next_run_at"`
+	LastRun          *Run                 `json:"last_run"`
+	// DestinationsLastSuccess: per current destination, in member order,
+	// when the job last wrote a successful copy there.
+	DestinationsLastSuccess []DestinationLastSuccess `json:"destinations_last_success"`
+	EstimatedMonthlyBytes   int64                    `json:"estimated_monthly_bytes"`
+	EstimatedMonthlyCost    *float64                 `json:"estimated_monthly_cost"`
+	CreatedAt               time.Time                `json:"created_at"`
 }
 
 // estimateRuns is how many recent runs the transfer estimate averages.
@@ -331,6 +372,9 @@ func (j *Job) View(ctx context.Context, q store.Querier, creds *Credentials, now
 		}
 	}
 	v.LastRun = last
+	if v.DestinationsLastSuccess, err = destinationsLastSuccess(ctx, q, j.ID); err != nil {
+		return nil, fmt.Errorf("destinations last success: %w", err)
+	}
 	var avg *float64
 	if err := q.QueryRow(ctx, `SELECT avg(wire_bytes)::float8 FROM (SELECT wire_bytes FROM backup_runs
 		WHERE job_id = $1 AND status = 'succeeded' AND trigger <> 'test' ORDER BY finished_at DESC LIMIT $2) x`, j.ID, estimateRuns).Scan(&avg); err != nil {

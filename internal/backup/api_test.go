@@ -869,3 +869,105 @@ func TestRestoreGuideRepairCopies(t *testing.T) {
 	}
 	mustContain(t, guideCommands(b.Restore), backup.ManifestPath("p2/rep2.zip", rep2))
 }
+
+// The job (and the self-backup) shows, per current destination in member
+// order, when it last wrote a successful copy there: repairs count, dry
+// runs do not, a destination the job no longer uses is not listed, and a
+// single-destination job counts its runs from before destination groups.
+func TestJobDestinationsLastSuccess(t *testing.T) {
+	a := newAPI(t)
+	e, ctx := a.e, context.Background()
+	op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+	admin := e.Login(e.Principal("root", "Member", "admin"))
+	d1, d2, d3 := destWith(t, a, "d1", "c1"), destWith(t, a, "d2", "c2"), destWith(t, a, "d3", "c3")
+	g := addGroup(t, e.DB, "pair", d1, d2)
+	job := addJob(t, e.DB, a.prod, jobOpts{group: &g})
+	now := time.Now().UTC().Truncate(time.Second)
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	run := func(job uuid.UUID, trigger, status string, repairOf *uuid.UUID, finished time.Time, copies map[uuid.UUID]string) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := e.DB.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, repair_of) VALUES ($1, $2, $3, $4, $4, $5) RETURNING id`,
+			job, trigger, status, finished, repairOf).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		for d, st := range copies {
+			if _, err := e.DB.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status, finished_at) VALUES ($1, $2, $3, $4)`, id, d, st, finished); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	type entry struct {
+		ID   uuid.UUID
+		Name string
+		At   *time.Time
+	}
+	flat := func(ls []backup.DestinationLastSuccess) []entry {
+		out := []entry{}
+		for _, l := range ls {
+			out = append(out, entry{l.DestinationID, l.Name, l.LastSuccessAt})
+		}
+		return out
+	}
+	check := func(what string, got []backup.DestinationLastSuccess, want ...entry) {
+		t.Helper()
+		g := flat(got)
+		if len(g) != len(want) {
+			t.Fatalf("%s: %+v, want %+v", what, g, want)
+		}
+		for i := range want {
+			if g[i].ID != want[i].ID || g[i].Name != want[i].Name || (g[i].At == nil) != (want[i].At == nil) ||
+				g[i].At != nil && !g[i].At.Equal(*want[i].At) {
+				t.Fatalf("%s: %+v, want %+v", what, g, want)
+			}
+		}
+	}
+	getJob := func(id uuid.UUID) backup.JobView {
+		t.Helper()
+		var jv backup.JobView
+		if code := op.Do("GET", "/api/v1/backup/jobs/"+id.String(), nil, &jv); code != http.StatusOK {
+			t.Fatalf("get job: %d", code)
+		}
+		return jv
+	}
+
+	check("no runs", getJob(job).DestinationsLastSuccess, entry{d1, "d1", nil}, entry{d2, "d2", nil})
+
+	partial := run(job, "manual", "partial", nil, at(5), map[uuid.UUID]string{d1: "succeeded", d2: "failed"})
+	run(job, "manual", "succeeded", &partial, at(4), map[uuid.UUID]string{d2: "succeeded"})
+	run(job, "test", "succeeded", nil, at(1), map[uuid.UUID]string{d1: "succeeded", d2: "succeeded"})
+	run(job, "manual", "failed", nil, at(2), map[uuid.UUID]string{d1: "failed", d2: "failed"})
+	run(job, "manual", "succeeded", nil, at(6), map[uuid.UUID]string{d3: "succeeded"}) // d3 left the group
+	check("group job", getJob(job).DestinationsLastSuccess, entry{d1, "d1", ptr(at(5))}, entry{d2, "d2", ptr(at(4))})
+
+	var list struct{ Items []backup.JobView }
+	op.Do("GET", "/api/v1/backup/jobs", nil, &list)
+	if len(list.Items) != 1 {
+		t.Fatalf("list: %d jobs", len(list.Items))
+	}
+	check("list", list.Items[0].DestinationsLastSuccess, entry{d1, "d1", ptr(at(5))}, entry{d2, "d2", ptr(at(4))})
+
+	// A single-destination job: its runs from before destination groups
+	// (no copy rows) count for its destination.
+	single := addJob(t, e.DB, a.prod, jobOpts{})
+	if _, err := e.DB.Exec(ctx, `UPDATE backup_jobs SET destination_id = $2 WHERE id = $1`, single, d3); err != nil {
+		t.Fatal(err)
+	}
+	run(single, "schedule", "succeeded", nil, at(8), nil)
+	run(single, "schedule", "failed", nil, at(7), nil)
+	check("single legacy", getJob(single).DestinationsLastSuccess, entry{d3, "d3", ptr(at(8))})
+	run(single, "manual", "succeeded", nil, at(3), map[uuid.UUID]string{d3: "succeeded"})
+	check("single", getJob(single).DestinationsLastSuccess, entry{d3, "d3", ptr(at(3))})
+
+	// The self-backup card shows the same.
+	var sv backup.SelfView
+	if code := admin.Do("PUT", "/api/v1/backup/self", map[string]any{"destination_group_id": g}, &sv); code != http.StatusOK {
+		t.Fatalf("configure self: %d", code)
+	}
+	run(sv.Job.ID, "schedule", "partial", nil, at(2), map[uuid.UUID]string{d1: "failed", d2: "succeeded"})
+	if code := admin.Do("GET", "/api/v1/backup/self", nil, &sv); code != http.StatusOK {
+		t.Fatalf("get self: %d", code)
+	}
+	check("self", sv.DestinationsLastSuccess, entry{d1, "d1", nil}, entry{d2, "d2", ptr(at(2))})
+}

@@ -25,6 +25,9 @@ type SelfView struct {
 	// Restore: commands for the latest restorable (succeeded or partial)
 	// original run, never a repair (F19, docs/restore-olympos.md).
 	Restore *RestoreGuide `json:"restore"`
+	// DestinationsLastSuccess: per current destination, in member order,
+	// when the self-backup last wrote a successful copy there.
+	DestinationsLastSuccess []DestinationLastSuccess `json:"destinations_last_success"`
 }
 
 type selfInput struct {
@@ -73,7 +76,7 @@ func (a *API) getSelf(w http.ResponseWriter, r *http.Request) {
 // from the copy on copyDest when set (ErrNoSuccessfulCopy when the run has
 // none there), else from the first succeeded copy.
 func LoadSelfView(ctx context.Context, q store.Querier, copyDest *uuid.UUID) (*SelfView, error) {
-	v := &SelfView{Runs: []*Run{}}
+	v := &SelfView{Runs: []*Run{}, DestinationsLastSuccess: []DestinationLastSuccess{}}
 	j, err := LoadSelfJob(ctx, q)
 	if errors.Is(err, store.ErrNotFound) {
 		return v, nil
@@ -82,6 +85,9 @@ func LoadSelfView(ctx context.Context, q store.Querier, copyDest *uuid.UUID) (*S
 		return nil, err
 	}
 	v.Configured, v.Job = true, j
+	if v.DestinationsLastSuccess, err = destinationsLastSuccess(ctx, q, j.ID); err != nil {
+		return nil, err
+	}
 	rows, err := q.Query(ctx, `SELECT id, job_id, trigger, status, scheduled_for, tier, started_at, finished_at, bytes, wire_bytes,
 		blob_path, sha256, error, created_at, attempt, repair_of, destination_ids, not_before
 		FROM backup_runs WHERE job_id = $1 ORDER BY created_at DESC LIMIT 20`, j.ID)
