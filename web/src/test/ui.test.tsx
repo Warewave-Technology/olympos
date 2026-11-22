@@ -245,6 +245,16 @@ describe('partial backup runs', () => {
     expect(b).not.toHaveClass('ok');
   });
 
+  it('a repair waiting for its start says when it starts', async () => {
+    const { RunBadge } = await import('../ui/status');
+    const at = new Date(Date.now() + 5 * 60_000).toISOString();
+    render(<RunBadge run={{ status: 'queued', error: '', not_before: at }} />);
+    expect(screen.getByText(`Queued · starts ${dateTime(at)}`)).toHaveClass('badge', 'mute');
+    cleanup();
+    render(<RunBadge run={{ status: 'queued', error: '', not_before: new Date(Date.now() - 1000).toISOString() }} />);
+    expect(screen.getByText('Queued')).toBeInTheDocument();
+  });
+
   it('the run dialog lists every copy and switches the restore commands to another copy', async () => {
     const { BackupRunDialog } = await import('../ui/BackupRunDialog');
     const copy = (over: Partial<BackupRunCopy>): BackupRunCopy => ({ destination_id: 'd1', destination_name: 'blob-weu-backups', destination_kind: 'azure_blob', status: 'succeeded', blob_path: 'p/a.zip', bytes: 3.1e9, sha256: '9f2c4a1e5d6c7b30', tier: 'daily', error: '', ...over });

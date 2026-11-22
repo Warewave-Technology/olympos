@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import type { BackupRun, ChangeRequest, Cluster, Severity, Target } from '../api/types';
-import { age, capitalize } from '../lib/format';
+import { age, capitalize, dateTime } from '../lib/format';
 import { Badge, type Tone } from './kit';
 
 export function PageHead({ title, sub, actions, crumbs }: { title: ReactNode; sub?: ReactNode; actions?: ReactNode; crumbs?: ReactNode }) {
@@ -39,8 +39,10 @@ export function TlsBadge({ t }: { t: Pick<Target, 'tls_ok'> }) {
 // partial (a group run that wrote some of its copies) is a warning, never a success.
 const RUN_TONE: Record<string, Tone> = { succeeded: 'ok', partial: 'warn', failed: 'crit', missed: 'crit', running: 'info', queued: 'mute' };
 
-export function RunBadge({ run }: { run: Pick<BackupRun, 'status' | 'error'> }) {
-  const label = capitalize(run.status) + ((run.status === 'failed' || run.status === 'partial') && run.error ? ` · ${run.error}` : '');
+export function RunBadge({ run }: { run: Pick<BackupRun, 'status' | 'error'> & Pick<Partial<BackupRun>, 'not_before'> }) {
+  // a repair waiting for its not_before (5 min, 30 min, 2 h after the run before it)
+  const waits = run.status === 'queued' && !!run.not_before && Date.parse(run.not_before) > Date.now();
+  const label = capitalize(run.status) + ((run.status === 'failed' || run.status === 'partial') && run.error ? ` · ${run.error}` : waits ? ` · starts ${dateTime(run.not_before)}` : '');
   return <Badge tone={RUN_TONE[run.status] ?? 'mute'}>{label}</Badge>;
 }
 
