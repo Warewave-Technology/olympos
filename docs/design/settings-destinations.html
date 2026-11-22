@@ -46,6 +46,16 @@ a{color:#83a598}a:hover{color:#8ec07c}
 .note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
 .note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
 .note.crit{border-color:#cc241d;background:#2a1a19;color:#d5c4a1}
+.grp{display:inline-flex;align-items:center;gap:6px}
+.gm{display:flex;flex-wrap:wrap;gap:10px;align-items:center;padding:10px 12px;border:1px solid #504945;border-radius:8px;background:#1d2021}
+.gm.new{border-color:#d79921;background:#2b2516}
+.gm .pos{flex:0 0 22px;height:22px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:600;border:1px solid #504945;color:#bdae93}
+.gm .nm{flex:1 1 140px;min-width:0;overflow-wrap:anywhere}
+.gm .ctl{display:flex;gap:6px;margin-left:auto}
+.btn.ic{padding:0;min-width:32px;width:32px}
+.btn[disabled]{opacity:.45;cursor:default}
+.in.err{border-color:#cc241d}
+.errtxt{color:#fc7f6f;font-size:12.5px;margin-top:6px;display:flex;gap:6px;align-items:center}
 </style>
 </head>
 <body>
@@ -82,14 +92,91 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </div>
 <div style="overflow-x: auto">
 <table class="t">
-<thead><tr><th>Name</th><th>Storage account / container</th><th>Auth</th><th>Delete refused</th><th>Used by</th><th>Status</th></tr></thead>
+<thead><tr><th>Name</th><th>Kind</th><th>Location</th><th>Auth</th><th>Delete refused</th><th>Used by</th><th>Status</th></tr></thead>
 <tbody>
-<tr><td class="mono">blob-weu-backups</td><td class="mono">stolympweu01 / backups</td><td><span class="badge info">Managed Identity</span></td><td><span class="badge ok">Yes</span></td><td>9 jobs</td><td><span class="badge ok">Healthy</span></td></tr>
-<tr class="sel"><td class="mono">blob-neu-dr</td><td class="mono">stolympneu01 / dr-copies</td><td><span class="badge mute">SAS token</span></td><td><span class="badge ok">Yes</span></td><td>2 jobs</td><td><span class="badge warn">SAS expires in 12 days</span></td></tr>
+<tr><td class="mono">blob-weu-backups</td><td><span class="badge mute">Azure Blob</span></td><td class="mono">stolympweu01 / backups</td><td><span class="badge info">Managed Identity</span></td><td><span class="badge ok">Yes</span></td><td>9 jobs <span class="muted">· in 1 group</span></td><td><span class="badge ok">Healthy</span></td></tr>
+<tr class="sel"><td class="mono">blob-neu-dr</td><td><span class="badge mute">Azure Blob</span></td><td class="mono">stolympneu01 / dr-copies</td><td><span class="badge mute">SAS token</span></td><td><span class="badge ok">Yes</span></td><td>2 jobs <span class="muted">· in 1 group</span></td><td><span class="badge warn">SAS expires in 12 days</span></td></tr>
+<tr><td class="mono">s3-fra-offsite</td><td><span class="badge mute">S3</span></td><td class="mono">AWS S3 / olympos-offsite</td><td><span class="badge mute">Access key · stored</span></td><td><span class="badge ok">Yes</span></td><td>0 jobs <span class="muted">· in 1 group</span></td><td><span class="badge ok">Healthy</span></td></tr>
+<tr><td class="mono">nfs-fra-snap</td><td><span class="badge mute">NFS</span></td><td class="mono">/exports/olympos</td><td><span class="badge mute">Server mount</span></td><td><span class="badge warn">No · protect on storage</span></td><td>0 jobs <span class="muted">· in 1 group</span></td><td><span class="badge ok">Healthy</span></td></tr>
 </tbody>
 </table>
 </div>
 <div style="height: 6px"></div>
+</section>
+
+<section class="card" id="groups">
+<div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center">
+<div><h2 style="margin: 0; font-size: 15px; font-weight: 600">Groups</h2><div class="muted" style="font-size: 12.5px; margin-top: 4px">A backup job can write to a group. One dump goes to every member, in the order shown.</div></div>
+<button class="btn pri">New group</button>
+</div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Name</th><th>Members</th><th>Used by</th><th style="text-align: right">Actions</th></tr></thead>
+<tbody>
+<tr class="sel"><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">eu-offsite</span></span></td><td>1 <span class="badge mute">Azure Blob</span> <span class="mono">blob-weu-backups</span> <span class="muted">&rarr;</span> 2 <span class="badge mute">S3</span> <span class="mono">s3-fra-offsite</span></td><td>5 jobs</td><td style="text-align: right"><button class="btn sm">Edit</button> <button class="btn sm" disabled title="Used by 5 jobs. Move them first.">Delete</button></td></tr>
+<tr><td><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">dr-pair</span></span></td><td>1 <span class="badge mute">Azure Blob</span> <span class="mono">blob-neu-dr</span> <span class="muted">&rarr;</span> 2 <span class="badge mute">NFS</span> <span class="mono">nfs-fra-snap</span></td><td>1 job</td><td style="text-align: right"><button class="btn sm">Edit</button> <button class="btn sm" disabled title="Used by 1 job. Move it first.">Delete</button></td></tr>
+</tbody>
+</table>
+</div>
+<div style="height: 6px"></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="g1-t" style="padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Edit group</div>
+<h2 id="g1-t" class="mono" style="margin: 6px 0 0; font-size: 16px; font-weight: 500">eu-offsite</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Jobs that use this group write to every destination below.</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px; min-height: 40px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px">
+<div><label class="lbl" for="g1n">Name</label><input id="g1n" class="in mono" value="eu-offsite"></div>
+<div><label class="lbl" for="g1d">Description</label><input id="g1d" class="in" value="Regional Blob plus an S3 copy in another cloud"></div>
+</div>
+<div>
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px"><span class="lbl" style="margin: 0" id="g1m">Destinations, in order</span><span class="muted" style="font-size: 12px">3 of 4</span></div>
+<ol aria-labelledby="g1m" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li class="gm"><span class="pos">1</span><span class="nm"><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span></span><div class="ctl"><button class="btn sm ic" aria-label="Move blob-weu-backups up" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button><button class="btn sm ic" aria-label="Move blob-weu-backups down"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg></button><button class="btn sm ic" aria-label="Remove blob-weu-backups"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button></div></li>
+<li class="gm"><span class="pos">2</span><span class="nm"><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span></span><div class="ctl"><button class="btn sm ic" aria-label="Move s3-fra-offsite up"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button><button class="btn sm ic" aria-label="Move s3-fra-offsite down"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg></button><button class="btn sm ic" aria-label="Remove s3-fra-offsite"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button></div></li>
+<li class="gm new"><span class="pos">3</span><span class="nm"><span class="mono">nfs-fra-snap</span> <span class="badge mute">NFS</span> <span class="badge warn" style="margin-left: 4px">New</span></span><div class="ctl"><button class="btn sm ic" aria-label="Move nfs-fra-snap up"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button><button class="btn sm ic" aria-label="Move nfs-fra-snap down" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg></button><button class="btn sm ic" aria-label="Remove nfs-fra-snap"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button></div></li>
+</ol>
+<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px">
+<div style="flex: 1 1 220px"><label class="lbl" for="g1a" style="position: absolute; left: -9999px">Add destination</label><select id="g1a" class="in mono"><option>Add a destination&hellip;</option><option>blob-neu-dr &middot; Azure Blob</option></select></div>
+<button class="btn">Add</button>
+</div>
+<div class="muted" style="font-size: 12px; margin-top: 8px">Two to four destinations, any kind. The first one is the default copy to restore from.</div>
+</div>
+<div class="note">Existing backups are not copied to a destination you add; only new runs write to it.</div>
+<div class="note warn">This change affects 5 backup jobs.</div>
+<div style="display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px"><button class="btn">Cancel</button><button class="btn pri">Save group</button></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="g2-t" style="padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">New group</div>
+<h2 id="g2-t" class="mono" style="margin: 6px 0 0; font-size: 16px; font-weight: 500">New destination group</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Pick two to four destinations. You can reorder them later.</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px; min-height: 40px"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px">
+<div><label class="lbl" for="g2n">Name</label><input id="g2n" class="in mono" value="cold-copies"></div>
+<div><label class="lbl" for="g2d">Description</label><input id="g2d" class="in" placeholder="Optional"></div>
+</div>
+<div>
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px"><span class="lbl" style="margin: 0" id="g2m">Destinations, in order</span><span class="muted" style="font-size: 12px">1 of 4</span></div>
+<ol aria-labelledby="g2m" style="list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px">
+<li class="gm"><span class="pos">1</span><span class="nm"><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span></span><div class="ctl"><button class="btn sm ic" aria-label="Move s3-fra-offsite up" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/></svg></button><button class="btn sm ic" aria-label="Move s3-fra-offsite down" disabled><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3v10M3.5 8.5 8 13l4.5-4.5"/></svg></button><button class="btn sm ic" aria-label="Remove s3-fra-offsite"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button></div></li>
+</ol>
+<div style="display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px">
+<div style="flex: 1 1 220px"><label class="lbl" for="g2a" style="position: absolute; left: -9999px">Add destination</label><select id="g2a" class="in mono"><option>Add a destination&hellip;</option></select></div>
+<button class="btn">Add</button>
+</div>
+<div class="errtxt" role="alert"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="#fc7f6f" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M8 4v5M8 12v.5"/></svg>A group needs 2 to 4 destinations</div>
+</div>
+<div style="display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 10px"><button class="btn">Cancel</button><button class="btn pri" disabled>Create group</button></div>
 </section>
 
 <section class="card" style="padding: 24px; display: flex; flex-direction: column; gap: 18px">
