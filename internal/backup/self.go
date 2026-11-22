@@ -184,8 +184,39 @@ func (s *SelfBackup) schedule(ctx context.Context) error {
 }
 
 // claim marks the oldest queued run of the job running; a repair waits for
-// its not_before (RepairDelays).
+// its not_before (RepairDelays). A due repair of a disabled self-backup is
+// skipped instead (skippedRepair).
 func (s *SelfBackup) claim(ctx context.Context) (uuid.UUID, error) {
+	if err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT r.id FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id
+			WHERE j.system = $1 AND NOT j.enabled AND r.status = 'queued' AND r.repair_of IS NOT NULL
+			  AND (r.not_before IS NULL OR r.not_before <= $2) FOR UPDATE OF r SKIP LOCKED`, SelfSystem, s.now())
+		if err != nil {
+			return err
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		o, _ := skippedRepair(true, false, "")
+		for _, id := range ids {
+			if _, err := finishRunTx(ctx, tx, id, o); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return uuid.Nil, err
+	}
 	var id uuid.UUID
 	err := s.DB.QueryRow(ctx, `UPDATE backup_runs SET status = 'running', started_at = now() WHERE id = (
 		SELECT r.id FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id

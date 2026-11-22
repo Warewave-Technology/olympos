@@ -179,9 +179,13 @@ an object like a destination group.
 - Agent disconnects keep their current rule (`disconnectedOutcome`, `attempt < MaxAttempts` inside the
   window), for plain and repair runs alike; the retry of a disconnected repair keeps `repair_of` and the
   missing set, has no `not_before` (it starts when the agent is back) and so counts as the same repair.
-  Only the first repair (attempt 2) can get such a retry. A repair that is not retried ends `missed` and
-  continues the chain like a failed repair: the next spaced repair is queued when the window allows,
-  else it gives up with `backup.failed` (`repair_of`, missing destinations), never `backup.missed`.
+  A repair whose attempt is below 3 is retried after a disconnect; later ones (and one past the window)
+  end `missed` and continue the repair chain like a failed repair: the next spaced repair is queued when
+  the window allows, else it gives up with `backup.failed` (`repair_of`, missing destinations), never
+  `backup.missed`.
+- A repair that comes due while its job is disabled or paused is skipped (added in the final review): it
+  ends `failed` with `skipped: the job is disabled` or `skipped: the job is paused`, quietly, and queues no
+  further repair.
 - A repair waiting for its `not_before` does not make the job busy (*Run now* and dry runs are accepted)
   and is not the job's `last_run`. The partial run's detail carries `next_repair_at`; `backup.partial`
   carries `next_attempt_at`.

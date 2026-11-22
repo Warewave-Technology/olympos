@@ -504,3 +504,45 @@ func TestSelfBackupInterruptedRun(t *testing.T) {
 		t.Fatalf("events: %+v", ev)
 	}
 }
+
+// A self repair that comes due while the self-backup is disabled is skipped
+// quietly, with no further repair.
+func TestSelfBackupRepairSkippedWhenDisabled(t *testing.T) {
+	e := newSelfGroup(t)
+	ctx := context.Background()
+	var partial, repair uuid.UUID
+	if err := e.db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, destination_ids)
+		VALUES ($1, 'manual', 'partial', now() - interval '20 minutes', now() - interval '19 minutes', $2) RETURNING id`, e.job, []uuid.UUID{e.d1, e.d2}).Scan(&partial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status) VALUES ($1, $2, 'succeeded'), ($1, $3, 'failed')`, partial, e.d1, e.d2); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, attempt, repair_of, destination_ids, not_before)
+		VALUES ($1, 'manual', 'queued', 2, $2, $3, now() - interval '1 second') RETURNING id`, e.job, partial, []uuid.UUID{e.d2}).Scan(&repair); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(ctx, `UPDATE backup_jobs SET enabled = false WHERE id = $1`, e.job); err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go e.runner.Run(rctx)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var open int
+		_ = e.db.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND finished_at IS NULL`, e.job).Scan(&open)
+		if open == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	runs := e.selfRuns(t)
+	if len(runs) != 2 || runs[1].ID != repair || runs[1].Status != "failed" || runs[1].Error != "skipped: the job is disabled" || len(loadCopies(t, e.db, repair)) != 0 {
+		t.Fatalf("runs: %+v", runs)
+	}
+	if ev := events(t, e.db, "backup.%"); len(ev) != 0 {
+		t.Fatalf("events: %+v", ev)
+	}
+}

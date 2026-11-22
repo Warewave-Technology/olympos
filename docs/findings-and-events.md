@@ -277,12 +277,14 @@ and scheduled time, and its `repair_of` field names the original run. While it w
 - When no repair is left (three used, or the next one would start after the window), the last repair
   sends `backup.failed` with the destinations that are still missing. The next scheduled run writes to
   every member again.
-- If the agent disconnects during a repair, the disconnect rule for every run applies: below attempt 3
-  (in practice the first repair) the repair is retried once the agent is back, and that retry is the
-  same repair, not another one. A repair that is not retried (attempt 3 or later, or the window is over)
-  ends `missed`, without `backup.missed`: the chain goes on as after a failed repair, so the next repair
-  is queued with its delay, or, when none is left, the repair sends `backup.failed` with the missing
-  destinations.
+- If the agent disconnects during a repair, the disconnect rule for every run applies: a repair whose
+  attempt is below 3 is retried once the agent is back, and that retry is the same repair, not another
+  one. Later ones (and one whose window is over) end `missed`, without `backup.missed`, and continue the
+  repair chain as after a failed repair: the next repair is queued with its delay, or, when none is
+  left, the repair sends `backup.failed` with the missing destinations.
+- A repair that comes due while its job is disabled (*Pause* on the job) or paused (target gone) does
+  not run: it ends `failed` with `skipped: the job is disabled` or `skipped: the job is paused`, sends
+  nothing and no further repair is queued. *Backup incomplete* stays until a later run writes every copy.
 - Test runs (the wizard's dry run) are never repaired. A run that fails entirely is not retried, as before.
 
 Besides the message fields, the stored event (`outbox.payload`) carries `job_id` and `run_id`.

@@ -523,3 +523,40 @@ func TestSelfViewRestoresPartial(t *testing.T) {
 		t.Fatalf("restore: %+v", v.Restore)
 	}
 }
+
+// A repair that comes due while its job is disabled or paused does not run:
+// it ends failed with the reason, quietly, and no further repair is queued.
+// A repair of an enabled job is unaffected.
+func TestRepairSkippedWhenJobDisabledOrPaused(t *testing.T) {
+	for _, c := range []struct{ name, set, want string }{
+		{"disabled", `enabled = false`, "skipped: the job is disabled"},
+		{"paused", `paused_reason = 'target_gone'`, "skipped: the job is paused"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			db := testutil.DB(t)
+			ctx := context.Background()
+			g := seedGroup(t, db, jobOpts{cron: yearly})
+			orig, _ := partialRun(t, db, g)
+			rep := onlyRepair(t, db, g.Job, orig, 2, g.Dest2)
+			if _, err := db.Exec(ctx, `UPDATE backup_jobs SET `+c.set+` WHERE id = $1`, g.Job); err != nil {
+				t.Fatal(err)
+			}
+			dueNow(t, db, rep.ID)
+			if id, err := g.W.Claim(ctx); err != nil || id != uuid.Nil {
+				t.Fatalf("claimed %s (%v)", id, err)
+			}
+			if r := loadRun(t, db, rep.ID); r.Status != "failed" || r.Error != c.want {
+				t.Fatalf("repair: %+v", r)
+			}
+			if cs := loadCopies(t, db, rep.ID); len(cs) != 0 {
+				t.Fatalf("copies: %+v", cs)
+			}
+			if q := queuedRuns(t, db, g.Job); len(q) != 0 {
+				t.Fatalf("queued after the skip: %+v", q)
+			}
+			if ev := events(t, db, "backup.%"); len(ev) != 1 || ev[0].Type != "backup.partial" {
+				t.Fatalf("events: %+v", ev)
+			}
+		})
+	}
+}

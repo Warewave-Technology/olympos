@@ -132,7 +132,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			return err
 		}
 		// A repair waits for its not_before (RepairDelays).
-		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until FROM backup_runs r
+		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until, r.repair_of IS NOT NULL, j.enabled, j.paused_reason FROM backup_runs r
 			JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 			WHERE r.status = 'queued' AND (r.not_before IS NULL OR r.not_before <= $1)
 			ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`, time.Now())
@@ -143,11 +143,14 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			id, cluster uuid.UUID
 			status      string
 			retryUntil  *time.Time
+			repair      bool
+			enabled     bool
+			paused      string
 		}
 		var cands []cand
 		for rows.Next() {
 			var c cand
-			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil); err != nil {
+			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil, &c.repair, &c.enabled, &c.paused); err != nil {
 				rows.Close()
 				return err
 			}
@@ -159,6 +162,14 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		}
 		running := map[uuid.UUID]int{}
 		for _, c := range cands {
+			if o, skip := skippedRepair(c.repair, c.enabled, c.paused); skip {
+				f, err := finishRunTx(ctx, tx, c.id, o)
+				if err != nil {
+					return err
+				}
+				failed = append(failed, f)
+				continue
+			}
 			switch c.status {
 			case "offline":
 				// F18: wait for the reconnect inside the retry window.
@@ -211,6 +222,22 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		f.observe()
 	}
 	return claimed, nil
+}
+
+// skippedRepair is the outcome of a due repair whose job was disabled or
+// paused while it waited: it does not run, ends failed with the reason,
+// sends nothing and queues no further repair (quiet). ok is false for every
+// other run.
+func skippedRepair(repair, enabled bool, paused string) (o outcome, ok bool) {
+	switch {
+	case !repair:
+		return outcome{}, false
+	case paused != "":
+		return outcome{status: "failed", err: "skipped: the job is paused", quiet: true}, true
+	case !enabled:
+		return outcome{status: "failed", err: "skipped: the job is disabled", quiet: true}, true
+	}
+	return outcome{}, false
 }
 
 // ReapStale fails running runs whose worker stopped heartbeating.
