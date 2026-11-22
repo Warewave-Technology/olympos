@@ -441,3 +441,66 @@ func selfView(t *testing.T, db *store.DB) backup.SelfView {
 	}
 	return *v
 }
+
+// A self run left running by a server that stopped is finished like any
+// run: an interrupted repair continues the repair chain (the next spaced
+// repair is queued, quietly), and an interrupted plain run sends
+// backup.failed.
+func TestSelfBackupInterruptedRun(t *testing.T) {
+	e := newSelfGroup(t)
+	ctx := context.Background()
+	var partial, repair, plain uuid.UUID
+	if err := e.db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, destination_ids)
+		VALUES ($1, 'manual', 'partial', now() - interval '20 minutes', now() - interval '19 minutes', $2) RETURNING id`, e.job, []uuid.UUID{e.d1, e.d2}).Scan(&partial); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(ctx, `INSERT INTO backup_run_copies (run_id, destination_id, status) VALUES ($1, $2, 'succeeded'), ($1, $3, 'failed')`, partial, e.d1, e.d2); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, attempt, repair_of, destination_ids, not_before, started_at, updated_at)
+		VALUES ($1, 'manual', 'running', 2, $2, $3, now() - interval '14 minutes', now() - interval '13 minutes', now() - interval '10 minutes') RETURNING id`,
+		e.job, partial, []uuid.UUID{e.d2}).Scan(&repair); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, updated_at)
+		VALUES ($1, 'manual', 'running', now() - interval '12 minutes', now() - interval '10 minutes') RETURNING id`, e.job).Scan(&plain); err != nil {
+		t.Fatal(err)
+	}
+	rctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go e.runner.Run(rctx)
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		var open int
+		_ = e.db.QueryRow(ctx, `SELECT count(*) FROM backup_runs WHERE job_id = $1 AND status = 'running'`, e.job).Scan(&open)
+		if open == 0 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	runs := e.selfRuns(t)
+	byID := map[uuid.UUID]selfRun{}
+	var next *selfRun
+	for i, r := range runs {
+		byID[r.ID] = r
+		if r.Status == "queued" {
+			next = &runs[i]
+		}
+	}
+	const interrupted = "interrupted: server stopped during the run"
+	if r := byID[repair]; r.Status != "failed" || r.Error != interrupted {
+		t.Fatalf("repair: %+v", r)
+	}
+	if r := byID[plain]; r.Status != "failed" || r.Error != interrupted {
+		t.Fatalf("plain run: %+v", r)
+	}
+	if next == nil || next.RepairOf == nil || *next.RepairOf != partial || next.Attempt != 3 || next.NotBefore == nil ||
+		len(next.Dests) != 1 || next.Dests[0] != e.d2 {
+		t.Fatalf("next repair: %+v (runs %+v)", next, runs)
+	}
+	ev := events(t, e.db, "backup.%")
+	if len(ev) != 1 || ev[0].Type != "backup.failed" || ev[0].Payload["link"] != "/backups?self=1&run="+plain.String() {
+		t.Fatalf("events: %+v", ev)
+	}
+}

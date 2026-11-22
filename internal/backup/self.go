@@ -100,10 +100,7 @@ func (s *SelfBackup) Run(ctx context.Context) {
 		iv = 10 * time.Second
 	}
 	schedule.RunLeader(ctx, s.DB, schedule.LockSelfBackup, iv, s.Log, func(ctx context.Context) error {
-		// A run left 'running' belonged to a previous leader that stopped.
-		if _, err := s.DB.Exec(ctx, `UPDATE backup_runs SET status = 'failed', error = 'interrupted: server stopped during the run', finished_at = now()
-			WHERE status = 'running' AND updated_at < now() - interval '2 minutes'
-			  AND job_id IN (SELECT id FROM backup_jobs WHERE system = $1)`, SelfSystem); err != nil {
+		if err := s.reapStale(ctx); err != nil {
 			return err
 		}
 		if err := s.schedule(ctx); err != nil {
@@ -116,6 +113,40 @@ func (s *SelfBackup) Run(ctx context.Context) {
 			}
 			s.execute(ctx, id)
 		}
+	})
+}
+
+// reapStale fails runs left 'running' by a previous leader that stopped
+// (no heartbeat for 2 minutes), through finishRunTx like any run: an
+// interrupted repair continues the repair chain, an interrupted run sends
+// backup.failed.
+func (s *SelfBackup) reapStale(ctx context.Context) error {
+	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT r.id FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id
+			WHERE j.system = $1 AND r.status = 'running' AND r.updated_at < now() - interval '2 minutes'
+			ORDER BY r.created_at FOR UPDATE OF r SKIP LOCKED`, SelfSystem)
+		if err != nil {
+			return err
+		}
+		var ids []uuid.UUID
+		for rows.Next() {
+			var id uuid.UUID
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, id := range ids {
+			if _, err := finishRunTx(ctx, tx, id, outcome{status: "failed", err: "interrupted: server stopped during the run"}); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 
