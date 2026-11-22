@@ -876,11 +876,15 @@ func (a *API) dashboard(w http.ResponseWriter, r *http.Request) {
 const notRepairAttemptSQL = `(r.repair_of IS NULL OR r.status = 'succeeded')`
 
 // missingSQL names the destinations of run r (in destination_ids order)
-// without a succeeded copy in r or in any repair of it.
+// without a succeeded copy in r or in any repair of it, among those the job
+// still writes to (as repairs do: a destination removed from the job is no
+// longer missing). Evaluated for the one run each item looks at.
 const missingSQL = `COALESCE((SELECT string_agg(d.name, ', ' ORDER BY u.ord)
 	FROM unnest(r.destination_ids) WITH ORDINALITY u(id, ord) JOIN destinations d ON d.id = u.id
 	WHERE NOT EXISTS (SELECT 1 FROM backup_run_copies c JOIN backup_runs x ON x.id = c.run_id
-	  WHERE (x.id = r.id OR x.repair_of = r.id) AND c.destination_id = u.id AND c.status = 'succeeded')), '')`
+	  WHERE (x.id = r.id OR x.repair_of = r.id) AND c.destination_id = u.id AND c.status = 'succeeded')
+	  AND u.id IN (SELECT COALESCE(cj.destination_id, cm.destination_id) FROM backup_jobs cj
+	    LEFT JOIN destination_group_members cm ON cm.group_id = cj.destination_group_id WHERE cj.id = r.job_id)), '')`
 
 func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid.UUID) ([]AttentionItem, error) {
 	var out []AttentionItem
@@ -889,10 +893,11 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 	if s.CanGlobal(authz.PermRead) {
 		var configured bool
 		var lastStatus, lastErr, missing string
-		err := a.DB.QueryRow(ctx, `SELECT true, COALESCE(l.status, ''), COALESCE(l.error, ''), COALESCE(l.missing, '')
-			FROM backup_jobs j LEFT JOIN LATERAL (SELECT r.status, r.error, `+missingSQL+` AS missing FROM backup_runs r
+		err := a.DB.QueryRow(ctx, `SELECT true, COALESCE(r.status, ''), COALESCE(r.error, ''),
+			CASE WHEN r.status = 'partial' THEN `+missingSQL+` ELSE '' END
+			FROM backup_jobs j LEFT JOIN LATERAL (SELECT r.id, r.job_id, r.destination_ids, r.status, r.error FROM backup_runs r
 			  WHERE r.job_id = j.id AND r.status IN ('succeeded','failed','partial') AND `+notRepairAttemptSQL+`
-			  AND r.created_at > now() - interval '48 hours' ORDER BY r.created_at DESC LIMIT 1) l ON true
+			  AND r.created_at > now() - interval '48 hours' ORDER BY r.created_at DESC LIMIT 1) r ON true
 			WHERE j.system = 'olympos-self'`).Scan(&configured, &lastStatus, &lastErr, &missing)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return nil, err
@@ -904,7 +909,7 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 		case lastStatus == "failed":
 			out = append(out, AttentionItem{Kind: "self_backup_failed", Severity: "crit", Label: "Olympos backup failed",
 				Detail: shortErr(lastErr), Link: "/backups?self=1"})
-		case lastStatus == "partial":
+		case lastStatus == "partial" && missing != "":
 			out = append(out, AttentionItem{Kind: "self_backup_partial", Severity: "warn", Label: "Olympos backup incomplete",
 				Detail: "missing " + missing, Link: "/backups?self=1"})
 		}
@@ -915,12 +920,13 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 	// Latest run per job in the last 48 h that failed, was missed or is
 	// partial (and not completed by a repair since).
 	rows, err := a.DB.Query(ctx, `
-		SELECT DISTINCT ON (j.id) j.id, t.service, r.status, r.error, `+missingSQL+`
-		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
-		WHERE t.cluster_id = ANY($1) AND j.deleted_at IS NULL AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
-		  AND r.status IN ('succeeded','failed','missed','partial') AND `+notRepairAttemptSQL+`
-		  AND NOT (r.status = 'failed' AND r.error LIKE 'agent_disconnected: retrying%')
-		ORDER BY j.id, r.created_at DESC`, clusterIDs)
+		SELECT r.job_id, r.service, r.status, r.error, CASE WHEN r.status = 'partial' THEN `+missingSQL+` ELSE '' END
+		FROM (SELECT DISTINCT ON (j.id) r.id, r.job_id, r.destination_ids, t.service, r.status, r.error
+		  FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
+		  WHERE t.cluster_id = ANY($1) AND j.deleted_at IS NULL AND r.trigger <> 'test' AND r.created_at > now() - interval '48 hours'
+		    AND r.status IN ('succeeded','failed','missed','partial') AND `+notRepairAttemptSQL+`
+		    AND NOT (r.status = 'failed' AND r.error LIKE 'agent_disconnected: retrying%')
+		  ORDER BY j.id, r.created_at DESC) r`, clusterIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -931,14 +937,14 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 			rows.Close()
 			return nil, err
 		}
-		switch st {
-		case "partial":
+		switch {
+		case st == "partial" && missing != "": // nothing missing the job still writes to: no item
 			out = append(out, AttentionItem{Kind: "backup_partial", Severity: "warn", Label: "Backup incomplete",
 				Detail: svc + " · missing " + missing, Link: "/backups?job=" + jobID.String()})
-		case "failed":
+		case st == "failed":
 			out = append(out, AttentionItem{Kind: "backup_failed", Severity: "crit", Label: "Backup failed",
 				Detail: svc + " · " + shortErr(errMsg), Link: "/backups?job=" + jobID.String()})
-		case "missed":
+		case st == "missed":
 			out = append(out, AttentionItem{Kind: "backup_missed", Severity: "crit", Label: "Backup missed",
 				Detail: svc, Link: "/backups?job=" + jobID.String()})
 		}
