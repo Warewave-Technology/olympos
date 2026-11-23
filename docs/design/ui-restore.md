@@ -19,8 +19,9 @@ with the pull request):
    parameters, bare-column keys, an Olympos-generated Keeper path); **no SQL text from the backup runs on the
    target**. Column defaults, `MATERIALIZED`/`ALIAS` columns, TTL, skip indexes, projections, constraints,
    codecs and table settings are not restored and are listed per table ("re-apply from your schema").
-   `Replacing`, `Summing`, `Aggregating` and `Collapsing` tables with expression keys are refused (an
-   `ORDER BY tuple()` would merge their rows), and server errors are reported as code and name only. See
+   `Replacing`, `Summing`, `Aggregating` and `Collapsing` tables with expression keys are not created and
+   are listed with the reason, while the rest of the database is restored (an `ORDER BY tuple()` would merge
+   their rows); a `Replicated` or proxy-engine database fails the whole request before anything is written, and server errors are reported as code and name only. See
    *ClickHouse objects* below.
 3. **Vault/OpenBao checks.** The token must hold **both** `update` and `sudo` on
    `sys/storage/raft/snapshot-force` (Vault enforces both), plus the `default` policy for
@@ -218,9 +219,10 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   - **No SQL text from the backup is run.** Olympos generates every `CREATE DATABASE` and `CREATE TABLE`
     from the manifest's structured data. The review showed that validating source DDL text could be bypassed
     again and again, and that the target then runs it with the restore credential.
-  - **Databases:** `CREATE DATABASE <db> ENGINE = Atomic`. A `Replicated` database is refused, because its
-    Keeper path could collide with the source's when Keeper is shared; another engine becomes Atomic, which the
-    result notes.
+  - **Databases:** `CREATE DATABASE <db> ENGINE = Atomic`. A `Replicated` database fails the whole request before
+    anything is written, because its Keeper path could collide with the source's when Keeper is shared; so does
+    a database whose engine is a proxy for another system (`MySQL`, `PostgreSQL`, …). `Ordinary`, `Lazy` and
+    `Memory` become Atomic, which the result notes.
   - **Tables created:** the MergeTree family (`MergeTree`, `Replacing`, `Summing`, `Aggregating`,
     `Collapsing`, `VersionedCollapsing`), their `Replicated*` variants, `Log`, `TinyLog`, `StripeLog` and
     `Memory`, each followed by its data. Each one is generated as

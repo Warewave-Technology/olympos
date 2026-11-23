@@ -564,37 +564,45 @@ const stages = {
     await apiCall(admin, 'POST', '/grants', { object_id: PEOPLE.approver.oid, roles: ['operator'], scope: 'env=lab' }, [201, 409]);
 
     // Something to restore: two tables in orders, then a fresh backup.
-    labSQL('orders-pg', [
-      'CREATE TABLE IF NOT EXISTS customers (id int PRIMARY KEY, name text NOT NULL)',
-      'CREATE TABLE IF NOT EXISTS orders (id int PRIMARY KEY, customer_id int REFERENCES customers, total numeric(10,2), placed_at timestamptz)',
-      "INSERT INTO customers SELECT g, 'customer ' || g FROM generate_series(1, 500) g ON CONFLICT DO NOTHING",
-      "INSERT INTO orders SELECT g, 1 + g % 500, (g % 97) * 1.25, timestamptz '2026-11-01' + g * interval '1 minute' FROM generate_series(1, 20000) g ON CONFLICT DO NOTHING",
-    ]);
-    const run = await runJob(admin, 'orders-pg', (r) => !r.repair_of);
-    if (run.status !== 'succeeded') throw new Error(`orders-pg run ended ${run.status}: ${run.error}`);
+    // orders-pg keeps its data across lab resets (and TestM8Restores checks
+    // its own table only), so the tables are dropped before and after.
+    const dropPG = () => labSQL('orders-pg', ['DROP TABLE IF EXISTS orders, customers']);
+    dropPG();
+    try {
+      labSQL('orders-pg', [
+        'CREATE TABLE IF NOT EXISTS customers (id int PRIMARY KEY, name text NOT NULL)',
+        'CREATE TABLE IF NOT EXISTS orders (id int PRIMARY KEY, customer_id int REFERENCES customers, total numeric(10,2), placed_at timestamptz)',
+        "INSERT INTO customers SELECT g, 'customer ' || g FROM generate_series(1, 500) g ON CONFLICT DO NOTHING",
+        "INSERT INTO orders SELECT g, 1 + g % 500, (g % 97) * 1.25, timestamptz '2026-11-01' + g * interval '1 minute' FROM generate_series(1, 20000) g ON CONFLICT DO NOTHING",
+      ]);
+      const run = await runJob(admin, 'orders-pg', (r) => !r.repair_of);
+      if (run.status !== 'succeeded') throw new Error(`orders-pg run ended ${run.status}: ${run.error}`);
 
-    const pg = await openRestoreDialog(admin, 'orders-pg', 'restore-pg');
-    await pg.getByText('Store in Olympos', { exact: true }).click(); // the lab has no Azure Key Vault
-    await pg.getByLabel('Username', { exact: true }).fill('postgres');
-    await pg.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-pg-password');
-    await checkTarget(pg);
-    await pg.getByLabel('Justification', { exact: true }).fill('INC-2041: orders-pg volume lost, restore into restore-pg');
-    await dump(admin, 'restore dialog checked');
-    await shot(admin, 'restore-01-dialog', pg);
-    const pgID = await submitRestore(admin, pg);
+      const pg = await openRestoreDialog(admin, 'orders-pg', 'restore-pg');
+      await pg.getByText('Store in Olympos', { exact: true }).click(); // the lab has no Azure Key Vault
+      await pg.getByLabel('Username', { exact: true }).fill('postgres');
+      await pg.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-pg-password');
+      await checkTarget(pg);
+      await pg.getByLabel('Justification', { exact: true }).fill('INC-2041: orders-pg volume lost, restore into restore-pg');
+      await dump(admin, 'restore dialog checked');
+      await shot(admin, 'restore-01-dialog', pg);
+      const pgID = await submitRestore(admin, pg);
 
-    // The checker: another person with operate on both clusters.
-    const approver = await signIn('approver');
-    await approver.goto(`${URL}/approvals?restore=${pgID}`);
-    await approver.getByRole('button', { name: 'Approve restore' }).waitFor();
-    await dump(approver, 'restore waiting for the checker');
-    await shot(approver, 'restore-02-approvals');
-    await approver.getByRole('button', { name: 'Approve restore' }).click();
-    await waitRestoreDone(approver, pgID);
-    await approver.goto(`${URL}/approvals?view=all&restore=${pgID}`);
-    await approver.getByRole('heading', { name: 'Result' }).waitFor();
-    await dump(approver, 'restore result');
-    await shot(approver, 'restore-03-result', approver.locator('.split-detail'));
+      // The checker: another person with operate on both clusters.
+      const approver = await signIn('approver');
+      await approver.goto(`${URL}/approvals?restore=${pgID}`);
+      await approver.getByRole('button', { name: 'Approve restore' }).waitFor();
+      await dump(approver, 'restore waiting for the checker');
+      await shot(approver, 'restore-02-approvals');
+      await approver.getByRole('button', { name: 'Approve restore' }).click();
+      await waitRestoreDone(approver, pgID);
+      await approver.goto(`${URL}/approvals?view=all&restore=${pgID}`);
+      await approver.getByRole('heading', { name: 'Result' }).waitFor();
+      await dump(approver, 'restore result');
+      await shot(approver, 'restore-03-result', approver.locator('.split-detail'));
+    } finally {
+      dropPG();
+    }
   },
 
   // ClickHouse: tables come back with their data; a view, a materialized
@@ -605,37 +613,43 @@ const stages = {
     const admin = await signIn('admin');
     const approver = await signIn('approver');
     const lab = (await apiCall(admin, 'GET', '/clusters')).items.find((c) => c.name === 'lab');
-    await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'compressed' });
-    chSQL('metrics-ch', 'backup', 'CANARY-lab-ch-password', [
-      'CREATE DATABASE IF NOT EXISTS analytics',
-      'CREATE TABLE IF NOT EXISTS analytics.events (d Date, service LowCardinality(String), v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY (service, d)',
-      "INSERT INTO analytics.events SELECT toDate('2026-10-01') + number % 60, ['api', 'web', 'worker'][1 + number % 3], number FROM numbers(30000)",
-      'CREATE TABLE IF NOT EXISTS analytics.sessions (d Date, user String, hits UInt32 DEFAULT 1) ENGINE = ReplacingMergeTree ORDER BY (d, user) TTL d + INTERVAL 2 YEAR',
-      "INSERT INTO analytics.sessions SELECT toDate('2026-10-01') + number % 30, concat('u', toString(number % 900)), number FROM numbers(4000)",
-      'CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.events_daily ENGINE = SummingMergeTree ORDER BY (service, d) AS SELECT d, service, count() AS n FROM analytics.events GROUP BY d, service',
-      "INSERT INTO analytics.events SELECT toDate('2026-11-01') + number % 20, ['api', 'web'][1 + number % 2], number FROM numbers(6000)",
-      'CREATE VIEW IF NOT EXISTS analytics.errors_by_day AS SELECT d, count() AS n FROM analytics.events WHERE v % 100 = 0 GROUP BY d',
-      "CREATE TABLE IF NOT EXISTS analytics.all_events AS analytics.events ENGINE = Merge('analytics', '^events$')",
-    ]);
-    const chJob = await ensureJobAPI(admin, 'metrics-ch', {
-      credential: { source: 'stored', username: 'backup', password: 'CANARY-lab-ch-password' },
-      engine_options: { databases: ['analytics'] },
-    });
-    await runJobAPI(admin, chJob, 'metrics-ch');
-    const ch = await openRestoreDialog(admin, 'metrics-ch', 'restore-ch');
-    await ch.getByText('Store in Olympos', { exact: true }).click();
-    await ch.getByLabel('Username', { exact: true }).fill('restore');
-    await ch.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-ch-password');
-    await checkTarget(ch);
-    await ch.getByLabel('Justification', { exact: true }).fill('INC-2041: metrics-ch lost with the node, restore into restore-ch');
-    const chID = await submitRestore(admin, ch);
-    await apiCall(approver, 'POST', `/restores/${chID}/approve`, { comment: 'Checked the target' });
-    await waitRestoreDone(admin, chID);
-    await admin.goto(`${URL}/approvals?view=all&restore=${chID}`);
-    await admin.getByRole('heading', { name: 'Result' }).waitFor();
-    await dump(admin, 'clickhouse restore result');
-    await shot(admin, 'restore-04-clickhouse-result', admin.locator('.split-detail'));
-    await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+    const dropCH = () => chSQL('metrics-ch', 'backup', 'CANARY-lab-ch-password', ['DROP DATABASE IF EXISTS analytics SYNC']);
+    dropCH();
+    try {
+      await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'compressed' });
+      chSQL('metrics-ch', 'backup', 'CANARY-lab-ch-password', [
+        'CREATE DATABASE IF NOT EXISTS analytics',
+        'CREATE TABLE IF NOT EXISTS analytics.events (d Date, service LowCardinality(String), v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY (service, d)',
+        "INSERT INTO analytics.events SELECT toDate('2026-10-01') + number % 60, ['api', 'web', 'worker'][1 + number % 3], number FROM numbers(30000)",
+        'CREATE TABLE IF NOT EXISTS analytics.sessions (d Date, user String, hits UInt32 DEFAULT 1) ENGINE = ReplacingMergeTree ORDER BY (d, user) TTL d + INTERVAL 2 YEAR',
+        "INSERT INTO analytics.sessions SELECT toDate('2026-10-01') + number % 30, concat('u', toString(number % 900)), number FROM numbers(4000)",
+        'CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.events_daily ENGINE = SummingMergeTree ORDER BY (service, d) AS SELECT d, service, count() AS n FROM analytics.events GROUP BY d, service',
+        "INSERT INTO analytics.events SELECT toDate('2026-11-01') + number % 20, ['api', 'web'][1 + number % 2], number FROM numbers(6000)",
+        'CREATE VIEW IF NOT EXISTS analytics.errors_by_day AS SELECT d, count() AS n FROM analytics.events WHERE v % 100 = 0 GROUP BY d',
+        "CREATE TABLE IF NOT EXISTS analytics.all_events AS analytics.events ENGINE = Merge('analytics', '^events$')",
+      ]);
+      const chJob = await ensureJobAPI(admin, 'metrics-ch', {
+        credential: { source: 'stored', username: 'backup', password: 'CANARY-lab-ch-password' },
+        engine_options: { databases: ['analytics'] },
+      });
+      await runJobAPI(admin, chJob, 'metrics-ch');
+      const ch = await openRestoreDialog(admin, 'metrics-ch', 'restore-ch');
+      await ch.getByText('Store in Olympos', { exact: true }).click();
+      await ch.getByLabel('Username', { exact: true }).fill('restore');
+      await ch.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-ch-password');
+      await checkTarget(ch);
+      await ch.getByLabel('Justification', { exact: true }).fill('INC-2041: metrics-ch lost with the node, restore into restore-ch');
+      const chID = await submitRestore(admin, ch);
+      await apiCall(approver, 'POST', `/restores/${chID}/approve`, { comment: 'Checked the target' });
+      await waitRestoreDone(admin, chID);
+      await admin.goto(`${URL}/approvals?view=all&restore=${chID}`);
+      await admin.getByRole('heading', { name: 'Result' }).waitFor();
+      await dump(admin, 'clickhouse restore result');
+      await shot(admin, 'restore-04-clickhouse-result', admin.locator('.split-detail'));
+    } finally {
+      await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+      dropCH();
+    }
   },
 
   // Vault: lab/vault's snapshot into restore-vault, a new Vault that is

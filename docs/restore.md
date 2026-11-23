@@ -142,9 +142,17 @@ retries: a failed restore is a new request (often with another target or credent
   `DEFAULT` expressions, `MATERIALIZED`, `ALIAS` and `EPHEMERAL` columns, TTL, skip indexes, projections,
   constraints, codecs, comments, the sampling key, table settings, and keys that are not plain columns (a
   `MergeTree` table then gets `ORDER BY tuple()`).
-- **Refused:** `Replacing`, `Summing`, `Aggregating` and `Collapsing` tables whose keys or engine
-  parameters are expressions (an `ORDER BY tuple()` would merge their rows differently), and `Replicated`
-  databases (their Keeper path could collide with the source's).
+- **Not created, data not restored, listed with the reason; the rest of the database is restored** (and
+  its result still says *Succeeded*, so read the list): `Replacing`, `Summing`, `Aggregating` and
+  `Collapsing` tables whose keys or engine parameters are expressions (an `ORDER BY tuple()` would merge
+  their rows differently), and tables with a column type outside the supported list. Restore their data by
+  hand from the backup ([Restore by hand](#clickhouse)).
+- **The whole request fails before anything is written:** a database with the `Replicated` engine (its
+  Keeper path could collide with the source's), a database whose engine is a proxy for another system
+  (`MySQL`, `PostgreSQL`, `MaterializedPostgreSQL`, `SQLite`, …), and a database that already exists on the
+  target with tables, views or dictionaries in it. The result names the database and the reason; the other
+  databases of the request are listed as *Skipped*. Leave such a database out of the selection. Other
+  database engines (`Ordinary`, `Lazy`, `Memory`) are created as `Atomic`, and the result notes it.
 - **Materialized views:** the data of a view without `TO` is restored into a table named
   `<view>__restored_data`; recreate the view with `TO` that table. A view with `TO` needs only to be
   recreated: its target is a table of the backup.
@@ -175,7 +183,9 @@ database selection, and it replaces all of the target's data.
   ```
 
   It is sealed until the request ends, then wiped.
-- **After the restore the target holds the source's data, sealed with the source's keys.** Unseal it with
+- **After the restore the target holds the source's data, encrypted with the source's keys.** Right after
+  `snapshot-force` it may still report unsealed; a Vault with Shamir keys seals itself shortly after (or at
+  its next restart), and the result notes which state it saw. Unseal it with
   the **source** Vault's unseal keys (or let the source's auto-unseal do it, with access to the same seal
   key); its own unseal keys no longer apply. Its root token, policies, auth methods and secrets are now the
   source's, and the token given for the request most likely stops working. The result says so:
@@ -204,6 +214,10 @@ database selection, and it replaces all of the target's data.
   [Restoring Olympos](restore-olympos.md).
 
 ## Restore by hand
+
+The sections from here on are the procedures by hand: the backup format of each engine, and the commands to
+download, verify and restore a copy yourself ([PostgreSQL](#postgresql), [Vault / OpenBao](#vault--openbao-raft),
+[ClickHouse](#clickhouse)). A run's restore commands link to them.
 
 The details of every successful run in *Backups* (click the run) show these commands already filled in for
 that run: download from its destination, checksum, restore. Every backup blob comes with a

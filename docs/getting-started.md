@@ -329,7 +329,8 @@ kubectl --context kind-olympos-lab -n lab exec statefulset/orders-pg -- psql -U 
    ![Restore dialog](images/restore-01-dialog.png)
 
 2. **Approve it.** As the approver, open **Approvals**: the restore request shows the backup, the target, the
-   databases and what the check found, never the password. **Approve restore**.
+   databases and what the check found, never the password. **Approve restore**. (The sidebar footer lists
+   every role a person holds: `operator, vault-approver` for Ali now.)
 
    ![Restore request waiting for the checker](images/restore-02-approvals.png)
 
@@ -342,7 +343,8 @@ Nothing is ever overwritten: try the same restore again and the check refuses it
 on `restore-pg` with data in it. ClickHouse restores bring back databases and tables with their data and list
 everything else (views, materialized views, column defaults, …) for you to re-apply; a Vault restore must be
 unsealed afterwards with the **source** Vault's keys. Both are in [Restore from the UI](restore.md#restore-from-the-ui).
-`./test/e2e/env.sh` empties the three servers again.
+`./test/e2e/env.sh` empties the three servers again, but it also resets Olympos to an empty installation:
+the clusters, destinations, jobs, grants and requests of steps 1–8 are gone.
 
 ## 10. Run audits
 
