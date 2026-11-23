@@ -141,7 +141,8 @@ func TestOfflineProbeRunSkippedNotFailed(t *testing.T) {
 	e.probes.connect(t, offline, 2) // a stream is no reason to send: the state is
 
 	due := e.schedule(sc, offline, 0)
-	later := e.schedule(sc, offline, time.Minute)
+	// One open scheduled run per scenario and cluster (synthetic_runs_one_open).
+	later := e.schedule(e.scenario("s2", true, httpStep("https://api.example.com/", nil)), offline, time.Minute)
 	none := e.schedule(sc, missing, 0)
 	wait := e.schedule(sc, elsewhere, 0)
 	if n := e.dispatch(); n != 0 {
@@ -230,8 +231,9 @@ func TestDisconnectMidRunSkipped(t *testing.T) {
 	e.dispatch()
 	e.wantRun(busy, StatusRunning, "")
 
-	// A running run no replica tracks (its replica restarted).
-	orphan := e.schedule(sc, cl, 0)
+	// A running run no replica tracks (its replica restarted). The busy run
+	// is still open: another scenario (one open scheduled run per pair).
+	orphan := e.schedule(e.scenario("s2", true, httpStep("https://api.example.com/", nil)), cl, 0)
 	e.exec(`UPDATE synthetic_runs SET status = 'running', started_at = $2 WHERE id = $1`, orphan, e.clock.now())
 	e.clock.add(10*time.Second + ResultGrace + OrphanGrace - time.Second)
 	e.svc.untrack(busy) // keep the busy run out of the way
@@ -276,7 +278,8 @@ func TestRejectedRun(t *testing.T) {
 	}
 	runs := map[string]uuid.UUID{}
 	for reason := range cases {
-		runs[reason] = e.schedule(sc, cl, 0)
+		// One open scheduled run per scenario and cluster.
+		runs[reason] = e.schedule(e.scenario(reason, true, httpStep("https://api.example.com/", nil)), cl, 0)
 	}
 	e.dispatch()
 	if e.probes.inFlight(sess) != len(cases) {

@@ -174,6 +174,13 @@ func TestSyntheticMonitoringMigration(t *testing.T) {
 	testRun := scan(`INSERT INTO synthetic_runs (cluster_id, status, test, test_spec, requested_by) VALUES ($1, 'running', true, '{"steps":[]}', $2) RETURNING id::text`, cluster, principal)
 	requireSQLState(t, exec(`INSERT INTO synthetic_runs (cluster_id, status, test) VALUES ($1, 'running', false)`, cluster), "23514")
 	requireSQLState(t, exec(strings.Replace(insRun, " RETURNING id::text", "", 1), scn, cluster2, "queued", false), "23514")
+	// One open scheduler run per scenario and cluster, whatever its slot; a
+	// manual run (Run now) takes no slot, and one is open at a time.
+	requireSQLState(t, exec(`INSERT INTO synthetic_runs (scenario_id, cluster_id, scheduled_for) VALUES ($1, $2, '2026-01-01T00:01:00Z')`, scn, cluster), "23505")
+	const insManual = `INSERT INTO synthetic_runs (scenario_id, cluster_id, scheduled_for, manual) VALUES ($1, $2, '2026-01-01T00:00:00Z', true)`
+	mustExec(insManual, scn, cluster)
+	requireSQLState(t, exec(insManual, scn, cluster), "23505")
+	requireSQLState(t, exec(`INSERT INTO synthetic_runs (scenario_id, cluster_id, manual, test) VALUES ($1, $2, true, true)`, scn, cluster2), "23514")
 	var runIP string
 	var allowV int64
 	if err := db.QueryRow(ctx, `SELECT remote_ip, probe_ip, allowlist_version FROM synthetic_runs WHERE id = $1`, run).Scan(&runIP, &runIP, &allowV); err != nil {

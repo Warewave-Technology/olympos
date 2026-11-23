@@ -8,7 +8,8 @@ import (
 )
 
 // Synthetic monitoring (docs/design/synthetic-monitoring.md): probe state,
-// dispatch of runs to the probe streams on this replica, result ingestion.
+// the scheduler, dispatch of runs to the probe streams on this replica,
+// result ingestion.
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		svc := &synthetic.Service{
@@ -19,8 +20,9 @@ func init() {
 		svc.InstallHooks(&d.Gateway.ProbeHooks)
 		return Wiring{
 			// The dispatcher runs on every replica (each sends the runs of
-			// the probes connected to it); the alert loop on the leader.
-			Workers: []Worker{svc.RunDispatcher, svc.RunAlerts},
+			// the probes connected to it); the scheduler and the alert loop
+			// on the leader of their locks.
+			Workers: []Worker{svc.RunDispatcher, svc.RunScheduler, svc.RunAlerts},
 		}, nil
 	})
 }

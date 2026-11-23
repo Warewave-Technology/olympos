@@ -178,9 +178,11 @@ CREATE TRIGGER scenario_alerts_touch BEFORE UPDATE ON scenario_alerts
 
 -- ---------------------------------------------------------------- runs
 
--- One row per scenario, cluster and scheduled slot. A test run (from the
--- editor) has no slot to keep, never alerts and may have no saved scenario:
--- then test_spec holds what was tried.
+-- One row per scenario, cluster and scheduled slot. A manual run (Run now)
+-- has no slot either: it runs at once and counts toward alerting like a
+-- scheduled run. A test run (from the editor) has no slot to keep, never
+-- alerts and may have no saved scenario: then test_spec holds what was
+-- tried.
 CREATE TABLE synthetic_runs (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   scenario_id       uuid REFERENCES scenarios(id) ON DELETE CASCADE,
@@ -195,15 +197,26 @@ CREATE TABLE synthetic_runs (
   total_ms          int,
   probe_version     text NOT NULL DEFAULT '',
   test              boolean NOT NULL DEFAULT false,
+  manual            boolean NOT NULL DEFAULT false,
   test_spec         jsonb,
   requested_by      uuid REFERENCES principals(id),
   allowlist_version bigint NOT NULL DEFAULT 0,
   remote_ip         text NOT NULL DEFAULT '',
   probe_ip          text NOT NULL DEFAULT '',
   created_at        timestamptz NOT NULL DEFAULT now(),
-  CHECK (scenario_id IS NOT NULL OR test)
+  CHECK (scenario_id IS NOT NULL OR test),
+  CHECK (NOT (manual AND test))
 );
-CREATE UNIQUE INDEX synthetic_runs_slot ON synthetic_runs (scenario_id, cluster_id, scheduled_for) WHERE NOT test;
+-- The scheduler's runs: one per slot, and at most one open per scenario and
+-- cluster (the next slot is planned once the last run ended), whatever the
+-- number of schedulers that try at once.
+CREATE UNIQUE INDEX synthetic_runs_slot ON synthetic_runs (scenario_id, cluster_id, scheduled_for) WHERE NOT test AND NOT manual;
+CREATE UNIQUE INDEX synthetic_runs_one_open ON synthetic_runs (scenario_id, cluster_id)
+  WHERE NOT test AND NOT manual AND status IN ('scheduled','running');
+-- At most one open manual run per scenario and cluster: Run now again while
+-- one waits gives back the waiting run.
+CREATE UNIQUE INDEX synthetic_runs_one_manual ON synthetic_runs (scenario_id, cluster_id)
+  WHERE manual AND status IN ('scheduled','running');
 CREATE INDEX synthetic_runs_scenario ON synthetic_runs (scenario_id, cluster_id, scheduled_for DESC);
 CREATE INDEX synthetic_runs_cluster ON synthetic_runs (cluster_id, scheduled_for DESC);
 CREATE INDEX synthetic_runs_open ON synthetic_runs (status) WHERE status IN ('scheduled','running');
@@ -268,7 +281,8 @@ CREATE TRIGGER synthetic_alerts_touch BEFORE UPDATE ON synthetic_alerts
   FOR EACH ROW EXECUTE FUNCTION olympos_touch_updated_at();
 
 -- Where each scenario stands on each cluster, so that the evaluator does not
--- count runs. blocked_reason says why runs do not happen (allowlist, probe).
+-- count runs. blocked_reason says why runs do not happen (rate_limit: the
+-- caps of 6.3; allowlist, probe).
 CREATE TABLE synthetic_state (
   scenario_id          uuid NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
   cluster_id           uuid NOT NULL REFERENCES clusters(id) ON DELETE CASCADE,
