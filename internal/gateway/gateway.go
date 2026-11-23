@@ -125,16 +125,28 @@ func (g *Gateway) GRPCServer(tlsCfg *tls.Config) *grpc.Server {
 // it was revoked alone (clusters.probe_status = 'revoked'), and unless it
 // presents the current probe certificate (clusters.probe_cert_serial).
 //
-// Only the current probe certificate is accepted, because RevokeProbe can
-// revoke only the current serial, and a reinstall clears probe_status: an
-// older unexpired certificate, from before a renewal or before the
-// reinstall, must not come back. The cost is a short gap after each
+// Only the current probe certificate is accepted, because older serials are
+// not kept (RevokeProbe can revoke only the current and the previous one),
+// and a reinstall clears probe_status: an older unexpired certificate, from
+// before a renewal or before the reinstall, must not come back. The cost is a short gap after each
 // renewal: the new serial is issued, but the probe has not yet reloaded the
 // Secret the agent writes, so a reconnect in that gap is refused until it
 // reloads. Streams that are already open are not affected, and the
 // probe's offline state is debounced well past that gap. The agent keeps
 // the old rule: any unrevoked certificate of the cluster.
 func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid.UUID, *x509.Certificate, error) {
+	return g.checkIdentity(ctx, want, false)
+}
+
+// authenticateProbeRenewal is authenticate for ProbeGateway.RenewCert: it
+// also accepts the certificate the current one replaced
+// (clusters.probe_prev_cert_serial), so that a renewal whose answer was
+// lost can be retried.
+func (g *Gateway) authenticateProbeRenewal(ctx context.Context) (uuid.UUID, *x509.Certificate, error) {
+	return g.checkIdentity(ctx, pki.RoleProbe, true)
+}
+
+func (g *Gateway) checkIdentity(ctx context.Context, want pki.IdentityRole, allowPrevProbe bool) (uuid.UUID, *x509.Certificate, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
 		return uuid.Nil, nil, status.Error(codes.Unauthenticated, "no peer")
@@ -153,12 +165,12 @@ func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid
 		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "this identity may not use this service")
 	}
 	var revoked bool
-	var st, probeSt, probeSerial string
+	var st, probeSt, probeSerial, probePrev string
 	serial := pki.SerialHex(cert.SerialNumber)
 	err = g.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM revoked_certs WHERE serial = $1),
-		COALESCE((SELECT status FROM clusters WHERE id = $2), ''), COALESCE((SELECT probe_status FROM clusters WHERE id = $2), ''),
-		COALESCE((SELECT probe_cert_serial FROM clusters WHERE id = $2), '')`,
-		serial, id).Scan(&revoked, &st, &probeSt, &probeSerial)
+		COALESCE(c.status, ''), COALESCE(c.probe_status, ''), COALESCE(c.probe_cert_serial, ''), COALESCE(c.probe_prev_cert_serial, '')
+		FROM (SELECT 1) AS one LEFT JOIN clusters c ON c.id = $2`,
+		serial, id).Scan(&revoked, &st, &probeSt, &probeSerial, &probePrev)
 	if err != nil {
 		return uuid.Nil, nil, status.Error(codes.Unavailable, "identity check failed")
 	}
@@ -169,6 +181,9 @@ func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid
 		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "probe revoked")
 	}
 	if role == pki.RoleProbe && serial != probeSerial {
+		if allowPrevProbe && probePrev != "" && serial == probePrev {
+			return id, cert, nil
+		}
 		g.Log.Warn("probe certificate is not the current one", "cluster_id", id, "serial", serial, "peer", peerAddr(ctx))
 		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "probe certificate superseded")
 	}
@@ -253,7 +268,13 @@ func (g *Gateway) enrollAgent(ctx context.Context, tx store.Querier, tokenID, cl
 	return cert, nil
 }
 
-// enrollProbe issues the probe's identity. The agent asks for it on the
+// revokeProbeSerialsSQL revokes the probe's current and previous serials.
+const revokeProbeSerialsSQL = `INSERT INTO revoked_certs (serial, cluster_id)
+	SELECT s.serial, c.id FROM clusters c, LATERAL (VALUES (c.probe_cert_serial), (c.probe_prev_cert_serial)) AS s(serial)
+	WHERE c.id = $1 AND s.serial <> '' ON CONFLICT DO NOTHING`
+
+// enrollProbe issues the probe's identity. A fresh enrollment replaces the
+// probe's identity, so the certificates of the one before are revoked. The agent asks for it on the
 // probe's behalf (decision 1), so the activity is the agent's. The probe's
 // version is recorded when it connects, not here.
 func (g *Gateway) enrollProbe(ctx context.Context, tx store.Querier, tokenID, clusterID uuid.UUID, req *pb.EnrollRequest) (*x509.Certificate, error) {
@@ -264,8 +285,11 @@ func (g *Gateway) enrollProbe(ctx context.Context, tx store.Querier, tokenID, cl
 	if _, err := tx.Exec(ctx, `UPDATE enroll_tokens SET probe_used_at = now() WHERE id = $1`, tokenID); err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
-	if _, err := tx.Exec(ctx, `UPDATE clusters SET probe_cert_serial = $2, probe_cert_expires_at = $3, probe_status = 'pending' WHERE id = $1`,
-		clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter); err != nil {
+	if _, err := tx.Exec(ctx, revokeProbeSerialsSQL, clusterID); err != nil {
+		return nil, status.Error(codes.Unavailable, "database error")
+	}
+	if _, err := tx.Exec(ctx, `UPDATE clusters SET probe_cert_serial = $2, probe_prev_cert_serial = '', probe_cert_expires_at = $3,
+		probe_status = 'pending' WHERE id = $1`, clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter); err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO activity_log (actor_kind, action, object_type, object_id, cluster_id, details)
@@ -298,7 +322,7 @@ func (g *Gateway) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (*pb.
 // probe's, and drops their open streams.
 func (g *Gateway) Revoke(ctx context.Context, q store.Querier, clusterID uuid.UUID) error {
 	if _, err := q.Exec(ctx, `INSERT INTO revoked_certs (serial, cluster_id)
-		SELECT s.serial, c.id FROM clusters c, LATERAL (VALUES (c.cert_serial), (c.probe_cert_serial)) AS s(serial)
+		SELECT s.serial, c.id FROM clusters c, LATERAL (VALUES (c.cert_serial), (c.probe_cert_serial), (c.probe_prev_cert_serial)) AS s(serial)
 		WHERE c.id = $1 AND s.serial <> '' ON CONFLICT DO NOTHING`, clusterID); err != nil {
 		return err
 	}
@@ -310,17 +334,17 @@ func (g *Gateway) Revoke(ctx context.Context, q store.Querier, clusterID uuid.UU
 	return nil
 }
 
-// RevokeProbe denies the probe's certificate alone and drops the probe's
+// RevokeProbe denies the probe's certificates alone (the current one and
+// the one it replaced, if a renewal is not yet confirmed) and drops the probe's
 // streams; the agent is untouched. Like Revoke it runs in the caller's
 // transaction, so the caller calls DisconnectProbe again after commit (a
 // probe reconnecting before the commit still sees the old state). A fresh
 // probe enrollment ("Install probe") makes the probe pending again.
 func (g *Gateway) RevokeProbe(ctx context.Context, q store.Querier, clusterID uuid.UUID) error {
-	if _, err := q.Exec(ctx, `INSERT INTO revoked_certs (serial, cluster_id)
-		SELECT probe_cert_serial, id FROM clusters WHERE id = $1 AND probe_cert_serial <> '' ON CONFLICT DO NOTHING`, clusterID); err != nil {
+	if _, err := q.Exec(ctx, revokeProbeSerialsSQL, clusterID); err != nil {
 		return err
 	}
-	tag, err := q.Exec(ctx, `UPDATE clusters SET probe_status = 'revoked' WHERE id = $1`, clusterID)
+	tag, err := q.Exec(ctx, `UPDATE clusters SET probe_status = 'revoked', probe_prev_cert_serial = '' WHERE id = $1`, clusterID)
 	if err != nil {
 		return err
 	}

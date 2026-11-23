@@ -101,12 +101,18 @@ func (p *probeServer) Connect(stream pb.ProbeGateway_ConnectServer) error {
 
 // RenewCert issues a new probe certificate for the authenticated probe. The
 // agent calls it with the probe's identity (decision 1). From then on only
-// the new certificate is accepted (see authenticate): the agent must write
+// the new certificate may connect (see authenticate): the agent must write
 // it to the probe's Secret at once, and the probe reconnects with it as
 // soon as the files change.
+//
+// A renewal whose answer was lost can be retried: until the probe connects
+// with the new certificate, the one it replaced
+// (clusters.probe_prev_cert_serial) may still renew, and only renew. A
+// retry replaces the current serial again and keeps the previous one, so
+// the certificate that never arrived is refused from then on.
 func (p *probeServer) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
 	g := p.g
-	clusterID, current, err := g.authenticate(ctx, pki.RoleProbe)
+	clusterID, presented, err := g.authenticateProbeRenewal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -114,24 +120,29 @@ func (p *probeServer) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	// A probe revoked since it authenticated gets nothing, and so does a
-	// second renewal made with the same certificate: the first one already
-	// replaced the current serial, which authenticate requires.
-	tag, err := g.DB.Exec(ctx, `UPDATE clusters SET probe_cert_serial = $2, probe_cert_expires_at = $3
-		WHERE id = $1 AND status <> 'revoked' AND probe_status <> 'revoked' AND probe_cert_serial = $4`,
-		clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter, pki.SerialHex(current.SerialNumber))
+	// Renewing with the current certificate makes it the previous one;
+	// renewing with the previous one keeps it so. The row is checked again
+	// here (all SET expressions read the old row): a probe revoked, renewed
+	// or connected since it authenticated may find nothing to replace.
+	old := pki.SerialHex(presented.SerialNumber)
+	tag, err := g.DB.Exec(ctx, `UPDATE clusters SET
+		probe_prev_cert_serial = CASE WHEN probe_cert_serial = $4 THEN $4 ELSE probe_prev_cert_serial END,
+		probe_cert_serial = $2, probe_cert_expires_at = $3
+		WHERE id = $1 AND status <> 'revoked' AND probe_status <> 'revoked'
+		  AND (probe_cert_serial = $4 OR (probe_prev_cert_serial <> '' AND probe_prev_cert_serial = $4))`,
+		clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter, old)
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
 	if tag.RowsAffected() == 0 {
 		return nil, status.Error(codes.PermissionDenied, "probe revoked or certificate superseded")
 	}
-	g.Log.Info("probe certificate renewed", "cluster_id", clusterID, "serial", pki.SerialHex(cert.SerialNumber))
+	g.Log.Info("probe certificate renewed", "cluster_id", clusterID, "serial", pki.SerialHex(cert.SerialNumber), "replaced", old)
 	return &pb.RenewCertResponse{CertDer: cert.Raw}, nil
 }
 
 func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
-	clusterID, _, err := g.authenticate(stream.Context(), pki.RoleProbe)
+	clusterID, cert, err := g.authenticate(stream.Context(), pki.RoleProbe)
 	if err != nil {
 		return err
 	}
@@ -149,6 +160,13 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	// DHKEM(X25519) (decision 2): anything else could not be sealed to.
 	if _, err := ecdh.X25519().NewPublicKey(hello.HpkePublicKey); err != nil {
 		return status.Error(codes.InvalidArgument, "hpke_public_key must be a raw X25519 public key")
+	}
+	// The probe has the current certificate: the one it replaced may no
+	// longer renew.
+	if _, err := g.DB.Exec(stream.Context(), `UPDATE clusters SET probe_prev_cert_serial = ''
+		WHERE id = $1 AND probe_cert_serial = $2 AND probe_prev_cert_serial <> ''`,
+		clusterID, pki.SerialHex(cert.SerialNumber)); err != nil {
+		return status.Error(codes.Unavailable, "database error")
 	}
 	maxConc := int(hello.MaxConcurrency)
 	if maxConc < 1 {

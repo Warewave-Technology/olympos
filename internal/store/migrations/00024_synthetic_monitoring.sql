@@ -25,11 +25,15 @@ ALTER TABLE enroll_tokens ADD CONSTRAINT enroll_tokens_roles_check
   CHECK (roles <@ ARRAY['agent','probe'] AND cardinality(roles) > 0);
 
 -- The probe has its own identity and its own state, apart from the agent's.
+-- Only the probe's current certificate is accepted. The one it replaced
+-- (probe_prev_cert_serial) may still renew, so that a renewal whose answer
+-- was lost can be retried, until the probe connects with the new one.
 ALTER TABLE clusters
   ADD COLUMN probe_status text NOT NULL DEFAULT 'not_installed'
     CHECK (probe_status IN ('not_installed','pending','online','offline','revoked')),
   ADD COLUMN probe_version text NOT NULL DEFAULT '',
   ADD COLUMN probe_cert_serial text NOT NULL DEFAULT '',
+  ADD COLUMN probe_prev_cert_serial text NOT NULL DEFAULT '',
   ADD COLUMN probe_cert_expires_at timestamptz,
   ADD COLUMN probe_last_seen_at timestamptz,
   ADD COLUMN probe_offline_since timestamptz,
@@ -347,6 +351,7 @@ ALTER TABLE clusters
   DROP COLUMN probe_offline_since,
   DROP COLUMN probe_last_seen_at,
   DROP COLUMN probe_cert_expires_at,
+  DROP COLUMN probe_prev_cert_serial,
   DROP COLUMN probe_cert_serial,
   DROP COLUMN probe_version,
   DROP COLUMN probe_status;

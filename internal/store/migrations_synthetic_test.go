@@ -47,14 +47,14 @@ func TestSyntheticMonitoringMigration(t *testing.T) {
 	requireSQLState(t, exec(`INSERT INTO grants (principal_id, role) VALUES ($1, 'bogus')`, principal), "23514")
 
 	// Probe columns of a cluster start as "not installed".
-	var probeStatus, probeVersion, probeSerial string
+	var probeStatus, probeVersion, probeSerial, probePrevSerial string
 	var alerted bool
-	if err := db.QueryRow(ctx, `SELECT probe_status, probe_version, probe_cert_serial, probe_offline_alerted FROM clusters WHERE id = $1`, cluster).
-		Scan(&probeStatus, &probeVersion, &probeSerial, &alerted); err != nil {
+	if err := db.QueryRow(ctx, `SELECT probe_status, probe_version, probe_cert_serial, probe_prev_cert_serial, probe_offline_alerted FROM clusters WHERE id = $1`, cluster).
+		Scan(&probeStatus, &probeVersion, &probeSerial, &probePrevSerial, &alerted); err != nil {
 		t.Fatal(err)
 	}
-	if probeStatus != "not_installed" || probeVersion != "" || probeSerial != "" || alerted {
-		t.Fatalf("probe defaults: %q %q %q %v", probeStatus, probeVersion, probeSerial, alerted)
+	if probeStatus != "not_installed" || probeVersion != "" || probeSerial != "" || probePrevSerial != "" || alerted {
+		t.Fatalf("probe defaults: %q %q %q %q %v", probeStatus, probeVersion, probeSerial, probePrevSerial, alerted)
 	}
 	requireSQLState(t, exec(`UPDATE clusters SET probe_status = 'bogus' WHERE id = $1`, cluster), "23514")
 	mustExec(`UPDATE clusters SET probe_status = 'online' WHERE id = $1`, cluster)
@@ -316,6 +316,12 @@ func TestSyntheticMonitoringMigrationDown(t *testing.T) {
 	var used bool
 	if err := db.QueryRow(ctx, `SELECT used_at IS NOT NULL FROM enroll_tokens WHERE token_hash = 'used'`).Scan(&used); err != nil || !used {
 		t.Fatalf("used_at after down: %v, %v", used, err)
+	}
+	// Down drops every probe column of clusters.
+	var probeCols string
+	if err := db.QueryRow(ctx, `SELECT COALESCE(string_agg(column_name, ','), '') FROM information_schema.columns
+		WHERE table_schema = current_schema() AND table_name = 'clusters' AND column_name LIKE 'probe\_%'`).Scan(&probeCols); err != nil || probeCols != "" {
+		t.Fatalf("probe columns after down: %q, %v", probeCols, err)
 	}
 	if _, err := db.Exec(ctx, `INSERT INTO grants (principal_id, role) VALUES ($1, 'synthetic-editor')`, principal); err == nil {
 		t.Fatal("synthetic-editor must not be a role in the old schema")

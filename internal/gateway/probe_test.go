@@ -95,6 +95,46 @@ func refusedProbe(t *testing.T, c pb.ProbeGatewayClient, clusterID string) error
 	}
 }
 
+// renewProbe renews with cert on ProbeGateway.
+func (e *env) renewProbe(t *testing.T, cert *tls.Certificate) (*tls.Certificate, error) {
+	t.Helper()
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	resp, err := e.dialProbe(t, cert).RenewCert(context.Background(), &pb.RenewCertRequest{CsrDer: csr})
+	if err != nil {
+		return nil, err
+	}
+	return &tls.Certificate{Certificate: [][]byte{resp.CertDer}, PrivateKey: key}, nil
+}
+
+func serialOf(t *testing.T, c *tls.Certificate) string {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(c.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pki.SerialHex(leaf.SerialNumber)
+}
+
+// probeSerials returns the cluster's current and previous probe serials.
+func (e *env) probeSerials(t *testing.T, id uuid.UUID) (cur, prev string) {
+	t.Helper()
+	if err := e.gw.DB.QueryRow(context.Background(), `SELECT probe_cert_serial, probe_prev_cert_serial FROM clusters WHERE id = $1`, id).
+		Scan(&cur, &prev); err != nil {
+		t.Fatal(err)
+	}
+	return cur, prev
+}
+
+func (e *env) isRevoked(t *testing.T, serial string) bool {
+	t.Helper()
+	var ok bool
+	if err := e.gw.DB.QueryRow(context.Background(), `SELECT EXISTS(SELECT 1 FROM revoked_certs WHERE serial = $1)`, serial).Scan(&ok); err != nil {
+		t.Fatal(err)
+	}
+	return ok
+}
+
 func waitProbes(t *testing.T, gw *gateway.Gateway, id uuid.UUID, n *atomic.Int32, want int32) {
 	t.Helper()
 	for i := 0; i < 200; i++ {
@@ -240,6 +280,11 @@ func TestRevokeProbeAlone(t *testing.T) {
 	// probe_status is no longer 'revoked', and this serial was never put in
 	// revoked_certs: only "current serial only" refuses it.
 	wantCode(t, "pre-renewal probe certificate after reinstall", refusedProbe(t, e.dialProbe(t, beforeRenew), id.String()), codes.PermissionDenied)
+	// The certificates from before the revoke can never renew either.
+	for name, c := range map[string]*tls.Certificate{"revoked": probe, "pre-renewal": beforeRenew} {
+		_, err := e.renewProbe(t, c)
+		wantCode(t, name+" certificate renews after reinstall", err, codes.PermissionDenied)
+	}
 
 	if err := e.gw.RevokeProbe(ctx, e.gw.DB, uuid.New()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown cluster: %v", err)
@@ -313,18 +358,96 @@ func TestProbeRenewCert(t *testing.T) {
 		t.Fatalf("probe serial %q (want %q), agent serial %q (want %q)", probeSerial, pki.SerialHex(leaf.SerialNumber), agentSerial, agentSerialBefore)
 	}
 	renewed := &tls.Certificate{Certificate: [][]byte{resp.CertDer}, PrivateKey: key}
-	// Only the current certificate is accepted: the one it replaced is
-	// refused at once, for Connect and for another renewal.
+	// Only the current certificate may connect: the one it replaced is
+	// refused at once.
 	wantCode(t, "superseded probe certificate", refusedProbe(t, e.dialProbe(t, probe), id.String()), codes.PermissionDenied)
-	_, err = e.dialProbe(t, probe).RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
-	wantCode(t, "renewal with a superseded certificate", err, codes.PermissionDenied)
+	if _, prev := e.probeSerials(t, id); prev != serialOf(t, probe) {
+		t.Fatalf("previous serial %q, want the replaced one", prev)
+	}
 	if _, err := connectProbe(t, ctx, e.dialProbe(t, renewed), id.String(), 1); err != nil {
 		t.Fatal(err)
 	}
 	waitProbes(t, e.gw, id, n, 1) // the current certificate is accepted
+	// Once the new certificate connected, the old one can no longer renew.
+	if _, prev := e.probeSerials(t, id); prev != "" {
+		t.Fatalf("previous serial %q kept after a connect with the new certificate", prev)
+	}
+	_, err = e.renewProbe(t, probe)
+	wantCode(t, "old certificate renews after the new one connected", err, codes.PermissionDenied)
 	// The renewed certificate is still a probe identity only.
 	_, err = e.dial(t, renewed).RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
 	wantCode(t, "renewed probe on AgentGateway", err, codes.PermissionDenied)
+}
+
+// A renewal whose answer was lost is retried with the old certificate. The
+// old certificate still cannot connect, and the certificate that never
+// arrived is refused once the retry replaced it.
+func TestProbeLostRenewalRetried(t *testing.T) {
+	e := start(t)
+	n := countConnects(e.gw)
+	id, _, s1 := e.enrolled(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	lost, err := e.renewProbe(t, s1) // the agent never receives this one
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantCode(t, "old certificate connects", refusedProbe(t, e.dialProbe(t, s1), id.String()), codes.PermissionDenied)
+
+	s3, err := e.renewProbe(t, s1)
+	if err != nil {
+		t.Fatalf("retried renewal: %v", err)
+	}
+	if cur, prev := e.probeSerials(t, id); cur != serialOf(t, s3) || prev != serialOf(t, s1) {
+		t.Fatalf("after the retry: current %q previous %q, want %q %q", cur, prev, serialOf(t, s3), serialOf(t, s1))
+	}
+	wantCode(t, "old certificate connects after the retry", refusedProbe(t, e.dialProbe(t, s1), id.String()), codes.PermissionDenied)
+	wantCode(t, "lost certificate connects", refusedProbe(t, e.dialProbe(t, lost), id.String()), codes.PermissionDenied)
+	_, err = e.renewProbe(t, lost)
+	wantCode(t, "lost certificate renews", err, codes.PermissionDenied)
+
+	if _, err := connectProbe(t, ctx, e.dialProbe(t, s3), id.String(), 1); err != nil {
+		t.Fatal(err)
+	}
+	waitProbes(t, e.gw, id, n, 1)
+	_, err = e.renewProbe(t, s1)
+	wantCode(t, "old certificate renews after the new one connected", err, codes.PermissionDenied)
+}
+
+// RevokeProbe and a fresh probe enrollment revoke both serials of a
+// renewal that was never confirmed, and clear the previous one.
+func TestProbeReplacedIdentityRevokesBothSerials(t *testing.T) {
+	e := start(t)
+	ctx := context.Background()
+	for _, how := range []string{"revoke", "reinstall"} {
+		t.Run(how, func(t *testing.T) {
+			id, _, s1 := e.enrolled(t)
+			s2, err := e.renewProbe(t, s1) // not yet confirmed by a connect
+			if err != nil {
+				t.Fatal(err)
+			}
+			if how == "revoke" {
+				if err := e.gw.RevokeProbe(ctx, e.gw.DB, id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fresh, _, err := enrollAs(t, e.dial(t, nil), e.newToken(t, id, []string{"probe"}, time.Hour), pb.EnrollRole_ENROLL_ROLE_PROBE)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cur, prev := e.probeSerials(t, id); cur != serialOf(t, fresh) || prev != "" {
+				t.Fatalf("after %s: current %q previous %q", how, cur, prev)
+			}
+			for name, c := range map[string]*tls.Certificate{"replaced": s1, "unconfirmed": s2} {
+				if !e.isRevoked(t, serialOf(t, c)) {
+					t.Fatalf("%s serial not revoked", name)
+				}
+				_, err := e.renewProbe(t, c)
+				wantCode(t, name+" certificate renews", err, codes.PermissionDenied)
+			}
+		})
+	}
 }
 
 // SendRun builds each run for the stream it goes out on: the credentials
