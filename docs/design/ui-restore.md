@@ -188,15 +188,26 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   (`AggregateFunction`, `Tuple`, `JSON`/`Variant`, `LowCardinality(Nullable(…))`); the official client parses
   every format, so every table is restored. Rows written per table are compared with the rows the backup
   streamed for that table (`rows` in the archive's manifest); a difference fails the table.
-- **ClickHouse objects, in this order:** databases (a `Replicated` database is refused: its Keeper path
-  could collide with the source's when Keeper is shared), tables of the MergeTree family and other local
-  engines, their data, dictionaries with a ClickHouse source in the same backup, views, then materialized
-  views, then the rows of each materialized view's inner table (inserted after the view exists, so nothing is
-  ingested twice). `Replicated*MergeTree` tables get their Keeper path rewritten to
-  `/olympos-restore/<request id>/…` and are reported as rewritten. Tables with external engines (Kafka, S3,
-  URL, MySQL, PostgreSQL, JDBC, …) and dictionaries with external sources are **not created** and are
-  reported with their DDL: they would read from, or commit offsets to, the source's systems. (My call, from
-  the builder check.)
+- **ClickHouse objects (changed during implementation for security; recreate views, MVs and dictionaries
+  from your schema):**
+  - **Created:** databases (`Replicated` is refused, because its Keeper path could collide with the source's
+    when Keeper is shared) and tables of the MergeTree family, their `Replicated*` variants, the Log family and
+    Memory. Each table's data follows.
+  - **Materialized views:** each one's inner table is restored as `<view>__restored_data` with its rows, and the
+    result says to recreate the view with `TO` that table. A view with `TO` needs nothing more, because its
+    target is a table of the backup.
+  - **Checks on a table definition:** it must be a single `CREATE TABLE` of the manifest's database and name. It
+    may not be `AS …` or `EMPTY AS`. Only an allowlist of storage settings is accepted. Expressions may not
+    contain a subquery, `IN`, or any function outside an allowlist of pure scalar functions.
+  - **Keeper paths:** `Replicated*MergeTree` paths are rewritten to `/olympos-restore/<request id>/…` and
+    reported.
+  - **Not created, reported by name and reason (never with their DDL):** views, materialized views,
+    dictionaries, live and window views, and tables of any other engine (Kafka, S3, URL, MySQL, PostgreSQL,
+    Distributed, Merge, Buffer, Join, Set, KeeperMap, EmbeddedRocksDB, …). The same applies to tables whose
+    definition fails the checks.
+  - **Why:** the review showed that query text in view definitions, dictionary sources and settings can read or
+    send any data the definer can reach. A restore cannot prove such text confined to the restored databases;
+    its job is the data.
 - **Vault/OpenBao:** the snapshot (the blob, not a zip) is streamed to `POST /v1/sys/storage/raft/
   snapshot-force` with the request's token. The result explains the unseal step.
 

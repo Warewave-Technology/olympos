@@ -226,12 +226,12 @@ INSERT INTO rs.events SELECT toDate('2024-03-01') + intDiv(number, 20), number, 
 -- Into the view's inner table through the view: mv_chain reads it.
 INSERT INTO rs.mv VALUES ('2025-01-01', 7);
 
--- Not created: SQL in the source, and a view reading a database not restored.
-CREATE DICTIONARY rs.dict_inv (id UInt64, v String) PRIMARY KEY id
-SOURCE(CLICKHOUSE(DB 'rs' TABLE 'events' INVALIDATE_QUERY 'SELECT max(id) FROM rs.events')) LAYOUT(HASHED()) LIFETIME(0);
-CREATE DATABASE other_src;
-CREATE TABLE other_src.s (x UInt8) ENGINE = Memory;
-CREATE VIEW rs.v_other AS SELECT x FROM other_src.s;
+-- Tables not created: a setting outside the allowlist, a function
+-- outside it.
+CREATE TABLE rs.bad_set (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS min_age_to_force_merge_seconds = 10;
+INSERT INTO rs.bad_set VALUES (1);
+CREATE TABLE rs.bad_expr (x UInt64, h String DEFAULT hostName()) ENGINE = MergeTree ORDER BY x;
+INSERT INTO rs.bad_expr (x) VALUES (1);
 
 CREATE DATABASE rs2;
 CREATE TABLE rs2.t (n UInt64, p Tuple(a UInt8, b String)) ENGINE = MergeTree ORDER BY n;
@@ -260,22 +260,25 @@ func TestRestoreIntegration(t *testing.T) {
 		}
 	}
 
-	checks := map[string]string{
-		"events":   "SELECT count(), sum(cityHash64(formatRow('RowBinary', *))) FROM rs.events",
-		"rep":      "SELECT count(), sum(cityHash64(k, v)) FROM rs.rep",
-		"audit":    "SELECT count(), sum(cityHash64(msg)) FROM rs.audit",
-		"agg":      "SELECT count(), sum(cityHash64(k, finalizeAggregation(u))) FROM rs.agg",
-		"v":        "SELECT count() FROM rs.v",
-		"v2":       "SELECT sum(v2) FROM rs.events",
-		"mv":       "SELECT count(), sum(c) FROM (SELECT d, sum(c) AS c FROM rs.mv GROUP BY d)",
-		"mv_rows":  "SELECT count() FROM rs.mv",
-		"daily":    "SELECT count(), sum(c) FROM rs.daily",
-		"mv_chain": "SELECT count(), sum(c) FROM rs.mv_chain",
-		"rs2":      "SELECT count(), sum(cityHash64(formatRow('RowBinary', *))) FROM rs2.t",
+	// Before (on the source) and after (on the restored tables): a
+	// materialized view's rows are in <view>__restored_data.
+	type check struct{ before, after string }
+	same := func(q string) check { return check{q, q} }
+	checks := map[string]check{
+		"events": same("SELECT count(), sum(cityHash64(formatRow('RowBinary', *))) FROM rs.events"),
+		"rep":    same("SELECT count(), sum(cityHash64(k, v)) FROM rs.rep"),
+		"audit":  same("SELECT count(), sum(cityHash64(msg)) FROM rs.audit"),
+		"agg":    same("SELECT count(), sum(cityHash64(k, finalizeAggregation(u))) FROM rs.agg"),
+		"v2":     same("SELECT sum(v2) FROM rs.events"),
+		"daily":  same("SELECT count(), sum(c) FROM rs.daily"),
+		"mv": {"SELECT count(), sum(c), sum(cityHash64(d, c)) FROM rs.mv",
+			"SELECT count(), sum(c), sum(cityHash64(d, c)) FROM rs.mv__restored_data"},
+		"mv_chain": {"SELECT count(), sum(c) FROM rs.mv_chain", "SELECT count(), sum(c) FROM rs.mv_chain__restored_data"},
+		"rs2":      same("SELECT count(), sum(cityHash64(formatRow('RowBinary', *))) FROM rs2.t"),
 	}
 	before := map[string]string{}
 	for k, q := range checks {
-		before[k] = chq(t, q)
+		before[k] = chq(t, q.before)
 	}
 	if before["mv_chain"] == "0\t0" || before["daily"] == "0\t0" || !strings.HasPrefix(before["rep"], "3\t") {
 		t.Fatalf("fixture: %v", before)
@@ -332,7 +335,7 @@ func TestRestoreIntegration(t *testing.T) {
 	if len(res.Items) != 1 || res.Items[0].Status != "succeeded" || res.Items[0].Rows != 5000 || res.Items[0].Tables != 1 || len(res.Created) != 0 {
 		t.Fatalf("rs2: %+v", res)
 	}
-	if got := chq(t, checks["rs2"]); got != before["rs2"] {
+	if got := chq(t, checks["rs2"].after); got != before["rs2"] {
 		t.Fatalf("rs2: before %s, after %s", before["rs2"], got)
 	}
 
@@ -358,15 +361,24 @@ func TestRestoreIntegration(t *testing.T) {
 		t.Fatalf("Created not reported through Progress: %+v", *prog)
 	}
 	skipped := strings.Join(it.Skipped, "\n")
-	if !strings.Contains(skipped, "rs.k (table): engine Kafka") || !strings.Contains(skipped, "rs.mv_k (materialized view): it uses rs.k") ||
-		!strings.Contains(skipped, "rs.dict_inv (dictionary): its ClickHouse source has INVALIDATE_QUERY") ||
-		!strings.Contains(skipped, "rs.v_other (view): it reads other_src.s, which is not restored") {
-		t.Fatalf("skipped: %s", skipped)
+	for _, w := range []string{
+		"rs.k (table): engine Kafka is not restored",
+		"rs.bad_set (table): it has setting min_age_to_force_merge_seconds",
+		"rs.bad_expr (table): an expression of it calls hostName()",
+		"rs.v (view): " + notRecreated,
+		"rs.mv (materialized view): " + notRecreated,
+		"rs.mv_to (materialized view): " + notRecreated,
+		"rs.mv_k (materialized view): " + notRecreated,
+		"rs.dict (dictionary): " + notRecreated,
+	} {
+		if !strings.Contains(skipped, w) {
+			t.Errorf("skipped lacks %q:\n%s", w, skipped)
+		}
 	}
 	if strings.Contains(skipped, "127.0.0.1:1") || strings.Contains(skipped, "olympos-t") {
 		t.Fatalf("skipped carries DDL: %s", skipped)
 	}
-	if n := strings.Join(res.Notes, "\n"); !strings.Contains(n, "rs.dict: the backup holds a secret") ||
+	if n := strings.Join(res.Notes, "\n"); !strings.Contains(n, "the data of materialized view rs.mv was restored into table rs.mv__restored_data; recreate the view with TO `rs`.`mv__restored_data`") ||
 		!strings.Contains(n, "rs.events: MATERIALIZED columns (v2)") {
 		t.Fatalf("notes: %v", res.Notes)
 	}
@@ -374,15 +386,14 @@ func TestRestoreIntegration(t *testing.T) {
 		if k == "rs2" {
 			continue
 		}
-		if got := chq(t, q); got != before[k] {
+		if got := chq(t, q.after); got != before[k] {
 			t.Errorf("%s: before %s, after restore %s", k, before[k], got)
 		}
 	}
-	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs' AND name IN ('k', 'mv_k', 'dict_inv', 'v_other')"); got != "0" {
-		t.Errorf("external objects created: %s", got)
-	}
-	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs' AND name = 'dict'"); got != "1" {
-		t.Errorf("dictionary not restored: %s", got)
+	// Only tables, each an ordinary one.
+	if got := chq(t, "SELECT arrayStringConcat(groupArray(name), ',') FROM (SELECT name FROM system.tables WHERE database = 'rs' ORDER BY name)"); got !=
+		"agg,audit,daily,events,mv__restored_data,mv_chain__restored_data,rep" {
+		t.Errorf("restored objects: %s", got)
 	}
 	var wantRows int64
 	for _, d := range m.Databases {
@@ -390,7 +401,7 @@ func TestRestoreIntegration(t *testing.T) {
 			continue
 		}
 		for _, tb := range d.Tables {
-			if tb.Name != "k" {
+			if tb.Name != "k" && tb.Name != "bad_set" && tb.Name != "bad_expr" {
 				wantRows += int64(tb.Rows)
 			}
 		}

@@ -21,7 +21,6 @@ import (
 	"time"
 
 	"github.com/ClickHouse/ch-go"
-	"github.com/ClickHouse/ch-go/proto"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/restore"
@@ -135,23 +134,17 @@ const (
 	phaseDatabase = iota
 	phaseTable
 	phaseData
-	phaseDictionary
-	phaseView
-	phaseMV
-	phaseInnerData
 )
 
-var phaseNames = []string{"database", "table", "data", "dictionary", "view", "materialized view", "inner data"}
+var phaseNames = []string{"database", "table", "data"}
 
-// objPlan is one object of a database that the restore creates.
+// objPlan is one table the restore creates: a table of the backup, or a
+// materialized view's inner table under a new name.
 type objPlan struct {
-	db    string
-	t     Table
-	st    *createStmt
-	inner *Table // a materialized view's inner table (its rows are loaded after the view)
-	// innerName is the inner table's name on the target, found after the
-	// view was created.
-	innerName string
+	db     string
+	t      Table
+	st     *createStmt
+	target string // its name on the target
 }
 
 // dbPlan is a selected database that passed its preflight.
@@ -167,13 +160,8 @@ type dbPlan struct {
 func (p *dbPlan) dataBytes() int64 {
 	var n int64
 	for _, o := range p.objs {
-		for _, t := range []*Table{&o.t, o.inner} {
-			if t == nil || !t.HasData {
-				continue
-			}
-			for _, pt := range t.Partitions {
-				n += pt.Bytes
-			}
+		for _, pt := range o.t.Partitions {
+			n += pt.Bytes
 		}
 	}
 	return n
@@ -190,14 +178,11 @@ func (s step) String() string {
 	if s.obj == nil {
 		return phaseNames[s.phase] + " " + s.plan.db.Name
 	}
-	return phaseNames[s.phase] + " " + s.plan.db.Name + "." + s.obj.t.Name
+	return phaseNames[s.phase] + " " + s.plan.db.Name + "." + s.obj.target
 }
 
 // steps orders the work: every database, then the tables of every
-// database, their data, dictionaries (and Dictionary tables), views,
-// materialized views, and last the rows of the views' inner tables, so
-// nothing is ingested twice. Across databases each phase completes before
-// the next starts (a view may read another restored database).
+// database, then their data.
 func steps(plans []*dbPlan) []step {
 	var out []step
 	for _, p := range plans {
@@ -205,23 +190,15 @@ func steps(plans []*dbPlan) []step {
 			out = append(out, step{phase: phaseDatabase, plan: p})
 		}
 	}
-	add := func(phase int, want func(o *objPlan) bool) {
+	for _, phase := range []int{phaseTable, phaseData} {
 		for _, p := range plans {
 			for _, o := range p.objs {
-				if want(o) {
+				if phase == phaseTable || (o.t.HasData && hasEntries(o.t)) {
 					out = append(out, step{phase: phase, plan: p, obj: o})
 				}
 			}
 		}
 	}
-	table := func(o *objPlan) bool { return o.t.Kind == KindTable && o.t.Engine != "Dictionary" }
-	add(phaseTable, table)
-	add(phaseData, func(o *objPlan) bool { return table(o) && o.t.HasData && hasEntries(o.t) })
-	add(phaseDictionary, func(o *objPlan) bool { return o.t.Kind == KindDictionary })
-	add(phaseDictionary, func(o *objPlan) bool { return o.t.Kind == KindTable && o.t.Engine == "Dictionary" })
-	add(phaseView, func(o *objPlan) bool { return o.t.Kind == KindView })
-	add(phaseMV, func(o *objPlan) bool { return o.t.Kind == KindMaterializedView })
-	add(phaseInnerData, func(o *objPlan) bool { return o.inner != nil && o.inner.HasData && hasEntries(*o.inner) })
 	return out
 }
 
@@ -287,9 +264,11 @@ var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 
 // planDatabase checks one selected database without writing anything: it
 // is in the backup, not on the target with objects, its database engine is
-// restorable, and every object's schema entry is the CREATE the manifest
-// records (classify). msg is why it cannot be restored ("" when it can).
-func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, restored map[string]bool, requestID string) (*dbPlan, string) {
+// restorable, and every table's schema entry is the CREATE TABLE the
+// manifest records (classify), with its data entries. Objects that are not
+// created are listed in skipped. msg is why the database cannot be
+// restored ("" when it can).
+func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, requestID string) (*dbPlan, string) {
 	p := &dbPlan{}
 	if md == nil {
 		return p, "the backup holds no such database"
@@ -320,14 +299,19 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		if err != nil {
 			return p, "CREATE DATABASE: " + err.Error()
 		}
+		if why := st.databaseProblem(); why != "" {
+			return p, why
+		}
 		if e := st.engineName(); e != "" && e != md.Engine {
 			return p, fmt.Sprintf("CREATE DATABASE has engine %s, the backup recorded %s", e, md.Engine)
 		}
 		p.create = st
 	}
 
-	byName := map[string]*objPlan{}
-	var inners []Table
+	names := map[string]bool{}
+	for _, t := range md.Tables {
+		names[t.Name] = true
+	}
 	dataPrefix := func(t Table) string { return "data/" + pathSegment(md.Name) + "/" + pathSegment(t.Name) + "/" }
 	checkData := func(t Table) string {
 		if !t.HasData {
@@ -361,44 +345,57 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		return ""
 	}
 	for _, t := range md.Tables {
+		what := md.Name + "." + t.Name + " (" + kindWord(t.Kind) + ")"
+		target := t.Name
 		if t.Kind == KindMVInner {
-			if why := checkData(t); why != "" {
-				return p, why
+			// The view is not created; its rows are kept in a table of
+			// their own.
+			target = t.InnerOf + "__restored_data"
+			what = "the data of materialized view " + md.Name + "." + t.InnerOf
+			if names[target] {
+				return p, fmt.Sprintf("the data of materialized view %s would be restored into table %s, which the backup also holds", t.InnerOf, target)
 			}
-			inners = append(inners, t)
-			continue
 		}
-		f := entries[t.SchemaEntry]
-		if f == nil || !strings.HasPrefix(t.SchemaEntry, "schema/") {
-			return p, t.Name + ": the backup holds no schema entry for it"
+		var ddl string
+		if t.Kind == KindTable || t.Kind == KindMVInner {
+			f := entries[t.SchemaEntry]
+			if f == nil || !strings.HasPrefix(t.SchemaEntry, "schema/") {
+				return p, t.Name + ": the backup holds no schema entry for it"
+			}
+			b, err := readSmall(f, maxSchemaEntry)
+			if err != nil {
+				return p, err.Error()
+			}
+			ddl = string(b)
 		}
-		b, err := readSmall(f, maxSchemaEntry)
-		if err != nil {
-			return p, err.Error()
-		}
-		c, err := classify(md.Name, t, string(b), restored)
+		c, err := classify(md.Name, t, ddl)
 		if err != nil {
 			return p, t.Name + ": " + err.Error()
 		}
 		if !c.create {
-			p.skipped = append(p.skipped, md.Name+"."+t.Name+" ("+kindWord(t.Kind)+"): "+c.reason)
+			if t.Kind == KindMVInner {
+				p.skipped = append(p.skipped, fmt.Sprintf("%s (%d rows) was not restored: %s", what, t.Rows, c.reason))
+			} else {
+				p.skipped = append(p.skipped, what+": "+c.reason)
+			}
 			continue
 		}
 		if why := checkData(t); why != "" {
 			return p, why
 		}
+		if t.Kind == KindMVInner {
+			c.st.rename(target)
+			p.notes = append(p.notes, fmt.Sprintf("%s was restored into table %s.%s; recreate the view with TO %s.%s",
+				what, md.Name, target, quoteIdent(md.Name), quoteIdent(target)))
+		}
 		if c.st.rewriteKeeperPaths(requestID) {
 			if !requestIDRe.MatchString(requestID) {
 				return p, t.Name + ": a Keeper path needs the restore request's id, and there is none"
 			}
-			p.notes = append(p.notes, md.Name+"."+t.Name+": its Keeper path was moved under /olympos-restore/"+requestID+"/, "+
+			p.notes = append(p.notes, md.Name+"."+target+": its Keeper path was moved under /olympos-restore/"+requestID+"/, "+
 				"so it shares no Keeper state with the source")
 		}
-		if c.hidden {
-			p.notes = append(p.notes, md.Name+"."+t.Name+": the backup holds a secret of its definition masked as [HIDDEN] "+
-				"(a source password); it was created with that value: set it again (CREATE OR REPLACE) before using it")
-		}
-		if t.Kind == KindTable && t.HasData {
+		if t.HasData {
 			var mat []string
 			for _, col := range t.Columns {
 				if col.DefaultKind == "MATERIALIZED" {
@@ -406,73 +403,13 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 				}
 			}
 			if len(mat) > 0 {
-				p.notes = append(p.notes, md.Name+"."+t.Name+": MATERIALIZED columns ("+strings.Join(mat, ", ")+") are not in the backup's "+
+				p.notes = append(p.notes, md.Name+"."+target+": MATERIALIZED columns ("+strings.Join(mat, ", ")+") are not in the backup's "+
 					"data; the target computed them again from the restored columns")
 			}
 		}
-		o := &objPlan{db: md.Name, t: t, st: c.st}
-		byName[t.Name] = o
-		p.objs = append(p.objs, o)
-	}
-	for i := range inners {
-		in := inners[i]
-		mv := byName[in.InnerOf]
-		if mv == nil || mv.t.Kind != KindMaterializedView {
-			if hasEntries(in) {
-				p.skipped = append(p.skipped, fmt.Sprintf("%s.%s: the %d rows of its inner table were not restored (the view was not created)",
-					md.Name, in.InnerOf, in.Rows))
-			}
-			continue
-		}
-		if _, _, to := mv.st.mvTarget(md.Name); to {
-			return p, in.InnerOf + ": the backup holds an inner table for a materialized view with TO"
-		}
-		mv.inner = &in
+		p.objs = append(p.objs, &objPlan{db: md.Name, t: t, st: c.st, target: target})
 	}
 	return p, ""
-}
-
-// dropUnsatisfied skips the materialized views (and their inner rows) that
-// read from or write into an object of the restored databases that is not
-// created, until nothing changes (a view may read another view).
-func dropUnsatisfied(plans []*dbPlan) {
-	for changed := true; changed; {
-		changed = false
-		created := map[string]bool{}
-		for _, p := range plans {
-			for _, o := range p.objs {
-				created[o.db+"."+o.t.Name] = true
-			}
-		}
-		for _, p := range plans {
-			kept := p.objs[:0]
-			for _, o := range p.objs {
-				why := ""
-				if o.t.Kind == KindMaterializedView {
-					refs, _ := o.st.scanRefs(o.db)
-					if d, n, ok := o.st.mvTarget(o.db); ok {
-						refs = append(refs, d+"."+n)
-					}
-					for _, r := range refs {
-						if !created[r] && !strings.HasSuffix(r, ".*") {
-							why = "it uses " + r + ", which was not created; not created (create it by hand)"
-							break
-						}
-					}
-				}
-				if why == "" {
-					kept = append(kept, o)
-					continue
-				}
-				changed = true
-				p.skipped = append(p.skipped, o.db+"."+o.t.Name+" ("+kindWord(o.t.Kind)+"): "+why)
-				if o.inner != nil && hasEntries(*o.inner) {
-					p.skipped = append(p.skipped, fmt.Sprintf("%s.%s: the %d rows of its inner table were not restored", o.db, o.t.Name, o.inner.Rows))
-				}
-			}
-			p.objs = kept
-		}
-	}
 }
 
 // ---------------------------------------------------------------- restore
@@ -509,15 +446,14 @@ func (r *restorer) session(ctx context.Context) (*session, error) {
 // Restore implements backup.Restorer (docs/design/ui-restore.md
 // "Engines"). Nothing is written before every selected database passed its
 // preflight (in the backup, not on the target with objects, a restorable
-// database engine, every schema entry the CREATE the manifest records) and
-// the clickhouse client was found. Then, across the selected databases:
-// CREATE DATABASE (unless it exists without objects), the tables of the
-// MergeTree family and other local engines, their data through
-// `clickhouse client`, dictionaries with a ClickHouse source in the
-// restored databases, views, materialized views, and the rows of the views'
-// inner tables. Objects that reach outside the restored databases are not
-// created and are reported by name. Nothing is dropped; the first failure
-// ends the restore.
+// database engine, every table's schema entry the CREATE TABLE the
+// manifest records) and the clickhouse client was found. Then, across the
+// selected databases: CREATE DATABASE (unless it exists without objects),
+// the tables of the MergeTree and Log families and Memory (materialized
+// views' inner tables as <view>__restored_data), and their data through
+// `clickhouse client`. Views, materialized views, dictionaries and other
+// engines are not created and are reported by name. Nothing is dropped;
+// the first failure ends the restore.
 func (Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.RestoreResult, err error) {
 	res := &backup.RestoreResult{Items: []backup.RestoreItem{}, Notes: []string{}, Created: []string{}}
 	scrub := &backup.SecretScrubber{}
@@ -595,10 +531,6 @@ func (Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.
 
 	// Preflight: every database, and the client, before anything is
 	// written.
-	restored := map[string]bool{}
-	for _, db := range rc.Databases {
-		restored[db] = true
-	}
 	inBackup := map[string]*Database{}
 	for i := range m.Databases {
 		inBackup[m.Databases[i].Name] = &m.Databases[i]
@@ -606,7 +538,7 @@ func (Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.
 	plans := make([]*dbPlan, len(rc.Databases))
 	var refused []string
 	for i, db := range rc.Databases {
-		plan, msg := planDatabase(inBackup[db], entries, ts, restored, rc.RequestID)
+		plan, msg := planDatabase(inBackup[db], entries, ts, rc.RequestID)
 		if msg != "" {
 			res.Items = append(res.Items, backup.RestoreItem{Name: db, Status: "failed", Bytes: plan.dataBytes(), Error: msg + "; nothing was written"})
 			refused = append(refused, db)
@@ -634,7 +566,6 @@ func (Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.
 		}
 		return res, nil
 	}
-	dropUnsatisfied(plans)
 	res.Notes = append(res.Notes, "Data was loaded with "+client.version+".")
 
 	r := &restorer{rc: rc, s: s, client: client, res: res, items: map[string]*backup.RestoreItem{}, files: entries, opts: opts}
@@ -675,7 +606,6 @@ var ddlSettings = []ch.Setting{
 	{Key: "allow_experimental_variant_type", Value: "1"},
 	{Key: "allow_experimental_dynamic_type", Value: "1"},
 	{Key: "allow_experimental_json_type", Value: "1"},
-	{Key: "allow_experimental_refreshable_materialized_view", Value: "1"},
 }
 
 // exec runs one checked statement over the native protocol.
@@ -721,42 +651,19 @@ func (r *restorer) run(ctx context.Context, plans []*dbPlan) {
 			}
 		}
 	}
-	for i := 0; i < len(all); {
-		j := i
-		for j < len(all) && all[j].phase == all[i].phase {
-			j++
+	for _, st := range all {
+		if err := ctx.Err(); err != nil {
+			failAt(st, err)
+			return
 		}
-		pending := append([]step(nil), all[i:j]...)
-		for len(pending) > 0 {
-			var retry []step
-			var retryErr []error
-			for _, st := range pending {
-				if err := ctx.Err(); err != nil {
-					failAt(st, err)
-					return
-				}
-				err := r.stepFn(ctx, st)
-				if err != nil && st.phase != phaseData && st.phase != phaseInnerData && ch.IsErr(err, proto.ErrUnknownTable) {
-					retry, retryErr = append(retry, st), append(retryErr, err)
-					continue
-				}
-				if err != nil {
-					failAt(st, err)
-					return
-				}
-				db := st.plan.db.Name
-				if left[db]--; left[db] == 0 {
-					finish(db)
-				}
-			}
-			// Nothing else in the phase succeeded: retrying cannot help.
-			if len(retry) == len(pending) {
-				failAt(retry[0], retryErr[0])
-				return
-			}
-			pending = retry
+		if err := r.stepFn(ctx, st); err != nil {
+			failAt(st, err)
+			return
 		}
-		i = j
+		db := st.plan.db.Name
+		if left[db]--; left[db] == 0 {
+			finish(db)
+		}
 	}
 }
 
@@ -769,7 +676,7 @@ func (r *restorer) progress(db, table string) {
 func (r *restorer) do(ctx context.Context, st step) error {
 	db := st.plan.db.Name
 	item := r.items[db]
-	if st.phase != phaseData && st.phase != phaseInnerData {
+	if st.phase != phaseData {
 		if _, err := r.session(ctx); err != nil {
 			return err
 		}
@@ -784,15 +691,9 @@ func (r *restorer) do(ctx context.Context, st step) error {
 		return nil
 	}
 	o := st.obj
-	r.progress(db, o.t.Name)
-	switch st.phase {
-	case phaseData:
-		rows, n, err := r.load(ctx, db, o.t.Name, o.t)
-		item.Rows += int64(rows)
-		item.Bytes += n
-		return err
-	case phaseInnerData:
-		rows, n, err := r.load(ctx, db, o.innerName, *o.inner)
+	r.progress(db, o.target)
+	if st.phase == phaseData {
+		rows, n, err := r.load(ctx, db, o.target, o.t)
 		item.Rows += int64(rows)
 		item.Bytes += n
 		return err
@@ -800,41 +701,8 @@ func (r *restorer) do(ctx context.Context, st step) error {
 	if err := r.s.exec(ctx, o.st.sql()); err != nil {
 		return err
 	}
-	if o.t.Kind == KindTable {
-		item.Tables++
-	}
-	if o.inner != nil {
-		name, err := r.s.innerTable(ctx, db, o.t.Name)
-		if err != nil {
-			return err
-		}
-		o.innerName = name
-	}
+	item.Tables++
 	return nil
-}
-
-// innerTable is the name of a materialized view's inner table on the
-// target: ".inner_id.<uuid>" (Atomic) or ".inner.<view>" (Ordinary).
-func (s *session) innerTable(ctx context.Context, db, mv string) (string, error) {
-	u, err := s.queryValue(ctx, "SELECT toString(uuid) FROM system.tables WHERE database = "+quoteString(db)+" AND name = "+quoteString(mv))
-	if err != nil {
-		return "", fmt.Errorf("find the view's inner table: %w", err)
-	}
-	var cands []string
-	if u = nilUUID(u); u != "" {
-		cands = append(cands, ".inner_id."+u)
-	}
-	cands = append(cands, ".inner."+mv)
-	for _, c := range cands {
-		n, err := s.queryValue(ctx, "SELECT toString(count()) FROM system.tables WHERE database = "+quoteString(db)+" AND name = "+quoteString(c))
-		if err != nil {
-			return "", fmt.Errorf("find the view's inner table: %w", err)
-		}
-		if n == "1" {
-			return c, nil
-		}
-	}
-	return "", errors.New("the materialized view has no inner table on the target")
 }
 
 // load streams the data entries of table t into db.target through

