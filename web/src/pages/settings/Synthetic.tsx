@@ -5,14 +5,14 @@
 // A credential's secret is write-only: it lives only in its password input (DOM), never in React state, a query
 // cache or a URL. It is read when the request leaves, dropped from the body once sent, and wiped when the dialog
 // closes (the RestoreDialog pattern). Nothing ever shows it again.
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../../api/client';
 import type { AllowKind, AllowRule, AllowRuleInput, Channel, CredentialKind, HostCheck, InUse, ItemList, SecretSource, SyntheticCredential, SyntheticCredentialInput } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { daysUntil, plural, shortDate } from '../../lib/format';
 import { CheckIcon, IconClose } from '../../ui/icons';
-import { Badge, Chip, EmptyState, Field, FormError, Modal, Spinner, aria, fieldError, useAction, useToast, type Tone } from '../../ui/kit';
+import { Badge, Chip, EmptyState, Field, FormError, Modal, Spinner, aria, fieldError, sentence, useAction, useToast, type Tone } from '../../ui/kit';
 import { DataTable } from '../../ui/DataTable';
 import { SettingsLayout } from './SettingsLayout';
 
@@ -67,9 +67,9 @@ function expiry(c: SyntheticCredential, now = Date.now()): { text: string; tone:
   return { text, tone: d <= 14 ? 'warn' : 'ok' };
 }
 
-/** "Nov 21 · yigit": the date and who did it (the name before an @). */
+/** "Nov 21 · Selin A.": the date and who did it (created_by_name is the display-name snapshot). */
 function byLine(at: string, name: string): string {
-  const who = (name || '').split('@')[0];
+  const who = (name || '').trim();
   return who ? `${shortDate(at)} · ${who}` : shortDate(at);
 }
 
@@ -227,7 +227,19 @@ function HostCheckBox() {
         <Spinner label="Checking the allowlist" /> Checking {host}…
       </>
     );
-  else if (host && q.isError) result = <span className="muted">Could not check the host now.</span>;
+  else if (host && q.isError) {
+    // a 4xx says what is wrong with the input (422 on host); anything else is the server or the network
+    const e = q.error;
+    const msg = e instanceof ApiError && e.status >= 400 && e.status < 500 ? (fieldError(e, 'host') === 'required' ? 'Enter a host name, or a URL with one.' : sentence(fieldError(e, 'host') ?? e.message)) : null;
+    result = msg ? (
+      <>
+        <CheckIcon ok={false} label="Not checked" />
+        <span>{msg}</span>
+      </>
+    ) : (
+      <span className="muted">Could not check the host now.</span>
+    );
+  }
   else if (host && q.data) {
     const h = q.data;
     result =
@@ -546,7 +558,7 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
   const [errs, setErrs] = useState<Record<string, string>>({});
   const [deleting, setDeleting] = useState(false);
   const [dirty, setDirty] = useState(false);
-  const secretRef = useRef<HTMLInputElement>(null);
+  const secretRef = useRef<HTMLInputElement | null>(null);
   const nameRef = useRef<HTMLInputElement>(null);
   const save = useAction<SyntheticCredential>();
   const del = useMutation({
@@ -565,8 +577,12 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
     wipe();
     onClose();
   };
-  // The secret input is wiped whenever it leaves the form (source switched, rotation turned off) and when the dialog goes.
-  useEffect(() => wipe, []);
+  // A callback ref: React calls it with null when the secret input leaves the DOM (rotation turned off, source
+  // switched, the dialog closed or unmounted), and the value is wiped right then.
+  const secretInput = useCallback((el: HTMLInputElement | null) => {
+    if (!el && secretRef.current) secretRef.current.value = '';
+    secretRef.current = el;
+  }, []);
 
   const sec = SECRET_OF[kind];
   const validate = (): Record<string, string> => {
@@ -580,7 +596,8 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
     });
     if (kind === 'header' && !header.trim()) e.header_name = 'Enter the header name, for example X-Api-Key.';
     if (kind === 'oauth2_client_credentials' && !/^https:\/\//i.test(tokenUrl.trim())) e.oauth_token_url = 'Enter the https:// token URL. It must be allowlisted and inside the bound hosts.';
-    if (expires && !editing && new Date(`${expires}T00:00:00`).getTime() <= Date.now()) e.expires_at = 'Choose a date in the future, or leave it empty.';
+    // the API refuses a past expiry on create and on update: it would mean nothing
+    if (expires && new Date(`${expires}T00:00:00`).getTime() <= Date.now()) e.expires_at = 'Choose a date in the future, or leave it empty.';
     if (rotate) {
       if (sec.user && !username.trim()) e['secret.username'] = `Enter the ${sec.user.toLowerCase()}.`;
       if (source === 'keyvault_ref') {
@@ -854,10 +871,10 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
               </div>
               <div className={source === 'keyvault_ref' ? (sec.user ? 'grid-3' : 'grid-2') : sec.user ? 'grid-2' : undefined}>
                 {sec.user && (
-                  <Field label={sec.user} htmlFor="cr-user" error={fe('secret.username')}>
+                  <Field label={sec.user} htmlFor="cr-user" error={fe('secret.username')} hint={editing ? `Needed again with a new secret: the API never returns the ${sec.user.toLowerCase()}.` : undefined}>
                     <input
                       className="in mono"
-                      {...aria('cr-user', fe('secret.username'))}
+                      {...aria('cr-user', fe('secret.username'), editing)}
                       value={username}
                       onChange={(e) => {
                         setUsername(e.target.value);
@@ -902,7 +919,7 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
                   </>
                 ) : (
                   <Field label={sec.label} htmlFor="cr-secret" error={fe('secret.password')} hint="Sent over TLS, stored encrypted, never shown again.">
-                    <input ref={secretRef} className="in mono" type="password" {...aria('cr-secret', fe('secret.password'), true)} onChange={touch} autoComplete="new-password" spellCheck={false} />
+                    <input ref={secretInput} className="in mono" type="password" {...aria('cr-secret', fe('secret.password'), true)} onChange={touch} autoComplete="off" data-1p-ignore="true" data-lpignore="true" spellCheck={false} />
                   </Field>
                 )}
               </div>
@@ -954,7 +971,14 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
         )}
         <div className="foot-actions">
           {editing && !deleting ? (
-            <button type="button" className="btn danger" onClick={() => setDeleting(true)}>
+            <button
+              type="button"
+              className="btn danger"
+              onClick={() => {
+                del.reset();
+                setDeleting(true);
+              }}
+            >
               Delete
             </button>
           ) : (

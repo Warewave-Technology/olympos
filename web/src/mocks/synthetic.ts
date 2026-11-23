@@ -50,7 +50,7 @@ const chan = (name: string) => db.channels.find((c) => c.name === name)!;
 for (const c of db.channels) if (c.routes.includes('grant.changed') && !c.routes.includes('synthetic.allowlist_changed')) c.routes.push('synthetic.allowlist_changed');
 
 function rule(pattern: string, kind: AllowRule['kind'], note: string, by = db.people.yigit, ago = 2 * D): AllowRule {
-  return { id: db.stableId(`rule:${pattern}`), pattern, kind, note, scenarios: 0, created_by: by.id, created_by_name: by.upn, created_at: db.iso(ago) };
+  return { id: db.stableId(`rule:${pattern}`), pattern, kind, note, scenarios: 0, created_by: by.id, created_by_name: by.display_name, created_at: db.iso(ago) };
 }
 export const allowlist: AllowRule[] = [
   rule('*.prod.wrw.com', 'wildcard', 'Production APIs'),
@@ -78,7 +78,7 @@ function cred(name: string, kind: SyntheticCredential['kind'], bound: string[], 
     resolve_failures_24h: 0,
     last_resolve_failed_at: null,
     created_by: db.people.yigit.id,
-    created_by_name: db.people.yigit.upn,
+    created_by_name: db.people.yigit.display_name,
     created_at: db.iso(25 * D),
     updated_at: db.iso(25 * D),
     ...p,
@@ -89,7 +89,7 @@ export const credentials: SyntheticCredential[] = [
   // a Key Vault reference the server could not read lately (resolve_failures_24h)
   cred('search-api-key', 'header', ['search.wrw.com'], { header_name: 'X-Api-Key', source: 'keyvault_ref', expires_at: null, resolve_failures_24h: 3, last_resolve_failed_at: db.iso(40 * MIN) }),
   cred('reports-login', 'basic', ['reports.wrw.com'], { expires_at: db.isoIn(9 * D + H) }),
-  cred('partner-oauth', 'oauth2_client_credentials', ['partner-sftp.acme.net', 'login.acme.net'], { oauth_token_url: 'https://login.acme.net/oauth2/token', oauth_scopes: 'sftp.read', expires_at: null, created_by: db.people.selin.id, created_by_name: db.people.selin.upn, created_at: db.iso(D), updated_at: db.iso(D) }),
+  cred('partner-oauth', 'oauth2_client_credentials', ['partner-sftp.acme.net', 'login.acme.net'], { oauth_token_url: 'https://login.acme.net/oauth2/token', oauth_scopes: 'sftp.read', expires_at: null, created_by: db.people.selin.id, created_by_name: db.people.selin.display_name, created_at: db.iso(D), updated_at: db.iso(D) }),
 ];
 const credRef = (name: string) => {
   const c = credentials.find((x) => x.name === name)!;
@@ -891,7 +891,7 @@ function settingsRoutes(): [string, string, Handler][] {
         if (Object.keys(fields).length) return invalid('invalid rule', fields);
         if (allowlist.some((x) => x.pattern === v.rule!.pattern && x.kind === v.rule!.kind)) return invalid('invalid rule', { pattern: 'This rule exists already.' });
         const me = db.me().principal;
-        const row: AllowRule = { id: db.uuid(), ...v.rule!, note: (b.note ?? '').trim(), scenarios: 0, created_by: me.id, created_by_name: me.upn, created_at: new Date().toISOString() };
+        const row: AllowRule = { id: db.uuid(), ...v.rule!, note: (b.note ?? '').trim(), scenarios: 0, created_by: me.id, created_by_name: me.display_name, created_at: new Date().toISOString() };
         allowlist.push(row);
         allowlistVersion++;
         db.record('synthetic.allowlist_rule_added', 'synthetic_allowlist', row.pattern, `+ ${row.kind} ${row.pattern}`);
@@ -909,8 +909,9 @@ function settingsRoutes(): [string, string, Handler][] {
         const rest = allowlist.filter((x) => x.id !== r.id);
         const needed = (h: string) => ruleMatches(r, h) && !rest.some((x) => ruleMatches(x, h));
         const scen = scenarios.filter((s) => hostsOf(s).some(needed)).map((s) => s.name);
+        // as the server: a bound host this rule helped cover that the others do not
         const creds = credentials
-          .filter((c) => c.bound_hosts.some((b) => !covered(rest, b)) || (c.oauth_token_url && needed(checkHost(c.oauth_token_url).host)))
+          .filter((c) => c.bound_hosts.some((b) => covered(allowlist, b) && !covered(rest, b)) || (c.oauth_token_url && needed(checkHost(c.oauth_token_url).host)))
           .map((c) => c.name);
         if (scen.length || creds.length) return inUse('This rule is still needed', scen, creds);
         allowlist.splice(i, 1);
@@ -939,7 +940,7 @@ function settingsRoutes(): [string, string, Handler][] {
           source: b.secret!.source,
           expires_at: b.expires_at ?? null,
           created_by: me.id,
-          created_by_name: me.upn,
+          created_by_name: me.display_name,
           created_at: now,
           updated_at: now,
         };
@@ -1148,7 +1149,15 @@ export const syntheticRoutes: [string, string, Handler][] = [
     },
   ],
   ['GET', '/synthetic/allowlist', () => (perms().synthetic_edit || perms().read ? ok({ items: allowlist.map(ruleView), version: allowlistVersion }) : forbidden())],
-  ['POST', '/synthetic/allowlist/check', (r) => (perms().synthetic_edit ? ok(checkHost(String(r.body?.host ?? ''))) : forbidden())],
+  [
+    'POST',
+    '/synthetic/allowlist/check',
+    (r) => {
+      if (!perms().synthetic_edit) return forbidden();
+      const h = checkHost(String(r.body?.host ?? ''));
+      return h.host ? ok(h) : invalid('invalid check', { host: 'required' });
+    },
+  ],
   ['GET', '/synthetic/credentials', () => localStorage.getItem('olympos.mock.credentials') === 'fail' ? { status: 500, body: { error: 'database unavailable' } } : items(credentials.map(credView))],
   ...settingsRoutes(),
 ];

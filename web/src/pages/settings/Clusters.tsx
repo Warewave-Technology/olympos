@@ -2,7 +2,7 @@ import { useState, type ReactNode } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
-import type { Cluster, ItemList, ProbeStatus, Provider, TransferMode } from '../../api/types';
+import type { Cluster, ItemList, Provider, TransferMode } from '../../api/types';
 import { useCan } from '../../auth/me';
 import { ago, bytes, money, plural, shortDate } from '../../lib/format';
 import { formatLabels, userLabels } from '../../lib/labels';
@@ -12,7 +12,7 @@ import { ClusterStatusBadge } from '../../ui/status';
 import { Select } from '../../ui/Select';
 import { TagInput } from '../../ui/TagInput';
 import { AddClusterDialog } from '../AddClusterDialog';
-import { InstallProbeDialog, ProbeBadge } from '../../ui/InstallProbeDialog';
+import { InstallProbeDialog, ProbeBadge, ProbeLine, probeState, probeVersion } from '../../ui/InstallProbeDialog';
 import { SettingsLayout } from './SettingsLayout';
 import { DataTable } from '../../ui/DataTable';
 
@@ -25,11 +25,14 @@ const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'onprem', label: 'On-prem' },
 ];
 
-/** Probe column sort: the ones that need attention first. */
-const PROBE_ORDER: ProbeStatus[] = ['offline', 'pending', 'not_installed', 'revoked', 'online'];
-
 /** What the synthetic probe of a cluster is doing, for the cluster settings. */
 function probeText(c: Cluster, now: number): ReactNode {
+  if (c.status === 'pending')
+    return (
+      <>
+        The agent has not enrolled yet. The install command already installs the probe: the agent enrolls it with the same token.
+      </>
+    );
   switch (c.probe_status) {
     case 'online':
       return (
@@ -154,18 +157,18 @@ export function ClustersSettingsPage() {
             { id: 'transfer', header: 'Transfer', sortValue: (c) => c.transfer_mode, cell: (c) => (c.transfer_mode === 'compressed' ? <Badge tone="warn">compressed</Badge> : <Badge tone="ok">e2e-tls</Badge>) },
             { id: 'bench', header: 'kube-bench', sortValue: (c) => c.bench_enabled, cell: (c) => (c.bench_enabled ? <Badge tone="ok">On</Badge> : <Badge tone="mute">Off</Badge>) },
             {
-              id: 'probe',
-              header: 'Probe',
-              sortValue: (c) => PROBE_ORDER.indexOf(c.probe_status),
-              searchText: (c) => `probe ${c.probe_status.replace('_', ' ')} ${c.probe_version}`,
+              id: 'status',
+              header: 'Status',
+              sortValue: (c) => c.status,
+              searchText: (c) => `${c.status} probe ${probeState(c).text}`,
+              // the agent, and on a second line the synthetic probe (state, and its version when installed)
               cell: (c) => (
                 <>
-                  <ProbeBadge c={c} now={now} />
-                  {c.probe_version && c.probe_status !== 'revoked' && c.probe_status !== 'not_installed' && <div className="mono muted small probe-ver">{c.probe_version}</div>}
+                  <ClusterStatusBadge c={c} now={now} />
+                  <ProbeLine c={c} now={now} />
                 </>
               ),
             },
-            { id: 'status', header: 'Status', sortValue: (c) => c.status, cell: (c) => <ClusterStatusBadge c={c} now={now} /> },
           ]}
         />
         <div className="card-spacer" />
@@ -280,7 +283,7 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           <dt>Synthetic probe</dt>
           <dd className="inline-sm">
             <ProbeBadge c={c} />
-            {c.probe_version && c.probe_status !== 'revoked' && c.probe_status !== 'not_installed' && <span className="mono muted">{c.probe_version}</span>}
+            {probeVersion(c) && <span className="mono muted">{probeVersion(c)}</span>}
           </dd>
         </dl>
         <p className="muted small" style={{ margin: 0 }}>Only admins with scope all can change cluster settings.</p>
@@ -364,15 +367,31 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           <div className="note probe-note" role="group" aria-label="Synthetic probe">
             <span>{probeText(c, now)}</span>
             <span className="inline">
-              {c.probe_status !== 'not_installed' && c.probe_status !== 'revoked' && (
-                <button type="button" className="btn sm danger" onClick={() => setRevokingProbe(true)}>
-                  Revoke probe
+              {c.status === 'pending' ? (
+                // Ruling P24: no probe token before the first agent; its add cluster command carries the probe.
+                <button type="button" className="btn sm" onClick={() => setInstalling(true)}>
+                  Show install command
                 </button>
-              )}
-              {c.probe_status !== 'online' && (
-                <button type="button" className="btn sm" onClick={() => setInstallingProbe(true)}>
-                  Install probe
-                </button>
+              ) : (
+                <>
+                  {c.probe_status !== 'not_installed' && c.probe_status !== 'revoked' && (
+                    <button
+                      type="button"
+                      className="btn sm danger"
+                      onClick={() => {
+                        revokeProbe.reset();
+                        setRevokingProbe(true);
+                      }}
+                    >
+                      Revoke probe
+                    </button>
+                  )}
+                  {c.probe_status !== 'online' && (
+                    <button type="button" className="btn sm" onClick={() => setInstallingProbe(true)}>
+                      Install probe
+                    </button>
+                  )}
+                </>
               )}
             </span>
           </div>

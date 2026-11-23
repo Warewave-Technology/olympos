@@ -8,6 +8,7 @@ import * as db from '../mocks/db';
 import * as syn from '../mocks/synthetic';
 import { match } from '../mocks/handlers';
 import { boundLabel, matchesText } from '../pages/settings/Synthetic';
+import { probeConnected } from '../ui/InstallProbeDialog';
 import { guestRolesText } from '../pages/settings/Access';
 import { GUEST_FORBIDDEN_ROLES } from '../auth/permissions';
 import { lastQueryClient, renderApp } from './renderApp';
@@ -45,7 +46,7 @@ describe('Settings › Synthetic monitoring: host allowlist', () => {
     // the Scenarios column counts the scenarios with a host the rule matches
     const cells = within(rowOf(table, 'partner-sftp.acme.net')).getAllByRole('cell');
     expect(cells[3]).toHaveTextContent('1');
-    expect(rowOf(table, 'partner-sftp.acme.net')).toHaveTextContent('· selin');
+    expect(rowOf(table, 'partner-sftp.acme.net')).toHaveTextContent('· Selin A.');
     // the change channel is the one grant.changed goes to
     await waitFor(() => expect(screen.getByText(/every change is/).textContent).toContain('posted to #platform-access'), T);
   });
@@ -60,6 +61,10 @@ describe('Settings › Synthetic monitoring: host allowlist', () => {
     await user.clear(input);
     await user.type(input, 'wrw.com.evil.io');
     await waitFor(() => expect(result()).toHaveTextContent('wrw.com.evil.io · no rule matches'), T);
+    // a 422 from the API says what is wrong
+    await user.clear(input);
+    await user.type(input, 'https://');
+    await waitFor(() => expect(result()).toHaveTextContent('Enter a host name, or a URL with one.'), T);
     await user.clear(input);
     await user.type(input, '169.254.169.254');
     await waitFor(() => expect(result()).toHaveTextContent('169.254.169.254 · IP addresses are always denied; use a host name.'), T);
@@ -254,21 +259,73 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     const err = await within(dlg).findByText('This credential is still used. Change these first:', {}, T);
     expect(err.parentElement).toHaveTextContent('Scenario: Checkout API flow');
     expect(syn.credentials.some((c) => c.name === 'catalog-monitor')).toBe(true);
+    // asking again starts without the last answer
+    await user.click(within(dlg).getByRole('button', { name: 'Keep it' }));
+    await user.click(within(dlg).getByRole('button', { name: 'Delete' }));
+    expect(within(dlg).queryByText('This credential is still used. Change these first:')).not.toBeInTheDocument();
+  });
+
+  it('rotates a secret: sent once in the PUT, then in no cache, URL or the page', async () => {
+    const user = userEvent.setup();
+    await renderApp('/settings/synthetic');
+    const sent: { url: string; method: string; body: string }[] = [];
+    const fetchNow = window.fetch;
+    vi.spyOn(window, 'fetch').mockImplementation((input, init) => {
+      sent.push({ url: String(input), method: init?.method ?? 'GET', body: typeof init?.body === 'string' ? init.body : '' });
+      return fetchNow(input, init);
+    });
+    const SECRET = 'rot-9a1b-new-secret';
+    const table = await screen.findByRole('table', { name: 'Credentials' }, T);
+    await user.click(await within(table).findByRole('button', { name: 'Edit credential catalog-monitor' }, T));
+    const dlg = screen.getByRole('dialog', { name: 'Edit catalog-monitor' });
+    await user.click(within(dlg).getByRole('checkbox', { name: 'Rotate the secret' }));
+    const input = within(dlg).getByLabelText('Token');
+    // password managers stay out of it
+    expect(input).toHaveAttribute('autocomplete', 'off');
+    expect(input).toHaveAttribute('data-1p-ignore', 'true');
+    expect(input).toHaveAttribute('data-lpignore', 'true');
+    await user.type(input, SECRET);
+    await user.click(within(dlg).getByRole('button', { name: 'Save credential' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument(), T);
+    const put = sent.find((x) => x.method === 'PUT' && x.url.includes('/synthetic/credentials/'))!;
+    expect(JSON.parse(put.body).secret).toEqual({ source: 'stored', password: SECRET });
+    expect(sent.some((x) => x.url.includes(SECRET))).toBe(false);
+    expect(document.body.innerHTML).not.toContain(SECRET);
+    const caches = JSON.stringify([lastQueryClient!.getQueryCache().getAll().map((q) => [q.queryKey, q.state.data]), lastQueryClient!.getMutationCache().getAll().map((m) => [m.state.variables, m.state.data])]);
+    expect(caches).not.toContain(SECRET);
+    await waitFor(() => expect(within(rowOf(table, 'catalog-monitor')).getAllByRole('cell')[4]).toHaveTextContent(/^[A-Z][a-z]{2} \d{2}$/), T);
+    expect(syn.credentials.find((c) => c.name === 'catalog-monitor')!.rotated_at).not.toBeNull();
+  });
+
+  it('asks for the login again on rotation, and refuses a past expiry on edit', async () => {
+    const user = userEvent.setup();
+    await renderApp('/settings/synthetic');
+    await user.click(await screen.findByRole('button', { name: 'Edit credential reports-login' }, T));
+    const dlg = screen.getByRole('dialog', { name: 'Edit reports-login' });
+    await user.click(within(dlg).getByRole('checkbox', { name: 'Rotate the secret' }));
+    expect(within(dlg).getByLabelText('Username')).toHaveValue('');
+    expect(within(dlg).getByText('Needed again with a new secret: the API never returns the username.')).toBeInTheDocument();
+    await user.click(within(dlg).getByRole('checkbox', { name: 'Rotate the secret' }));
+    const exp = within(dlg).getByLabelText('Expires (optional)');
+    await user.clear(exp);
+    await user.type(exp, '2020-01-01');
+    await user.click(within(dlg).getByRole('button', { name: 'Save credential' }));
+    expect(await within(dlg).findByText('Choose a date in the future, or leave it empty.', {}, T)).toBeInTheDocument();
   });
 });
 
 describe('Settings › Clusters & agents: the synthetic probe', () => {
-  it('shows the probe state and version per cluster', async () => {
+  it('shows the probe state and version on a second line of the status, and the table fits', async () => {
     await renderApp('/settings/clusters');
     const table = await screen.findByRole('table', { name: 'Clusters' }, T);
     await within(table).findByText('prod-aks-weu-01', {}, T);
-    expect(within(table).getByRole('columnheader', { name: /Probe/ })).toBeInTheDocument();
-    const cell = (name: string) => within(rowOf(table, name)).getAllByRole('cell')[6];
-    expect(cell('prod-aks-weu-01')).toHaveTextContent('Installed0.3.0');
-    expect(within(cell('prod-aks-weu-01')).getByText('Installed')).toHaveClass('badge', 'ok');
-    expect(cell('aks-sea-apac')).toHaveTextContent('Not installed');
-    expect(cell('onprem-ist-lab')).toHaveTextContent(/^Offline · 2 h0\.3\.0$/);
-    expect(within(cell('onprem-ist-lab')).getByText(/Offline/)).toHaveClass('badge', 'crit');
+    // folded into Status (ruling P23): no column of its own
+    expect(within(table).getAllByRole('columnheader').map((h) => h.textContent?.trim())).toEqual(['Cluster', 'Labels', 'Provider', 'Agent', 'Transfer', 'kube-bench', 'Status']);
+    const status = (name: string) => within(rowOf(table, name)).getAllByRole('cell')[6];
+    expect(status('prod-aks-weu-01')).toHaveTextContent(/^OnlineProbe installed \(0\.3\.0\)$/);
+    expect(status('aks-sea-apac')).toHaveTextContent(/^OnlineProbe not installed$/);
+    expect(status('onprem-ist-lab')).toHaveTextContent(/^Offline · 2 hProbe offline · 2 h$/);
+    expect(within(status('onprem-ist-lab')).getByText('Probe offline · 2 h')).toHaveClass('ico-crit');
   });
 
   it('installs the probe on a cluster without one: the command carries the install sets and a one-time token', async () => {
@@ -289,7 +346,46 @@ describe('Settings › Clusters & agents: the synthetic probe', () => {
     expect(within(dlg).getByRole('button', { name: 'Copy command' })).toBeInTheDocument();
   });
 
-  it('revokes a probe after a confirmation; a cluster without a probe has nothing to revoke (409)', async () => {
+  it('says "Probe connected" only for the new probe, not an earlier one that reconnects', () => {
+    const exp = new Date(Date.now() + 3600_000).toISOString(); // issued now
+    const after = new Date(Date.now() + 5_000).toISOString();
+    const before = new Date(Date.now() - 60_000).toISOString();
+    const online = (seen: string) => ({ probe_status: 'online' as const, probe_last_seen_at: seen });
+    // it went through pending since the token
+    expect(probeConnected({ before: 'offline', polled: online(after), sawEnrolling: true, tokenExpiresAt: exp })).toBe(true);
+    // none before (or revoked): seen after the token is the new one
+    expect(probeConnected({ before: 'not_installed', polled: online(after), sawEnrolling: false, tokenExpiresAt: exp })).toBe(true);
+    expect(probeConnected({ before: 'revoked', polled: online(after), sawEnrolling: false, tokenExpiresAt: exp })).toBe(true);
+    expect(probeConnected({ before: 'not_installed', polled: online(before), sawEnrolling: false, tokenExpiresAt: exp })).toBe(false);
+    // an offline probe that merely reconnects is not
+    expect(probeConnected({ before: 'offline', polled: online(after), sawEnrolling: false, tokenExpiresAt: exp })).toBe(false);
+    expect(probeConnected({ before: 'not_installed', polled: { probe_status: 'pending', probe_last_seen_at: null }, sawEnrolling: true, tokenExpiresAt: exp })).toBe(false);
+  });
+
+  it('offers no probe token while the cluster waits for its first agent (ruling P24)', async () => {
+    const user = userEvent.setup();
+    const pending = { ...db.byName('aks-sea-apac'), id: db.stableId('pending-probe-test'), name: 'oke-fra-mes', status: 'pending' as const, probe_status: 'not_installed' as const, labels: { 'olympos.io/cluster': 'oke-fra-mes' } };
+    db.clusters.push(pending);
+    try {
+      await renderApp(`/settings/clusters?cluster=${pending.id}`);
+      const probe = await screen.findByLabelText('Synthetic probe', {}, T);
+      expect(probe).toHaveTextContent('The agent has not enrolled yet. The install command already installs the probe');
+      expect(within(probe).queryByRole('button', { name: 'Install probe' })).not.toBeInTheDocument();
+      expect(within(probe).queryByRole('button', { name: 'Revoke probe' })).not.toBeInTheDocument();
+      const table = screen.getByRole('table', { name: 'Clusters' });
+      expect(within(rowOf(table, 'oke-fra-mes')).getAllByRole('cell')[6]).toHaveTextContent('Probe installs with the agent');
+      await user.click(within(probe).getByRole('button', { name: 'Show install command' }));
+      expect(screen.getByRole('dialog', { name: 'Install command for oke-fra-mes' })).toBeInTheDocument();
+      // and the API refuses it
+      const res = await match('POST', `/clusters/${pending.id}/probe-token`)!.h({ method: 'POST', path: '', query: new URLSearchParams(), body: {} }, { id: pending.id });
+      expect(res.status).toBe(409);
+      expect((res.body as { error: string }).error).toBe('the agent has not enrolled yet; its install command already installs the probe');
+    } finally {
+      db.clusters.splice(db.clusters.indexOf(pending), 1);
+    }
+  });
+
+  it('revokes a probe after a confirmation', async () => {
     const user = userEvent.setup();
     const c = db.byName('prod-aks-weu-01');
     await renderApp(`/settings/clusters?cluster=${c.id}`);
@@ -303,18 +399,35 @@ describe('Settings › Clusters & agents: the synthetic probe', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument(), T);
     await waitFor(() => expect(screen.getByLabelText('Synthetic probe')).toHaveTextContent('The synthetic probe was revoked: its certificate is denied and scenarios skip this cluster.'), T);
     const table = screen.getByRole('table', { name: 'Clusters' });
-    expect(within(rowOf(table, 'prod-aks-weu-01')).getAllByRole('cell')[6]).toHaveTextContent(/^Revoked$/);
+    expect(within(rowOf(table, 'prod-aks-weu-01')).getAllByRole('cell')[6]).toHaveTextContent(/Probe revoked$/);
     expect(within(screen.getByLabelText('Synthetic probe')).getByRole('button', { name: 'Install probe' })).toBeInTheDocument();
+  });
 
-    const res = await match('DELETE', `/clusters/${db.byName('aks-sea-apac').id}/probe`)!.h({ method: 'DELETE', path: '', query: new URLSearchParams(), body: undefined }, { id: db.byName('aks-sea-apac').id });
-    expect(res).toEqual({ status: 409, body: { error: 'no probe installed' } });
+  it('shows the 409 of a probe that is gone by the time of the revoke, and a fresh dialog next time', async () => {
+    const user = userEvent.setup();
+    const c = db.byName('eks-fra-data');
+    await renderApp(`/settings/clusters?cluster=${c.id}`);
+    const probe = await screen.findByLabelText('Synthetic probe', {}, T);
+    // the server's state moves on under the page
+    c.probe_status = 'not_installed';
+    try {
+      await user.click(within(probe).getByRole('button', { name: 'Revoke probe' }));
+      const dlg = screen.getByRole('dialog', { name: 'Revoke the probe of eks-fra-data?' });
+      await user.click(within(dlg).getByRole('button', { name: 'Revoke probe' }));
+      expect(await within(dlg).findByRole('alert', {}, T)).toHaveTextContent('No probe installed.');
+      await user.click(within(dlg).getByRole('button', { name: 'Cancel' }));
+      await user.click(within(screen.getByLabelText('Synthetic probe')).getByRole('button', { name: 'Revoke probe' }));
+      expect(within(screen.getByRole('dialog', { name: 'Revoke the probe of eks-fra-data?' })).queryByRole('alert')).not.toBeInTheDocument();
+    } finally {
+      c.probe_status = 'online';
+    }
   });
 
   it('shows the probe to people who cannot change cluster settings', async () => {
     localStorage.setItem('olympos.mock.role', 'viewer');
-    await renderApp(`/settings/clusters?cluster=${db.byName('aks-sea-apac').id}`);
+    await renderApp(`/settings/clusters?cluster=${db.byName('onprem-ist-lab').id}`);
     const term = await screen.findByText('Synthetic probe', { selector: 'dt' }, T);
-    expect(term.nextElementSibling).toHaveTextContent('Not installed');
+    expect(term.nextElementSibling).toHaveTextContent(/^Offline · 2 h0\.3\.0$/);
     expect(screen.queryByRole('button', { name: 'Install probe' })).not.toBeInTheDocument();
   });
 });

@@ -3708,10 +3708,14 @@ button.cell:focus-visible {
   flex-wrap: nowrap;
   align-items: flex-start;
 }
-.probe-ver {
-  margin-top: 3px;
-}
 .probe-note > span:first-child {
   flex: 1 1 360px;
   min-width: 0;
+}
+.probe-line {
+  margin-top: 4px;
+  white-space: normal;
+  min-width: 110px;
+  max-width: 150px;
+  line-height: 1.35;
 }

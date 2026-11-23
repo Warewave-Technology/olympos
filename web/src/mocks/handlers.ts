@@ -44,11 +44,12 @@ const AGENT_SETS = ['probe.image.repository=registry.contoso.internal/mirror/oly
 function liveClusters(): Cluster[] {
   const now = Date.now();
   for (const c of db.clusters) {
+    // a probe token: the agent enrolls the probe after 3 s (pending), and it connects after 9 s
     const pt = probeEnrolling.get(c.id);
     if (pt && c.status !== 'revoked' && now - pt > 9000) {
       probeEnrolling.delete(c.id);
-      Object.assign(c, { probe_status: 'online', probe_version: '0.3.0', probe_last_seen_at: new Date().toISOString() });
-    }
+      Object.assign(c, { probe_status: 'online', probe_version: '0.3.1', probe_last_seen_at: new Date().toISOString() });
+    } else if (pt && c.status !== 'revoked' && now - pt > 3000) c.probe_status = 'pending';
     const t = db.enrolling.get(c.id);
     if (t && c.status === 'pending' && now - t > 9000) {
       Object.assign(c, {
@@ -414,7 +415,8 @@ const routes: [string, string, Handler][] = [
         created_at: new Date().toISOString(),
         eol: false,
         version_skew: false,
-        probe_status: 'pending',
+        // as the server: the probe enrolls with the agent, from the same token
+        probe_status: 'not_installed',
         probe_version: '',
         probe_last_seen_at: null,
       };
@@ -502,6 +504,8 @@ const routes: [string, string, Handler][] = [
       if (!c) return notFound();
       if (!perms().admin_global) return forbidden();
       if (c.status === 'revoked') return { status: 409, body: { error: 'cluster is revoked; add it again as a new cluster' } };
+      // ruling P24: the add cluster command of a pending cluster already installs the probe
+      if (c.status === 'pending') return { status: 409, body: { error: 'the agent has not enrolled yet; its install command already installs the probe' } };
       probeEnrolling.set(c.id, Date.now());
       db.record('cluster.probe_token_issued', 'cluster', c.name, 'probe install command issued');
       const sets = AGENT_SETS.map((kv) => ` --set ${kv}`).join('');
