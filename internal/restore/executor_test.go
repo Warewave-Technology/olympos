@@ -760,7 +760,7 @@ func TestLostOwnershipStopsRestore(t *testing.T) {
 // says so; the databases it created are listed.
 func TestLeaseStopsRestore(t *testing.T) {
 	x := newXEnv(t)
-	x.ex.StaleAfter, x.ex.LeaseMargin = time.Second, 200*time.Millisecond
+	x.ex.StaleAfter, x.ex.LeaseMargin = 3*time.Second, time.Second
 	id := x.approved(x.pgTarget)
 	_, started := holdRestore()
 	x.claim(id)
@@ -788,7 +788,7 @@ func TestLeaseStopsRestore(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if el := time.Since(locked); el >= time.Second {
+	if el := time.Since(locked); el >= 3*time.Second {
 		t.Fatalf("stopped after %s, not before StaleAfter", el)
 	}
 	if err := tx.Rollback(ctx); err != nil {

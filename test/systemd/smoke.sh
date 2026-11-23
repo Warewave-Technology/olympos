@@ -86,6 +86,8 @@ unit_run() {
   while IFS= read -r line; do props+=(-p "$line"); done < <(
     systemctl cat olympos-server | sed -n '/^\[Service\]/,/^\[/p' | grep -E '^[A-Za-z]+=' |
       grep -vE '^(Type|Exec[A-Za-z]*|Restart[A-Za-z]*|Timeout[A-Za-z]*)=')
+  # No properties means the unit was not read: the check would prove nothing.
+  [ "${#props[@]}" -gt 20 ] || { echo "unit_run: read ${#props[@]} unit properties" >&2; return 1; }
   systemd-run --quiet --wait --pipe --collect "${props[@]}" -- "$@"
 }
 test -x /usr/lib/olympos/bin/clickhouse && unit_run /usr/lib/olympos/bin/clickhouse client --version
