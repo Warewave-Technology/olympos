@@ -8,7 +8,9 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 - The server image and the packages ship the pinned official `clickhouse` binary (LTS) as the restore client;
-  new key `backup.clickhouseClient`. See `docs/configuration.md`.
+  new key `backup.clickhouseClient`. Size: packages grow by about 200-230 MB per architecture
+  (about 750 MB more under `/usr/lib/olympos/bin`) and the server image goes from about 0.8 to 1.8 GB. See
+  `docs/configuration.md`.
 - **Signed kube-bench image** ([#26](https://github.com/Warewave-Technology/olympos/issues/26)): upstream
   kube-bench images are not signed, so each release copies the digest the agent pins to
   `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity. New agent chart value

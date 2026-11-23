@@ -99,6 +99,8 @@ issued by Olympos's internal CA for the host of `agentGatewayURL` (agents pin th
 `gatewayTLSSecret` to use your own. **Do not terminate TLS for `:8443` in a proxy** — mTLS must reach
 the server.
 
+The server image is about 1.8 GB (it was about 0.8 GB) because it carries the static ClickHouse client used for ClickHouse restores; plan registry and node disk accordingly.
+
 ### Target certificates
 
 The server verifies every target's certificate end to end against `targetTLS.caBundleFile` (and a

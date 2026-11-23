@@ -71,11 +71,12 @@ olympos:
   listen: {http: ":8080", gateway: ":8443", metrics: "127.0.0.1:9090"}
   keyVault: {provider: local, name: smoke, localDir: /var/lib/olympos/localkv}
   database: {dsn: "postgres:///olympos?host=/var/run/postgresql"}
-  backup: {pgDumpDir: "/usr/lib/postgresql", nfsRoot: /var/lib/olympos/nfs}
+  backup: {pgDumpDir: "/usr/lib/postgresql", nfsRoot: /var/lib/olympos/nfs, clickhouseClient: /usr/lib/olympos/bin/clickhouse}
   audit: {kubescapeBin: /usr/lib/olympos/bin/kubescape, polarisBin: /usr/lib/olympos/bin/polaris}
   security: {trivyBin: /usr/lib/olympos/bin/trivy, trivyCacheDir: /var/lib/olympos/trivy-cache}
 YAML
 install -d -o olympos -g olympos -m 0750 /var/lib/olympos/nfs/smoke
+test -x /usr/lib/olympos/bin/clickhouse && /usr/lib/olympos/bin/clickhouse client --version
 sudo -u olympos olympos-server check-config -db
 systemctl enable --now olympos-server
 for i in $(seq 60); do curl -fsS http://127.0.0.1:9090/readyz >/dev/null 2>&1 && break; sleep 2; done
