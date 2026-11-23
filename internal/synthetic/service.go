@@ -192,6 +192,18 @@ func (s *Service) probeOfflineAlertAfter() time.Duration {
 	return 5 * time.Minute
 }
 
+// AdvanceAllowlistVersion moves the allowlist version to the current time
+// in milliseconds, or by one when it is ahead of that (ruling P25), and
+// returns it. Every replica calls it at start-up, before it dispatches: a
+// probe refuses a snapshot older than the newest it has seen, so after a
+// restore from an older dump every run would be refused (allowlist_stale)
+// until the list changed. Calling it more than once does no harm.
+func (s *Service) AdvanceAllowlistVersion(ctx context.Context) (int64, error) {
+	var v int64
+	err := s.DB.QueryRow(ctx, `SELECT olympos_synthetic_allowlist_advance()`).Scan(&v)
+	return v, err
+}
+
 // InstallHooks connects the gateway's probe streams to the service.
 //
 // Disconnected is left alone on purpose: when the last stream of a cluster

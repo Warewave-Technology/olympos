@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
@@ -20,6 +22,15 @@ func init() {
 			Cfg:   d.Cfg.Synthetic, Started: time.Now(),
 		}
 		svc.OnResult = svc.ApplyOutcome
+		// Ruling P25: a restored database starts ahead of every allowlist
+		// version a probe has seen. Before any run is sent.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		v, err := svc.AdvanceAllowlistVersion(ctx)
+		if err != nil {
+			return Wiring{}, fmt.Errorf("advance the synthetic allowlist version: %w", err)
+		}
+		svc.Log.Info("synthetic allowlist version", "version", v)
 		svc.InstallHooks(&d.Gateway.ProbeHooks)
 		api := &synthetic.API{Svc: svc, Log: d.Log.With("component", "synthetic-api")}
 		return Wiring{

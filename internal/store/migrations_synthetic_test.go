@@ -2,8 +2,10 @@ package store_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
@@ -104,6 +106,42 @@ func TestSyntheticMonitoringMigration(t *testing.T) {
 	}
 	// Only the one row.
 	requireSQLState(t, exec(`INSERT INTO synthetic_allowlist_version (id, version) VALUES (2, 1)`), "23514")
+
+	// Ruling P25: the version is the time of the change in milliseconds.
+	// After a restore from an older dump (a lower version) and a server
+	// start, it is above every version a probe saw before.
+	if lo := time.Now().Add(-time.Hour).UnixMilli(); v4 < lo {
+		t.Fatalf("allowlist version %d is not a time in milliseconds (want >= %d)", v4, lo)
+	}
+	oldMax := v4
+	mustExec(`UPDATE synthetic_allowlist_version SET version = 5 WHERE id = 1`)
+	// A restore takes longer than the few changes that may share oldMax's
+	// millisecond.
+	time.Sleep(20 * time.Millisecond)
+	started := scanInt(t, db, `SELECT olympos_synthetic_allowlist_advance()`)
+	if started <= oldMax || version() != started {
+		t.Fatalf("version after a restore and a start: %d (stored %d), want above %d", started, version(), oldMax)
+	}
+	// Two changes in the same millisecond (or with the clock behind the
+	// version) still move it, by one each.
+	ahead := time.Now().Add(time.Hour).UnixMilli()
+	mustExec(`UPDATE synthetic_allowlist_version SET version = $1 WHERE id = 1`, ahead)
+	mustExec(`INSERT INTO synthetic_allowlist (pattern, kind) VALUES ('same.example.com', 'exact')`)
+	mustExec(`DELETE FROM synthetic_allowlist WHERE pattern = 'same.example.com'`)
+	if v := version(); v != ahead+2 {
+		t.Fatalf("two changes with the clock behind the version: %d, want %d", v, ahead+2)
+	}
+	// Many changes in a row, several within one millisecond: each moves it.
+	mustExec(`UPDATE synthetic_allowlist_version SET version = 1 WHERE id = 1`)
+	last := int64(1)
+	for i := range 20 {
+		mustExec(`UPDATE synthetic_allowlist SET note = $1`, fmt.Sprint(i))
+		if v := version(); v <= last {
+			t.Fatalf("change %d: version %d after %d", i, v, last)
+		} else {
+			last = v
+		}
+	}
 
 	// Credentials: secret material lives in credentials; at least one bound host.
 	cred := scan(`INSERT INTO credentials (kind, keyvault_name, secret_name) VALUES ('keyvault_ref', 'kv', 'sec') RETURNING id::text`)
@@ -344,6 +382,15 @@ func TestSyntheticMonitoringMigrationDown(t *testing.T) {
 	if err := store.Migrate(ctx, db); err != nil {
 		t.Fatalf("migrate back up: %v", err)
 	}
+}
+
+func scanInt(t *testing.T, db *store.DB, q string, args ...any) int64 {
+	t.Helper()
+	var n int64
+	if err := db.QueryRow(context.Background(), q, args...).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", q, err)
+	}
+	return n
 }
 
 func boolStr(b bool) string {

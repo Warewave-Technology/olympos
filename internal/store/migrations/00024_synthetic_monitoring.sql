@@ -65,11 +65,26 @@ CREATE TABLE synthetic_allowlist_version (
 );
 INSERT INTO synthetic_allowlist_version (id, version) VALUES (1, 1);
 
+-- Ruling P25: the version moves to the current time in milliseconds since
+-- the epoch, or by one when that is not ahead of it (two changes in the
+-- same millisecond, a clock set back). A probe refuses a snapshot older
+-- than the newest it has seen; after a restore from an older dump, the
+-- version the server starts with (the server calls this at start-up too)
+-- is still ahead of anything a probe saw before the restore.
+-- +goose StatementBegin
+CREATE FUNCTION olympos_synthetic_allowlist_advance() RETURNS bigint AS $$
+  UPDATE synthetic_allowlist_version
+    SET version = greatest(version + 1, (extract(epoch from clock_timestamp())*1000)::bigint)
+    WHERE id = 1
+    RETURNING version;
+$$ LANGUAGE sql;
+-- +goose StatementEnd
+
 -- Once per statement, whatever the number of rows, and for TRUNCATE too.
 -- +goose StatementBegin
 CREATE FUNCTION olympos_synthetic_allowlist_bump() RETURNS trigger AS $$
 BEGIN
-  UPDATE synthetic_allowlist_version SET version = version + 1 WHERE id = 1;
+  PERFORM olympos_synthetic_allowlist_advance();
   RETURN NULL;
 END;
 $$ LANGUAGE plpgsql;
@@ -377,6 +392,7 @@ DROP TABLE scenarios;
 DROP TABLE synthetic_credentials;
 DROP TRIGGER synthetic_allowlist_version_bump ON synthetic_allowlist;
 DROP FUNCTION olympos_synthetic_allowlist_bump();
+DROP FUNCTION olympos_synthetic_allowlist_advance();
 DROP TABLE synthetic_allowlist_version;
 DROP TABLE synthetic_allowlist;
 

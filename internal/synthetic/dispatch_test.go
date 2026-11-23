@@ -305,3 +305,41 @@ func TestRejectedRun(t *testing.T) {
 	}
 	e.wantRun(waiting, StatusScheduled, "")
 }
+
+// Ruling P25: after a restore from an older dump (a lower allowlist
+// version) the start-up hook moves the version above everything a probe
+// saw before, and the next run carries it. Calling it again moves it on.
+func TestAllowlistVersionAfterRestore(t *testing.T) {
+	e := newEnv(t)
+	e.allow("suffix", "example.com")
+	var seen int64
+	if err := e.db.QueryRow(e.ctx, `SELECT version FROM synthetic_allowlist_version WHERE id = 1`).Scan(&seen); err != nil {
+		t.Fatal(err)
+	}
+	e.exec(`UPDATE synthetic_allowlist_version SET version = 3 WHERE id = 1`)
+	time.Sleep(20 * time.Millisecond)
+	v, err := e.svc.AdvanceAllowlistVersion(e.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v <= seen {
+		t.Fatalf("version after a restore and a start = %d, want above %d", v, seen)
+	}
+	again, err := e.svc.AdvanceAllowlistVersion(e.ctx)
+	if err != nil || again <= v {
+		t.Fatalf("a second start: %d after %d, %v", again, v, err)
+	}
+
+	cl := e.cluster("c1", "online")
+	e.probes.connect(t, cl, 2)
+	run := e.schedule(e.scenario("s", true, httpStep("https://api.example.com/", nil)), cl, 0)
+	if n := e.dispatch(); n != 1 {
+		t.Fatalf("sent %d runs", n)
+	}
+	if r := e.run(run); r.AllowVersion != again {
+		t.Fatalf("run carries allowlist version %d, want %d", r.AllowVersion, again)
+	}
+	if got := e.probes.messages()[0].msg.GetAllowlist().GetVersion(); got != again {
+		t.Fatalf("snapshot version %d, want %d", got, again)
+	}
+}
