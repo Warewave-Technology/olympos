@@ -57,10 +57,38 @@ func TestRequestsPerMinute(t *testing.T) {
 		t.Errorf("flow with two credentials: %v, want 12", got)
 	}
 
-	// The worst valid case: 10 steps, 2 retries, every 30 s.
+	// 10 steps without redirects, 2 retries, every 30 s.
 	s = &Scenario{IntervalSeconds: 30, StepRetries: MaxStepRetries, Steps: make([]Step, MaxSteps)}
 	if got := RequestsPerMinute(s); got != 60 {
-		t.Errorf("worst case: %v, want 60", got)
+		t.Errorf("10 steps, 2 retries: %v, want 60", got)
+	}
+
+	// Redirects: an HTTP step that follows them counts 1 + MaxRedirects
+	// requests per attempt.
+	s = single(KindHTTP) // 1 step, no retries, 30 s
+	s.Steps[0].HTTP.FollowRedirects = true
+	if got := RequestsPerMinute(s); got != 12 {
+		t.Errorf("one redirecting step every 30 s: %v, want 12", got)
+	}
+	s = flow() // 5 steps, 1 retry, 60 s
+	s.Steps[0].HTTP.FollowRedirects = true
+	if got := RequestsPerMinute(s); got != 20 { // 2×6 + 4×2
+		t.Errorf("flow with one redirecting step: %v, want 20", got)
+	}
+	s.Steps[0].HTTP.FollowRedirects = false
+	if got := RequestsPerMinute(s); got != 10 {
+		t.Errorf("flow without redirects: %v, want 10", got)
+	}
+
+	// The worst valid case with redirects: 10 redirecting HTTP steps, 2
+	// retries, every 30 s, one credential: (10×3×6 + 1) × 2.
+	s = &Scenario{IntervalSeconds: 30, StepRetries: MaxStepRetries}
+	for i := range MaxSteps {
+		s.Steps = append(s.Steps, Step{Position: i, Kind: KindHTTP, CredentialID: &cred,
+			HTTP: &HTTPSpec{Method: "GET", URL: "https://www.wrw.com/", FollowRedirects: true}})
+	}
+	if got := RequestsPerMinute(s); got != 362 {
+		t.Errorf("worst case with redirects: %v, want 362", got)
 	}
 
 	s = &Scenario{IntervalSeconds: 45, Steps: make([]Step, 1)}

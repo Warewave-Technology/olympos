@@ -235,27 +235,34 @@ func Hosts(s *Scenario) []string {
 	return out
 }
 
-// RequestsPerMinute estimates the requests one cluster's probe makes for
-// the scenario: steps × (1 + retries) × 60 / interval, as if every step
-// were retried as often as allowed, plus one token request per run for
-// each distinct credential the steps use.
+// RequestsPerMinute is the worst-case number of requests one cluster's
+// probe makes for the scenario, per minute (the cap of §6.3 bounds real
+// traffic): each step is tried 1 + retries times; an attempt of an HTTP
+// step that follows redirects counts 1 + MaxRedirects requests, every
+// other attempt counts 1; each distinct credential the steps use adds one
+// token request per run. The sum per run is scaled by 60 / interval.
 //
 // Only OAuth2 credentials request a token, but a step names its credential
-// by id alone, so every credential is counted: the figure is an upper bound
-// that is at most 60/interval per non-OAuth2 credential above the true
-// one. Redirects are not counted. It returns 0 for an interval below 1.
+// by id alone, so every credential is counted: an upper bound at most
+// 60/interval above the true figure per non-OAuth2 credential. It returns 0
+// for an interval below 1.
 func RequestsPerMinute(s *Scenario) float64 {
 	if s == nil || s.IntervalSeconds < 1 {
 		return 0
 	}
-	retries := max(s.StepRetries, 0)
-	perRun := float64(len(s.Steps) * (1 + retries))
+	attempts := 1 + max(s.StepRetries, 0)
+	perRun := 0
 	creds := map[uuid.UUID]bool{}
 	for _, st := range s.Steps {
+		perAttempt := 1
+		if st.HTTP != nil && st.HTTP.FollowRedirects {
+			perAttempt += MaxRedirects
+		}
+		perRun += attempts * perAttempt
 		if st.CredentialID != nil {
 			creds[*st.CredentialID] = true
 		}
 	}
-	perRun += float64(len(creds))
-	return perRun * 60 / float64(s.IntervalSeconds)
+	perRun += len(creds)
+	return float64(perRun) * 60 / float64(s.IntervalSeconds)
 }
