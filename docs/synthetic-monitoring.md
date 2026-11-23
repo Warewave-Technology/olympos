@@ -53,7 +53,9 @@ contained.
 ## Install the probe
 
 **New clusters.** The *Add cluster* command installs the probe together with the agent (`probe.enabled: true`
-in the agent chart). The same one-time token enrolls the agent and then the probe.
+in the agent chart). The same one-time token enrolls the agent and then the probe. A command shown again
+(*Show install command*) enrolls the probe only while the cluster has none; once a probe has enrolled,
+replace it with *Install probe*.
 
 **Clusters added before v0.3.** `helm upgrade` of the agent chart adds the probe Deployment, which waits
 without an identity; the cluster shows *Probe: not installed*. An admin with scope `all` opens

@@ -321,7 +321,10 @@ func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
 }
 
 // newToken issues a fresh bootstrap token (e.g. the first one expired, or
-// a re-install after the identity Secret was lost).
+// a re-install after the identity Secret was lost). It enrolls the agent,
+// and the probe too unless the cluster already has one (enrolled: pending,
+// online or offline): then the command, which an admin may hand around,
+// cannot enroll a second probe. A probe is replaced with Install probe.
 func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 	s := httpx.Subject(r)
 	id, ok := httpx.UUIDParam(w, r, "id")
@@ -348,14 +351,23 @@ func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 	var token string
 	var exp time.Time
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		var probeStatus string
+		if err := tx.QueryRow(r.Context(), `SELECT probe_status FROM clusters WHERE id = $1 FOR UPDATE`, id).Scan(&probeStatus); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND `+unusedTokenSQL+` AND expires_at > now()`, id); err != nil {
 			return err
 		}
+		roles := []string{tokenRoleAgent, tokenRoleProbe}
+		switch probeStatus {
+		case "pending", "online", "offline":
+			roles = []string{tokenRoleAgent}
+		}
 		var err error
-		if token, exp, err = a.issueToken(r.Context(), tx, id, []string{tokenRoleAgent, tokenRoleProbe}); err != nil {
+		if token, exp, err = a.issueToken(r.Context(), tx, id, roles); err != nil {
 			return err
 		}
-		return httpx.Record(r, tx, "cluster.token_issued", "cluster", id.String(), &id, nil)
+		return httpx.Record(r, tx, "cluster.token_issued", "cluster", id.String(), &id, map[string]any{"roles": roles})
 	})
 	if err != nil {
 		httpx.Internal(w, r, a.Log, err)

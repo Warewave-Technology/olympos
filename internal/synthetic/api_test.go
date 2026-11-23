@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -1006,6 +1007,59 @@ func TestRunNowRateLimit(t *testing.T) {
 }
 
 // ---------------------------------------------------------------- inventory
+
+// A reissued add cluster command (POST /clusters/{id}/token) enrolls the
+// probe only on a cluster that has none: once a probe is enrolled (pending,
+// online or offline) its token is for the agent alone, so the command
+// cannot enroll a second, rogue probe. A probe is replaced with Install
+// probe.
+func TestReissuedTokenEnrollsNoSecondProbe(t *testing.T) {
+	x := newEnv(t)
+	admin := x.login("admin", "admin")
+	ctx := context.Background()
+	var added struct {
+		Cluster struct {
+			ID uuid.UUID `json:"id"`
+		} `json:"cluster"`
+	}
+	if code := admin.Do("POST", "/api/v1/clusters", map[string]any{"name": "re-1"}, &added); code != 201 {
+		t.Fatalf("add cluster: %d", code)
+	}
+	id := added.Cluster.ID
+	x.exec(`UPDATE clusters SET status = 'online' WHERE id = $1`, id)
+	tokenRe := regexp.MustCompile(`--set bootstrapToken=(\S+)`)
+	for _, c := range []struct {
+		probe string
+		want  []string
+	}{
+		{"not_installed", []string{"agent", "probe"}},
+		{"pending", []string{"agent"}},
+		{"online", []string{"agent"}},
+		{"offline", []string{"agent"}},
+		{"revoked", []string{"agent", "probe"}},
+	} {
+		x.exec(`UPDATE clusters SET probe_status = $2 WHERE id = $1`, id, c.probe)
+		var inst struct {
+			Command string `json:"command"`
+		}
+		if code := admin.Do("POST", "/api/v1/clusters/"+id.String()+"/token", nil, &inst); code != 200 {
+			t.Fatalf("token with probe %s: %d", c.probe, code)
+		}
+		m := tokenRe.FindStringSubmatch(inst.Command)
+		if m == nil {
+			t.Fatalf("no token in %q", inst.Command)
+		}
+		var roles []string
+		if err := x.DB.QueryRow(ctx, `SELECT roles FROM enroll_tokens WHERE token_hash = $1`, gateway.HashToken(m[1])).Scan(&roles); err != nil || !slices.Equal(roles, c.want) {
+			t.Fatalf("probe %s: token roles %v (%v), want %v", c.probe, roles, err, c.want)
+		}
+		// Only the new token is live.
+		var live int
+		if err := x.DB.QueryRow(ctx, `SELECT count(*) FROM enroll_tokens WHERE cluster_id = $1 AND expires_at > now()`, id).Scan(&live); err != nil || live != 1 {
+			t.Fatalf("probe %s: %d live tokens, %v", c.probe, live, err)
+		}
+	}
+}
 
 func TestProbeTokenAndRevoke(t *testing.T) {
 	x := newEnv(t)

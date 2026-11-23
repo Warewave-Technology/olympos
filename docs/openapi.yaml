@@ -95,7 +95,10 @@ paths:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [clusters]
-      summary: Issue a fresh bootstrap token / install command (invalidates unused ones).
+      summary: >-
+        Issue a fresh bootstrap token / install command (invalidates unused ones). The token enrolls the agent, and
+        the probe only when the cluster has none enrolled (probe_status not_installed or revoked); a probe is
+        replaced with probe-token (Install probe).
       responses:
         "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
   /clusters/{id}/probe-token:
