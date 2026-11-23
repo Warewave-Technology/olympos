@@ -264,18 +264,32 @@ sha256sum backup.dump   # must match the sha256 of this copy: 9f2c4a1e&hellip;7b
 </div>
 <div class="note">A snapshot replaces all of the target's data: there is no database selection. The target must be a new Vault or OpenBao that is not configured in Olympos, initialized, unsealed and the active node.</div>
 <div><label class="lbl" for="v-target">Target (Vault/OpenBao)</label><select id="v-target" class="in mono"><option>aks-neu-dr / security / openbao-dr &middot; OpenBao 2.1</option></select></div>
-<div><label class="lbl" for="v-token">Token of the new Vault</label><input id="v-token" type="password" class="in mono" value="hvs.xxxxxxxxxxxxxxxx"><div class="hint">Needs the <span class="mono">default</span> policy plus <b>update</b> and <b>sudo</b> on <span class="mono">sys/storage/raft/snapshot-force</span>. Sealed until the request ends, then wiped; never shown again.</div></div>
+<div><label class="lbl" for="v-token">Token of the new Vault</label><input id="v-token" type="password" class="in mono" value="hvs.xxxxxxxxxxxxxxxx" aria-invalid="true" style="border-color: #cc241d"><div class="err">this token needs both update and sudo on sys/storage/raft/snapshot-force on the target</div><div class="muted" style="font-size: 12px; margin-top: 4px">(Before a check, the field's hint says what the token needs: the <span class="mono">default</span> policy plus <b>update</b> and <b>sudo</b> on <span class="mono">sys/storage/raft/snapshot-force</span>; sealed until the request ends, then wiped; never shown again.)</div></div>
 <div style="display: flex; justify-content: flex-end"><button class="btn pri">Check again</button></div>
 <div style="border: 1px solid #3c3836; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 6px">
-<b style="font-weight: 600; font-size: 13px; margin-bottom: 4px">Target check</b>
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 4px"><b style="font-weight: 600; font-size: 13px">Target check</b><span class="muted mono" style="font-size: 12px">OpenBao 2.1.0 &middot; nothing was written</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-crit" aria-label="Failed" role="img"><path d="M6 6l12 12M18 6 6 18"/></svg><span>The target cannot take this restore. Check the highlighted fields.</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Initialized</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Unsealed</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Active node (not an HA standby)</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-crit" aria-label="Failed" role="img"><path d="M6 6l12 12M18 6 6 18"/></svg><span>Token holds update and sudo on <span class="mono">sys/storage/raft/snapshot-force</span></span></div>
-<div class="err">This token needs both update and sudo on sys/storage/raft/snapshot-force on the target.</div>
 </div>
 <div class="note warn"><div class="note-title">After the restore</div><ul style="margin: 4px 0 0; padding-left: 18px"><li>The snapshot replaces all of the target's data. Unseal it with the <b>source</b> Vault's unseal keys, or by the source's auto-unseal (the same seal key). Its own unseal keys no longer apply.</li><li>Its root token, policies, auth methods and secrets become the source's.</li><li>The token given for this request most likely stops working.</li></ul></div>
 <div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end"><button class="btn">Cancel</button><button class="btn pri" disabled style="opacity: .55">Submit for approval</button></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="d5-t" style="flex: 1 1 420px; max-width: 520px; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 16px">
+<div><div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore request</div><h2 id="d5-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Submitted for approval</h2></div>
+<div class="note ok" role="status">The restore into <span class="mono">billing-pg-dr</span> waits for a second person with operate on both clusters. It expires Nov 26, 10:44 if nobody decides. Nothing is written to the target before it is approved.</div>
+<p class="muted" style="margin: 0; font-size: 12.5px">The credential is kept encrypted while the request is open and deleted when it ends. It is never shown again.</p>
+<div style="display: flex; gap: 10px; justify-content: flex-end"><a href="approvals.html#restore-detail" class="btn" style="display: inline-flex; align-items: center; text-decoration: none; box-sizing: border-box">Open request</a><button class="btn pri">Done</button></div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="d6-t" style="flex: 1 1 420px; max-width: 520px; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 16px">
+<div><div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore request</div><h2 id="d6-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Break-glass restore started</h2></div>
+<div class="note warn" role="status">The restore into <span class="mono">openbao-dr</span> is approved and starts as soon as the target's agent is connected (within 24 h). It is recorded in the audit log and a critical notification (<span class="mono">restore.break_glass</span>) was sent.</div>
+<p class="muted" style="margin: 0; font-size: 12.5px">The credential (the token) is kept encrypted while the request is open and deleted when it ends. It is never shown again.</p>
+<div style="display: flex; gap: 10px; justify-content: flex-end"><a href="approvals.html#restore-vault" class="btn" style="display: inline-flex; align-items: center; text-decoration: none; box-sizing: border-box">Open request</a><button class="btn pri">Done</button></div>
 </section>
 
 

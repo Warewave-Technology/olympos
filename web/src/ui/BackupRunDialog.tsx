@@ -4,7 +4,7 @@
 // built from any succeeded copy. *Restore…* opens the restore dialog: the copy
 // is loaded into a new, discovered target after a second person approves it
 // (docs/design/ui-restore.md).
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { BackupRun, BackupRunCopy, BackupRunDetail, RestoreCopy, RestoreGuide } from '../api/types';
@@ -283,6 +283,9 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
   const [runId, setRunId] = useState(id);
   const [copy, setCopy] = useState('');
   const [restoring, setRestoring] = useState(false);
+  // Coming back from the restore dialog, focus returns to Restore… (the button it was opened from).
+  const [backFromRestore, setBackFromRestore] = useState(false);
+  const restoreBtn = useRef<HTMLButtonElement>(null);
   // Opening a restore needs operate on the target's cluster (and read here): hidden without operate anywhere.
   const mayRestore = useCan('operate');
   const q = useQuery({
@@ -297,9 +300,19 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
     setRunId(other);
   };
   // The restore dialog replaces the run dialog while it is open (one modal at a time); closing it comes back here.
-  if (restoring && r && !q.isPlaceholderData) return <RestoreDialog run={r} onClose={() => setRestoring(false)} />;
+  if (restoring && r && !q.isPlaceholderData)
+    return (
+      <RestoreDialog
+        run={r}
+        onClose={() => {
+          setRestoring(false);
+          setBackFromRestore(true);
+        }}
+      />
+    );
   return (
     <Modal
+      initialFocus={backFromRestore ? restoreBtn : undefined}
       open
       onClose={onClose}
       size="xl"
@@ -353,7 +366,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
                 <p className="small" style={{ margin: 0 }}>
                   <b>Restore…</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.
                 </p>
-                <button type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
+                <button ref={restoreBtn} type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
                   Restore…
                 </button>
               </div>

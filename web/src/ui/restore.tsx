@@ -81,7 +81,7 @@ export function RestoreProgressView({ progress, engine }: { progress: RestorePro
   const read = p.bytes ?? 0;
   const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : null;
   return (
-    <div className="stack-sm" aria-labelledby="rs-prog-t">
+    <div className="stack-sm" role="group" aria-labelledby="rs-prog-t">
       <div className="spread small">
         <span id="rs-prog-t">
           {phase}
@@ -203,7 +203,7 @@ export function RestoreResultView({ rq }: { rq: Pick<RestoreRequest, 'engine' | 
         </div>
       )}
       {withSkipped.map((i) => (
-        <div className="note warn" key={`skip-${i.name}`} aria-label={`Not restored in ${i.name}`}>
+        <div className="note warn" role="group" key={`skip-${i.name}`} aria-label={`Not restored in ${i.name}`}>
           <div className="note-title">
             Not restored in <span className="mono">{i.name}</span> ({i.skipped!.length}){isCH ? ' · recreate or re-apply from your schema' : ''}
           </div>
@@ -217,7 +217,7 @@ export function RestoreResultView({ rq }: { rq: Pick<RestoreRequest, 'engine' | 
         </div>
       ))}
       {notes.length > 0 && (
-        <div className="note" aria-label="Notes from the restore">
+        <div className="note" role="group" aria-label="Notes from the restore">
           <div className="note-title">Notes</div>
           <ul className="note-list">
             {notes.map((n, k) => (

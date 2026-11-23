@@ -62,12 +62,18 @@ export function RestoreDetail({ id }: { id: string }) {
     void qc.invalidateQueries({ queryKey: ['restores'] });
     toast(msg(rq), 'ok');
   };
+  // A refused decision (409: expired, decided by someone else, target busy) means the request changed: reload it.
+  const refresh = () => {
+    void qc.invalidateQueries({ queryKey: ['restores', id] });
+    void qc.invalidateQueries({ queryKey: ['restores'] });
+  };
   const approve = useMutation({
     mutationFn: () => api.post<RestoreRequest>(`/restores/${id}/approve`, { comment }),
     onSuccess: done(() => 'Restore approved. It starts when the target’s agent is connected.'),
+    onError: refresh,
   });
-  const reject = useMutation({ mutationFn: () => api.post<RestoreRequest>(`/restores/${id}/reject`, { comment }), onSuccess: done(() => 'Restore request rejected.') });
-  const cancel = useMutation({ mutationFn: () => api.post<RestoreRequest>(`/restores/${id}/cancel`), onSuccess: done(() => 'Restore request withdrawn. The target is free again.') });
+  const reject = useMutation({ mutationFn: () => api.post<RestoreRequest>(`/restores/${id}/reject`, { comment }), onSuccess: done(() => 'Restore request rejected.'), onError: refresh });
+  const cancel = useMutation({ mutationFn: () => api.post<RestoreRequest>(`/restores/${id}/cancel`), onSuccess: done(() => 'Restore request withdrawn. The target is free again.'), onError: refresh });
 
   if (q.isPending)
     return (

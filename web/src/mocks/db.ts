@@ -447,6 +447,9 @@ export const targets: Target[] = [
   target({ service: 'billing-pg-dr', namespace: 'billing', engine: 'postgresql', detected_version: '16.4', port_name: 'postgres', tls_server_name: 'billing-pg-dr.billing.svc', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
   target({ service: 'metrics-ch-dr', namespace: 'observability', engine: 'clickhouse', detected_version: '24.8', port: 9440, port_name: 'native-tls', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
   target({ service: 'openbao-dr', namespace: 'security', engine: 'vault', vault_provider: 'openbao', detected_version: '2.1', port: 8200, tls_server_name: 'openbao-dr.security.svc', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
+  // the same Service name recreated in another namespace of the backup's cluster (a CloudNativePG cluster rebuilt next
+  // to the broken one): a valid restore target, not the backup's own
+  target({ service: 'billing-pg', namespace: 'billing-restore', engine: 'postgresql', detected_version: '16.4', port_name: 'postgres', first_seen_at: iso(2 * H) }, 'prod-aks-weu-02'),
 ];
 export const tByService = (s: string) => targets.find((t) => t.service === s)!;
 

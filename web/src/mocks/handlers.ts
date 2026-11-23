@@ -288,7 +288,7 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
   if (target.id === source.id) fields.target_id = "a restore never writes to the backup's own target; choose a new target";
   else if (target.engine !== engine) fields.target_id = `the target is ${ENGINE_NAME[target.engine] ?? 'an unknown engine'}, the backup is ${ENGINE_NAME[engine]}`;
   else if (target.status === 'gone') fields.target_id = 'the target is gone';
-  else if (engine === 'vault' && db.vaults.some((v) => v.target.service === target.service && v.target.cluster_name === target.cluster_name && v.status === 'configured'))
+  else if (engine === 'vault' && db.vaults.some((v) => v.target.id === target.id && v.status === 'configured'))
     fields.target_id = 'this Vault is configured in Olympos; a snapshot is restored into a new Vault only';
   const c = b.credential;
   if (engine === 'vault') {
@@ -1277,7 +1277,7 @@ const routes: [string, string, Handler][] = [
       if (st) list = list.filter((x) => x.status === st);
       const run = r.query.get('run_id');
       if (run) list = list.filter((x) => x.source.run_id === run);
-      return items(list.sort((a, b) => b.created_at.localeCompare(a.created_at)));
+      return items(list.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)));
     },
   ],
   [

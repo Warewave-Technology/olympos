@@ -5,6 +5,7 @@ import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as db from '../mocks/db';
 import { relDateTime } from '../lib/format';
+import { readable } from '../ui/RestoreDialog';
 import { renderApp } from './renderApp';
 
 afterEach(() => {
@@ -94,7 +95,6 @@ describe('restore dialog', () => {
     const dlg = await openRestore(user, baoRun());
     expect(within(dlg).getByText((_, el) => el?.id === 'rs-token-hint' && /default policy plus update and sudo on sys\/storage\/raft\/snapshot-force/.test(el.textContent ?? ''))).toBeInTheDocument();
     expect(within(dlg).getByText("After the restore")).toBeInTheDocument();
-    expect(within(dlg).queryByText(/Databases \(/)).toBeNull();
     expect(within(dlg).getByLabelText('Token of the new Vault')).toHaveAttribute('type', 'password');
 
     await chooseTarget(user, 'openbao-dr');
@@ -106,6 +106,9 @@ describe('restore dialog', () => {
     expect(within(rows[0]).getByLabelText('Passed')).toBeInTheDocument();
     expect(within(rows[3]).getByLabelText('Failed')).toBeInTheDocument();
     expect(within(dlg).getByText('this token needs both update and sudo on sys/storage/raft/snapshot-force on the target')).toBeInTheDocument();
+    // a snapshot is all or nothing: even after the check there is no database selection
+    expect(within(dlg).queryByRole('group', { name: /^Databases/ })).toBeNull();
+    expect(within(dlg).queryByText(/Databases \(/)).toBeNull();
     expect(submitButton()).toBeDisabled();
   });
 
@@ -123,9 +126,11 @@ describe('restore dialog', () => {
     await user.click(within(dlg).getByRole('button', { name: 'Check target' }));
     await within(dlg).findByText('The target can take this restore.', {}, T);
     await user.click(within(dlg).getByRole('checkbox', { name: /Break-glass: start now, without a checker/ }));
+    const before = db.restoreRequests.length;
     await user.click(submitButton());
     expect(await within(dlg).findByText(/Explain why in at least 10 characters/)).toBeInTheDocument();
-    expect(db.restoreRequests[0].break_glass).toBe(false);
+    // nothing was opened without the justification
+    expect(db.restoreRequests.length).toBe(before);
 
     await user.type(within(dlg).getByLabelText('Justification'), 'openbao is gone after the node pool failure (INC-4398)');
     await user.click(submitButton());
@@ -136,6 +141,76 @@ describe('restore dialog', () => {
     expect(rq.has_vault_token).toBe(true);
     expect(JSON.stringify(rq)).not.toContain('hvs.restore-token');
     expect(document.body.innerHTML).not.toContain('hvs.restore-token');
+  });
+});
+
+describe('restore dialog targets and selections', () => {
+  it('hides only the backup’s own target by id: the same Service in another namespace stays selectable', async () => {
+    const user = userEvent.setup();
+    const run = billingRun();
+    const own = db.jobs.find((j) => j.id === run.job_id)!.target;
+    const sibling = db.targets.find((t) => t.service === own.service && t.cluster_name === own.cluster_name && t.namespace !== own.namespace)!;
+    expect(sibling).toBeTruthy();
+    const dlg = await openRestore(user, run);
+    await user.click(within(dlg).getByRole('combobox', { name: /^Target/ }));
+    await screen.findByRole('option', { name: new RegExp(`${sibling.cluster_name} / ${sibling.namespace} / ${sibling.service}`) }, T);
+    expect(screen.queryByRole('option', { name: new RegExp(`${own.cluster_name} / ${own.namespace} / ${own.service}`) })).toBeNull();
+    await user.click(screen.getByRole('option', { name: new RegExp(`/ ${sibling.namespace} / `) }));
+    expect(within(dlg).getByRole('combobox', { name: /^Target/ })).toHaveTextContent(`${sibling.namespace} / ${sibling.service}`);
+  });
+
+  it('does not offer a Vault that is configured in Olympos', async () => {
+    const user = userEvent.setup();
+    const configured = db.vaults.find((v) => v.status === 'configured' && v.target.service !== baoRun().target_service)!;
+    const dlg = await openRestore(user, baoRun());
+    await user.click(within(dlg).getByRole('combobox', { name: /^Target/ }));
+    await screen.findByRole('option', { name: /openbao-dr/ }, T);
+    expect(screen.queryByRole('option', { name: new RegExp(`${configured.target.cluster_name} / ${configured.target.namespace} / ${configured.target.service}$`) })).toBeNull();
+  });
+
+  it('starts the database selection again when the copy changes', async () => {
+    const user = userEvent.setup();
+    // a partial run whose missing copy a repair completed: two copies to choose from
+    const repaired = db.runs.find((r) => r.status === 'partial' && db.runs.some((x) => x.repair_of === r.id && x.status === 'succeeded'))!;
+    const dlg = await openRestore(user, repaired);
+    await chooseTarget(user, 'billing-pg-dr');
+    await user.type(within(dlg).getByLabelText('Username'), 'postgres');
+    await user.type(within(dlg).getByLabelText('Key Vault'), 'kv-dr-neu');
+    await user.type(within(dlg).getByLabelText('Secret name (holds the password)'), 'billing-pg-dr-admin');
+    await user.click(within(dlg).getByRole('button', { name: 'Check target' }));
+    const report = await within(dlg).findByRole('region', { name: 'Target check' }, T);
+    await user.click(await within(report).findByRole('checkbox', { name: /billing_audit/ }, T));
+    expect(within(report).getByText(/2 of 3 in the backup selected/)).toBeInTheDocument();
+    // the backdrop does not drop a filled form
+    await user.click(document.querySelector('.overlay')!);
+    expect(screen.getByRole('dialog', { name: /Restore billing-pg into a new target/ })).toBeInTheDocument();
+    // another copy: the selection is gone until the next check lists that copy's databases
+    const copy = within(dlg).getByRole('group', { name: 'Copy' });
+    const other = within(copy).getByRole('radio', { name: /Repair/ });
+    expect(other).toBeEnabled();
+    await user.click(other);
+    expect(within(dlg).queryByText(/in the backup selected/)).toBeNull();
+    await user.click(within(dlg).getByRole('button', { name: 'Check again' }));
+    expect(await within(dlg).findByText(/3 of 3 in the backup selected/, {}, T)).toBeInTheDocument();
+  });
+
+  it('drops a machine code from a server message', () => {
+    expect(readable("agent_offline: the target cluster's agent is not connected to this server")).toBe("The target cluster's agent is not connected to this server");
+    expect(readable('the target cannot take this restore')).toBe('The target cannot take this restore');
+  });
+
+  it('shows a refusal once, readable, without its code', async () => {
+    const user = userEvent.setup();
+    const dlg = await openRestore(user, billingRun());
+    await chooseTarget(user, 'billing-pg-dr');
+    await user.type(within(dlg).getByLabelText('Username'), 'nobody');
+    await user.type(within(dlg).getByLabelText('Key Vault'), 'kv-dr-neu');
+    await user.type(within(dlg).getByLabelText('Secret name (holds the password)'), 'billing-pg-dr-admin');
+    await user.click(within(dlg).getByRole('button', { name: 'Check target' }));
+    const msg = await within(dlg).findByText(/^The target check failed: password authentication failed/, {}, T);
+    expect(msg).toHaveTextContent(/failed for user "nobody"\.$/);
+    expect(within(dlg).getAllByText(/password authentication failed/)).toHaveLength(1);
+    expect(within(dlg).getByRole('combobox', { name: /^Target/ })).toHaveAttribute('aria-invalid', 'true');
   });
 });
 

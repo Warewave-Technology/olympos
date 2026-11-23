@@ -70,7 +70,7 @@ export function ApprovalsPage() {
   const entries: Entry[] = [
     ...(listQ.data?.items ?? []).map((cr) => ({ kind: 'vault' as const, id: cr.id, created_at: cr.created_at, cr })),
     ...(restoresQ.data?.items ?? []).map((rq) => ({ kind: 'restore' as const, id: rq.id, created_at: rq.created_at, rq })),
-  ].sort((a, b) => b.created_at.localeCompare(a.created_at));
+  ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
   const first = entries[0];
   const selected: { kind: 'vault' | 'restore'; id: string } | undefined = search.restore
     ? { kind: 'restore', id: search.restore }

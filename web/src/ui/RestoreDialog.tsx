@@ -8,7 +8,7 @@ import { useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { BackupRunDetail, CredentialInput, DestinationKind, ItemList, RestoreCheck, RestoreInput, RestoreRequest, RestoreTargetReport, Target } from '../api/types';
+import type { BackupJob, BackupRunDetail, CredentialInput, DestinationKind, ItemList, RestoreCheck, RestoreInput, RestoreRequest, RestoreTargetReport, Target, Vault } from '../api/types';
 import { useMaybeMe } from '../auth/me';
 import { can } from '../auth/permissions';
 import { dateTime, engineLabel, relDateTime } from '../lib/format';
@@ -51,6 +51,12 @@ function copyRows(run: BackupRunDetail): CopyRow[] {
 }
 
 const sentenceCase = (m: string) => (m ? m[0].toUpperCase() + m.slice(1) : m);
+
+/**
+ * A server message for people: without a leading machine code ("agent_offline: …") and
+ * without a final period, in sentence case.
+ */
+export const readable = (m: string) => sentenceCase(m.replace(/^[a-z][a-z0-9_]*:\s+/, '').replace(/\.$/, ''));
 
 const KV_RE = /^[a-zA-Z0-9-]{3,24}$/;
 const SECRET_RE = /^[a-zA-Z0-9-]{1,127}$/;
@@ -148,11 +154,22 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
   const check = useAction<RestoreCheck>();
   const submit = useAction<RestoreRequest>();
   const touch = () => setRev((r) => r + 1);
+  // A filled form is not dropped by a stray click next to the dialog (Esc and Cancel still close it).
+  const dirty = rev > 0 || why.trim() !== '' || breakGlass;
 
   const targetsQ = useQuery({ queryKey: ['targets', { engine }], queryFn: () => api.get<ItemList<Target>>('/targets', { engine }), staleTime: 30_000 });
-  // Never the backup's own target (the server refuses it too), never a gone one.
-  const targets = (targetsQ.data?.items ?? [])
-    .filter((t) => t.engine === engine && t.status !== 'gone' && !(t.cluster_name === run.cluster_name && t.service === run.target_service))
+  // The backup's own target, by id (from the run's job). Until it is known (or if the job cannot be read) nothing is
+  // hidden for it: the server refuses the backup's own target anyway.
+  const jobQ = useQuery({ queryKey: ['backup-jobs', run.job_id], queryFn: () => api.get<BackupJob>(`/backup/jobs/${run.job_id}`), staleTime: 60_000, retry: false });
+  const ownTargetId = jobQ.data?.target.id;
+  // Vaults configured in Olympos are never restore targets (the server refuses them too).
+  const vaultsQ = useQuery({ queryKey: ['vaults'], queryFn: () => api.get<ItemList<Vault>>('/vaults'), staleTime: 60_000, enabled: isVault, retry: false });
+  const configuredVaults = new Set((vaultsQ.data?.items ?? []).filter((v) => v.status === 'configured').map((v) => v.target.id));
+  // The list waits for what it filters on, so the backup's own target never flashes up as a choice.
+  const listing = targetsQ.isPending || jobQ.isPending || (isVault && vaultsQ.isPending);
+  // Never the backup's own target, a gone one, or (Vault) one configured in Olympos.
+  const targets = (listing ? [] : (targetsQ.data?.items ?? []))
+    .filter((t) => t.engine === engine && t.status !== 'gone' && t.id !== ownTargetId && !(isVault && configuredVaults.has(t.id)))
     .sort((a, b) => `${a.cluster_name}/${a.namespace}/${a.service}`.localeCompare(`${b.cluster_name}/${b.namespace}/${b.service}`));
   const target = targets.find((t) => t.id === targetId);
 
@@ -223,8 +240,15 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
     if (!res) return;
     setChecked({ rev: at, res });
     setKnown((k) => ({ target: b.target_id, dbs: learn(k.target === b.target_id ? k.dbs : {}, res.databases, res.report) }));
-    // The first check lists the databases in the backup: all of them are selected.
-    if (databases === null && res.databases_in_backup) setDatabases([...res.databases_in_backup]);
+    // The first check lists the databases in the backup: all of them are selected. Later checks keep the selection
+    // to what this copy holds (another copy may hold other databases); an empty result selects all again.
+    const inBackup = res.databases_in_backup;
+    if (inBackup) {
+      setDatabases((cur) => {
+        const kept = cur?.filter((d) => inBackup.includes(d)) ?? [];
+        return kept.length ? kept : [...inBackup];
+      });
+    }
   };
 
   const open = async (e: React.FormEvent) => {
@@ -248,6 +272,11 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
   const ready = !!current?.ok;
   const fe = (n: string) => errs[n] ?? (current?.fields ?? {})[n] ?? fieldError(submit.error, n) ?? fieldError(check.error, n);
   const credErr = fe('credential');
+  // A refusal the check reports as its message too (agent offline, the target check failed) is shown once, in the
+  // check panel; the Target field only points at it.
+  const targetErrRaw = fe('target_id');
+  const targetErrInPanel = !!targetErrRaw && !!current?.error && current.error === current.fields?.target_id;
+  const targetErr = errs.target_id ?? (targetErrRaw && !targetErrInPanel ? readable(targetErrRaw) : undefined);
   const sourceErr = fe('run_id') ?? fe('copy_destination_id');
   const title = `Restore ${run.target_service} into a new target`;
   const kind = restoreEngineName(engine);
@@ -284,7 +313,7 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
   }
 
   return (
-    <Modal open onClose={close} size="wide" eyebrow={`Restore · ${run.target_service}`} title={title} description={`${kind} · run of ${relDateTime(run.started_at ?? run.scheduled_for)} · ${run.cluster_name}`}>
+    <Modal open onClose={close} closeOnBackdrop={!dirty} size="wide" eyebrow={`Restore · ${run.target_service}`} title={title} description={`${kind} · run of ${relDateTime(run.started_at ?? run.scheduled_for)} · ${run.cluster_name}`}>
       <form onSubmit={open} className="stack-sm" style={{ gap: 18 }} noValidate autoComplete="off">
         <div className="note">
           {isVault ? (
@@ -317,6 +346,9 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
                   disabled={!c.enabled}
                   onChange={() => {
                     setCopy(c.destination_id);
+                    // another copy may hold other databases: the next check lists them again
+                    setDatabases(null);
+                    setKnown({ target: '', dbs: {} });
                     touch();
                   }}
                 />
@@ -337,9 +369,9 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
         <Field
           label={`Target (${kind})`}
           htmlFor="rs-target"
-          error={fe('target_id')}
+          error={targetErr}
           hint={
-            targetsQ.isSuccess && targets.length === 0 ? (
+            targetsQ.isSuccess && !listing && targets.length === 0 ? (
               <>
                 No other discovered {kind} target. Deploy the new server, annotate its Service with <span className="mono">olympos.io/backup: {engine}</span>, and wait for its agent to report it.
               </>
@@ -357,9 +389,9 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
             }}
             mono
             searchable={targets.length > 8}
-            invalid={!!fe('target_id')}
-            aria-describedby={fe('target_id') ? 'rs-target-err' : 'rs-target-hint'}
-            placeholder={targetsQ.isPending ? 'Loading targets…' : 'Choose a target'}
+            invalid={!!targetErrRaw}
+            aria-describedby={targetErr ? 'rs-target-err' : targetErrInPanel ? 'rs-check-err' : 'rs-target-hint'}
+            placeholder={listing ? 'Loading targets…' : 'Choose a target'}
             options={targets.map((t) => ({
               value: t.id,
               label: `${t.cluster_name} / ${t.namespace} / ${t.service}`,
@@ -526,9 +558,11 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
               </div>
             )}
             {!res.ok && res.error && (
-              <div className="chk" role="alert">
+              <div className="chk" role="alert" id="rs-check-err">
                 <CheckIcon ok={false} />
-                <span>{sentenceCase(res.error)}. Check the highlighted fields.</span>
+                <span>
+                  {readable(res.error)}.{Object.entries(res.fields ?? {}).some(([, v]) => v !== res.error) ? ' Check the highlighted fields.' : ''}
+                </span>
               </div>
             )}
             {isVault && res.report && <VaultChecks r={res.report} />}

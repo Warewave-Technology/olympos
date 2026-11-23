@@ -245,6 +245,7 @@ export function Modal({
   danger,
   eyebrowTone,
   initialFocus,
+  closeOnBackdrop = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -256,6 +257,8 @@ export function Modal({
   danger?: boolean;
   eyebrowTone?: 'crit';
   initialFocus?: React.RefObject<HTMLElement | null>;
+  /** false: a click on the backdrop does not close (a filled form); Esc and the close button still do. */
+  closeOnBackdrop?: boolean;
 }) {
   const titleId = useId();
   const descId = useId();
@@ -266,7 +269,7 @@ export function Modal({
     <div
       className="overlay"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && closeOnBackdrop) onClose();
       }}
     >
       <div
