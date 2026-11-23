@@ -100,7 +100,8 @@ const reqID = "0f6c1d9e-5d1a-4a53-8e0b-7a1f3c2b9d44"
 func shopBackup() *fakeBackup {
 	b := newFakeBackup()
 	shop := b.db("shop", "Atomic")
-	b.obj(shop, Table{Name: "events", Kind: KindTable, Engine: "MergeTree"},
+	b.obj(shop, Table{Name: "events", Kind: KindTable, Engine: "MergeTree",
+		Columns: []Column{{Name: "d", Type: "Date"}, {Name: "x", Type: "UInt64"}, {Name: "x2", Type: "UInt64", DefaultKind: "MATERIALIZED", DefaultExpression: "x * 2"}}},
 		"CREATE TABLE shop.events (`d` Date, `x` UInt64) ENGINE = MergeTree PARTITION BY d ORDER BY x", 3, 0, 2)
 	b.obj(shop, Table{Name: "agg", Kind: KindTable, Engine: "AggregatingMergeTree", DataFormat: FormatRowBinary},
 		"CREATE TABLE shop.agg (`k` UInt8, `u` AggregateFunction(uniq, UInt64)) ENGINE = AggregatingMergeTree ORDER BY k", 4)
@@ -163,7 +164,8 @@ func TestPlanDatabaseAndSteps(t *testing.T) {
 	}
 	notes := strings.Join(p.notes, "\n")
 	if !strings.Contains(notes, "shop.r: its Keeper path was moved under /olympos-restore/"+reqID+"/") ||
-		!strings.Contains(notes, "shop.users_dict: the backup holds a secret") {
+		!strings.Contains(notes, "shop.users_dict: the backup holds a secret") ||
+		!strings.Contains(notes, "shop.events: MATERIALIZED columns (x2)") {
 		t.Fatalf("notes: %s", notes)
 	}
 	for _, o := range p.objs {
@@ -245,7 +247,8 @@ func TestClientMessage(t *testing.T) {
 		{"Code: 210. DB::NetException: SSL Exception: error:0A000086:SSL routines::certificate verify failed (127.0.0.1:4321). (NETWORK_ERROR)",
 			"Code: 210. DB::NetException: SSL Exception: error:0A000086:SSL routines::certificate verify failed", ""},
 		{"Code: 516. DB::Exception: Received from 127.0.0.1:1. DB::Exception: olympos: Authentication failed. (AUTHENTICATION_FAILED)", "Authentication failed", ""},
-		{"Bad arguments: unrecognised option '--nope'", "Bad arguments: unrecognised option '--nope'", ""},
+		{"Bad arguments: unrecognised option 'secret-row'", "no error code", "secret-row"},
+		{"Code: 36. DB::Exception: Cannot convert 'secret-row' (BAD_ARGUMENTS)", "Code: 36 (BAD_ARGUMENTS)", "secret-row"},
 	}
 	for _, c := range cases {
 		got := clientMessage(c.in)

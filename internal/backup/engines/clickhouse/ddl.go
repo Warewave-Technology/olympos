@@ -128,6 +128,10 @@ func lexSQL(s string) ([]token, error) {
 		case strings.IndexByte("()[]{},.;:=<>!+-*/%|?@^~&", c) >= 0:
 			add(tokPunct, s[i:i+1], i, i+1)
 			i++
+		case c >= 0x80:
+			// ClickHouse reads some of these as quotes (‘’ “”) or spaces
+			// (U+00A0), so text with them is not read here at all.
+			return nil, errNonASCII
 		default:
 			return nil, fmt.Errorf("unexpected character %q at byte %d", c, i)
 		}
@@ -142,8 +146,11 @@ func lexSQL(s string) ([]token, error) {
 }
 
 func isWordByte(c byte) bool {
-	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c >= 0x80
+	return c == '_' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
 }
+
+// errNonASCII: the statement has a byte outside ASCII outside quotes.
+var errNonASCII = errors.New("it holds characters outside ASCII outside quotes, which Olympos does not read")
 
 // lexQuoted reads a quoted literal or identifier starting at s[i]: the quote
 // doubled or backslash-escaped stands for itself.
@@ -326,6 +333,9 @@ func checkCreate(stmt, kind, db, name string) (*createStmt, error) {
 		return nil, errors.New("ON CLUSTER is refused: a restore only writes to the target server")
 	}
 	st.body = i
+	if kind == KindMaterializedView && st.find(i, "POPULATE") >= 0 {
+		return nil, errors.New("POPULATE is refused: it would ingest the source's rows a second time")
+	}
 	if kind == KindMaterializedView {
 		if j := st.find(i, "TO"); j >= 0 && at(j+1).is("INNER") {
 			k := j + 2
@@ -467,33 +477,6 @@ func (s *createStmt) mvTarget(db string) (string, string, bool) {
 	return db, s.toks[j+1].val, true
 }
 
-// sources are the "db.table" names after FROM and JOIN in a view's query
-// (unqualified names are in db). Table functions and subqueries are not
-// listed.
-func (s *createStmt) sources(db string) []string {
-	var out []string
-	from := s.selectStart()
-	if from < 0 {
-		return nil
-	}
-	for i := from; i+1 < len(s.toks); i++ {
-		t := s.toks[i]
-		if !(t.is("FROM") || (t.is("JOIN") && !(i > 0 && s.toks[i-1].is("ARRAY")))) {
-			continue
-		}
-		n := s.toks[i+1]
-		if !n.ident() || (i+2 < len(s.toks) && s.toks[i+2].punct("(")) {
-			continue
-		}
-		if i+3 < len(s.toks) && s.toks[i+2].punct(".") && s.toks[i+3].ident() {
-			out = append(out, n.val+"."+s.toks[i+3].val)
-			continue
-		}
-		out = append(out, db+"."+n.val)
-	}
-	return out
-}
-
 // hasHidden: the statement holds a secret ClickHouse masked in SHOW CREATE.
 func (s *createStmt) hasHidden() bool {
 	for _, t := range s.toks {
@@ -502,31 +485,6 @@ func (s *createStmt) hasHidden() bool {
 		}
 	}
 	return false
-}
-
-// externalFunctions are table functions (and file()) that reach outside the
-// server or its databases; a definition calling one is not created.
-var externalFunctions = map[string]bool{
-	"url": true, "urlcluster": true, "s3": true, "s3cluster": true, "gcs": true, "oss": true, "cosn": true,
-	"azureblobstorage": true, "azureblobstoragecluster": true, "hdfs": true, "hdfscluster": true,
-	"remote": true, "remotesecure": true, "cluster": true, "clusterallreplicas": true,
-	"mysql": true, "postgresql": true, "mongodb": true, "redis": true, "sqlite": true, "jdbc": true, "odbc": true,
-	"iceberg": true, "icebergs3": true, "icebergazure": true, "iceberghdfs": true, "iceberglocal": true,
-	"icebergcluster": true, "icebergs3cluster": true, "icebergazurecluster": true, "iceberghdfscluster": true,
-	"deltalake": true, "deltalakecluster": true, "deltalakelocal": true, "deltalakeazure": true,
-	"hudi": true, "hudicluster": true, "hive": true, "file": true, "filecluster": true,
-	"executable": true, "ytsaurus": true, "arrowflight": true, "paimon": true, "kafka": true, "disk": true,
-}
-
-// externalCall is the first external function the statement calls ("").
-func (s *createStmt) externalCall() string {
-	for i := 0; i+1 < len(s.toks); i++ {
-		t := s.toks[i]
-		if t.kind == tokWord && s.toks[i+1].punct("(") && externalFunctions[strings.ToLower(t.val)] {
-			return t.val
-		}
-	}
-	return ""
 }
 
 // ---------------------------------------------------------------- engines
@@ -594,124 +552,176 @@ type classification struct {
 // not what the manifest says (the restore is refused).
 func classify(db string, t Table, ddl string, restored map[string]bool) (classification, error) {
 	st, err := checkCreate(ddl, t.Kind, db, t.Name)
+	if errors.Is(err, errNonASCII) {
+		return classification{reason: err.Error() + "; not created (create it by hand)"}, nil
+	}
 	if err != nil {
 		return classification{}, err
 	}
 	c := classification{st: st, hidden: st.hasHidden()}
 	skip := func(reason string) (classification, error) {
-		c.create, c.reason = false, reason
+		c.create, c.reason = false, reason+"; not created (create it by hand)"
 		return c, nil
 	}
 	engine := st.engineName()
 	switch t.Kind {
 	case KindTable, KindMVInner:
 		if st.selectStart() >= 0 || engine == "" {
-			return skip("engine " + t.Engine + " is defined over a table function; not created (create it by hand)")
+			return skip("engine " + t.Engine + " is defined over a table function")
 		}
 		if engine != t.Engine {
 			return classification{}, fmt.Errorf("the schema entry has engine %s, the backup recorded %s", engine, t.Engine)
 		}
-		if !restorableEngine(engine) {
-			return skip(engineSkipReason(engine))
-		}
-		if f := st.externalCall(); f != "" {
-			return skip("its definition calls " + f + "(), which reaches outside the target; not created (create it by hand)")
-		}
-		args := st.engineArgs()
-		switch engine {
-		case "Merge", "Buffer":
-			if len(args) == 0 {
-				return skip("engine " + engine + " without arguments; not created")
-			}
-			other, ok := st.argDatabase(args[0])
-			switch {
-			case !ok:
-				return skip("engine " + engine + " reads databases matching a pattern; not created (create it by hand)")
-			case !restored[other]:
-				return skip("engine " + engine + " uses database " + other + ", which is not restored; not created (create it by hand)")
-			}
-		case "Dictionary":
-			if len(args) == 1 {
-				ts := st.toks[args[0][0]:args[0][1]]
-				other := db
-				if len(ts) == 3 && ts[1].punct(".") {
-					other = ts[0].val
-				} else if len(ts) == 1 && ts[0].kind == tokString {
-					if d, _, ok := strings.Cut(ts[0].val, "."); ok {
-						other = d
-					}
-				}
-				if !restored[other] {
-					return skip("engine Dictionary uses database " + other + ", which is not restored; not created (create it by hand)")
-				}
-			}
-		}
-	case KindView:
-		if f := st.externalCall(); f != "" {
-			return skip("its query calls " + f + "(), which reaches outside the target; not created (create it by hand)")
-		}
-	case KindMaterializedView:
-		if engine != "" && !restorableEngine(engine) {
-			return skip("its inner table has " + engineSkipReason(engine))
-		}
-		if f := st.externalCall(); f != "" {
-			return skip("its definition calls " + f + "(), which reaches outside the target; not created (create it by hand)")
-		}
-		if tdb, tname, ok := st.mvTarget(db); ok && !restored[tdb] {
-			return skip("it writes into " + tdb + "." + tname + ", which is not restored; not created (create it by hand)")
-		}
-		for _, src := range st.sources(db) {
-			if d, _, _ := strings.Cut(src, "."); !restored[d] {
-				return skip("it reads from " + src + ", which is not restored; not created (create it by hand)")
-			}
-		}
-	case KindDictionary:
-		if why := st.dictionarySource(restored); why != "" {
+		if why := st.engineProblem(db, engine, restored); why != "" {
 			return skip(why)
 		}
-		if f := st.externalCall(); f != "" {
-			return skip("its definition calls " + f + "(), which reaches outside the target; not created (create it by hand)")
+	case KindView:
+	case KindMaterializedView:
+		if st.find(st.body, "REFRESH") >= 0 {
+			return skip("it is a refreshable materialized view, which could refresh before its rows are restored")
+		}
+		if engine != "" {
+			if why := st.engineProblem(db, engine, restored); why != "" {
+				return skip("its inner table: " + why)
+			}
+		}
+		if tdb, tname, ok := st.mvTarget(db); ok && !restored[tdb] {
+			return skip("it writes into " + tdb + "." + tname + ", which is not restored")
+		}
+	case KindDictionary:
+		if why := st.dictionaryProblem(restored); why != "" {
+			return skip(why)
 		}
 	default:
-		return skip("a " + t.Engine + " is not restored by Olympos; not created (create it by hand)")
+		return skip("a " + t.Engine + " is not restored by Olympos")
+	}
+	refs, why := st.scanRefs(db)
+	if why != "" {
+		return skip(why)
+	}
+	if r := refOutside(refs, restored); r != "" {
+		return skip("it reads " + r + ", which is not restored")
 	}
 	c.create = true
 	return c, nil
 }
 
-// dictionarySource is why a dictionary's SOURCE is not restored ("": it is
-// a ClickHouse table in a restored database on the target itself).
-func (s *createStmt) dictionarySource(restored map[string]bool) string {
-	i := -1
-	for j := s.body; j+3 < len(s.toks); j++ {
-		if s.toks[j].depth == 0 && s.toks[j].is("SOURCE") && s.toks[j+1].punct("(") {
-			i = j + 2
-			break
+// engineProblem is why a table (or a view's inner table) of engine is not
+// created ("": it is).
+func (s *createStmt) engineProblem(db, engine string, restored map[string]bool) string {
+	if !restorableEngine(engine) {
+		return engineSkipReason(engine)
+	}
+	args := s.engineArgs()
+	keeper := strings.HasPrefix(engine, "Replicated") || engine == "KeeperMap"
+	if !keeper {
+		for _, a := range args {
+			for _, t := range s.toks[a[0]:a[1]] {
+				if t.kind == tokString && strings.HasPrefix(t.val, "/") {
+					return "engine " + engine + " names a path on the server"
+				}
+			}
 		}
 	}
-	if i < 0 || !s.toks[i].ident() || !s.toks[i+1].punct("(") {
-		return "its source cannot be read; not created (create it by hand)"
+	if engine == "EmbeddedRocksDB" && len(args) >= 2 {
+		return "engine EmbeddedRocksDB names its own directory on the server"
 	}
-	typ := strings.ToUpper(s.toks[i].val)
+	// SETTINGS name = '/path' (a directory, a file) at depth 0.
+	if i := s.find(s.body, "SETTINGS"); i >= 0 {
+		for j := i + 1; j < len(s.toks); j++ {
+			if t := s.toks[j]; t.depth == 0 && t.kind == tokString && (strings.HasPrefix(t.val, "/") || strings.Contains(t.val, "://")) {
+				return "a setting of it names a path or a location"
+			}
+		}
+	}
+	switch engine {
+	case "Merge", "Buffer":
+		if len(args) == 0 {
+			return "engine " + engine + " without arguments"
+		}
+		other, ok := s.argDatabase(args[0])
+		switch {
+		case !ok:
+			return "engine " + engine + " reads databases matching a pattern"
+		case !restored[other]:
+			return "engine " + engine + " uses database " + other + ", which is not restored"
+		}
+	case "Dictionary":
+		if len(args) != 1 {
+			return "engine Dictionary with arguments Olympos cannot check"
+		}
+		ts := s.toks[args[0][0]:args[0][1]]
+		other := ""
+		switch {
+		case len(ts) == 3 && ts[0].ident() && ts[1].punct(".") && ts[2].ident():
+			other = ts[0].val
+		case len(ts) == 1 && ts[0].kind == tokString:
+			other, _, _ = strings.Cut(qualify(db, ts[0].val), ".")
+		case len(ts) == 1 && ts[0].ident():
+			other = db
+		default:
+			return "engine Dictionary with arguments Olympos cannot check"
+		}
+		if !restored[other] {
+			return "engine Dictionary uses database " + other + ", which is not restored"
+		}
+	}
+	return ""
+}
+
+// dictionaryProblem is why a dictionary is not created ("": its SOURCE is
+// a ClickHouse table in a restored database on the target itself, named by
+// HOST, PORT, USER, PASSWORD, DB, TABLE, SECURE, UPDATE_LAG only, each
+// once, and no key repeats in its other sections). WHERE,
+// INVALIDATE_QUERY, UPDATE_FIELD and QUERY are SQL run on the target, so
+// they are not created.
+func (s *createStmt) dictionaryProblem(restored map[string]bool) string {
+	src := -1
+	for j := s.body; j+1 < len(s.toks); j++ {
+		t := s.toks[j]
+		if t.depth != 0 || !s.toks[j+1].punct("(") {
+			continue
+		}
+		switch {
+		case t.is("SOURCE"):
+			src = j + 2
+		case t.is("LAYOUT") || t.is("LIFETIME") || t.is("RANGE") || t.is("SETTINGS"):
+			if dup := s.duplicateKey(j+1, true); dup != "" {
+				return "its " + strings.ToUpper(t.val) + " repeats " + dup
+			}
+		}
+	}
+	if src < 0 || src+1 >= len(s.toks) || !s.toks[src].ident() || !s.toks[src+1].punct("(") {
+		return "its source cannot be read"
+	}
+	typ := strings.ToUpper(s.toks[src].val)
 	if typ != "CLICKHOUSE" {
-		return "its source is " + typ + ", outside the target; not created (create it by hand)"
+		return "its source is " + typ + ", outside the target"
 	}
 	kv := map[string]string{}
-	end := s.close(i + 1)
-	for j := i + 2; j < end; {
+	end := s.close(src + 1)
+	for j := src + 2; j < end; {
 		k := s.toks[j]
 		if k.kind != tokWord || j+1 >= end {
-			return "its ClickHouse source cannot be read; not created (create it by hand)"
+			return "its ClickHouse source cannot be read"
 		}
 		v := s.toks[j+1]
 		if v.punct("(") || (j+2 < end && s.toks[j+2].punct("(")) {
-			return "its ClickHouse source uses " + strings.ToUpper(k.val) + "(…), which Olympos does not check; not created (create it by hand)"
+			return "its ClickHouse source uses " + strings.ToUpper(k.val) + "(…), which Olympos does not check"
+		}
+		if v.kind != tokString && v.kind != tokNumber && v.kind != tokWord {
+			return "its ClickHouse source cannot be read"
 		}
 		key := strings.ToUpper(k.val)
 		switch key {
-		case "HOST", "PORT", "USER", "PASSWORD", "DB", "TABLE", "WHERE", "INVALIDATE_QUERY", "SECURE", "UPDATE_FIELD", "UPDATE_LAG":
+		case "HOST", "PORT", "USER", "PASSWORD", "DB", "TABLE", "SECURE", "UPDATE_LAG":
+		case "WHERE", "INVALIDATE_QUERY", "UPDATE_FIELD", "QUERY":
+			return "its ClickHouse source has " + key + ", SQL run on the target that Olympos does not check"
 		default:
-			return "its ClickHouse source uses " + key + ", which Olympos does not check; not created (create it by hand)"
+			return "its ClickHouse source uses " + key + ", which Olympos does not check"
+		}
+		if _, dup := kv[key]; dup {
+			return "its ClickHouse source names " + key + " twice"
 		}
 		kv[key] = v.val
 		j += 2
@@ -723,14 +733,53 @@ func (s *createStmt) dictionarySource(restored map[string]bool) string {
 		switch strings.ToLower(h) {
 		case "localhost", "127.0.0.1", "::1":
 		default:
-			return "its ClickHouse source is on another host; not created (create it by hand)"
+			return "its ClickHouse source is on another host"
 		}
 	}
 	switch db, ok := kv["DB"]; {
 	case !ok || kv["TABLE"] == "":
-		return "its ClickHouse source names no database and table; not created (create it by hand)"
+		return "its ClickHouse source names no database and table"
 	case !restored[db]:
-		return "its ClickHouse source is in database " + db + ", which is not restored; not created (create it by hand)"
+		return "its ClickHouse source is in database " + db + ", which is not restored"
+	}
+	return ""
+}
+
+// duplicateKey is a key that appears twice among the "KEY value" or
+// "key = value" pairs in the parentheses at open; a single TYPE(...) group
+// inside (LAYOUT(HASHED(SHARDS 16))) is read the same way when nested.
+// "" if none.
+func (s *createStmt) duplicateKey(open int, nested bool) string {
+	end := s.close(open)
+	d := s.toks[open].depth + 1
+	if nested && open+2 < end && s.toks[open+1].ident() && s.toks[open+2].punct("(") && s.close(open+2) == end-1 {
+		return s.duplicateKey(open+2, false)
+	}
+	seen := map[string]bool{}
+	for j := open + 1; j < end; {
+		t := s.toks[j]
+		if t.depth != d || t.kind != tokWord || j+1 >= end {
+			j++
+			continue
+		}
+		next := s.toks[j+1]
+		step := 0
+		switch {
+		case next.punct("=") && j+2 < end:
+			step = 3
+		case next.kind == tokString || next.kind == tokNumber || next.ident():
+			step = 2
+		}
+		if step == 0 {
+			j++
+			continue
+		}
+		k := strings.ToUpper(t.val)
+		if seen[k] {
+			return k
+		}
+		seen[k] = true
+		j += step
 	}
 	return ""
 }

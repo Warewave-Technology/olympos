@@ -195,7 +195,7 @@ exec '` + dockerBin + `' run --rm -i --network host -e CLICKHOUSE_USER -e CLICKH
 
 const restoreFixtureSQL = `
 CREATE DATABASE rs;
-CREATE TABLE rs.events (d Date, id UInt64, s LowCardinality(Nullable(String)), v String)
+CREATE TABLE rs.events (d Date, id UInt64, s LowCardinality(Nullable(String)), v String, v2 UInt64 MATERIALIZED id * 2)
 ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY id;
 INSERT INTO rs.events SELECT toDate('2024-01-01') + intDiv(number, 20), number, if(number % 5 = 0, NULL, toString(number % 13)), repeat('x', number % 7)
 FROM numbers(1000);
@@ -225,6 +225,13 @@ SOURCE(CLICKHOUSE(DB 'rs' TABLE 'events' USER '` + chUser + `' PASSWORD '` + chP
 INSERT INTO rs.events SELECT toDate('2024-03-01') + intDiv(number, 20), number, 'late', '' FROM numbers(1000, 500);
 -- Into the view's inner table through the view: mv_chain reads it.
 INSERT INTO rs.mv VALUES ('2025-01-01', 7);
+
+-- Not created: SQL in the source, and a view reading a database not restored.
+CREATE DICTIONARY rs.dict_inv (id UInt64, v String) PRIMARY KEY id
+SOURCE(CLICKHOUSE(DB 'rs' TABLE 'events' INVALIDATE_QUERY 'SELECT max(id) FROM rs.events')) LAYOUT(HASHED()) LIFETIME(0);
+CREATE DATABASE other_src;
+CREATE TABLE other_src.s (x UInt8) ENGINE = Memory;
+CREATE VIEW rs.v_other AS SELECT x FROM other_src.s;
 
 CREATE DATABASE rs2;
 CREATE TABLE rs2.t (n UInt64, p Tuple(a UInt8, b String)) ENGINE = MergeTree ORDER BY n;
@@ -259,6 +266,7 @@ func TestRestoreIntegration(t *testing.T) {
 		"audit":    "SELECT count(), sum(cityHash64(msg)) FROM rs.audit",
 		"agg":      "SELECT count(), sum(cityHash64(k, finalizeAggregation(u))) FROM rs.agg",
 		"v":        "SELECT count() FROM rs.v",
+		"v2":       "SELECT sum(v2) FROM rs.events",
 		"mv":       "SELECT count(), sum(c) FROM (SELECT d, sum(c) AS c FROM rs.mv GROUP BY d)",
 		"mv_rows":  "SELECT count() FROM rs.mv",
 		"daily":    "SELECT count(), sum(c) FROM rs.daily",
@@ -350,13 +358,16 @@ func TestRestoreIntegration(t *testing.T) {
 		t.Fatalf("Created not reported through Progress: %+v", *prog)
 	}
 	skipped := strings.Join(it.Skipped, "\n")
-	if !strings.Contains(skipped, "rs.k (table): engine Kafka") || !strings.Contains(skipped, "rs.mv_k (materialized view): it uses rs.k") {
+	if !strings.Contains(skipped, "rs.k (table): engine Kafka") || !strings.Contains(skipped, "rs.mv_k (materialized view): it uses rs.k") ||
+		!strings.Contains(skipped, "rs.dict_inv (dictionary): its ClickHouse source has INVALIDATE_QUERY") ||
+		!strings.Contains(skipped, "rs.v_other (view): it reads other_src.s, which is not restored") {
 		t.Fatalf("skipped: %s", skipped)
 	}
 	if strings.Contains(skipped, "127.0.0.1:1") || strings.Contains(skipped, "olympos-t") {
 		t.Fatalf("skipped carries DDL: %s", skipped)
 	}
-	if !strings.Contains(strings.Join(res.Notes, "\n"), "rs.dict: the backup holds a secret") {
+	if n := strings.Join(res.Notes, "\n"); !strings.Contains(n, "rs.dict: the backup holds a secret") ||
+		!strings.Contains(n, "rs.events: MATERIALIZED columns (v2)") {
 		t.Fatalf("notes: %v", res.Notes)
 	}
 	for k, q := range checks {
@@ -367,7 +378,7 @@ func TestRestoreIntegration(t *testing.T) {
 			t.Errorf("%s: before %s, after restore %s", k, before[k], got)
 		}
 	}
-	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs' AND name IN ('k', 'mv_k')"); got != "0" {
+	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs' AND name IN ('k', 'mv_k', 'dict_inv', 'v_other')"); got != "0" {
 		t.Errorf("external objects created: %s", got)
 	}
 	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs' AND name = 'dict'"); got != "1" {

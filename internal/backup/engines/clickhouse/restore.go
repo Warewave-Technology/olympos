@@ -398,6 +398,18 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 			p.notes = append(p.notes, md.Name+"."+t.Name+": the backup holds a secret of its definition masked as [HIDDEN] "+
 				"(a source password); it was created with that value: set it again (CREATE OR REPLACE) before using it")
 		}
+		if t.Kind == KindTable && t.HasData {
+			var mat []string
+			for _, col := range t.Columns {
+				if col.DefaultKind == "MATERIALIZED" {
+					mat = append(mat, col.Name)
+				}
+			}
+			if len(mat) > 0 {
+				p.notes = append(p.notes, md.Name+"."+t.Name+": MATERIALIZED columns ("+strings.Join(mat, ", ")+") are not in the backup's "+
+					"data; the target computed them again from the restored columns")
+			}
+		}
 		o := &objPlan{db: md.Name, t: t, st: c.st}
 		byName[t.Name] = o
 		p.objs = append(p.objs, o)
@@ -437,12 +449,12 @@ func dropUnsatisfied(plans []*dbPlan) {
 			for _, o := range p.objs {
 				why := ""
 				if o.t.Kind == KindMaterializedView {
-					refs := o.st.sources(o.db)
+					refs, _ := o.st.scanRefs(o.db)
 					if d, n, ok := o.st.mvTarget(o.db); ok {
 						refs = append(refs, d+"."+n)
 					}
 					for _, r := range refs {
-						if !created[r] {
+						if !created[r] && !strings.HasSuffix(r, ".*") {
 							why = "it uses " + r + ", which was not created; not created (create it by hand)"
 							break
 						}
@@ -1135,7 +1147,7 @@ var (
 // quotableCodes are client errors whose message is about the connection,
 // the login or the table, not the rows sent: their text is kept.
 var quotableCodes = map[int]bool{
-	36: true, 60: true, 81: true, 115: true, 159: true, 164: true, 194: true, 202: true, 209: true, 210: true,
+	60: true, 81: true, 115: true, 159: true, 164: true, 194: true, 202: true, 209: true, 210: true,
 	241: true, 242: true, 252: true, 497: true, 516: true, 999: true,
 }
 
@@ -1146,16 +1158,8 @@ func clientMessage(stderr string) string {
 	stderr = strings.TrimSpace(stderr)
 	loc := clientCodeRe.FindStringSubmatchIndex(stderr)
 	if loc == nil {
-		var lines []string
-		for _, l := range strings.Split(stderr, "\n") {
-			if l = strings.TrimSpace(l); l != "" {
-				lines = append(lines, l)
-			}
-		}
-		if len(lines) > 3 {
-			lines = lines[len(lines)-3:]
-		}
-		return truncate(strings.Join(lines, "; "), 300)
+		// No ClickHouse error: its text is not shown at all.
+		return "the client reported no error code; its output is not shown"
 	}
 	code, _ := strconv.Atoi(stderr[loc[2]:loc[3]])
 	rest := stderr[loc[0]:]
