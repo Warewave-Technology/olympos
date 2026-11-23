@@ -104,8 +104,9 @@ paths:
       tags: [clusters]
       summary: >-
         "Install probe" for a cluster whose agent runs without the probe (admin, scope all): a one-time probe-only
-        token (1 h) and the command `helm upgrade olympos-agent <chart> -n olympos-system --reuse-values --set
-        probe.enabled=true --set probe.bootstrapToken=<token>`. The agent enrolls the probe with it. Earlier
+        token (1 h) and the command `helm upgrade olympos-agent <chart> -n olympos-system --reuse-values [--set
+        <k=v> for each of the server's OLYMPOS_AGENT_INSTALL_SETS] --set probe.enabled=true --set
+        probe.bootstrapToken=<token>`. The agent enrolls the probe with it. Earlier
         tokens lose their unused probe role (an install token keeps its agent role).
       responses:
         "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}

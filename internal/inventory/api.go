@@ -456,9 +456,16 @@ func (a *API) newProbeToken(w http.ResponseWriter, r *http.Request) {
 // probeInstallCommand adds the probe to an installed agent release: the
 // values it was installed with stay, the probe is enabled, and the chart
 // puts the token into olympos-probe-identity for the agent to enroll the
-// probe with.
+// probe with. AgentSets (OLYMPOS_AGENT_INSTALL_SETS, e.g. an image mirror
+// with probe.image.repository) are added as for a new cluster: a release
+// installed before the probe has no probe values to reuse. The probe's own
+// sets come last, so they win, and the token ends the command.
 func (a *API) probeInstallCommand(token string) string {
-	return "helm upgrade olympos-agent " + a.chart() + " -n olympos-system --reuse-values --set probe.enabled=true --set probe.bootstrapToken=" + token
+	cmd := "helm upgrade olympos-agent " + a.chart() + " -n olympos-system --reuse-values"
+	for _, kv := range a.AgentSets {
+		cmd += " --set " + kv
+	}
+	return cmd + " --set probe.enabled=true --set probe.bootstrapToken=" + token
 }
 
 func (a *API) chart() string {
