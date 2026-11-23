@@ -288,8 +288,9 @@ type rateWindow struct {
 }
 
 // allow records an event of key at now when fewer than n happened in the
-// minute before, and reports whether it did.
-func (w *rateWindow) allow(key uuid.UUID, now time.Time, n int) bool {
+// minute before, and reports whether it did. undo takes the recorded event
+// back.
+func (w *rateWindow) allow(key uuid.UUID, now time.Time, n int) (time.Time, bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.hits == nil {
@@ -303,7 +304,7 @@ func (w *rateWindow) allow(key uuid.UUID, now time.Time, n int) bool {
 	}
 	if len(keep) >= n {
 		w.hits[key] = keep
-		return false
+		return time.Time{}, false
 	}
 	w.hits[key] = append(keep, now)
 	// Forget keys with nothing in the window, so the map stays small.
@@ -312,7 +313,20 @@ func (w *rateWindow) allow(key uuid.UUID, now time.Time, n int) bool {
 			delete(w.hits, k)
 		}
 	}
-	return true
+	return now, true
+}
+
+// undo removes one event of key recorded at t.
+func (w *rateWindow) undo(key uuid.UUID, t time.Time) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	ts := w.hits[key]
+	for i := len(ts) - 1; i >= 0; i-- {
+		if ts[i].Equal(t) {
+			w.hits[key] = append(ts[:i], ts[i+1:]...)
+			return
+		}
+	}
 }
 
 func (a *API) testRunsPerMinute() int {

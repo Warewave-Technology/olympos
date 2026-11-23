@@ -1041,12 +1041,7 @@ func (a *API) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		if err := tx.QueryRow(ctx, `SELECT name, credential_id FROM synthetic_credentials WHERE id = $1 FOR UPDATE`, id).Scan(&name, &credID); err != nil {
 			return store.NotFound(err)
 		}
-		rows, err := tx.Query(ctx, `SELECT DISTINCT s.name FROM scenario_steps st JOIN scenarios s ON s.id = st.scenario_id
-			WHERE st.credential_id = $1 ORDER BY s.name`, id)
-		if err != nil {
-			return err
-		}
-		users, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		users, err := credentialUsers(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -1063,7 +1058,12 @@ func (a *API) deleteCredential(w http.ResponseWriter, r *http.Request) {
 	})
 	if isFKViolation(err) {
 		// A scenario took the credential between the check and the delete.
-		httpx.Error(w, http.StatusConflict, "This credential is used by a scenario. Change it first.")
+		users, qerr := credentialUsers(ctx, a.db(), id)
+		if qerr != nil {
+			a.fail(w, r, qerr)
+			return
+		}
+		a.fail(w, r, inUse("This credential is still used", users, nil))
 		return
 	}
 	if err != nil {
@@ -1071,6 +1071,16 @@ func (a *API) deleteCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// credentialUsers names the scenarios that use credential id, by name.
+func credentialUsers(ctx context.Context, q store.Querier, id uuid.UUID) ([]string, error) {
+	rows, err := q.Query(ctx, `SELECT DISTINCT s.name FROM scenario_steps st JOIN scenarios s ON s.id = st.scenario_id
+		WHERE st.credential_id = $1 ORDER BY s.name`, id)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // zeroInput clears the secret of an input once it is stored. Go strings

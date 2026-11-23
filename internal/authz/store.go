@@ -109,11 +109,19 @@ func ListGrants(ctx context.Context, q store.Querier) ([]GrantRow, error) {
 // ErrGuestApprover is returned when vault-approver is granted to a guest.
 var ErrGuestApprover = errors.New("vault-approver cannot be granted to guest accounts")
 
+// ErrGuestSyntheticEditor is returned when synthetic-editor is granted to a
+// guest (ruling P18): the role attaches admin-made credentials to requests
+// and sees the headers of credentialed steps.
+var ErrGuestSyntheticEditor = errors.New("synthetic-editor cannot be granted to guest accounts")
+
 // CreateGrant inserts a grant after validating the role/guest rules.
 func CreateGrant(ctx context.Context, q store.Querier, principal Principal, role Role, scope Scope, grantedBy *uuid.UUID) (uuid.UUID, error) {
-	if (role == RoleVaultApprover || role == RoleAdmin) && principal.IsGuest() {
-		if role == RoleVaultApprover {
+	if (role == RoleVaultApprover || role == RoleAdmin || role == RoleSyntheticEditor) && principal.IsGuest() {
+		switch role {
+		case RoleVaultApprover:
 			return uuid.Nil, ErrGuestApprover
+		case RoleSyntheticEditor:
+			return uuid.Nil, ErrGuestSyntheticEditor
 		}
 		// Admin implies approve; approval is refused for guests at check time,
 		// but granting admin to a guest is refused too to keep it obvious.

@@ -120,7 +120,7 @@ paths:
         new one.
       responses:
         "204": {description: Revoked}
-        "409": {description: The cluster is revoked}
+        "409": {description: "The cluster is revoked, or it has no probe (\"no probe installed\"; nothing changes)"}
   /clusters/{id}/nodes:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -163,7 +163,7 @@ paths:
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Grant"}}}}}}
     post:
       tags: [identity]
-      summary: Grant roles to a person by Entra object ID (admin, scope all). vault-approver/admin refused for guests (422).
+      summary: Grant roles to a person by Entra object ID (admin, scope all). vault-approver, admin and synthetic-editor refused for guests (422).
       requestBody:
         content:
           application/json:
@@ -1231,8 +1231,10 @@ paths:
       tags: [synthetic]
       summary: >-
         Replace a scenario (checked as on create; the caller must be allowed both the stored and the new
-        clusters). alerts omitted keeps the stored rule. A scenario read with GET can be sent back as it is
-        (credential and hidden are ignored).
+        clusters). Omitted alerts, enabled and store_responses keep their stored values. A scenario read with
+        GET can be sent back as it is: its read-only fields (id, targets, requests_per_minute, can_edit,
+        created_by, created_by_name, created_at, updated_at, alerts.channel_name, alerts.critical_channel_name,
+        and each step's position, credential and hidden) are ignored.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}

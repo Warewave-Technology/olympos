@@ -499,6 +499,10 @@ func (a *API) revokeProbe(w http.ResponseWriter, r *http.Request) {
 		if status == "revoked" {
 			return errRevoked
 		}
+		// Nothing to revoke (ruling P17): no state changes.
+		if probe == "not_installed" {
+			return errNoProbe
+		}
 		if err := a.Gateway.RevokeProbe(r.Context(), tx, id); err != nil {
 			return err
 		}
@@ -514,6 +518,9 @@ func (a *API) revokeProbe(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, errRevoked):
 		httpx.Error(w, http.StatusConflict, "cluster is revoked; its probe was revoked with it")
 		return
+	case errors.Is(err, errNoProbe):
+		httpx.Error(w, http.StatusConflict, "no probe installed")
+		return
 	case err != nil:
 		httpx.Internal(w, r, a.Log, err)
 		return
@@ -524,7 +531,10 @@ func (a *API) revokeProbe(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-var errRevoked = errors.New("cluster revoked")
+var (
+	errRevoked = errors.New("cluster revoked")
+	errNoProbe = errors.New("no probe installed")
+)
 
 func (a *API) installCommand(c *Cluster, token string) string {
 	ca := base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.CA.Cert.Raw}))

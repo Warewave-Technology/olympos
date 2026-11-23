@@ -416,6 +416,72 @@ func TestCredentialsAndHiddenHeaders(t *testing.T) {
 	}
 }
 
+// A scenario read with GET goes back with PUT as it is, and comes back the
+// same; a PUT that omits enabled and store_responses keeps them.
+func TestScenarioRoundTrip(t *testing.T) {
+	x := newEnv(t)
+	admin := x.login("admin", "admin")
+	x.addRule(admin, "wrw.com", "suffix")
+	var channel uuid.UUID
+	if err := x.DB.QueryRow(context.Background(), `INSERT INTO notification_channels (name, slack_channel_id) VALUES ('#payments-alerts', 'C1')
+		RETURNING id`).Scan(&channel); err != nil {
+		t.Fatal(err)
+	}
+	cred := x.addCredential(admin, bearer("tok", canary, "suffix:wrw.com"))
+	s0 := map[string]any{"kind": "dns", "dns": map[string]any{"name": "api.wrw.com", "record_type": "A"},
+		"assertions": []map[string]any{{"subject": "record_count", "operator": "greater_than", "value": "0"}}}
+	s1 := httpStep("https://api.wrw.com/v1")
+	s1["credential_id"] = cred
+	s1["http"] = map[string]any{"method": "POST", "url": "https://api.wrw.com/v1", "headers": map[string]string{"X-Trace": "1"},
+		"body": `{"a":1}`, "body_type": "json", "follow_redirects": true}
+	s1["extracts"] = []map[string]any{{"name": "item", "source": "json_path", "expr": "$.items[0].id"}}
+	s2 := map[string]any{"kind": "tls", "tls": map[string]any{"host": "api.wrw.com", "port": 443, "sni": "www.wrw.com"},
+		"assertions": []map[string]any{{"subject": "tls_days_left", "operator": "greater_than", "value": "14"}}}
+	body := with(scenarioBody("flow", s0, s1, s2), "owner_selector", "team=payments", "step_retries", 1, "enabled", false,
+		"store_responses", false, "exclude_selectors", []string{"env=prod"},
+		"alerts", map[string]any{"cluster_fail_after": 4, "fleet_critical_clusters": 2, "recovery_after": 3, "send_recovery": false,
+			"channel_id": channel, "critical_channel_id": channel})
+	id := x.createScenario(admin, body)
+	path := "/api/v1/synthetic/scenarios/" + id.String()
+	read := func() map[string]any {
+		t.Helper()
+		var m map[string]any
+		if code := admin.Do("GET", path, nil, &m); code != 200 {
+			t.Fatalf("get: %d", code)
+		}
+		return m
+	}
+	before := read()
+	if before["alerts"].(map[string]any)["channel_name"] != "#payments-alerts" {
+		t.Fatalf("view: %v", before["alerts"])
+	}
+	// The whole GET body, read-only fields and all.
+	if code, raw := admin.Raw("PUT", path, before); code != 200 {
+		t.Fatalf("round trip: %d %s", code, raw)
+	}
+	after := read()
+	delete(before, "updated_at")
+	delete(after, "updated_at")
+	b1, _ := json.Marshal(before)
+	b2, _ := json.Marshal(after)
+	if string(b1) != string(b2) {
+		t.Fatalf("round trip changed the scenario:\n%s\n%s", b1, b2)
+	}
+	// enabled and store_responses omitted: kept (false), not reset to true.
+	put := map[string]any{}
+	for k, v := range after {
+		put[k] = v
+	}
+	delete(put, "enabled")
+	delete(put, "store_responses")
+	if code, raw := admin.Raw("PUT", path, put); code != 200 {
+		t.Fatalf("put without the switches: %d %s", code, raw)
+	}
+	if m := read(); m["enabled"] != false || m["store_responses"] != false {
+		t.Fatalf("switches reset: enabled=%v store_responses=%v", m["enabled"], m["store_responses"])
+	}
+}
+
 // finishedRun stores a finished run of the scenario on the cluster with
 // one step result.
 func (x *env) finishedRun(scenarioID, clusterID uuid.UUID, status, excerpt string) uuid.UUID {
@@ -842,12 +908,16 @@ func TestRunNowAndTestRuns(t *testing.T) {
 	if code := admin.Do("POST", "/api/v1/synthetic/scenarios/"+id.String()+"/run", nil, &e); code != 409 || !strings.Contains(e.Error, "no cluster") {
 		t.Fatalf("run now with every probe offline: %d %+v", code, e)
 	}
-	if code := admin.Do("POST", "/api/v1/synthetic/test-runs", map[string]any{"scenario": body, "cluster_id": x.clusters["dev-1"]}, &e); code != 409 {
-		t.Fatalf("test run on an offline probe: %d", code)
+	devEditor := x.login("dev-editor", "synthetic-editor@env=dev")
+	// A test run that makes no run uses up no slot (TestRunsPerMinute is
+	// 2 in this env).
+	for range 3 {
+		if code := devEditor.Do("POST", "/api/v1/synthetic/test-runs", map[string]any{"scenario": body, "cluster_id": x.clusters["dev-1"]}, &e); code != 409 {
+			t.Fatalf("test run on an offline probe: %d", code)
+		}
 	}
 	x.exec(`UPDATE clusters SET probe_status = 'online'`)
 
-	devEditor := x.login("dev-editor", "synthetic-editor@env=dev")
 	// A cluster the editor cannot read is unknown to it.
 	if code := devEditor.Do("POST", "/api/v1/synthetic/test-runs", map[string]any{"scenario": body, "cluster_id": x.clusters["prod-1"]}, nil); code != 422 {
 		t.Fatalf("test run outside the editor's scope: %d", code)
@@ -925,6 +995,18 @@ func TestProbeTokenAndRevoke(t *testing.T) {
 		t.Fatalf("editor issues a probe token: %d", code)
 	}
 
+	// No probe yet: nothing to revoke, nothing changes (ruling P17).
+	var e errBody
+	if code := admin.Do("DELETE", "/api/v1/clusters/"+id.String()+"/probe", nil, &e); code != 409 || e.Error != "no probe installed" {
+		t.Fatalf("revoke a probe never installed: %d %+v", code, e)
+	}
+	var probeStatus string
+	if err := x.DB.QueryRow(ctx, `SELECT probe_status FROM clusters WHERE id = $1`, id).Scan(&probeStatus); err != nil || probeStatus != "not_installed" {
+		t.Fatalf("probe status after a refused revoke: %q %v", probeStatus, err)
+	}
+	if err := x.DB.QueryRow(ctx, `SELECT count(*) FROM enroll_tokens WHERE cluster_id = $1 AND expires_at > now() AND 'probe' = ANY(roles)`, id).Scan(&live); err != nil || live != 1 {
+		t.Fatalf("probe token kept after a refused revoke: %d %v", live, err)
+	}
 	x.exec(`UPDATE clusters SET probe_status = 'online', probe_cert_serial = 'abc123' WHERE id = $1`, id)
 	if code := admin.Do("DELETE", "/api/v1/clusters/"+id.String()+"/probe", nil, nil); code != 204 {
 		t.Fatalf("revoke probe: %d", code)

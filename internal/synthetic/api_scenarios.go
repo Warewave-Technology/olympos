@@ -46,6 +46,21 @@ type scenarioInput struct {
 	Steps            []stepInput `json:"steps"`
 	// Alerts nil: the defaults on create, the stored rule on update.
 	Alerts *alertInput `json:"alerts"`
+	viewOnly
+}
+
+// viewOnly holds the read-only fields of a scenario's view (scenarioView):
+// accepted and ignored, so that a scenario read with GET can be sent back
+// as it is.
+type viewOnly struct {
+	ID                json.RawMessage `json:"id,omitempty"`
+	Targets           json.RawMessage `json:"targets,omitempty"`
+	RequestsPerMinute json.RawMessage `json:"requests_per_minute,omitempty"`
+	CanEdit           json.RawMessage `json:"can_edit,omitempty"`
+	CreatedBy         json.RawMessage `json:"created_by,omitempty"`
+	CreatedByName     json.RawMessage `json:"created_by_name,omitempty"`
+	CreatedAt         json.RawMessage `json:"created_at,omitempty"`
+	UpdatedAt         json.RawMessage `json:"updated_at,omitempty"`
 }
 
 // stepInput is a step as spec.Step takes it. Credential and Hidden belong
@@ -64,6 +79,9 @@ type alertInput struct {
 	SendRecovery          bool       `json:"send_recovery"`
 	ChannelID             *uuid.UUID `json:"channel_id"`
 	CriticalChannelID     *uuid.UUID `json:"critical_channel_id"`
+	// The channels' names belong to the view: accepted and ignored.
+	ChannelName         json.RawMessage `json:"channel_name,omitempty"`
+	CriticalChannelName json.RawMessage `json:"critical_channel_name,omitempty"`
 }
 
 func (in *scenarioInput) targeting() Targeting {
@@ -966,6 +984,13 @@ func (a *API) updateScenario(w http.ResponseWriter, r *http.Request) {
 		if err := mayChange(sub, cur, f); err != nil {
 			return err
 		}
+		// Omitted, the switches keep their stored values (as alerts does).
+		if in.Enabled == nil {
+			in.Enabled = &cur.Enabled
+		}
+		if in.StoreResponses == nil {
+			in.StoreResponses = &cur.StoreResponses
+		}
 		p, err := a.validate(ctx, tx, sub, &in, f, &id, forSave)
 		if err != nil {
 			return err
@@ -1306,11 +1331,16 @@ func (a *API) testRun(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	if !a.testRuns.allow(sub.Principal.ID, a.now(), a.testRunsPerMinute()) {
+	slot, ok := a.testRuns.allow(sub.Principal.ID, a.now(), a.testRunsPerMinute())
+	if !ok {
 		httpx.Error(w, http.StatusTooManyRequests, fmt.Sprintf("At most %d test runs a minute; wait a moment.", a.testRunsPerMinute()))
 		return
 	}
 	runID, err := a.Svc.TestRun(ctx, p.sc, in.ClusterID, sub.Principal.ID)
+	if err != nil {
+		// No run was made: the slot goes back.
+		a.testRuns.undo(sub.Principal.ID, slot)
+	}
 	switch {
 	case errors.Is(err, ErrProbeNotOnline):
 		httpx.Error(w, http.StatusConflict, "The cluster's probe is not online: "+strings.TrimPrefix(err.Error(), ErrProbeNotOnline.Error()+": "))
