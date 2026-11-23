@@ -157,9 +157,11 @@ func (a *Agent) probeIdentityStep(ctx context.Context, e probeEnroller, store *i
 	}
 	usable := leaf != nil && now.Before(leaf.NotAfter)
 
-	// A token is a fresh install: it is used when there is nothing usable
-	// to keep, or the server refused what there is.
-	if token := string(data[keyBootstrap]); token != "" && (!usable || st.lockedOut) {
+	// A token that is present always means a newer install request (tokens
+	// are dropped once used): "Install probe" is how an operator recovers a
+	// revoked probe, whose certificate may still look valid. It replaces the
+	// current identity at once, valid or not.
+	if token := string(data[keyBootstrap]); token != "" {
 		a.enrollProbe(ctx, e, store, st, token)
 		return probeRetry
 	}
@@ -190,6 +192,16 @@ func (a *Agent) enrollProbe(ctx context.Context, e probeEnroller, store *identit
 	cctx, cancel := context.WithTimeout(ctx, probeCallTimeout)
 	defer cancel()
 	der, err := e.Enroll(cctx, token, csr)
+	if c := status.Code(err); c == codes.PermissionDenied || c == codes.NotFound {
+		// Invalid, expired or used: it will never work. Drop it so that it
+		// is not tried again, and keep the current certificate.
+		a.log.Error("probe identity: the bootstrap token was refused (invalid, expired or used); dropping it and keeping the current certificate. Generate a new Install probe command in Olympos if the probe needs a new identity",
+			"err", err)
+		if derr := store.dropToken(ctx); derr != nil {
+			a.log.Error("probe identity: cannot drop the bootstrap token; retrying in 10m", "err", derr)
+		}
+		return
+	}
 	if err != nil {
 		a.log.Error("probe identity: enrollment failed; if the token is spent or expired, generate an Install probe command in Olympos. Retrying in 10m", "err", err)
 		return

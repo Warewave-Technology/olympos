@@ -94,6 +94,20 @@ func (s *identityStore) save(ctx context.Context, clusterID string, certDER []by
 	return err
 }
 
+// dropToken removes the bootstrap token and leaves the rest of the Secret.
+func (s *identityStore) dropToken(ctx context.Context) error {
+	sec, err := s.kube.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if _, ok := sec.Data[keyBootstrap]; !ok {
+		return nil
+	}
+	delete(sec.Data, keyBootstrap)
+	_, err = s.kube.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	return err
+}
+
 func parseStored(data map[string][]byte) ([]byte, *ecdsa.PrivateKey, error) {
 	cb, _ := pem.Decode(data[keyCert])
 	kb, _ := pem.Decode(data[keyKey])

@@ -475,3 +475,75 @@ func TestProbeConfigFromEnv(t *testing.T) {
 		t.Fatalf("%+v %v", c, err)
 	}
 }
+
+func TestProbeIdentityTokenReplacesValidCertificate(t *testing.T) {
+	h := newProbeHarness(t, nil)
+	oldDER, oldKey := probeCert(t, 70, h.now.Add(-time.Hour), h.now.Add(30*24*time.Hour))
+	data := certData(t, oldDER, oldKey)
+	data[keyBootstrap] = []byte("tok-reinstall")
+	h.seed(t, data)
+	newDER, _ := probeCert(t, 71, h.now, h.now.Add(30*24*time.Hour))
+	e := &fakeEnroller{enrollCert: func() ([]byte, error) { return newDER, nil }}
+
+	h.run(t, e, 1, func() bool { return true })
+
+	if !reflect.DeepEqual(e.enrollToks, []string{"tok-reinstall"}) || len(e.renewCerts) != 0 {
+		t.Fatalf("enroll tokens %v, renews %d", e.enrollToks, len(e.renewCerts))
+	}
+	got := h.secret(t, testProbeSecret).Data
+	if _, ok := got[keyBootstrap]; ok {
+		t.Fatal("token kept")
+	}
+	if h.storedSerial(t) != 71 {
+		t.Fatal("the valid certificate was not replaced")
+	}
+	h.agentSecretIntact(t)
+}
+
+func TestProbeIdentityBadTokenIsDroppedAndCertificateKept(t *testing.T) {
+	for _, code := range []codes.Code{codes.PermissionDenied, codes.NotFound} {
+		t.Run(code.String(), func(t *testing.T) {
+			h := newProbeHarness(t, nil)
+			oldDER, oldKey := probeCert(t, 80, h.now.Add(-time.Hour), h.now.Add(30*24*time.Hour))
+			data := certData(t, oldDER, oldKey)
+			data[keyBootstrap] = []byte("tok-bad")
+			h.seed(t, data)
+			e := &fakeEnroller{enrollCert: func() ([]byte, error) { return nil, status.Error(code, "token invalid, expired or used") }}
+
+			h.run(t, e, 3, func() bool { return false })
+
+			if len(e.enrollToks) != 1 {
+				t.Fatalf("the bad token was tried %d times", len(e.enrollToks))
+			}
+			got := h.secret(t, testProbeSecret).Data
+			if _, ok := got[keyBootstrap]; ok {
+				t.Fatal("bad token kept")
+			}
+			if h.storedSerial(t) != 80 || !bytes.Equal(got[keyClusterID], []byte(testProbeCluster)) {
+				t.Fatal("current certificate not kept")
+			}
+			if !strings.Contains(h.logs.String(), "bootstrap token was refused") || !strings.Contains(h.logs.String(), "level=ERROR") {
+				t.Fatalf("refusal not logged:\n%s", h.logs)
+			}
+			if len(e.renewCerts) != 0 {
+				t.Fatal("renewed before 2/3 of the life")
+			}
+			h.agentSecretIntact(t)
+		})
+	}
+}
+
+func TestProbeIdentityUnreachableServerKeepsToken(t *testing.T) {
+	h := newProbeHarness(t, nil)
+	oldDER, oldKey := probeCert(t, 90, h.now.Add(-time.Hour), h.now.Add(30*24*time.Hour))
+	data := certData(t, oldDER, oldKey)
+	data[keyBootstrap] = []byte("tok-1")
+	h.seed(t, data)
+	e := &fakeEnroller{enrollCert: func() ([]byte, error) { return nil, status.Error(codes.Unavailable, "down") }}
+
+	h.run(t, e, 2, func() bool { return false })
+
+	if len(e.enrollToks) != 2 || h.updates() != 0 {
+		t.Fatalf("enroll tries %d, writes %d: the token must stay for the next try", len(e.enrollToks), h.updates())
+	}
+}
