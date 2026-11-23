@@ -222,6 +222,22 @@ Alert debounce for agent connectivity. Zero or negative values use the default.
 | `security.systemNamespaces` | list of globs | `[kube-system, kube-public, kube-node-lease, olympos-system, olympos-bench]` | no | Namespaces excluded from the default-deny NetworkPolicy check, sensitive-data findings and Secret inventory findings. An explicit `[]` excludes nothing. |
 | `security.secretsInventory.reportUnmanaged` | bool | `true` | no | Raise `secret.unmanaged` (info) for Secrets not owned by External Secrets, Vault Secrets Operator, sealed-secrets or cert-manager. Needs the agent's opt-in Secret inventory. |
 
+### `synthetic`
+
+[Synthetic monitoring](synthetic-monitoring.md). Zero or unset values use the default; negative values are
+refused.
+
+| Key | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `synthetic.runRetention` | duration | `720h` (30 days) | no | Keeps runs and their step results; older ones remain only as hourly aggregates (availability, p50, p95 per scenario and cluster). |
+| `synthetic.aggregateRetention` | duration | `9600h` (400 days) | no | Keeps the hourly aggregates. |
+| `synthetic.excerptRetention` | duration | `168h` (7 days) | no | Keeps response excerpts; the runs stay. |
+| `synthetic.maxRequestsPerMinutePerCluster` | int | `600` | no | What all scenarios together may make one cluster's probe send. A scenario that would go over is not scheduled there. |
+| `synthetic.maxRequestsPerMinutePerScenario` | int | `120` | no | What one scenario may send on one cluster. Counted as the worst case: every step at every retry, 6 requests per attempt for a step that follows redirects. |
+| `synthetic.probeOfflineAlertAfter` | duration | `5m` | no | `probe.offline` fires after a probe has been offline this long; one `probe.online` follows when it is back. |
+
+Test runs are kept for 7 days and alerts forever; neither is configurable.
+
 ### Validation errors
 
 Validation collects every problem and fails with `invalid config: <problem>; <problem>`. The problems are:
@@ -240,6 +256,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `gateway.tlsCertFile and gateway.tlsKeyFile must be set together` | Set both or neither. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
+| `synthetic.<key> must not be negative` | Use a positive value, or leave the key out for the default. |
 
 YAML errors appear as `parse <file>: ...`. Errors the server reports only at start include
 `unknown keyVault.provider`, `azure credential: ...`, `resolve database dsn: ...`,

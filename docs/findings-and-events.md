@@ -245,6 +245,13 @@ activity log still gets one row per item.
 | `grant.changed` | A role grant was added or revoked. | *Access granted: name → role (scope)* or *Access revoked: name (role)* · principal, role, scope, by. | No |
 | `grant.stale` | The daily directory sync found a grant whose Entra account is disabled or deleted. Stale grants do not authorize. | *Grant marked stale: name (role) — reason* · principal, role, reason. | No |
 | `sas.expiring` | A destination's SAS token expires within 14 days, within 3 days, or has expired. | *SAS token of destination X expires in N days*, *… expires within a day* or *… has expired: backups to it fail* · destination, expires. | One per destination, threshold and expiry |
+| `synthetic.failing` | A [synthetic scenario](synthetic-monitoring.md#alerts) failed (or errored) on a cluster the set number of runs in a row (default 3). Skipped runs, an offline probe and test runs never count. | *Synthetic check failing: \<scenario\> on \<clusters\>* · scenario, clusters (first 5), failed step, reason. | Yes: per scenario, the cluster alerts that opened in one 15-second pass |
+| `synthetic.critical` | The scenario fails on at least *Critical when failing in* clusters at once (default 3). Goes to the scenario's critical channel when it has one. | *Synthetic check critical: \<scenario\> fails on N clusters* · scenario, clusters, failed step, reason. | Yes: replaces the `synthetic.failing` of the cluster alerts that opened with it |
+| `synthetic.recovered` | A firing alert passed the set number of runs in a row (default 2), if the scenario sends recoveries. For the fleet alert: *no longer critical*, with how many clusters still fail. An alert that resolves because its pair is no longer monitored (scenario disabled or deleted, cluster excluded, probe removed or revoked) sends nothing. | *Synthetic check recovered: \<scenario\> on \<clusters\>* or *Synthetic check no longer critical: \<scenario\>* · scenario, clusters, still failing. | Yes, like the opens |
+| `probe.offline` | A cluster's probe has been offline for `synthetic.probeOfflineAlertAfter` (default 5 minutes). Its scenarios read *probe offline*, never failed, and keep any alert that fires. | *Probe offline: \<cluster\>* · cluster, offline for. | Once per outage |
+| `probe.online` | The probe is back, **only** after a `probe.offline` for the same outage. A reconnect after a certificate renewal sends nothing. | *Probe back online: \<cluster\>* · cluster. | Once per outage |
+| `synthetic.credential_expiring` | A synthetic credential with an expiry date expires within 14 days, or within 3 days. | *Synthetic credential X expires in N days* (*… within a day*) · credential, expires, used by (scenarios). | One per credential and threshold |
+| `synthetic.allowlist_changed` | An admin added or removed a rule of the synthetic host allowlist: what probes may reach changed. On the upgrade that adds it, every channel that gets `grant.changed` is routed this event too. | *Synthetic allowlist: added \<kind\> rule \<pattern\>* (or *removed*) · change, rule, kind, by. | No |
 
 Short agent blips send nothing. A cluster counts as offline after 60 seconds of silence, but
 `agent.offline` and the Dashboard's *Agent offline* item wait for the alert delay. The item counts it
@@ -311,7 +318,8 @@ be told when a destination keeps failing, alert on
 Nothing is routed by default. An event with no route and no channel override is dropped (outcome
 `no_route`). The one exception is an upgrade that adds an event type that must not go unnoticed: the
 upgrade to v0.2 routes the new `backup.partial`, `restore.failed` and `restore.break_glass` to every
-channel that already gets `backup.failed`. To receive events:
+channel that already gets `backup.failed`. The upgrade to v0.3 routes the new `synthetic.allowlist_changed` to
+every channel that already gets `grant.changed`. To receive events:
 
 1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
    (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.
@@ -326,6 +334,11 @@ Overrides and opt-in:
   used.
 - **`backup.succeeded` is opt-in twice.** The job needs *Also notify on success*, **and** the event type
   needs at least one route. A job's own channel does not turn it on by itself.
+- **Per-scenario channel.** A synthetic scenario can name a channel and a critical channel for its
+  `synthetic.failing`, `synthetic.critical` and `synthetic.recovered` (*Alerting* in the editor). Without
+  them, the routing table decides. Besides the message fields, the stored event carries `scenario_id`,
+  `alert_ids`, `cluster_count` and, for an open, `run_id` and `failed_step`; a fleet recovery adds
+  `still_failing`. Messages never carry a credential or a response body.
 - **Restore events are not opt-in.** Like every event they need a route. On upgrade, `restore.failed` and
   `restore.break_glass` are routed wherever `backup.failed` goes (a break-glass restore is critical like a
   failed backup, and `cr.opened` is an approval queue that an install without Vault change requests does

@@ -1,6 +1,10 @@
 # Synthetic monitoring (spec addendum)
 
-Status: **design**: the owner's spec of 2026-11-23, with the decisions taken in review below. Tracks issue [#46](https://github.com/Warewave-Technology/olympos/issues/46) (milestone v0.3).
+Status: **implemented** (v0.3, 2026-11-24): the owner's spec of 2026-11-23, with the decisions taken in review below and
+the [decisions taken during implementation](#decisions-taken-during-implementation). Tracks issue
+[#46](https://github.com/Warewave-Technology/olympos/issues/46) (milestone v0.3). User documentation:
+[Synthetic monitoring](../synthetic-monitoring.md); security: [Security model](../security-model.md#synthetic-monitoring-credentials-in-the-cluster);
+SPEC §4.6; `docs/spec-changes.md` #21–#25.
 
 ## Decisions after review
 
@@ -39,6 +43,56 @@ These change or settle parts of the spec below. Where they conflict, they win.
      kept for 7 days.
    - **Upgrading without a probe token.** A `helm upgrade` without a probe token succeeds: the probe waits and the
      cluster shows "Probe: not installed" until *Install probe* is used.
+
+## Decisions taken during implementation
+
+Rulings P1–P24 of the implementation (in the order they were taken). Where they differ from the spec below,
+they win. The user-visible ones:
+
+| Ruling | Decision | Cost |
+|---|---|---|
+| P1 | The migration copies the routes of `grant.changed` to `synthetic.allowlist_changed` (decision 4). | One more route row per access channel. |
+| P2 | An OAuth2 credential's token URL is checked against the allowlist and its bound hosts when saved (and must be `https://`). | None. |
+| P3 | Every mockup's sidebar has *Monitoring* after *Security*, as the app has. | None. |
+| P4 | "Cloud metadata" covers every cloud: Alibaba `100.100.100.200`, Oracle `192.0.0.192` and `255.255.255.255` are always denied too; `100.64.0.0/10` is not (it may hold pod or service CIDRs). | A scenario to one of these addresses is refused. |
+| P5 | The request rate counts the **worst case**: a step that follows redirects counts 1 + 5 requests per attempt, every retry counts. | The caps are reached sooner. |
+| P6 | Only the **current** probe certificate (serial = `clusters.probe_cert_serial`) may connect; older ones are refused. | After a renewal the probe reconnects within the kubelet sync plus a 30 s poll; this never alerts. |
+| P7 | A lost renewal answer must not lock the probe out: the previous serial (`probe_prev_cert_serial`) may call `RenewCert` only, until the new certificate connects. | One more column. |
+| P8 | A bootstrap token in `olympos-probe-identity` always means a newer install request: the agent enrolls with it even over a valid certificate (recovers revoked probes). | None. |
+| P9 | Bound hosts travel as `<kind>:<pattern>`; one that does not parse fails the run closed (`credential_error`). | None. |
+| P10 | A step whose response contains any form of a run's credential refuses all its extracts (`credential_error`). | Such a step cannot extract anything. |
+| P11 | **Taint**: variables extracted from a credentialed step (or from a step that used a tainted variable) may only be used toward that credential's bound hosts, checked at save and at run time; `Range` and `If-Range` are reserved; non-text, compressed or NUL bodies give no body extracts. | A flow cannot send data derived from a credentialed step outside its bound hosts. |
+| P12 | Extracts from **any** response of a host inside a credential's bound hosts are tainted with it; tainted values shorter than 4 bytes are not scrubbed; templates whose references do not parse are refused by the probe. | Credential-free steps on bound hosts also produce tainted variables. |
+| P13 | Runs due after their scenario was disabled are skipped (`scenario_disabled`); runs with an expired credential end `error` (`credential_expired`). | None. |
+| P14 | A server-side credential resolution failure (Key Vault or envelope outage) ends the run **skipped** (`credential_unavailable`), not error, and is shown on the credential. | A broken credential reads skipped until its warning is acted on. |
+| P15 | Saving a scenario that a rate cap would itself block is refused (enabled scenarios only). | A new scenario cannot be saved enabled on a full cluster. |
+| P16 | A firing alert whose pair is no longer monitored (scenario disabled or deleted, cluster excluded, probe not installed or revoked) resolves **silently**; an offline probe keeps its alert. | None. |
+| P17 | Revoking a probe on a cluster that never had one answers 409 *no probe installed*. | None. |
+| P18 | Guests cannot hold `synthetic-editor`, and a guest's existing grant does not authorize editing. | B2B guests cannot edit scenarios. |
+| P19 | (Process) a mechanical index fix was verified by the controller instead of a second review. | — |
+| P20 | The agent starts enrolling the probe only after its own identity exists. | The probe enrolls one agent loop later. |
+| P21 | The *Install probe* command appends the server's `OLYMPOS_AGENT_INSTALL_SETS`, like *Add cluster*. | None. |
+| P22 | The editor has **Store response excerpts** (`store_responses`) and the scenario detail **Delete** with a confirm dialog; both are in the mockups. | None. |
+| P23 | The probe's state is part of the *Status* cell of *Settings › Clusters & agents* (no extra column; no sideways scroll at 1440 px). | None. |
+| P24 | `POST /clusters/{id}/probe-token` answers 409 while the cluster waits for its first agent: its *Add cluster* command already installs the probe. | None. |
+
+Also settled while building, and documented for users: names must be fully qualified (no search list), a
+literal `${` cannot be written, `Accept-Encoding`, `Range`, `If-Range` and `Host` are reserved headers, test runs
+are limited to 6 a minute per person, and after a full outage late runs go out together.
+
+**Model additions** (beyond §3 below; migration `00024_synthetic_monitoring.sql`):
+
+- `synthetic_runs.manual` (*Run now*, counts toward alerts, no slot), `test`, `test_spec`, `requested_by`,
+  `allowlist_version`, `remote_ip`, `probe_ip`; unique indexes for one run per slot, **one open** scheduled run
+  and **one open manual** run per scenario and cluster; finished runs are append-only (trigger).
+- `synthetic_alerts.reason`, `clusters`, **`still_failing`** (cluster alerts still firing when the fleet alert
+  resolved), `notified_at`, `resolved_notified_at`; one firing alert per scenario and cluster (or fleet).
+- `synthetic_state` (streaks, last run, `blocked_reason`), `synthetic_hourly` (the 400-day roll-up),
+  `synthetic_allowlist_version` (bumped by trigger), `scenario_assertions.position`.
+- `clusters.probe_*` (status, version, current and previous certificate serial, expiry, last seen, offline
+  since, alerted) and `enroll_tokens.roles`, `agent_used_at`, `probe_used_at`.
+- Retention indexes: runs by `finished_at`, step results with an excerpt, `synthetic_hourly.hour`, and the
+  `last_run_id` references; the notifier's index of unnotified alerts.
 
 ---
 

@@ -1,5 +1,5 @@
 // Docs tour: walks through Olympos in the kind lab the way a new user would
-// and saves a screenshot at every step, for README.md and docs/getting-started.md.
+// and saves a screenshot at every step, for README.md, docs/getting-started.md and the feature docs.
 // The tour is also a check: if a step no longer works, the tour fails.
 //
 //   ./test/e2e/env.sh                     # fresh lab, Olympos reset to empty
@@ -671,7 +671,160 @@ const stages = {
     await dump(admin, 'vault restore result');
     await shot(admin, 'restore-05-vault-result', admin.locator('.split-detail'));
   },
+
+  // Synthetic monitoring (docs/synthetic-monitoring.md): both clusters got a
+  // probe with their agent in the clusters stage. synth-web answers every
+  // *.olympos-lab.test name in each cluster; edge's is switched to 500, so the
+  // shop flow fails there while it passes on lab.
+  async monitoring() {
+    const admin = await signIn('admin');
+    await until(admin, 180_000, 'both probes online', async () => {
+      const cs = (await apiCall(admin, 'GET', '/clusters')).items;
+      return ['lab', 'edge'].every((n) => cs.find((c) => c.name === n)?.probe_status === 'online');
+    });
+    const labID = (await apiCall(admin, 'GET', '/clusters')).items.find((c) => c.name === 'lab').id;
+    synthWeb('lab', 'ok');
+    synthWeb('edge', 'ok');
+    try {
+      const rules = (await apiCall(admin, 'GET', '/synthetic/allowlist')).items;
+      for (const r of [
+        { pattern: 'olympos-lab.test', kind: 'suffix', note: 'Lab: synth-web answers every name in every cluster' },
+        { pattern: '*.shop.svc.cluster.local', kind: 'wildcard', note: 'In-cluster shop services' },
+      ]) {
+        if (!rules.some((x) => x.pattern === r.pattern && x.kind === r.kind)) await apiCall(admin, 'POST', '/synthetic/allowlist', r);
+      }
+      // Lab values only (synth-web takes any token); Olympos never shows them again.
+      const creds = (await apiCall(admin, 'GET', '/synthetic/credentials')).items;
+      const inDays = (n) => new Date(Date.now() + n * 86_400_000).toISOString();
+      const ensureCred = async (body) => creds.find((c) => c.name === body.name)?.id ?? (await apiCall(admin, 'POST', '/synthetic/credentials', body)).id;
+      const shopToken = await ensureCred({
+        name: 'shop-api-token',
+        kind: 'bearer',
+        bound_hosts: [{ kind: 'suffix', pattern: 'olympos-lab.test' }],
+        secret: { source: 'stored', password: 'lab-only-shop-token' },
+        expires_at: inDays(90),
+      });
+      await ensureCred({
+        name: 'status-page-key',
+        kind: 'header',
+        header_name: 'X-Api-Key',
+        bound_hosts: [{ kind: 'exact', pattern: 'status.olympos-lab.test' }],
+        secret: { source: 'stored', password: 'lab-only-status-key' },
+        expires_at: inDays(10),
+      });
+
+      const status200 = { subject: 'status_code', operator: 'equals', value: '200' };
+      const http = (url, extra = {}) => ({ kind: 'http', http: { method: 'GET', url }, assertions: [status200], ...extra });
+      const scenarios = [
+        {
+          name: 'Shop items API',
+          type: 'http_flow',
+          owner_selector: 'team=shop',
+          steps: [
+            http('http://shop.olympos-lab.test/health'),
+            http('http://shop.olympos-lab.test/api/items', {
+              credential_id: shopToken,
+              assertions: [status200, { subject: 'json:$.count', operator: 'equals', value: '2' }, { subject: 'latency_ms', operator: 'less_than', value: '500' }],
+            }),
+          ],
+        },
+        {
+          name: 'Storefront DNS',
+          type: 'dns',
+          owner_selector: 'team=shop',
+          steps: [{ kind: 'dns', dns: { name: 'storefront.olympos-lab.test', record_type: 'A' }, assertions: [{ subject: 'record_count', operator: 'greater_than', value: '0' }] }],
+        },
+        {
+          name: 'Checkout health',
+          type: 'http',
+          owner_selector: 'team=platform',
+          exclude_selectors: ['olympos.io/cluster=edge'],
+          steps: [http('http://checkout.olympos-lab.test/health', { assertions: [status200, { subject: 'latency_ms', operator: 'less_than', value: '300' }] })],
+        },
+        {
+          name: 'Payments gateway port',
+          type: 'tcp',
+          owner_selector: 'team=payments',
+          enabled: false,
+          steps: [{ kind: 'tcp', tcp: { host: 'payments.olympos-lab.test', port: 80 }, assertions: [{ subject: 'connects', operator: 'equals', value: 'true' }] }],
+        },
+      ];
+      const alerts = { cluster_fail_after: 3, fleet_critical_clusters: 2, recovery_after: 2, send_recovery: true };
+      const existing = (await apiCall(admin, 'GET', '/synthetic/scenarios')).items;
+      const ids = {};
+      for (const sc of scenarios) {
+        ids[sc.name] =
+          existing.find((x) => x.name === sc.name)?.id ??
+          (await apiCall(admin, 'POST', '/synthetic/scenarios', { interval_seconds: 30, timeout_seconds: 10, run_on: 'all', store_responses: true, alerts, ...sc })).id;
+      }
+      const shop = ids['Shop items API'];
+
+      // A few passing runs everywhere, then edge's synth-web answers 500:
+      // after three failed runs the shop flow's edge cell reads failing.
+      await until(admin, 180_000, 'shop flow passing on both clusters', () => cellStates(admin, shop, (s) => s.lab === 'passing' && s.edge === 'passing'));
+      await admin.waitForTimeout(60_000);
+      synthWeb('edge', '500');
+      await until(admin, 300_000, 'shop flow failing on edge', () => cellStates(admin, shop, (s) => s.lab === 'passing' && s.edge === 'failing'));
+
+      await admin.goto(`${URL}/monitoring`);
+      await admin.getByRole('table', { name: 'Scenarios by cluster' }).waitFor();
+      await dump(admin, 'monitoring overview');
+      await shot(admin, 'monitoring-01-overview');
+
+      await admin.goto(`${URL}/monitoring?scenario=${shop}`);
+      await admin.getByRole('table', { name: 'Scenario by cluster' }).waitFor();
+      await dump(admin, 'scenario detail');
+      await shot(admin, 'monitoring-02-scenario');
+
+      await admin.goto(`${URL}/monitoring/editor?scenario=${shop}`);
+      await admin.getByRole('heading', { name: 'Basics' }).waitFor();
+      await dump(admin, 'scenario editor');
+      // The editor is taller than the window: a taller window, with the sidebar.
+      await admin.setViewportSize({ width: 1440, height: 1250 });
+      await shot(admin, 'monitoring-03-editor');
+      await admin.setViewportSize({ width: 1440, height: 900 });
+
+      // A passing run on lab: the echoed token and the cookie are redacted.
+      const run = (await apiCall(admin, 'GET', `/synthetic/runs?scenario_id=${shop}&cluster_id=${labID}&status=passed&limit=1`)).items[0];
+      await admin.goto(`${URL}/monitoring?scenario=${shop}&run=${run.id}`);
+      await admin.getByRole('dialog').getByLabel('Response excerpt').first().waitFor();
+      await dump(admin, 'run detail');
+      await shot(admin, 'monitoring-04-run', admin.getByRole('dialog'));
+
+      await admin.goto(`${URL}/settings/synthetic`);
+      await admin.getByRole('table', { name: 'Credentials' }).waitFor();
+      await dump(admin, 'synthetic settings');
+      await shot(admin, 'monitoring-05-settings');
+    } finally {
+      synthWeb('edge', 'ok');
+    }
+  },
 };
+
+/** Switches a lab cluster's synth-web (test/e2e/cmd/synth-web) to ok, 500 or slow. */
+function synthWeb(cluster, mode) {
+  execFileSync('kubectl', ['--context', `kind-olympos-${cluster}`, '-n', 'lab', 'exec', 'deploy/synth-web', '--', '/synth-web', 'toggle', mode], {
+    env: { ...process.env, KUBECONFIG },
+    stdio: ['ignore', 'ignore', 'inherit'],
+  });
+}
+
+/** Waits until check() resolves true, every 3 s. */
+async function until(page, timeout, what, check) {
+  const end = Date.now() + timeout;
+  while (!(await check())) {
+    if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+    await page.waitForTimeout(3000);
+  }
+}
+
+/** pick() of a scenario's matrix cells by cluster name (GET /synthetic/overview). */
+async function cellStates(page, scenarioID, pick) {
+  const ov = await apiCall(page, 'GET', '/synthetic/overview');
+  const names = Object.fromEntries(ov.clusters.map((c) => [c.id, c.name]));
+  const row = ov.scenarios.find((x) => x.id === scenarioID);
+  return pick(Object.fromEntries((row?.cells ?? []).map((c) => [names[c.cluster_id], c.state])));
+}
 
 /** The lab cluster's vault (lab/vault) in the Vaults list. */
 function labVault(page) {

@@ -10,7 +10,7 @@ This document is the source of truth for the implementation. Where it says **MUS
 
 ## 0. Principles (read first)
 
-1. **Credentials never enter the cluster.** All work that needs a credential (backups, Vault operations, image scans) runs on the **server**. The agent is discovery + a constrained tunnel.
+1. **Credentials never enter the cluster.** All work that needs a credential (backups, Vault operations, image scans) runs on the **server**. The agent is discovery + a constrained tunnel. **Documented exception (v0.3):** synthetic monitoring sends the credentials a scenario uses to that cluster's probe, sealed per run to the probe's connection, used in memory and only toward the credential's bound hosts (§4.6, `docs/security-model.md`, `docs/spec-changes.md` #21). The agent never receives one.
 2. **The agent is a narrow, boring component.** Distroless, no shell, read-only RBAC, no Secret access except its own identity Secret and the opt-in Secret inventory (metadata only, F3; off by default; `list` on `secrets` would let a stolen agent token read values), no listening port. It only dials out.
 3. **The agent only tunnels to targets it discovered itself.** The server can never ask for an arbitrary `host:port`.
 4. **Secret values are never shown in the UI.** Users see keys, never values; values can only be replaced, through maker/checker approval.
@@ -139,7 +139,11 @@ providerOverride: ""        # set for on-prem: "onprem", region text optional
 bench:
   enabled: false            # kube-bench exception, see §12.3
   maxParallel: 3
+probe:
+  enabled: true             # olympos-probe for synthetic monitoring, §4.6
+  bootstrapToken: ""        # probe-only token from "Install probe" (clusters added before v0.3)
 ```
+- The chart installs **`olympos-probe`** (synthetic monitoring, §4.6) next to the agent by default; the install command's token enrolls both. `probe.enabled: false` opts out (*Probe: not installed*). A `helm upgrade` without a probe token succeeds; the probe waits until *Settings › Clusters & agents › Install probe* gives it one.
 
 ---
 
@@ -234,6 +238,15 @@ rules:
 5. Agent renews at 2/3 of lifetime via `RenewCert` over the authenticated channel.
 6. Server can **revoke** a cluster: cert serial added to deny list, open streams dropped.
 
+### 4.6 Probe (synthetic monitoring, v0.3)
+
+The design and its decisions are in `docs/design/synthetic-monitoring.md`; the user documentation in `docs/synthetic-monitoring.md`.
+- **The agent does not change** (its RBAC gains only the Secret name below). Scenarios run in a separate Deployment, `olympos-probe`, in the agent's namespace: distroless, non-root, read-only root FS, all capabilities dropped, a ServiceAccount with **no RBAC bindings** and `automountServiceAccountToken: false`, one projected read-only volume (its identity and the CA). It never talks to the Kubernetes API.
+- **Identity.** Client certificate CN = `<cluster-uuid>/probe`, 30 days, its serial apart from the agent's (`clusters.probe_cert_serial`). The agent enrolls the probe after its own identity exists (with the same bootstrap token, role `probe`, or a probe-only token), keeps its certificate and key in the Secret `olympos-probe-identity` (the one extra `resourceNames` entry of the agent's Role) and renews it. Only the current probe certificate may connect; the previous one may only retry a renewal. A probe identity may only use `ProbeGateway`; an agent identity never may. Revoking the cluster revokes both; the probe can be revoked alone.
+- **Egress.** Only hosts on the global allowlist (admin-only, `exact` / `wildcard` / `suffix` by whole labels). Always denied: IP literals, `localhost`, `kubernetes.default.svc*`, and resolved addresses in loopback, link-local, cloud metadata, unspecified, multicast, broadcast and the Kubernetes API service IP. Names are resolved once (no search list, no `/etc/hosts`), every answer checked, and the checked address dialled; every redirect hop is checked again. A run carries the allowlist version; a stale one is refused.
+- **Credentials** (the §0 exception): stored like backup credentials; sealed per run with HPKE (RFC 9180, DHKEM(X25519)) to a key pair the probe makes for each connection, with the run and cluster ids as AAD; attached only to the credential's bound hosts and removed on a redirect elsewhere; zeroed after the run. Values extracted from a credentialed exchange may only go to the bound hosts. The probe redacts headers, sensitive JSON fields, gitleaks matches and every form of the credentials before anything leaves it.
+- **Scheduling, results and alerts** live on the server: runs per scenario × cluster at the interval with a stable jitter of ±10 %, no run for an offline probe (*probe offline*, never failed), cluster alert after N failures in a row, fleet alert at N failing clusters, recovery after N passes, one message per open and resolve.
+
 ---
 
 ## 5. Discovery annotations
@@ -315,6 +328,20 @@ message TunnelFrame {
 }
 ```
 
+The probe uses its own service on the same listener (`proto/olympos/v1/probe.proto`, §4.6):
+
+```proto
+service ProbeGateway {                    // probe identity only (CN = <cluster-uuid>/probe)
+  rpc Connect(stream ProbeMessage) returns (stream ServerProbeMessage); // ProbeHello first: version, HPKE public key
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);          // the agent renews the probe's certificate
+}
+// Server → probe: RunScenario { run_id, scenario_json (names credentials, never holds them),
+//                               allowlist snapshot + version, SealedCredentials (per run), test }
+// Probe → server: RunResult { run_id, status, failed step, reason, per-step timings, assertion results,
+//                             extracted variable names, redacted excerpt ≤ 2 KiB } | RunRejected | Pong
+```
+`AgentGateway.Enroll` takes a role (`agent` or `probe`); a bootstrap token enrolls each role it lists at most once. Heartbeat and the offline rule are the agent's (15 s, 60 s).
+
 Rules:
 - Server → `OpenTunnel{target_id}`. Agent looks up `target_id` in **its own** discovered set; unknown → `TunnelRejected`. Agent resolves Service → endpoint, opens TCP, then calls `Tunnel` RPC with `tunnel_id` and pipes bytes.
 - The agent never inspects or terminates TLS. The server speaks TLS **end-to-end** with the target. If the target has no TLS, the target gets a `tls.missing` security finding (shown as "TLS: No" badge) and, in `e2e-tls` mode, **no password crosses a non-TLS connection**: PostgreSQL is allowed only when the server asks for SCRAM-SHA-256 (checked before the password is sent; cleartext/MD5 are refused), ClickHouse and Vault/OpenBao are refused. The error names both ways out: enable TLS on the target, or switch the cluster to `compressed`. Target certificates are verified against the configured target CA bundle (and per-target CAs); public CAs only with `targetTLS.systemRoots`. The TLS name (`olympos.io/tls-server-name`) is pinned when the target is first seen; a later change is held until an admin of the cluster accepts it (security review v0.1 #1).
@@ -338,8 +365,11 @@ All tables have `id uuid pk`, `created_at`, `updated_at` unless noted. Append-on
 clusters(id, name, labels jsonb, provider, provider_override, region, api_version,
          status[pending|online|offline|revoked], last_seen_at, agent_version,
          bench_enabled bool, cert_serial, transfer_mode[e2e-tls|compressed] default 'e2e-tls',
-         egress_rate_per_gb numeric null)
-enroll_tokens(id, cluster_id, token_hash, expires_at, used_at)
+         egress_rate_per_gb numeric null,
+         probe_status[not_installed|pending|online|offline|revoked], probe_version, probe_cert_serial,
+         probe_prev_cert_serial, probe_cert_expires_at, probe_last_seen_at, probe_offline_since,
+         probe_offline_alerted bool)                                       -- probe columns: §4.6
+enroll_tokens(id, cluster_id, token_hash, expires_at, roles text[] /*agent, probe*/, agent_used_at, probe_used_at)
 nodes(cluster_id, name, provider_id, kubelet_version, region, zone, instance_type,
       cpu_capacity, mem_capacity, roles text[], ready bool, seen_at)   -- pk(cluster_id,name)
 
@@ -397,6 +427,32 @@ outbox(id, event_type, payload jsonb, created_at, attempts, next_attempt_at, del
 
 activity_log(id, at, actor_principal_id, action, object_type, object_id, details jsonb)  -- append-only
 sessions(id, principal_id, created_at, last_seen_at, expires_at, csrf_token)
+
+-- synthetic monitoring (§4.6, docs/design/synthetic-monitoring.md §3)
+synthetic_allowlist(id, pattern, kind[exact|wildcard|suffix], note, created_by)   -- unique(lower(pattern), kind)
+synthetic_allowlist_version(id = 1, version)                                       -- bumped by trigger on every change
+synthetic_credentials(id, name, kind[bearer|basic|header|oauth2_client_credentials], bound_hosts text[],
+                      credential_id /*credentials row*/, header_name, oauth_token_url, oauth_scopes,
+                      expires_at, rotated_at, created_by)
+scenarios(id, name, type[http_flow|http|dns|tcp|tls], owner_selector, interval_seconds ≥ 30, timeout_seconds ≤ 60,
+          step_retries ≤ 2, enabled, run_on[all|selector], run_on_selector, exclude_selectors text[],
+          store_responses bool, created_by)
+scenario_steps(id, scenario_id, position, kind[dns|http|tcp|tls], spec jsonb, credential_id null)
+scenario_assertions(id, step_id, position, subject, operator, value)
+scenario_extracts(id, step_id, name, source[json_path|header|regex], expr)        -- names only, never values
+scenario_alerts(scenario_id pk, cluster_fail_after, fleet_critical_clusters, channel_id, critical_channel_id,
+                recovery_after, send_recovery)
+synthetic_runs(id, scenario_id, cluster_id, scheduled_for, started_at, finished_at,
+               status[scheduled|running|passed|failed|error|skipped], failed_step, failure_reason, total_ms,
+               probe_version, test bool, manual bool, test_spec, requested_by, allowlist_version, remote_ip, probe_ip)
+                                                       -- append-only once finished; one per slot, one open, one manual
+synthetic_step_results(run_id, position, status, status_code, timings jsonb, assertions jsonb,
+                       excerpt bytea ≤ 2 KiB, extracted_names text[], error)
+synthetic_alerts(id, scenario_id, cluster_id null /*fleet*/, state[firing|resolved], reason, clusters text[],
+                 still_failing, opened_at, resolved_at, last_run_id, notified_at, resolved_notified_at)
+synthetic_state(scenario_id, cluster_id, consecutive_failures, consecutive_passes, last_run_id, last_status,
+                last_finished_at, blocked_reason)
+synthetic_hourly(scenario_id, cluster_id, hour, runs, passed, failed, p50_ms, p95_ms)   -- kept 400 days
 ```
 
 ---
@@ -625,7 +681,8 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 ## 14. Notifications
 
 - Slack app (bot token in Key Vault, `chat:write` scope). Channel objects defined once, reused by any module.
-- **Event catalog** (v1): `backup.failed`, `backup.partial`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `restore.requested`, `restore.approved`, `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed`, `restore.break_glass` (v0.2, §10.4), `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`.
+- **Event catalog** (v1): `backup.failed`, `backup.partial`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `restore.requested`, `restore.approved`, `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed`, `restore.break_glass` (v0.2, §10.4), `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`, and for synthetic monitoring (v0.3, §4.6) `synthetic.failing`, `synthetic.critical`, `synthetic.recovered`, `probe.offline`, `probe.online`, `synthetic.credential_expiring` (14 and 3 days), `synthetic.allowlist_changed` (routed like `grant.changed` on upgrade).
+- Synthetic alerts send one message when an alert opens and one when it resolves, grouped per scenario in one pass; a scenario can name its own channel and critical channel. Messages never carry a credential or a response body.
 - Routing: `notification_routes(event_type → channel)`; jobs/schedules can override with their own channel.
 - **Transactional outbox**: events written in the same DB transaction as the state change; a dispatcher delivers with retries + backoff. At-least-once; messages carry an idempotency key.
 - Messages: Block Kit, short, with a link to the object. **No interactive buttons.** Never include secret values, fingerprints are fine.
@@ -660,7 +717,12 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 | `dialog-grant-access.html` | Person search (guest flagged), roles, scope by labels | §3.2 |
 | `settings-destinations.html` | Managed Identity / SAS token, parsed SAS checks, destination test | §10.3 |
 | `settings-registries.html` | Registry credentials for scanning, unmatched images | §13.3 |
-| `settings-clusters.html` | Labels, provider override, transfer mode trade-off, egress estimate, bench state, revoke | §6, §7, §12.3 |
+| `settings-clusters.html` | Labels, provider override, transfer mode trade-off, egress estimate, bench state, probe state, Install probe, revoke | §6, §7, §12.3, §4.6 |
+| `monitoring-overview.html` | Monitoring › Synthetic: KPIs, filter pills, scenario × cluster matrix (text and symbol), 24 h availability, p95 | §4.6 |
+| `monitoring-scenario.html` | Scenario: steps, per-cluster table with 48 × 30 min timeline, alert rule and history, Run now, Delete | §4.6 |
+| `monitoring-editor.html` | Scenario editor: steps, assertions, extracts, credentials, allowlist hints, store response excerpts, schedule, runs on + exclude, alerting, test run | §4.6 |
+| `monitoring-run.html` | Run detail: per-step waterfall, assertions, redacted excerpt, Copy as curl | §4.6 |
+| `settings-synthetic.html` | Host allowlist with *check a host*, always-denied note, credentials with bound hosts and expiry | §4.6 |
 | `logo.html` + `logo*.svg`, `app-icon.svg` | Brand sheet and logo files | §15 |
 
 - Mockups are **static visual references**: match layout, hierarchy, copy and tokens; sample data is illustrative. Build real components from the tokens below, not by copying mockup markup.
@@ -716,6 +778,11 @@ GET    /api/v1/grants                   POST   DELETE /{id}
 GET    /api/v1/notifications/channels   POST PATCH DELETE
 GET    /api/v1/notifications/routes     PUT
 GET    /api/v1/activity
+GET    /api/v1/synthetic/overview       GET /api/v1/synthetic/runs   GET /{id}   POST /api/v1/synthetic/test-runs
+GET    /api/v1/synthetic/scenarios      POST   GET /{id}   PUT   PATCH   DELETE   POST /{id}/run   POST /preview
+GET    /api/v1/synthetic/allowlist      POST   DELETE /{id}   POST /check
+GET    /api/v1/synthetic/credentials    POST   PUT /{id}   DELETE /{id}
+POST   /api/v1/clusters/{id}/probe-token  (Install probe)   DELETE /api/v1/clusters/{id}/probe  (revoke the probe)
 ```
 - Authorization enforced in middleware + per-handler scope checks (cluster labels). 403 responses never leak object existence outside scope.
 
@@ -745,6 +812,11 @@ GET    /api/v1/activity
 - [ ] No Blob credential or SAS appears in any agent message (proto review + test).
 - [ ] Destination test refuses to save silently when the credential can delete (warning shown).
 - [ ] `compressed` transfer mode always produces a visible finding.
+- [ ] Probe isolation: the probe's ServiceAccount has no bindings and token automount is off (golden-file test); a probe identity is refused by `Control`, `Tunnel` and the agent's `RenewCert`, an agent identity by `ProbeGateway`; revoking the probe alone leaves the agent working.
+- [ ] One bootstrap token enrolls exactly one agent and one probe; a replay fails.
+- [ ] Allowlist matching by whole labels (exact, wildcard, suffix; `wrw.com.evil.io`, case, trailing dot, IDNA) and the always-denied addresses (tests); DNS rebinding: one resolution, the checked address dialled; a redirect to a host or address that is not allowed fails the step.
+- [ ] A synthetic credential is never attached outside its bound hosts, after a redirect too; tainted values stay on the bound hosts; a canary credential never appears in the server's database, server, probe or agent logs, messages, excerpts or extracted values (unit tests and e2e `TestM9SyntheticMonitoring`); sealed credentials cannot be opened by another probe connection.
+- [ ] An offline probe never yields a failed run; alerts send one message per open and resolve; test runs never alert (tests and e2e).
 
 ---
 

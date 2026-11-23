@@ -7,11 +7,12 @@ screenshot, no Azure account needed.
 
 | | |
 |---|---|
-| [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, restore a backup into a new server, run audits and image scans |
+| [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, restore a backup into a new server, run audits and image scans, watch a service from every cluster |
 | [Access](access.md) | Roles, scopes, granting access, guests and the first admin |
 | [Findings and events](findings-and-events.md) | What each finding, *Needs attention* item and notification means, and how to fix it |
 | [Restoring backups](restore.md) | Restore from the UI into a new target with approval (and what each engine restores), restores by hand, the backup format and manifests, choosing a copy |
 | [Restoring Olympos itself](restore-olympos.md) | Recovering the server from its `olympos-self` backup |
+| [Synthetic monitoring](synthetic-monitoring.md) | Scenarios that run from inside every cluster: the probe, the host allowlist, credentials, results, alerts, roles |
 | [Runbook: Vault break-glass](runbooks/vault-break-glass.md) | When Olympos' Vault access is lost or must be bypassed |
 
 ## Install and operate
@@ -47,5 +48,5 @@ screenshot, no Azure account needed.
 
 `docs/design/` holds the HTML mockups the UI was built from and the designs of features in progress
 ([destination groups](design/destination-groups.md), [restore from the UI](design/ui-restore.md),
-[synthetic monitoring](design/synthetic-monitoring.md)); they are
-not user documentation.
+[synthetic monitoring](design/synthetic-monitoring.md)), with the decisions taken while building them; they
+are not user documentation.
