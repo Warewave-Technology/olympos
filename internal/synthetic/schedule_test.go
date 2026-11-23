@@ -3,6 +3,7 @@ package synthetic
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -612,6 +613,11 @@ func TestRunNow(t *testing.T) {
 	if _, err := e.svc.RunNow(e.ctx, uuid.New(), nil, who); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("RunNow of no scenario: %v", err)
 	}
+	// Minor 6: no cluster to run on is ErrNoClusters, and nothing is made.
+	nowhere := e.ratedScenario("nowhere", planned{steps: 1, enabled: true, target: Targeting{RunOn: RunOnSelector, RunOnSelector: "olympos.io/cluster=off"}}, time.Second)
+	if ids, err := e.svc.RunNow(e.ctx, nowhere, nil, who); !errors.Is(err, ErrNoClusters) || len(ids) != 0 {
+		t.Fatalf("RunNow with no cluster to run on: %v %v", ids, err)
+	}
 
 	// Both runs go out, once each; the manual one counts toward alerting.
 	e.probes.connect(t, cl, 4)
@@ -720,5 +726,160 @@ func TestTestRun(t *testing.T) {
 	bad.IntervalSeconds = 5
 	if _, err := e.svc.TestRun(e.ctx, bad, cl, uuid.Nil); !errors.Is(err, ErrInvalidScenario) {
 		t.Fatalf("TestRun of an invalid scenario: %v", err)
+	}
+}
+
+// Fix round 1: planned runs follow the configuration. A run that has not
+// come due goes when its pair is no longer planned, or when it is more than
+// the current interval ahead; a pair whose probe is only offline keeps it.
+func TestTickReconcilesPlannedRuns(t *testing.T) {
+	e := newEnv(t)
+	a := e.labeledCluster("a", ProbeOnlineState, nil)
+	b := e.labeledCluster("b", ProbeOnlineState, nil)
+	c := e.labeledCluster("c", ProbeOnlineState, nil)
+	long := e.ratedScenario("long", planned{interval: 3600, steps: 1, enabled: true}, 0)
+	e.tick(e.svc)
+	before := e.openRuns()
+	for _, cl := range []uuid.UUID{a, b, c} {
+		if len(before[pair{long, cl}]) != 1 {
+			t.Fatalf("no planned run on %s: %v", cl, before)
+		}
+	}
+
+	// c's probe goes offline; b is excluded.
+	e.exec(`UPDATE clusters SET probe_status = 'offline' WHERE id = $1`, c)
+	e.exec(`UPDATE scenarios SET exclude_selectors = '{olympos.io/cluster=b}' WHERE id = $1`, long)
+	e.tick(e.svc)
+	after := e.openRuns()
+	if len(after[pair{long, b}]) != 0 {
+		t.Fatal("the planned run of an excluded cluster was kept")
+	}
+	if n := e.count(`SELECT count(*) FROM synthetic_runs WHERE cluster_id = $1`, b); n != 0 {
+		t.Fatalf("%d runs left on the excluded cluster", n)
+	}
+	for _, cl := range []uuid.UUID{a, c} {
+		if r := after[pair{long, cl}]; len(r) != 1 || r[0].id != before[pair{long, cl}][0].id {
+			t.Fatalf("planned run of %s changed: %v then %v", cl, before[pair{long, cl}], r)
+		}
+	}
+
+	// The interval goes from an hour to 30 s: the next tick plans a near
+	// slot.
+	old := after[pair{long, a}][0]
+	e.exec(`UPDATE scenarios SET interval_seconds = 30 WHERE id = $1`, long)
+	e.tick(e.svc)
+	now := e.clock.now()
+	r := e.openRuns()[pair{long, a}]
+	if len(r) != 1 || !r[0].scheduled.After(now) || r[0].scheduled.After(now.Add(30*time.Second)) {
+		t.Fatalf("after the interval was shortened: %v (now %s)", r, now)
+	}
+	if old.scheduled.After(now.Add(30*time.Second)) && r[0].id == old.id {
+		t.Fatal("the far slot was kept")
+	}
+	// The offline pair keeps its run unless it is too far ahead: then it
+	// is replaced once the probe is back.
+	if n := e.count(`SELECT count(*) FROM synthetic_runs WHERE cluster_id = $1 AND scheduled_for > $2`, c, now.Add(30*time.Second)); n != 0 {
+		t.Fatalf("%d runs of the offline pair beyond the new interval", n)
+	}
+
+	// A disabled scenario's planned run goes.
+	e.exec(`UPDATE scenarios SET enabled = false WHERE id = $1`, long)
+	e.tick(e.svc)
+	if open := e.openRuns(); len(open) != 0 {
+		t.Fatalf("runs of a disabled scenario: %v", open)
+	}
+
+	// A pair that a cap starts blocking loses its planned run.
+	for i := range 4 {
+		e.ratedScenario(fmt.Sprintf("big%d", i), at120, time.Duration(i)*time.Second)
+	}
+	off := at120
+	off.enabled = false
+	late := e.ratedScenario("late-big", off, 10*time.Second) // older than small
+	small := e.ratedScenario("small", planned{steps: 1, enabled: true}, time.Minute)
+	e.tick(e.svc)
+	smallRun := e.openRuns()[pair{small, a}]
+	if len(smallRun) != 1 || !smallRun[0].scheduled.After(e.clock.now()) {
+		t.Fatalf("small not planned: %v", smallRun)
+	}
+	e.exec(`UPDATE scenarios SET enabled = true WHERE id = $1`, late)
+	e.tick(e.svc)
+	if r := e.openRuns()[pair{small, a}]; len(r) != 0 {
+		t.Fatalf("the planned run of a rate-limited pair was kept: %v", r)
+	}
+	if e.blockedReason(small, a) != BlockedRateLimit {
+		t.Fatalf("blocked_reason %q", e.blockedReason(small, a))
+	}
+}
+
+// Ruling P15: CheckRate reports a cluster only where the scenario being
+// saved would itself be blocked, in the scheduler's oldest-first order.
+func TestCheckRateOldestFirst(t *testing.T) {
+	e := newEnv(t)
+	cl := e.cluster("c1", ProbeOnlineState)
+	var big []uuid.UUID
+	for i := range 5 {
+		big = append(big, e.ratedScenario(fmt.Sprintf("big%d", i), at120, time.Duration(i)*time.Second))
+	}
+	small := e.ratedScenario("small", planned{steps: 1, enabled: true}, time.Minute) // 601 on c1
+	load := func(id uuid.UUID) *spec.Scenario {
+		sc, err := LoadScenario(e.ctx, e.db, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sc
+	}
+	// Editing an old scenario that still fits: nothing to report, even on
+	// an over-subscribed cluster (small is the one blocked).
+	if over, err := e.svc.CheckRate(e.ctx, e.db, load(big[0]), []uuid.UUID{cl}, &big[0]); err != nil || len(over) != 0 {
+		t.Fatalf("edit of an old scenario: %v %v", over, err)
+	}
+	// The newest is blocked, edited or new.
+	if over, err := e.svc.CheckRate(e.ctx, e.db, load(small), []uuid.UUID{cl}, &small); err != nil || over["c1"] != 601 || len(over) != 1 {
+		t.Fatalf("edit of the newest: %v %v", over, err)
+	}
+	if over, err := e.svc.CheckRate(e.ctx, e.db, load(small), []uuid.UUID{cl}, nil); err != nil || over["c1"] != 602 {
+		t.Fatalf("a new scenario: %v %v", over, err)
+	}
+	// A disabled scenario runs nowhere: no clusters, nothing reported.
+	if over, err := e.svc.CheckRate(e.ctx, e.db, load(small), nil, &small); err != nil || len(over) != 0 {
+		t.Fatalf("a disabled scenario: %v %v", over, err)
+	}
+	// The scheduler agrees.
+	e.tick(e.svc)
+	if e.blockedReason(small, cl) != BlockedRateLimit || e.blockedReason(big[0], cl) != "(no row)" {
+		t.Fatalf("scheduler: small %q, big0 %q", e.blockedReason(small, cl), e.blockedReason(big[0], cl))
+	}
+}
+
+// Minor 4: a stored targeting that does not parse is logged once per
+// change, not on every tick.
+func TestBadTargetingLoggedOnce(t *testing.T) {
+	e := newEnv(t)
+	e.cluster("c1", ProbeOnlineState)
+	sc := e.ratedScenario("s", planned{steps: 1, enabled: true, target: Targeting{RunOn: RunOnSelector, RunOnSelector: "env in ("}}, 0)
+	const msg = "targeting does not parse"
+	count := func() int { return strings.Count(e.LogBuf.String(), msg) }
+	for range 3 {
+		e.tick(e.svc)
+	}
+	if n := count(); n != 1 {
+		t.Fatalf("logged %d times", n)
+	}
+	e.exec(`UPDATE scenarios SET run_on_selector = 'a b c' WHERE id = $1`, sc)
+	e.tick(e.svc)
+	e.tick(e.svc)
+	if n := count(); n != 2 {
+		t.Fatalf("logged %d times after a change", n)
+	}
+	e.exec(`UPDATE scenarios SET run_on_selector = 'env=prod' WHERE id = $1`, sc)
+	e.tick(e.svc)
+	e.exec(`UPDATE scenarios SET run_on_selector = 'a b c' WHERE id = $1`, sc)
+	e.tick(e.svc)
+	if n := count(); n != 3 {
+		t.Fatalf("logged %d times after it broke again", n)
+	}
+	if open := e.openRuns(); len(open) != 0 {
+		t.Fatalf("runs of a scenario whose targeting does not parse: %v", open)
 	}
 }

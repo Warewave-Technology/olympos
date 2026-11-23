@@ -162,6 +162,9 @@ type Service struct {
 	mu sync.Mutex
 	// sent holds the runs this replica sent and that have not finished.
 	sent map[uuid.UUID]*sentRun
+	// badTargeting holds the scenarios whose stored targeting does not
+	// parse, with that targeting, so that each change is logged once.
+	badTargeting map[uuid.UUID]string
 }
 
 // sentRun is a run in flight on a stream of this replica.

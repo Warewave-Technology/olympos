@@ -33,6 +33,9 @@ var (
 	ErrProbeNotOnline = errors.New("probe is not online")
 	// ErrInvalidScenario: the scenario of a test run does not validate.
 	ErrInvalidScenario = errors.New("invalid scenario")
+	// ErrNoClusters: RunNow was given no cluster and the scenario runs on
+	// none now (no target with an online probe that no cap blocks).
+	ErrNoClusters = errors.New("the scenario runs on no cluster now")
 )
 
 // SlotFor is the first run time of a scenario on a cluster after now. A
@@ -74,6 +77,13 @@ func (s *Service) RunScheduler(ctx context.Context) {
 // synthetic_state.blocked_reason = 'rate_limit', cleared once it fits
 // again.
 //
+// Planned runs follow the configuration (reconcile): a planned run that has
+// not come due goes when its pair is no longer planned (the scenario was
+// disabled, the cluster left its targeting, a cap blocks it) or when it is
+// more than the scenario's interval ahead (the interval was shortened). A
+// pair whose probe is offline keeps its planned run: Dispatch skips it if
+// the probe is still offline when it comes due.
+//
 // Two ticks at once cannot plan a pair twice: synthetic_runs_one_open
 // allows one open scheduler run per pair, and the inserts are made in one
 // order so that two ticks wait for each other rather than deadlock.
@@ -83,28 +93,34 @@ func (s *Service) Tick(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("load scenarios: %w", err)
 	}
-	for _, p := range plans {
-		if p.selErr != nil {
-			s.Log.Warn("synthetic scenario targeting does not parse: it runs nowhere", "scenario_id", p.id, "err", p.selErr)
-		}
-	}
+	s.noteTargeting(plans)
 	cs, err := LoadClusters(ctx, s.DB)
 	if err != nil {
 		return fmt.Errorf("load clusters: %w", err)
 	}
-	open, err := openPairs(ctx, s.DB)
-	if err != nil {
-		return fmt.Errorf("load open runs: %w", err)
-	}
 	run, blocked := s.allocate(plans, cs)
 
+	var errs []error
+	if n, err := reconcile(ctx, s.DB, run, now); err != nil {
+		errs = append(errs, err)
+	} else if n > 0 {
+		s.Log.Info("synthetic planned runs withdrawn: their pairs are no longer planned, or their interval changed", "runs", n)
+	}
+	open, err := openPairs(ctx, s.DB)
+	if err != nil {
+		return errors.Join(append(errs, fmt.Errorf("load open runs: %w", err))...)
+	}
+	online := map[uuid.UUID]bool{}
+	for _, c := range cs {
+		online[c.ID] = c.ProbeStatus == ProbeOnlineState
+	}
 	interval := make(map[uuid.UUID]time.Duration, len(plans))
 	for _, p := range plans {
 		interval[p.id] = p.interval
 	}
 	var due []pair
 	for _, pr := range run {
-		if !open[pr] {
+		if online[pr.cluster] && !open[pr] {
 			due = append(due, pr)
 		}
 	}
@@ -114,7 +130,6 @@ func (s *Service) Tick(ctx context.Context) error {
 		}
 		return bytes.Compare(a.cluster[:], b.cluster[:])
 	})
-	var errs []error
 	if len(due) > 0 {
 		scen := make([]uuid.UUID, len(due))
 		clus := make([]uuid.UUID, len(due))
@@ -141,6 +156,55 @@ func (s *Service) Tick(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// reconcile deletes the scheduler's planned runs that the configuration no
+// longer wants (see Tick): not due yet, still scheduled, and either of a
+// pair outside planned or more than the scenario's interval ahead. A run
+// never sent is not a result: deleting it loses nothing (the freeze trigger
+// guards finished runs only). A run Dispatch is claiming meanwhile is
+// rechecked once its lock is released: running, it is left alone.
+func reconcile(ctx context.Context, q store.Querier, planned []pair, now time.Time) (int64, error) {
+	scen := make([]uuid.UUID, len(planned))
+	clus := make([]uuid.UUID, len(planned))
+	for i, p := range planned {
+		scen[i], clus[i] = p.scenario, p.cluster
+	}
+	tag, err := q.Exec(ctx, `DELETE FROM synthetic_runs r USING scenarios s
+		WHERE s.id = r.scenario_id AND r.status = 'scheduled' AND NOT r.manual AND NOT r.test AND r.scheduled_for > $1
+		  AND ((r.scenario_id, r.cluster_id) NOT IN (SELECT * FROM unnest($2::uuid[], $3::uuid[]))
+		       OR r.scheduled_for > $1 + make_interval(secs => s.interval_seconds))`, now, scen, clus)
+	if err != nil {
+		return 0, fmt.Errorf("reconcile planned runs: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// noteTargeting logs a scenario whose stored targeting does not parse (it
+// runs nowhere) once per change of that targeting, not on every tick.
+func (s *Service) noteTargeting(plans []planScenario) {
+	type bad struct {
+		id  uuid.UUID
+		err error
+	}
+	var fresh []bad
+	s.mu.Lock()
+	seen := map[uuid.UUID]string{}
+	for _, p := range plans {
+		if p.selErr == nil {
+			continue
+		}
+		key := fmt.Sprintf("%q %q %q", p.target.RunOn, p.target.RunOnSelector, p.target.Exclude)
+		seen[p.id] = key
+		if s.badTargeting[p.id] != key {
+			fresh = append(fresh, bad{p.id, p.selErr})
+		}
+	}
+	s.badTargeting = seen
+	s.mu.Unlock()
+	for _, b := range fresh {
+		s.Log.Warn("synthetic scenario targeting does not parse: it runs nowhere", "scenario_id", b.id, "err", b.err)
+	}
 }
 
 // openPairs lists the pairs with a scheduled or running run that is not a
@@ -172,7 +236,8 @@ func openPairs(ctx context.Context, q store.Querier) (map[pair]bool, error) {
 // A pair has at most one open manual run: asking again while one waits
 // gives back that run. Named clusters must be targets with an online probe
 // that no cap blocks, or nothing is run (ErrNotTarget, ErrProbeNotOnline,
-// ErrRateLimit); with no cluster named, those are left out. A disabled
+// ErrRateLimit); with no cluster named, those are left out, and none left
+// is ErrNoClusters. A disabled
 // scenario is refused (ErrScenarioDisabled), as is one over the
 // per-scenario cap (ErrRateLimit). by is the principal who asked
 // (requested_by), uuid.Nil for none.
@@ -241,6 +306,9 @@ func (s *Service) RunNow(ctx context.Context, scenarioID uuid.UUID, clusterIDs [
 				}
 				want = append(want, id)
 			}
+		}
+		if len(want) == 0 {
+			return ErrNoClusters
 		}
 		for _, cl := range want {
 			id, err := manualRun(ctx, tx, scenarioID, cl, now, by)

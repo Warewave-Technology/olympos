@@ -1,14 +1,17 @@
 package synthetic
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/store"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
 )
@@ -47,12 +50,14 @@ func (s *Service) scenarioCap() float64 {
 
 // planScenario is a scenario as the scheduler and the caps see it.
 type planScenario struct {
-	id       uuid.UUID
-	enabled  bool
-	interval time.Duration
-	sel      selectors
-	selErr   error
-	rpm      float64
+	id        uuid.UUID
+	createdAt time.Time
+	enabled   bool
+	interval  time.Duration
+	target    Targeting
+	sel       selectors
+	selErr    error
+	rpm       float64
 }
 
 // loadPlans reads the scenarios to plan, oldest first (the per-cluster cap
@@ -65,23 +70,22 @@ func loadPlans(ctx context.Context, q store.Querier, only *uuid.UUID) ([]planSce
 	if only != nil {
 		where, args = `WHERE id = $1`, []any{*only}
 	}
-	rows, err := q.Query(ctx, `SELECT id, enabled, interval_seconds, step_retries, run_on, run_on_selector, exclude_selectors
+	rows, err := q.Query(ctx, `SELECT id, created_at, enabled, interval_seconds, step_retries, run_on, run_on_selector, exclude_selectors
 		FROM scenarios `+where+` ORDER BY created_at, id`, args...)
 	if err != nil {
 		return nil, err
 	}
 	type row struct {
-		plan    planScenario
-		sc      spec.Scenario
-		targets Targeting
+		plan planScenario
+		sc   spec.Scenario
 	}
 	var list []*row
 	byID := map[uuid.UUID]*row{}
 	var ids []uuid.UUID
 	for rows.Next() {
 		r := &row{}
-		if err := rows.Scan(&r.plan.id, &r.plan.enabled, &r.sc.IntervalSeconds, &r.sc.StepRetries,
-			&r.targets.RunOn, &r.targets.RunOnSelector, &r.targets.Exclude); err != nil {
+		if err := rows.Scan(&r.plan.id, &r.plan.createdAt, &r.plan.enabled, &r.sc.IntervalSeconds, &r.sc.StepRetries,
+			&r.plan.target.RunOn, &r.plan.target.RunOnSelector, &r.plan.target.Exclude); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -124,7 +128,7 @@ func loadPlans(ctx context.Context, q store.Querier, only *uuid.UUID) ([]planSce
 	for _, r := range list {
 		r.plan.interval = time.Duration(r.sc.IntervalSeconds) * time.Second
 		r.plan.rpm = spec.RequestsPerMinute(&r.sc)
-		r.plan.sel, r.plan.selErr = r.targets.parse()
+		r.plan.sel, r.plan.selErr = r.plan.target.parse()
 		out = append(out, r.plan)
 	}
 	return out, nil
@@ -133,46 +137,70 @@ func loadPlans(ctx context.Context, q store.Querier, only *uuid.UUID) ([]planSce
 // pair is a scenario on a cluster.
 type pair struct{ scenario, cluster uuid.UUID }
 
-// allocate applies the caps to the included pairs (§6.3): a scenario over
-// the per-scenario cap runs nowhere; on each cluster, the scenarios fill
-// the per-cluster cap oldest first, and one that does not fit in what is
-// left is blocked (a newer, smaller one may still fit). It returns the
-// pairs to run and the pairs blocked, in plan order per cluster.
-func (s *Service) allocate(plans []planScenario, cs []ClusterInfo) (run, blocked []pair) {
+// fill applies the caps of §6.3 to one cluster: a scenario over the
+// per-scenario cap is blocked and takes none of the cluster's room; the
+// others fill the per-cluster cap in plan order (oldest first), and one that
+// does not fit in what is left is blocked (a newer, smaller one may still
+// fit). It reports, for each plan that targets the cluster, whether it is
+// blocked, and the rate all of them together ask for.
+func (s *Service) fill(plans []planScenario, labels map[string]string) (blocked map[int]bool, demand float64) {
 	clusterCap, scenarioCap := s.clusterCap(), s.scenarioCap()
-	for _, c := range cs {
-		if probeState(c.ProbeStatus) != TargetIncluded {
+	blocked = map[int]bool{}
+	used := 0.0
+	for i, p := range plans {
+		if !p.enabled || !p.sel.targets(labels) {
 			continue
 		}
-		labels := clusterLabels(c)
-		used := 0.0
-		for _, p := range plans {
-			if !p.enabled || !p.sel.targets(labels) {
-				continue
-			}
-			pr := pair{p.id, c.ID}
+		switch {
+		case p.rpm > scenarioCap+rateSlack:
+			blocked[i] = true
+			continue
+		case used+p.rpm > clusterCap+rateSlack:
+			blocked[i] = true
+		default:
+			used += p.rpm
+			blocked[i] = false
+		}
+		demand += p.rpm
+	}
+	return blocked, demand
+}
+
+// allocate is fill on every cluster, whatever the state of its probe: a
+// probe that is offline now comes back with the same load, and its pairs
+// keep their planned runs. It returns the pairs that may run and the pairs
+// blocked, in plan order per cluster.
+func (s *Service) allocate(plans []planScenario, cs []ClusterInfo) (run, blocked []pair) {
+	for _, c := range cs {
+		b, _ := s.fill(plans, clusterLabels(c))
+		for i, p := range plans {
+			isBlocked, targeted := b[i]
 			switch {
-			case p.rpm > scenarioCap+rateSlack, used+p.rpm > clusterCap+rateSlack:
-				blocked = append(blocked, pr)
+			case !targeted:
+			case isBlocked:
+				blocked = append(blocked, pair{p.id, c.ID})
 			default:
-				used += p.rpm
-				run = append(run, pr)
+				run = append(run, pair{p.id, c.ID})
 			}
 		}
 	}
 	return run, blocked
 }
 
-// CheckRate is the API's check of a scenario before it is saved: sc on the
-// clusters it would run on, next to every other enabled scenario (exclude
-// is the scenario's own id when it is edited, so that its stored version is
-// not counted twice). It returns, for each cluster where the scenarios
-// together would ask for more than the per-cluster cap, the cluster's name
-// and that rate; an empty map when sc fits everywhere. A scenario over the
-// per-scenario cap by itself is refused with ErrRateLimit.
+// CheckRate is the API's check of a scenario before it is saved (ruling
+// P15): sc on the clusters it would run on, among every other enabled
+// scenario in the scheduler's order (oldest first). exclude is the
+// scenario's own id when it is edited: its stored version is not counted,
+// and sc takes its place in the order; a new scenario comes last. It
+// returns the clusters where the scheduler would block sc itself (allocate),
+// by name, with the rate all the scenarios on that cluster ask for; an
+// empty map when sc runs everywhere. A cluster that is over the cap because
+// of newer scenarios is not reported: they are the ones blocked.
 //
-// Other scenarios count on a cluster they target whatever the state of its
-// probe: a probe that is offline now comes back with the same load.
+// A disabled scenario runs nowhere: pass no clusters, and the map is empty.
+// A scenario over the per-scenario cap by itself is refused with
+// ErrRateLimit whatever the clusters: the cap is a property of the
+// scenario.
 func (s *Service) CheckRate(ctx context.Context, q store.Querier, sc *spec.Scenario, clusters []uuid.UUID, exclude *uuid.UUID) (map[string]float64, error) {
 	rpm := spec.RequestsPerMinute(sc)
 	if limit := s.scenarioCap(); rpm > limit+rateSlack {
@@ -182,10 +210,40 @@ func (s *Service) CheckRate(ctx context.Context, q store.Querier, sc *spec.Scena
 	if len(clusters) == 0 {
 		return out, nil
 	}
-	plans, err := loadPlans(ctx, q, nil)
+	others, err := loadPlans(ctx, q, nil)
 	if err != nil {
 		return nil, err
 	}
+	all, _ := authz.ParseScope(RunOnAll)
+	// The clusters given are sc's targets: it targets each of them.
+	self := planScenario{enabled: true, rpm: rpm, sel: selectors{include: &all}}
+	stored := false
+	if exclude != nil {
+		self.id = *exclude
+		err := q.QueryRow(ctx, `SELECT created_at FROM scenarios WHERE id = $1`, *exclude).Scan(&self.createdAt)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return nil, err
+		}
+		stored = err == nil
+	}
+	plans := make([]planScenario, 0, len(others)+1)
+	for _, p := range others {
+		if exclude == nil || p.id != *exclude {
+			plans = append(plans, p)
+		}
+	}
+	// sc's place in the order: its stored one, else last.
+	at := len(plans)
+	if stored {
+		at = slices.IndexFunc(plans, func(p planScenario) bool {
+			return p.createdAt.After(self.createdAt) || p.createdAt.Equal(self.createdAt) && bytes.Compare(p.id[:], self.id[:]) > 0
+		})
+		if at < 0 {
+			at = len(plans)
+		}
+	}
+	plans = slices.Insert(plans, at, self)
+
 	cs, err := LoadClusters(ctx, q)
 	if err != nil {
 		return nil, err
@@ -194,7 +252,6 @@ func (s *Service) CheckRate(ctx context.Context, q store.Querier, sc *spec.Scena
 	for _, c := range cs {
 		byID[c.ID] = c
 	}
-	clusterCap, scenarioCap := s.clusterCap(), s.scenarioCap()
 	seen := map[uuid.UUID]bool{}
 	for _, id := range clusters {
 		c, ok := byID[id]
@@ -202,17 +259,9 @@ func (s *Service) CheckRate(ctx context.Context, q store.Querier, sc *spec.Scena
 			continue
 		}
 		seen[id] = true
-		labels := clusterLabels(c)
-		total := rpm
-		for _, p := range plans {
-			// A scenario over its own cap is not scheduled: it adds nothing.
-			if exclude != nil && p.id == *exclude || p.rpm > scenarioCap+rateSlack || !p.sel.targets(labels) {
-				continue
-			}
-			total += p.rpm
-		}
-		if total > clusterCap+rateSlack {
-			out[c.Name] = total
+		blocked, demand := s.fill(plans, clusterLabels(c))
+		if blocked[at] {
+			out[c.Name] = demand
 		}
 	}
 	return out, nil
