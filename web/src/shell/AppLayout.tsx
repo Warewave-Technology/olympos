@@ -135,7 +135,7 @@ export function AppLayout() {
           <div className="side-footer">
             <div className="who">{personName(me.principal)}</div>
             <div className="muted small">
-              {primaryRole(me)} · Entra ID{me.is_guest ? ' · guest' : ''}
+              {primaryRole(me)} <span style={{ whiteSpace: 'nowrap' }}>· Entra ID{me.is_guest ? ' · guest' : ''}</span>
             </div>
             <button type="button" className="btn sm" onClick={() => void logout()}>
               Sign out
