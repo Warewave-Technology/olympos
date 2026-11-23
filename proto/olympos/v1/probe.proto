@@ -101,6 +101,7 @@ message StepTimings {
   int64 dns_us = 1;
   int64 connect_us = 2;
   int64 tls_us = 3;
+  // Cumulative from the step's start to the first response byte (over every redirect hop): includes DNS, connect and TLS.
   int64 ttfb_us = 4;
   int64 download_us = 5;
   int64 total_us = 6;

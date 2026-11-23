@@ -66,7 +66,7 @@ they win. The user-visible ones:
 | P13 | Runs due after their scenario was disabled are skipped (`scenario_disabled`); runs with an expired credential end `error` (`credential_expired`). | None. |
 | P14 | A server-side credential resolution failure (Key Vault or envelope outage) ends the run **skipped** (`credential_unavailable`), not error, and is shown on the credential. | A broken credential reads skipped until its warning is acted on. |
 | P15 | Saving a scenario that a rate cap would itself block is refused (enabled scenarios only). | A new scenario cannot be saved enabled on a full cluster. |
-| P16 | A firing alert whose pair is no longer monitored (scenario disabled or deleted, cluster excluded, probe not installed or revoked) resolves **silently**; an offline probe keeps its alert. | None. |
+| P16 | A firing alert whose pair is no longer monitored (scenario disabled, cluster excluded, probe not installed or revoked) resolves **silently**; a deleted scenario or cluster takes its alerts with it; an offline probe keeps its alert. | None. |
 | P17 | Revoking a probe on a cluster that never had one answers 409 *no probe installed*. | None. |
 | P18 | Guests cannot hold `synthetic-editor`, and a guest's existing grant does not authorize editing. | B2B guests cannot edit scenarios. |
 | P19 | (Process) a mechanical index fix was verified by the controller instead of a second review. | — |

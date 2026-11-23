@@ -23,8 +23,8 @@ const PHASES: { key: keyof Omit<StepTimings, 'total_us'>; label: string; cls: st
 /**
  * The waterfall segments of one step, in µs, in order. The probe measures TTFB from the start of the step
  * (it includes DNS, connect and TLS, like curl's time_starttransfer), so the "waiting" segment is TTFB minus
- * those. Segments never add up to more than the step's total: they are scaled down if they would, so a bar
- * stays inside its own step.
+ * those; over redirects TTFB still runs from the step's start. Segments never add up to more than the step's
+ * total (rounding, or timings taken apart): they are scaled down if they would, so a bar stays inside its step.
  */
 export function waterfallPhases(t: StepTimings): { key: (typeof PHASES)[number]['key']; label: string; cls: string; us: number }[] {
   const waiting = t.ttfb_us > 0 ? Math.max(0, t.ttfb_us - t.dns_us - t.connect_us - t.tls_us) : 0;

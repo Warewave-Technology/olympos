@@ -405,7 +405,7 @@ through the probe each cluster got in step 3, and alerts when one keeps failing.
 1. **Settings › Synthetic monitoring › Add rule**: `olympos-lab.test`, kind *suffix*. Probes may only call
    hosts on this allowlist.
 2. **New credential**: *Bearer token*, bound to the suffix `olympos-lab.test`, any value.
-3. **Monitoring › New scenario**: an HTTP flow, `GET http://shop.olympos-lab.test/health`, then
+3. **Monitoring › Synthetic › New scenario**: an HTTP flow, `GET http://shop.olympos-lab.test/health`, then
    `GET http://shop.olympos-lab.test/api/items` with the credential, *status code equals 200*; interval
    30 seconds. **Run once** tries it on one cluster; **Save scenario** runs it on both.
 

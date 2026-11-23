@@ -233,7 +233,7 @@ refused.
 | `synthetic.aggregateRetention` | duration | `9600h` (400 days) | no | Keeps the hourly aggregates. |
 | `synthetic.excerptRetention` | duration | `168h` (7 days) | no | Keeps response excerpts; the runs stay. |
 | `synthetic.maxRequestsPerMinutePerCluster` | int | `600` | no | What all scenarios together may make one cluster's probe send. A scenario that would go over is not scheduled there. |
-| `synthetic.maxRequestsPerMinutePerScenario` | int | `120` | no | What one scenario may send on one cluster. Counted as the worst case: every step at every retry, 6 requests per attempt for a step that follows redirects. |
+| `synthetic.maxRequestsPerMinutePerScenario` | int | `120` | no | What one scenario may send on one cluster. Counted as the worst case: every step at every retry, 6 requests per attempt for a step that follows redirects, and 1 per run for each distinct credential the scenario uses (an OAuth2 token request). |
 | `synthetic.probeOfflineAlertAfter` | duration | `5m` | no | `probe.offline` fires after a probe has been offline this long; one `probe.online` follows when it is back. |
 
 Test runs are kept for 7 days and alerts forever; neither is configurable.

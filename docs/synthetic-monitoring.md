@@ -41,8 +41,8 @@ olympos-server ──mTLS gRPC──▶ olympos-agent    (unchanged: inventory, 
 - The probe resolves each name once, checks every address, connects to the address it checked, runs the
   steps, redacts the responses and sends back timings, assertion results and short excerpts. Extracted
   values are never sent back; only their names are.
-- A probe that is offline is never counted as a failure: its cells read *probe offline* and no run is
-  created for it.
+- A probe that is offline is never counted as a failure: its cells read *probe offline*, it gets no new
+  runs, and runs that were already scheduled for it end *skipped* (`probe_offline`).
 
 Scenarios that log in need credentials, and those credentials go into the cluster for the run. This is a
 documented exception to Olympos' rule that credentials never enter a cluster; see
@@ -120,7 +120,9 @@ on the same page shows which rule allows a host or URL.
 
 **Always denied**, whatever the rules say:
 
-- IP literals in a URL or host field, `localhost`, `kubernetes.default.svc` and its longer forms;
+- IP literals in a URL or host field;
+- the names `localhost` and `*.localhost`, `kubernetes`, `kubernetes.default` and `kubernetes.default.svc*`
+  (any name containing the labels `kubernetes.default.svc`, such as `kubernetes.default.svc.cluster.local`);
 - any resolved address that is loopback, link-local (`169.254.0.0/16`, `fe80::/10`), cloud metadata
   (`169.254.169.254`, `fd00:ec2::254`, Alibaba `100.100.100.200`, Oracle `192.0.0.192`), unspecified,
   multicast or broadcast, or the Kubernetes API service IP.
@@ -249,8 +251,9 @@ place. Test runs never alert and are kept for 7 days. Each person can start 6 te
 ## Read the results
 
 **Monitoring › Synthetic** shows totals (scenarios, failing, degraded, probes online), filter pills and the
-matrix: one row per scenario, one column per cluster, each cell the latest counted run, as a symbol and a
-word, never colour alone. The last columns show the 24-hour availability and p95 latency.
+matrix: one row per scenario, one column per cluster, each cell the latest counted run as a symbol (the
+legend above the matrix names them, a cell's tooltip and screen-reader label say it in words) and each row's
+*Status* in words, never colour alone. The last columns show the 24-hour availability and p95 latency.
 
 | Cell | Means |
 |---|---|
@@ -303,9 +306,9 @@ A skipped run neither counts as a failure nor breaks a streak.
   response body.
 - **Grouping.** Alerts that open or resolve within one 15-second pass go into one message per scenario.
   Runs are spread over the interval, so a fleet incident often reads *failing*, *failing*, then *critical*.
-- **Not monitored any more.** An alert whose scenario was disabled or deleted, whose cluster was excluded, or
-  whose probe was removed or revoked resolves silently, without a recovery message. An **offline** probe
-  keeps its alert: offline is not a recovery.
+- **Not monitored any more.** An alert whose scenario was disabled, whose cluster was excluded, or whose probe
+  was removed or revoked resolves silently, without a recovery message. Deleting a scenario (or a cluster)
+  deletes its alerts with it. An **offline** probe keeps its alert: offline is not a recovery.
 - *Run now* counts; test runs never alert.
 
 Known limitation: when the number of failing clusters hovers around the critical threshold, the fleet alert
@@ -324,8 +327,9 @@ Probe outages have their own events: `probe.offline` after `synthetic.probeOffli
 | Requests a minute per scenario on one cluster | 120 | `synthetic.maxRequestsPerMinutePerScenario` |
 | Runs one probe replica runs at once | 20 | `probe.maxConcurrency` (agent chart) |
 
-A scenario's rate is its **worst case**: every step at every retry, and a step that follows redirects
-counts 6 requests per attempt. Over a cap, the scenario is not scheduled on that cluster (*Held back by a request
+A scenario's rate is its **worst case**: every step at every retry, a step that follows redirects counts 6
+requests per attempt, and each distinct credential the scenario uses adds 1 request per run (room for an
+OAuth2 token request). Over a cap, the scenario is not scheduled on that cluster (*Held back by a request
 cap*); saving a scenario that would itself be blocked is refused with the clusters and their rates. After a full outage of the server, the runs that come due go out together once.
 
 ## Who can do what

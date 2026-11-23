@@ -192,7 +192,7 @@ describe('run dialog', () => {
 describe('waterfallPhases', () => {
   const us = (ps: { key: string; us: number }[]) => Object.fromEntries(ps.map((p) => [p.key, Math.round(p.us)]));
 
-  it('takes DNS, connect and TLS out of the TTFB, which the probe measures from the start of the step', () => {
+  it('takes DNS, connect and TLS out of the TTFB, which the probe measures from the start of the step over every hop', () => {
     // A lab run: TTFB 1000 µs includes DNS 300 and connect 200; the bar must not run past the step's total.
     const ps = waterfallPhases({ dns_us: 300, connect_us: 200, tls_us: 0, ttfb_us: 1000, download_us: 50, total_us: 1060 });
     expect(us(ps)).toEqual({ dns_us: 300, connect_us: 200, ttfb_us: 500, download_us: 50 });
@@ -201,9 +201,10 @@ describe('waterfallPhases', () => {
   });
 
   it('never lets the segments add up to more than the step', () => {
-    // Redirects: DNS and connect add up over every hop, TTFB is the last hop's.
-    const ps = waterfallPhases({ dns_us: 4000, connect_us: 4000, tls_us: 2000, ttfb_us: 6000, download_us: 1000, total_us: 9000 });
-    expect(us(ps)).toEqual({ dns_us: 3273, connect_us: 3273, tls_us: 1636, download_us: 818 });
+    // TTFB runs from the step's start over every redirect hop, so with download it normally fits the step's
+    // total. Timings rounded or taken apart can still overshoot it: the segments are then scaled to fit.
+    const ps = waterfallPhases({ dns_us: 1000, connect_us: 1000, tls_us: 0, ttfb_us: 5000, download_us: 6000, total_us: 9000 });
+    expect(us(ps)).toEqual({ dns_us: 818, connect_us: 818, ttfb_us: 2455, download_us: 4909 });
     expect(Math.round(ps.reduce((n, p) => n + p.us, 0))).toBe(9000);
   });
 

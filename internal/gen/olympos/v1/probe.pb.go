@@ -597,13 +597,14 @@ func (x *RunRejected) GetReason() string {
 
 // Durations of one step, in microseconds.
 type StepTimings struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DnsUs         int64                  `protobuf:"varint,1,opt,name=dns_us,json=dnsUs,proto3" json:"dns_us,omitempty"`
-	ConnectUs     int64                  `protobuf:"varint,2,opt,name=connect_us,json=connectUs,proto3" json:"connect_us,omitempty"`
-	TlsUs         int64                  `protobuf:"varint,3,opt,name=tls_us,json=tlsUs,proto3" json:"tls_us,omitempty"`
-	TtfbUs        int64                  `protobuf:"varint,4,opt,name=ttfb_us,json=ttfbUs,proto3" json:"ttfb_us,omitempty"`
-	DownloadUs    int64                  `protobuf:"varint,5,opt,name=download_us,json=downloadUs,proto3" json:"download_us,omitempty"`
-	TotalUs       int64                  `protobuf:"varint,6,opt,name=total_us,json=totalUs,proto3" json:"total_us,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	DnsUs     int64                  `protobuf:"varint,1,opt,name=dns_us,json=dnsUs,proto3" json:"dns_us,omitempty"`
+	ConnectUs int64                  `protobuf:"varint,2,opt,name=connect_us,json=connectUs,proto3" json:"connect_us,omitempty"`
+	TlsUs     int64                  `protobuf:"varint,3,opt,name=tls_us,json=tlsUs,proto3" json:"tls_us,omitempty"`
+	// Cumulative from the step's start to the first response byte (over every redirect hop): includes DNS, connect and TLS.
+	TtfbUs        int64 `protobuf:"varint,4,opt,name=ttfb_us,json=ttfbUs,proto3" json:"ttfb_us,omitempty"`
+	DownloadUs    int64 `protobuf:"varint,5,opt,name=download_us,json=downloadUs,proto3" json:"download_us,omitempty"`
+	TotalUs       int64 `protobuf:"varint,6,opt,name=total_us,json=totalUs,proto3" json:"total_us,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

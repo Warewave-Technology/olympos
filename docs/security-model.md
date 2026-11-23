@@ -157,10 +157,11 @@ credential where the request is made, inside the cluster. It is contained like t
 A probe makes requests from inside the cluster network, so where it may go is bounded:
 
 - **The allowlist** (global, admin only, every change notified): a host must match a rule by whole labels.
-- **Always denied**, whatever the rules: IP literals, `localhost`, `kubernetes.default.svc*`, and resolved
-  addresses in loopback, link-local, cloud metadata (`169.254.169.254`, `fd00:ec2::254`, Alibaba
-  `100.100.100.200`, Oracle `192.0.0.192`), unspecified, multicast, broadcast, and the Kubernetes API
-  service IP.
+- **Always denied**, whatever the rules: IP literals; the names `localhost` and `*.localhost`,
+  `kubernetes`, `kubernetes.default` and `kubernetes.default.svc*` (any name containing the labels
+  `kubernetes.default.svc`); and resolved addresses in loopback, link-local, cloud metadata
+  (`169.254.169.254`, `fd00:ec2::254`, Alibaba `100.100.100.200`, Oracle `192.0.0.192`), unspecified,
+  multicast, broadcast, and the Kubernetes API service IP.
 - **One resolution, the checked address dialled.** The probe resolves each name once with its own stub
   resolver (it does not read `/etc/hosts` and uses no search list), checks every answer and connects to the
   address it checked, so a second DNS answer cannot rebind the connection.
