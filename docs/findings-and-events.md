@@ -227,6 +227,13 @@ activity log still gets one row per item.
 | `cr.rejected` | A change request was rejected. | *Change request rejected* · Vault. | No |
 | `cr.expired` | A pending change request passed its TTL. | *Change request expired* · Vault. | No |
 | `cr.failed` | An approved change request failed to apply. | *Change request failed to apply* · Vault. | No |
+| `restore.requested` | A [restore request](restore.md#restore-from-the-ui) was opened and waits for a checker. | *Restore request waiting for approval* · Backup, Target, Databases, Maker. | No |
+| `restore.approved` | A checker approved a restore request; it starts when the target's agent is connected. | *Restore request approved* · Backup, Target, Databases, Checker. | No |
+| `restore.rejected` | A checker rejected a restore request (the credential is deleted). | *Restore request rejected* · Backup, Target, Databases, Checker. | No |
+| `restore.started` | An approved restore started: the server verifies the backup, checks the target again, then writes to it. | *Restore started: ns/svc* · Backup, Target, Databases. | No |
+| `restore.succeeded` | A restore finished. | *Restore succeeded: ns/svc* · Backup, Target, Databases, Created. | No |
+| `restore.failed` | A restore failed. The databases it created stay on the target and are listed. Route it: a failed restore in a disaster must not go unnoticed. | *Restore failed: ns/svc* · Backup, Target, Databases, Error, Created. | No |
+| `restore.break_glass` | An admin started a restore without a checker (break-glass), with a justification. Critical: route it to a channel someone watches. | *Break-glass restore started without approval* · Backup, Target, Databases, Maker, Justification. | No |
 | `vault.unmanaged_write` | The drift check found a Vault secret version that Olympos did not write. | *Unmanaged change to a vault secret* · Vault, Cluster, Secret, Version. | No: one per unmanaged version |
 | `audit.new_findings` | A successful Kubescape, Polaris or kube-bench run opened new findings. | *N new \<tool\> findings on \<cluster\>* · cluster, tool, new, resolved, score, top (5 most severe). | Yes: per cluster and run |
 | `vuln.critical` | At the end of an image scan run, for critical CVEs new to an image that is running (digest scans only). | *N new critical CVEs in M running images on \<cluster\>* · cluster, new, images, top (5, fixable first). | Yes: per cluster and scan run |
@@ -318,6 +325,10 @@ Overrides and opt-in:
   used.
 - **`backup.succeeded` is opt-in twice.** The job needs *Also notify on success*, **and** the event type
   needs at least one route. A job's own channel does not turn it on by itself.
+- **Restore events are not opt-in.** Like every event they need a route, and no route is added for them
+  on upgrade. Route at least `restore.failed` and `restore.break_glass`. Restore events carry the
+  **backup's** cluster (`cluster_id`), like the restore's audit rows, because they name its run and
+  databases. A request that expires sends no event.
 
 Delivery is at least once, with retries and backoff. *Last delivery* on each channel shows the time and
 result of its most recent send. If the Slack sink is not configured, events wait instead of using up

@@ -7,10 +7,10 @@ screenshot, no Azure account needed.
 
 | | |
 |---|---|
-| [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, run audits and image scans |
+| [Getting started](getting-started.md) | Add clusters, back up a database, change a Vault secret with approval, restore a backup into a new server, run audits and image scans |
 | [Access](access.md) | Roles, scopes, granting access, guests and the first admin |
 | [Findings and events](findings-and-events.md) | What each finding, *Needs attention* item and notification means, and how to fix it |
-| [Restoring backups](restore.md) | PostgreSQL, ClickHouse and Vault/OpenBao restores, the backup format and manifests, choosing a copy |
+| [Restoring backups](restore.md) | Restore from the UI into a new target with approval (and what each engine restores), restores by hand, the backup format and manifests, choosing a copy |
 | [Restoring Olympos itself](restore-olympos.md) | Recovering the server from its `olympos-self` backup |
 | [Runbook: Vault break-glass](runbooks/vault-break-glass.md) | When Olympos' Vault access is lost or must be bypassed |
 
@@ -46,4 +46,5 @@ screenshot, no Azure account needed.
 | [SECURITY.md](../SECURITY.md) | Reporting a vulnerability privately |
 
 `docs/design/` holds the HTML mockups the UI was built from and the designs of features in progress
-([destination groups](design/destination-groups.md)); they are not user documentation.
+([destination groups](design/destination-groups.md), [restore from the UI](design/ui-restore.md)); they are
+not user documentation.

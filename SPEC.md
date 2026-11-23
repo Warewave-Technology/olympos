@@ -470,7 +470,18 @@ A **destination group** is a named, ordered list of **2 to 4 destinations** of a
 - The restore guide is built per copy: the reader picks the copy, the commands use that copy's destination (§10.4).
 
 ### 10.4 Restore
-Out of scope for v1 UI, but manifests MUST contain everything needed to restore. Document manual restore commands per engine in `docs/restore.md`. For a destination group run, every successful copy is a full backup; the restore guide offers each one, including copies completed later by a repair run (§10.5), which come from a later dump and have their own run id and sha256.
+Manifests MUST contain everything needed to restore. Document manual restore commands per engine in `docs/restore.md`; every successful run shows them, filled in for that run. For a destination group run, every successful copy is a full backup; the restore guide offers each one, including copies completed later by a repair run (§10.5), which come from a later dump and have their own run id and sha256.
+
+**Restore from the UI** (v0.2, `docs/design/ui-restore.md`): a succeeded or partial run's copy is restored into a **new** target that Olympos discovered (same engine, any cluster, never the run's own target; for Vault, never a Vault configured in Olympos) as a restore request:
+- **Maker/checker.** The maker needs `read` on the run's cluster and `operate` on the target's cluster; the checker MUST be another person (tenant + object id), not a guest, with `operate` on both clusters. Break-glass: an admin on both clusters (not a guest) starts the request at once with a justification of 10–2000 characters; the maker is recorded as the decider and `restore.break_glass` is sent. Pending requests expire after `changeRequests.ttl`; approved requests that have not started expire 24 h after approval.
+- **Visibility.** Requests are visible with `read` on the run's cluster; their audit rows and events carry that cluster.
+- **Secrets.** The target credential (stored, envelope-encrypted, or a Key Vault reference) and the Vault token (sealed, AAD `restore_requests:<id>`) MUST be deleted in every terminal state and are never returned by the API.
+- **Before any write** the target is checked again and the copy's SHA-256 is verified in a full pass against the copy row and manifest; zip entry CRCs are checked while restoring.
+- **No overwrite.** A selected database that exists on the target with user objects refuses the request; an existing empty one is restored into; nothing on the target is dropped. One approved or running request per target; running restores count against the target cluster's per-cluster backup limit.
+- **PostgreSQL:** `pg_restore` of the target's major version; the dump's major MUST be ≤ the target's. Globals (roles) only with a superuser credential, roles that exist on the target are left untouched; without a superuser, `--no-owner --no-privileges`, said in the request and the result.
+- **ClickHouse:** no SQL text from the backup runs on the target. Olympos generates `CREATE DATABASE` and `CREATE TABLE` from the manifest for MergeTree-family, Replicated (Keeper path `/olympos-restore/<request id>/<db>/<table>`), Log and Memory tables and loads their data with `clickhouse client`; views, materialized views, dictionaries, other engines and secondary table features (defaults, MATERIALIZED/ALIAS columns, TTL, indexes, projections, constraints, codecs, settings) are not restored and are listed in the result; materialized-view inner data goes into `<view>__restored_data`; server errors are reported as code and name only.
+- **Vault/OpenBao:** `snapshot-force` with a token of the new Vault that holds the default policy plus `update` and `sudo` on `sys/storage/raft/snapshot-force`; the target MUST be initialized, unsealed and the active node. The result says to unseal with the source's keys.
+- Events `restore.requested`, `restore.approved`, `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed`, `restore.break_glass`. `olympos-self` is not restored from the UI (`docs/restore-olympos.md`).
 
 ### 10.5 Scheduler
 - Single active scheduler via Postgres advisory lock (multiple server replicas allowed).
@@ -614,7 +625,7 @@ kube-bench must read node files, so it runs as a **Job per node**. Constraints (
 ## 14. Notifications
 
 - Slack app (bot token in Key Vault, `chat:write` scope). Channel objects defined once, reused by any module.
-- **Event catalog** (v1): `backup.failed`, `backup.partial`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`.
+- **Event catalog** (v1): `backup.failed`, `backup.partial`, `backup.missed`, `backup.succeeded` (opt-in), `cr.opened`, `cr.approved`, `cr.rejected`, `cr.expired`, `cr.failed`, `restore.requested`, `restore.approved`, `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed`, `restore.break_glass` (v0.2, §10.4), `vault.unmanaged_write`, `audit.new_findings`, `vuln.critical`, `agent.offline`, `agent.online`, `grant.changed`, `grant.stale`, `sas.expiring`.
 - Routing: `notification_routes(event_type → channel)`; jobs/schedules can override with their own channel.
 - **Transactional outbox**: events written in the same DB transaction as the state change; a dispatcher delivers with retries + backoff. At-least-once; messages carry an idempotency key.
 - Messages: Block Kit, short, with a link to the object. **No interactive buttons.** Never include secret values, fingerprints are fine.
@@ -694,6 +705,8 @@ GET    /api/v1/vaults                   POST /api/v1/vaults/{id}/configure  (roo
 GET    /api/v1/vaults/{id}/tree         GET  /api/v1/vaults/{id}/secrets/{path}  (keys + versions only)
 POST   /api/v1/change-requests          GET  /api/v1/change-requests?mine=&waiting_for_me=
 POST   /api/v1/change-requests/{id}/approve   /reject   /cancel
+POST   /api/v1/restores                 GET  /api/v1/restores?mine=&waiting_for_me=&status=&run_id=   GET /{id}
+POST   /api/v1/restores/check           POST /api/v1/restores/{id}/approve   /reject   /cancel
 GET    /api/v1/audit/schedules          POST PATCH DELETE   POST /{id}/run
 GET    /api/v1/audit/runs               GET /api/v1/findings?source=&status=&cluster=
 GET    /api/v1/images                   GET /api/v1/images/{digest}
@@ -752,6 +765,6 @@ Each milestone ends with an e2e test on kind (agent + server + Postgres + Vault 
 
 1. **Hosting:** Kubernetes (Helm) **and** a systemd service on Linux (§2.1, `docs/install-systemd.md`).
 2. **Olympos DB:** PostgreSQL on the same server/namespace by default (bundled), external PostgreSQL optional; backed up by the built-in `olympos-self` job (§2.1).
-3. **Restore UI:** v0.1 shows ready-to-copy restore commands per successful run; a UI restore to a **new** target only (maker/checker) is planned for v0.2.
+3. **Restore UI:** v0.1 shows ready-to-copy restore commands per successful run; v0.2 adds a UI restore to a **new** target only, with maker/checker (§10.4).
 4. **Intermittent links:** full resync on reconnect (state snapshots with a generation), no diff buffering; a bounded buffer only for result-bearing work (kube-bench results, report chunks).
 5. **Approvers:** one approver in v0.1 (maker ≠ checker); TTL 72 h. Multiple approvers per path: later.

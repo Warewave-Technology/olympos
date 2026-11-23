@@ -209,11 +209,7 @@ const stages = {
     const page = await signIn('admin');
     await page.goto(`${URL}/vaults`);
     await page.getByText('vault', { exact: true }).first().waitFor({ timeout: 60_000 });
-    await page
-      .getByRole('button', { name: /lab · Vault/ })
-      .or(page.getByText('lab · Vault'))
-      .first()
-      .click();
+    await labVault(page).click(); // not restore-vault, the new Vault in the same namespace
     await page.getByText('lab/lab/vault').first().waitFor();
     await shot(page, 'start-13-vaults');
     await page
@@ -233,7 +229,7 @@ const stages = {
     await shot(page, 'start-15-vault-configured', dlg);
     await page.keyboard.press('Escape');
     await page.goto(`${URL}/vaults`);
-    await page.getByText('lab · Vault').first().click();
+    await labVault(page).click();
     await page.waitForTimeout(2000);
     await dump(page, 'vault configured');
   },
@@ -263,7 +259,7 @@ const stages = {
   async change() {
     const page = await signIn('admin');
     await page.goto(`${URL}/vaults`);
-    await page.getByText('lab · Vault').first().click();
+    await labVault(page).click();
     await page.getByRole('button', { name: 'Replace db_password' }).click();
     const dlg = page.getByRole('dialog');
     await dlg.getByLabel('New value', { exact: true }).fill('lab-rotated-value-2026');
@@ -558,7 +554,206 @@ const stages = {
     await shot(page, 'start-30-olympos-restore-copy', page.getByRole('dialog'));
     await page.keyboard.press('Escape');
   },
+
+  // Restore from the UI: orders-pg into the new restore-pg, with a check, a
+  // second person's approval and the result. The approver needs operate on
+  // both clusters (vault-approver is for Vault changes only).
+  async restore() {
+    const admin = await signIn('admin');
+    // Ali signed in during the access stage, so the principal exists.
+    await apiCall(admin, 'POST', '/grants', { object_id: PEOPLE.approver.oid, roles: ['operator'], scope: 'env=lab' }, [201, 409]);
+
+    // Something to restore: two tables in orders, then a fresh backup.
+    labSQL('orders-pg', [
+      'CREATE TABLE IF NOT EXISTS customers (id int PRIMARY KEY, name text NOT NULL)',
+      'CREATE TABLE IF NOT EXISTS orders (id int PRIMARY KEY, customer_id int REFERENCES customers, total numeric(10,2), placed_at timestamptz)',
+      "INSERT INTO customers SELECT g, 'customer ' || g FROM generate_series(1, 500) g ON CONFLICT DO NOTHING",
+      "INSERT INTO orders SELECT g, 1 + g % 500, (g % 97) * 1.25, timestamptz '2026-11-01' + g * interval '1 minute' FROM generate_series(1, 20000) g ON CONFLICT DO NOTHING",
+    ]);
+    const run = await runJob(admin, 'orders-pg', (r) => !r.repair_of);
+    if (run.status !== 'succeeded') throw new Error(`orders-pg run ended ${run.status}: ${run.error}`);
+
+    const pg = await openRestoreDialog(admin, 'orders-pg', 'restore-pg');
+    await pg.getByText('Store in Olympos', { exact: true }).click(); // the lab has no Azure Key Vault
+    await pg.getByLabel('Username', { exact: true }).fill('postgres');
+    await pg.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-pg-password');
+    await checkTarget(pg);
+    await pg.getByLabel('Justification', { exact: true }).fill('INC-2041: orders-pg volume lost, restore into restore-pg');
+    await dump(admin, 'restore dialog checked');
+    await shot(admin, 'restore-01-dialog', pg);
+    const pgID = await submitRestore(admin, pg);
+
+    // The checker: another person with operate on both clusters.
+    const approver = await signIn('approver');
+    await approver.goto(`${URL}/approvals?restore=${pgID}`);
+    await approver.getByRole('button', { name: 'Approve restore' }).waitFor();
+    await dump(approver, 'restore waiting for the checker');
+    await shot(approver, 'restore-02-approvals');
+    await approver.getByRole('button', { name: 'Approve restore' }).click();
+    await waitRestoreDone(approver, pgID);
+    await approver.goto(`${URL}/approvals?view=all&restore=${pgID}`);
+    await approver.getByRole('heading', { name: 'Result' }).waitFor();
+    await dump(approver, 'restore result');
+    await shot(approver, 'restore-03-result', approver.locator('.split-detail'));
+  },
+
+  // ClickHouse: tables come back with their data; a view, a materialized
+  // view's definition, a Merge table and column defaults are reported.
+  // metrics-ch has no TLS, so the lab cluster uses compressed transfer mode.
+  // A database of its own: metrics-ch keeps its data across lab resets.
+  async restoreClickHouse() {
+    const admin = await signIn('admin');
+    const approver = await signIn('approver');
+    const lab = (await apiCall(admin, 'GET', '/clusters')).items.find((c) => c.name === 'lab');
+    await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'compressed' });
+    chSQL('metrics-ch', 'backup', 'CANARY-lab-ch-password', [
+      'CREATE DATABASE IF NOT EXISTS analytics',
+      'CREATE TABLE IF NOT EXISTS analytics.events (d Date, service LowCardinality(String), v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY (service, d)',
+      "INSERT INTO analytics.events SELECT toDate('2026-10-01') + number % 60, ['api', 'web', 'worker'][1 + number % 3], number FROM numbers(30000)",
+      'CREATE TABLE IF NOT EXISTS analytics.sessions (d Date, user String, hits UInt32 DEFAULT 1) ENGINE = ReplacingMergeTree ORDER BY (d, user) TTL d + INTERVAL 2 YEAR',
+      "INSERT INTO analytics.sessions SELECT toDate('2026-10-01') + number % 30, concat('u', toString(number % 900)), number FROM numbers(4000)",
+      'CREATE MATERIALIZED VIEW IF NOT EXISTS analytics.events_daily ENGINE = SummingMergeTree ORDER BY (service, d) AS SELECT d, service, count() AS n FROM analytics.events GROUP BY d, service',
+      "INSERT INTO analytics.events SELECT toDate('2026-11-01') + number % 20, ['api', 'web'][1 + number % 2], number FROM numbers(6000)",
+      'CREATE VIEW IF NOT EXISTS analytics.errors_by_day AS SELECT d, count() AS n FROM analytics.events WHERE v % 100 = 0 GROUP BY d',
+      "CREATE TABLE IF NOT EXISTS analytics.all_events AS analytics.events ENGINE = Merge('analytics', '^events$')",
+    ]);
+    const chJob = await ensureJobAPI(admin, 'metrics-ch', {
+      credential: { source: 'stored', username: 'backup', password: 'CANARY-lab-ch-password' },
+      engine_options: { databases: ['analytics'] },
+    });
+    await runJobAPI(admin, chJob, 'metrics-ch');
+    const ch = await openRestoreDialog(admin, 'metrics-ch', 'restore-ch');
+    await ch.getByText('Store in Olympos', { exact: true }).click();
+    await ch.getByLabel('Username', { exact: true }).fill('restore');
+    await ch.getByLabel('Password', { exact: true }).fill('CANARY-lab-restore-ch-password');
+    await checkTarget(ch);
+    await ch.getByLabel('Justification', { exact: true }).fill('INC-2041: metrics-ch lost with the node, restore into restore-ch');
+    const chID = await submitRestore(admin, ch);
+    await apiCall(approver, 'POST', `/restores/${chID}/approve`, { comment: 'Checked the target' });
+    await waitRestoreDone(admin, chID);
+    await admin.goto(`${URL}/approvals?view=all&restore=${chID}`);
+    await admin.getByRole('heading', { name: 'Result' }).waitFor();
+    await dump(admin, 'clickhouse restore result');
+    await shot(admin, 'restore-04-clickhouse-result', admin.locator('.split-detail'));
+    await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+  },
+
+  // Vault: lab/vault's snapshot into restore-vault, a new Vault that is
+  // initialized, unsealed and not configured in Olympos.
+  async restoreVault() {
+    const admin = await signIn('admin');
+    const approver = await signIn('approver');
+    const vJob = await ensureJobAPI(admin, 'vault', {});
+    await runJobAPI(admin, vJob, 'vault');
+    const vt = await openRestoreDialog(admin, 'vault', 'restore-vault');
+    await vt.getByLabel('Token of the new Vault', { exact: true }).fill(vaultToken('lab/restore-vault'));
+    await checkTarget(vt);
+    await vt.getByLabel('Justification', { exact: true }).fill('INC-2042: lab vault storage corrupted, restore its snapshot into restore-vault');
+    const vID = await submitRestore(admin, vt);
+    await apiCall(approver, 'POST', `/restores/${vID}/approve`, { comment: 'Source keys are with the platform team' });
+    await waitRestoreDone(admin, vID);
+    await admin.goto(`${URL}/approvals?view=all&restore=${vID}`);
+    await admin.getByRole('heading', { name: 'Result' }).waitFor();
+    await dump(admin, 'vault restore result');
+    await shot(admin, 'restore-05-vault-result', admin.locator('.split-detail'));
+  },
 };
+
+/** The lab cluster's vault (lab/vault) in the Vaults list. */
+function labVault(page) {
+  return page.getByRole('button', { name: /^lab \/ lab \/ vault, / });
+}
+
+/** A state-changing (or GET) API call with the page's session; expect lists the accepted status codes. */
+async function apiCall(page, method, path, data, expect = [200, 201, 202]) {
+  const csrf = (await page.context().cookies()).find((c) => c.name === 'olympos_csrf')?.value ?? '';
+  const res = await page.request.fetch(`${URL}/api/v1${path}`, { method, data, headers: { 'X-CSRF-Token': csrf } });
+  if (!expect.includes(res.status())) throw new Error(`${method} ${path}: ${res.status()} ${(await res.text()).slice(0, 300)}`);
+  const text = await res.text();
+  return text ? JSON.parse(text) : {};
+}
+
+/** The lab cluster's discovered target of a service. */
+async function labTargetAPI(page, service) {
+  const t = (await apiCall(page, 'GET', '/targets')).items.find((x) => x.service === service && x.cluster_name === 'lab' && x.status !== 'gone');
+  if (!t) throw new Error(`target ${service} not discovered`);
+  return t;
+}
+
+/** The job of a lab target (created on lab-minio when there is none). */
+async function ensureJobAPI(page, service, extra) {
+  const target = await labTargetAPI(page, service);
+  const jobs = (await apiCall(page, 'GET', '/backup/jobs')).items;
+  const job = jobs.find((j) => j.target.id === target.id);
+  if (job) return job.id;
+  const dest = (await apiCall(page, 'GET', '/destinations')).items.find((d) => d.name === 'lab-minio');
+  const j = await apiCall(page, 'POST', '/backup/jobs', { target_id: target.id, destination_id: dest.id, cron: '0 3 * * *', timezone: 'UTC', enabled: true, ...extra });
+  return j.id;
+}
+
+/** Run now on a job through the API, then waits until that run has finished. */
+async function runJobAPI(page, jobID, service) {
+  const queued = await apiCall(page, 'POST', `/backup/jobs/${jobID}/run`, { trigger: 'manual' });
+  const r = await waitRun(page, service, (x) => x.id === queued.id);
+  if (r.status !== 'succeeded') throw new Error(`${service} run ended ${r.status}: ${r.error}`);
+  return r;
+}
+
+/** Opens the details of a service's newest succeeded run and its Restore… dialog with the target chosen. */
+async function openRestoreDialog(page, service, target) {
+  await openRun(page, service, (rows) => rows.filter({ hasText: 'Succeeded' }).filter({ hasNotText: 'test' }));
+  await page.getByRole('dialog').getByRole('button', { name: 'Restore…' }).click();
+  const dlg = page.getByRole('dialog');
+  await dlg.getByText(`Restore ${service} into a new target`).waitFor();
+  await dlg.getByRole('combobox', { name: /^Target/ }).click();
+  await page.getByRole('option', { name: new RegExp(`/ ${target}\\b`) }).click();
+  return dlg;
+}
+
+async function checkTarget(dlg) {
+  await dlg.getByRole('button', { name: 'Check target' }).click();
+  await dlg.getByText('The target can take this restore.').waitFor({ timeout: 120_000 });
+}
+
+/** Submits the restore dialog and returns the request's id. */
+async function submitRestore(page, dlg) {
+  await dlg.getByRole('button', { name: /^(Submit for approval|Break-glass: start now)$/ }).click();
+  await page.getByRole('dialog').getByRole('link', { name: 'Open request' }).click();
+  await page.waitForURL(/restore=/);
+  const id = new globalThis.URL(page.url()).searchParams.get('restore');
+  if (!id) throw new Error('no restore request id');
+  return id;
+}
+
+/** Waits until a restore request has ended; it must have succeeded. */
+async function waitRestoreDone(page, id, timeout = 600_000) {
+  const end = Date.now() + timeout;
+  for (;;) {
+    const rq = await apiCall(page, 'GET', `/restores/${id}`);
+    if (rq.status === 'succeeded') return rq;
+    if (!['pending', 'approved', 'running'].includes(rq.status)) throw new Error(`restore ${id} ended ${rq.status}: ${rq.error}`);
+    if (Date.now() > end) throw new Error(`restore ${id} still ${rq.status}`);
+    await page.waitForTimeout(3000);
+  }
+}
+
+/** Runs SQL statements in a lab PostgreSQL target as its backup user (lab values). */
+function labSQL(statefulset, statements) {
+  for (const sql of statements)
+    execFileSync('kubectl', ['--context', 'kind-olympos-lab', '-n', 'lab', 'exec', `statefulset/${statefulset}`, '--', 'psql', '-U', 'backup', '-d', 'orders', '-v', 'ON_ERROR_STOP=1', '-qc', sql], {
+      env: { ...process.env, KUBECONFIG },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+}
+
+/** Runs ClickHouse statements in a lab ClickHouse target (lab values). */
+function chSQL(deploy, user, password, statements) {
+  for (const sql of statements)
+    execFileSync('kubectl', ['--context', 'kind-olympos-lab', '-n', 'lab', 'exec', `deploy/${deploy}`, '--', 'clickhouse-client', '--user', user, '--password', password, '--query', sql], {
+      env: { ...process.env, KUBECONFIG },
+      stdio: ['ignore', 'ignore', 'inherit'],
+    });
+}
 
 /** The lab's Azurite SAS from ENV.md (lab only: signed with Azurite's well-known key). */
 function azuriteSas() {

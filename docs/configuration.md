@@ -181,7 +181,7 @@ targets".
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `backup.globalConcurrency` | int | `4` | no | Maximum concurrent backup runs on this server instance. `0` or less uses the default. |
-| `backup.perClusterConcurrency` | int | `2` | no | Maximum running backups per cluster. `0` or less uses the default. |
+| `backup.perClusterConcurrency` | int | `2` | no | Maximum running backups per cluster. Running restores into the cluster's targets count too (a server runs at most two restores at once). `0` or less uses the default. |
 | `backup.pgDumpDir` | string | `/usr/lib/postgresql` | no | Where to find `pg_dump`/`pg_dumpall`. A `:`-separated list. Each entry is either a directory holding `<major>/bin/` or a pattern with `{major}` (e.g. `/usr/pgsql-{major}/bin`). The closest major version at or above the target server's is used; `pg_dump` on `PATH` is the fallback. |
 | `backup.clickhouseClient` | string | `clickhouse` | no | The `clickhouse` binary restores of ClickHouse backups run as `clickhouse client`. It must be the `clickhouse` binary itself, not `clickhouse-client`, because Olympos adds the `client` argument. Path or name on `PATH`; the image and the packages ship the pinned official binary (`/usr/lib/olympos/bin/clickhouse` on systemd). Missing: the server starts with a warning and ClickHouse restores fail with a clear message. |
 | `backup.nfsRoot` | path | `/var/lib/olympos/nfs` | no | Every first-level subdirectory is one volume NFS destinations may write to. |
@@ -192,7 +192,7 @@ targets".
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `changeRequests.ttl` | duration | `72h` | no | Lifetime of a Vault change request. Pending requests past it move to `expired`. |
+| `changeRequests.ttl` | duration | `72h` | no | Lifetime of a Vault change request and of a restore request. Pending requests past it move to `expired` (an approved restore that has not started expires 24 hours after its approval). |
 
 ### `agents`
 

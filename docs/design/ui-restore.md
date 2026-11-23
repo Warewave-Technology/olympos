@@ -1,6 +1,31 @@
 # Restore from the UI into a new target, with approval
 
-Status: design, approved by the owner on 2026-11-23. Tracks issue #22 (milestone v0.2).
+Status: **implemented** (v0.2). Design approved by the owner on 2026-11-23. Tracks issue #22 (milestone v0.2).
+User documentation: [Restore from the UI](../restore.md#restore-from-the-ui).
+
+## Changes during implementation
+
+Three changes to the approved design, made in review for security and correctness (reported to the owner
+with the pull request):
+
+1. **ClickHouse: conservative scope.** A ClickHouse restore creates only databases (`Atomic`) and
+   MergeTree-family, `Replicated*`, `Log` and `Memory` tables with their data. Views, materialized views,
+   dictionaries and tables of every other engine are **not** created; the result lists them by name and
+   reason. A materialized view's inner data is restored into `<view>__restored_data`. Validating the
+   backup's statements so that they were safe to run on the target (no reads of other databases, no external
+   sources, no table functions) turned out to be an unbounded task: every review round found a new bypass.
+2. **ClickHouse: generated DDL.** Olympos generates every `CREATE DATABASE` and `CREATE TABLE` from the
+   manifest's structured data (columns and types through a strict grammar, the engine with bare-column
+   parameters, bare-column keys, an Olympos-generated Keeper path); **no SQL text from the backup runs on the
+   target**. Column defaults, `MATERIALIZED`/`ALIAS` columns, TTL, skip indexes, projections, constraints,
+   codecs and table settings are not restored and are listed per table ("re-apply from your schema").
+   `Replacing`, `Summing`, `Aggregating` and `Collapsing` tables with expression keys are refused (an
+   `ORDER BY tuple()` would merge their rows), and server errors are reported as code and name only. See
+   *ClickHouse objects* below.
+3. **Vault/OpenBao checks.** The token must hold **both** `update` and `sudo` on
+   `sys/storage/raft/snapshot-force` (Vault enforces both), plus the `default` policy for
+   `sys/capabilities-self`; and the target must be the **active node** (`sys/leader`), because a standby
+   answers the upload with a redirect that would resend a consumed body.
 
 ## Intent
 
