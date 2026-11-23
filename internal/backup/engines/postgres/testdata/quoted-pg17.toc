@@ -1,0 +1,21 @@
+;
+; Archive created at 2026-11-23 03:25:01 +03
+;     dbname: My-DB
+;     TOC Entries: 9
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 16.15
+;     Dumped by pg_dump version: 17.4
+;
+;
+; Selected TOC Entries:
+;
+3449; 1262 6958785 DATABASE - My-DB olympos
+3450; 0 0 COMMENT - DATABASE "My-DB" olympos
+3451; 0 0 ACL - DATABASE "My-DB" olympos
+3452; 0 0 DATABASE PROPERTIES - My-DB olympos
+215; 1259 6958786 TABLE public t olympos
+3443; 0 6958786 TABLE DATA public t olympos

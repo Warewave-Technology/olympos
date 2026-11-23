@@ -36,6 +36,7 @@ olympos:
     # pg_dump layouts: shipped, Debian PGDG, RHEL PGDG.
     pgDumpDir: /usr/lib/olympos/pg:/usr/lib/postgresql:/usr/pgsql-{major}/bin
     nfsRoot: /var/lib/olympos/nfs                      # OS-managed mounts: /var/lib/olympos/nfs/<name>
+    clickhouseClient: /usr/lib/olympos/bin/clickhouse  # restores of ClickHouse backups
   audit:
     kubescapeBin: /usr/lib/olympos/bin/kubescape
     polarisBin: /usr/lib/olympos/bin/polaris

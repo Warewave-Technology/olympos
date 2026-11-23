@@ -1,6 +1,32 @@
 # Restore from the UI into a new target, with approval
 
-Status: design, approved by the owner on 2026-11-23. Tracks issue #22 (milestone v0.2).
+Status: **implemented** (v0.2). Design approved by the owner on 2026-11-23. Tracks issue #22 (milestone v0.2).
+User documentation: [Restore from the UI](../restore.md#restore-from-the-ui).
+
+## Changes during implementation
+
+Three changes to the approved design, made in review for security and correctness (reported to the owner
+with the pull request):
+
+1. **ClickHouse: conservative scope.** A ClickHouse restore creates only databases (`Atomic`) and
+   MergeTree-family, `Replicated*`, `Log` and `Memory` tables with their data. Views, materialized views,
+   dictionaries and tables of every other engine are **not** created; the result lists them by name and
+   reason. A materialized view's inner data is restored into `<view>__restored_data`. Validating the
+   backup's statements so that they were safe to run on the target (no reads of other databases, no external
+   sources, no table functions) turned out to be an unbounded task: every review round found a new bypass.
+2. **ClickHouse: generated DDL.** Olympos generates every `CREATE DATABASE` and `CREATE TABLE` from the
+   manifest's structured data (columns and types through a strict grammar, the engine with bare-column
+   parameters, bare-column keys, an Olympos-generated Keeper path); **no SQL text from the backup runs on the
+   target**. Column defaults, `MATERIALIZED`/`ALIAS` columns, TTL, skip indexes, projections, constraints,
+   codecs and table settings are not restored and are listed per table ("re-apply from your schema").
+   `Replacing`, `Summing`, `Aggregating`, `Collapsing` and `VersionedCollapsing` tables with expression keys are not created and
+   are listed with the reason, while the rest of the database is restored (an `ORDER BY tuple()` would merge
+   their rows); a `Replicated` or proxy-engine database fails the whole request before anything is written, and server errors are reported as code and name only. See
+   *ClickHouse objects* below.
+3. **Vault/OpenBao checks.** The token must hold **both** `update` and `sudo` on
+   `sys/storage/raft/snapshot-force` (Vault enforces both), plus the `default` policy for
+   `sys/capabilities-self`; and the target must be the **active node** (`sys/leader`), because a standby
+   answers the upload with a redirect that would resend a consumed body.
 
 ## Intent
 
@@ -188,15 +214,50 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   (`AggregateFunction`, `Tuple`, `JSON`/`Variant`, `LowCardinality(Nullable(…))`); the official client parses
   every format, so every table is restored. Rows written per table are compared with the rows the backup
   streamed for that table (`rows` in the archive's manifest); a difference fails the table.
-- **ClickHouse objects, in this order:** databases (a `Replicated` database is refused: its Keeper path
-  could collide with the source's when Keeper is shared), tables of the MergeTree family and other local
-  engines, their data, dictionaries with a ClickHouse source in the same backup, views, then materialized
-  views, then the rows of each materialized view's inner table (inserted after the view exists, so nothing is
-  ingested twice). `Replicated*MergeTree` tables get their Keeper path rewritten to
-  `/olympos-restore/<request id>/…` and are reported as rewritten. Tables with external engines (Kafka, S3,
-  URL, MySQL, PostgreSQL, JDBC, …) and dictionaries with external sources are **not created** and are
-  reported with their DDL: they would read from, or commit offsets to, the source's systems. (My call, from
-  the builder check.)
+- **ClickHouse objects (changed during implementation for security; recreate views, MVs and dictionaries,
+  and re-apply secondary table features, from your schema):**
+  - **No SQL text from the backup is run.** Olympos generates every `CREATE DATABASE` and `CREATE TABLE`
+    from the manifest's structured data. The review showed that validating source DDL text could be bypassed
+    again and again, and that the target then runs it with the restore credential.
+  - **Databases:** `CREATE DATABASE <db> ENGINE = Atomic`. A `Replicated` database fails the whole request before
+    anything is written, because its Keeper path could collide with the source's when Keeper is shared; so does
+    a database whose engine is a proxy for another system (`MySQL`, `PostgreSQL`, …). `Ordinary`, `Lazy` and
+    `Memory` become Atomic, which the result notes.
+  - **Tables created:** the MergeTree family (`MergeTree`, `Replacing`, `Summing`, `Aggregating`,
+    `Collapsing`, `VersionedCollapsing`), their `Replicated*` variants, `Log`, `TinyLog`, `StripeLog` and
+    `Memory`, each followed by its data. Each one is generated as
+    `CREATE TABLE <db>.<table> (<columns>) ENGINE = <engine>[(<parameters>)] [PARTITION BY …] ORDER BY …
+    [PRIMARY KEY …]`:
+    - **columns:** the ordinary columns, which are the ones in the backup's data. Names are quoted by Olympos.
+      Types are read by a strict grammar and written again: numeric types, `Decimal`, `String`, `FixedString`,
+      `UUID`, `IPv4`/`IPv6`, dates and times with a time zone, `Bool`, `Enum8`/`Enum16`, `Nullable`,
+      `LowCardinality`, `Array`, `Tuple`, `Map`, `Nested`, `Object('json')`, `JSON`, `Dynamic`, `Variant`,
+      and `AggregateFunction`/`SimpleAggregateFunction` with an allowlisted aggregate function, combinators
+      and literal parameters. A table with any other type is not created.
+    - **engine parameters:** only bare columns of the table, read from the schema entry's `ENGINE` clause for
+      Replacing (version, is_deleted), Summing (columns), Collapsing (sign) and VersionedCollapsing (sign,
+      version). If they cannot be read in that shape, the table is not created, because other parameters
+      change how its rows merge.
+    - **Keeper path:** a `Replicated*` table gets `'/olympos-restore/<request id>/<db>/<table>'`, with the
+      names escaped like ClickHouse file names, and the replica `'{replica}'`. The source path is not used. A
+      target without Keeper or the `{replica}` macro refuses the `CREATE`.
+    - **keys:** the sorting, partition and primary keys are kept when they are bare columns. A partition key of
+      the form `toYYYYMM(col)`, `toYYYYMMDD(col)`, `toDate(col)` or `toStartOfMonth(col)` is also kept, and
+      Olympos writes it itself. Otherwise a `MergeTree` table gets `ORDER BY tuple()` and no partition key; a
+      table of an engine that merges rows is not created. A primary key is kept only when it is a prefix of the
+      sorting key.
+  - **Not restored, reported once per table (re-apply from your schema):** `DEFAULT` expressions, `MATERIALIZED`,
+    `ALIAS` and `EPHEMERAL` columns (they are not in the backup's data), codecs, TTL, indexes, projections,
+    constraints, comments, the sampling key, settings, and keys that are not bare columns.
+  - **Materialized views:** each one's inner table is generated the same way as `<view>__restored_data`, from
+    the inner table's columns, engine and keys, with its rows. The result says to recreate the view with `TO`
+    that table. A view with `TO` needs nothing more, because its target is a table of the backup.
+  - **Not created, reported by name and reason (never with their DDL):** views, materialized views,
+    dictionaries, live and window views, `GraphiteMergeTree` (its rollup rules live in the server
+    configuration), and tables of any other engine (Kafka, S3, URL, MySQL, PostgreSQL, Distributed, Merge,
+    Buffer, Join, Set, KeeperMap, EmbeddedRocksDB, …).
+  - **Errors:** a refused `CREATE` is reported by error code and name only (for example `Code 36
+    BAD_ARGUMENTS`), never with the server's message, which can quote what the statement made the server read.
 - **Vault/OpenBao:** the snapshot (the blob, not a zip) is streamed to `POST /v1/sys/storage/raft/
   snapshot-force` with the request's token. The result explains the unseal step.
 
@@ -205,7 +266,12 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
 - The backup worker (same claim loop and per-cluster limits) also claims `approved` restore requests whose
   target's agent is connected here; it sets `running`, heartbeats `progress`, and finishes with
   `succeeded`/`failed`, `result`, `error`. A request left `running` by a stopped replica is failed by the
-  stale-run reaper (as backups), with the databases it created listed.
+  stale-run reaper (as backups), with the databases it created listed. The reaper skips the requests its
+  own replica is executing. The executor holds a lease on the request: a progress write that finds the
+  request no longer `running` stops the restore at once and records nothing over the other server's
+  outcome, and a restore with no successful progress write for `StaleAfter` less a margin (4 of 5 minutes)
+  stops itself, because another replica may reap it after `StaleAfter`. Its error says that the server lost
+  contact with its database and that part of the data may have been written.
 - No retries: a failed restore is a new request (it may need a different target or credential).
 
 ### API, UI, notifications
@@ -218,7 +284,10 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   kind column; a restore detail view shows the request, the decision, progress and the result (with the Vault
   unseal note).
 - Events as listed in Goals, routed like other events; `restore.break_glass` and `restore.failed` are not
-  opt-in.
+  opt-in. Migration 00023 routes both to every channel that gets `backup.failed`, as 00022 did for
+  `backup.partial`, because the dispatcher drops an event with no route. `backup.failed` is the channel
+  watched for what goes wrong with the data, which fits a critical break-glass notification; `cr.opened` is
+  an approval queue, and an install without Vault change requests routes it nowhere.
 
 ## Left to the builder
 

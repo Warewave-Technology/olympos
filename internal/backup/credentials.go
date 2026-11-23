@@ -209,3 +209,17 @@ func (t *secretTracker) zero() {
 	}
 	t.secrets = nil
 }
+
+// SecretScrubber hands out credentials for other packages (restore
+// requests) like the worker does: Track every credential it resolves, Scrub
+// error text before it is stored or shown, Zero when done.
+type SecretScrubber struct{ t secretTracker }
+
+// Track remembers c's secret for Scrub and Zero and returns c.
+func (s *SecretScrubber) Track(c Credential) Credential { return s.t.track(c) }
+
+// Scrub removes tracked secrets and common secret shapes from msg.
+func (s *SecretScrubber) Scrub(msg string) string { return s.t.scrub(msg) }
+
+// Zero zeroes every tracked secret.
+func (s *SecretScrubber) Zero() { s.t.zero() }

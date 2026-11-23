@@ -11,7 +11,7 @@ mkdir -p "dist/linux_$arch"
 CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath -tags "${GO_TAGS:-}" \
   -ldflags "-s -w -X github.com/Warewave-Technology/olympos/internal/version.Version=v$version" \
   -o "dist/linux_$arch/olympos-server" ./cmd/olympos-server
-[ -x "dist/tools/linux_$arch/trivy" ] || scripts/fetch-tools.sh "$arch"
+{ [ -x "dist/tools/linux_$arch/trivy" ] && [ -x "dist/tools/linux_$arch/clickhouse" ]; } || scripts/fetch-tools.sh "$arch"
 NFPM=${NFPM:-nfpm}
 # nfpm expands variables in arch and version only, not in contents paths.
 cfg=$(mktemp)

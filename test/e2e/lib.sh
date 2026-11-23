@@ -22,7 +22,8 @@ init_vault() { # deploy binary
 
 # reset_olympos: back to an empty installation — agents removed from both lab
 # clusters, Olympos database and local key vault wiped, lab Vault/OpenBao
-# uninitialized again (their data is an emptyDir). Expects $WORK and the lab
+# uninitialized again and the restore targets (restore-pg, restore-ch,
+# restore-vault) empty again (their data is an emptyDir). Expects $WORK and the lab
 # kubeconfig in $KUBECONFIG. Safe to run when nothing is installed yet.
 # reset_olympos_db stops the server and drops its database and local key
 # vault: the bundled PostgreSQL and both volumes go, helm upgrade recreates
@@ -50,5 +51,6 @@ reset_olympos() {
   fi
   reset_olympos_db
   kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null 2>&1 || true
-  rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json"
+  kubectl -n lab rollout restart deploy/restore-pg deploy/restore-ch deploy/restore-vault >/dev/null 2>&1 || true
+  rm -f "$WORK/vault-init.json" "$WORK/openbao-init.json" "$WORK/restore-vault-init.json"
 }

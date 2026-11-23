@@ -5,12 +5,19 @@ export function can(me: Me | null | undefined, perm: Permission): boolean {
   return Boolean(me?.permissions?.[perm]);
 }
 
-const ORDER: Role[] = ['admin', 'vault-approver', 'vault-maker', 'operator', 'viewer'];
+const ORDER: Role[] = ['admin', 'operator', 'vault-maker', 'vault-approver', 'viewer'];
 
-/** The highest role, for the sidebar footer ("admin · Entra ID"). */
+/**
+ * The roles for the sidebar footer ("admin · Entra ID", "operator, vault-approver · Entra ID"). Roles are not
+ * ordered (operator and vault-approver allow different things), so every role is shown; admin includes all
+ * the others and viewer is implied by any of them, so those are left out.
+ */
 export function primaryRole(me: Me | null | undefined): string {
   const roles = me?.roles ?? [];
-  return ORDER.find((r) => roles.includes(r)) ?? 'no role';
+  if (roles.includes('admin')) return 'admin';
+  const shown = ORDER.filter((r) => roles.includes(r) && r !== 'viewer');
+  if (shown.length > 0) return shown.join(', ');
+  return roles.includes('viewer') ? 'viewer' : 'no role';
 }
 
 export function isSelf(me: Me | null | undefined, p: { tenant_id?: string; object_id?: string } | null | undefined): boolean {

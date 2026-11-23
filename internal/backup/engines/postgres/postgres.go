@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +27,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/tunnelbridge"
 )
 
 // DefaultDumpDir holds <major>/bin/pg_dump (Debian layout).
@@ -143,6 +143,8 @@ type session struct {
 	guard   bool
 	rootCAs *x509.CertPool
 	cred    backup.Credential
+	// toolDir is the engine's pg_dump layout (restores pick pg_restore).
+	toolDir string
 }
 
 func (e *Engine) open(ctx context.Context, ec backup.EngineContext) (*session, error) {
@@ -487,8 +489,13 @@ func quote(v string) string {
 // conninfo is the libpq connection string; host is the TLS name (verified
 // by libpq) while hostaddr is replaced per process by the local bridge.
 func (s *session) conninfo(db string, ssl [][2]string) [][2]string {
+	return s.conninfoFor(db, ssl, "olympos-backup")
+}
+
+// conninfoFor is conninfo with the application_name the target sees.
+func (s *session) conninfoFor(db string, ssl [][2]string, app string) [][2]string {
 	kv := [][2]string{{"host", s.serverName()}, {"user", s.cred.Username}, {"dbname", db},
-		{"gssencmode", "disable"}, {"application_name", "olympos-backup"}, {"connect_timeout", "30"}}
+		{"gssencmode", "disable"}, {"application_name", app}, {"connect_timeout", "30"}}
 	return append(kv, ssl...)
 }
 
@@ -503,15 +510,30 @@ func render(kv [][2]string) string {
 // runTool runs one pg_dump/pg_dumpall process against a fresh local bridge
 // and streams its stdout to out.
 func (s *session) runTool(ctx context.Context, bin string, args []string, kv [][2]string, env []string, out io.Writer) error {
-	br, err := startBridge(ctx, s.dial)
-	if err != nil {
-		return err
+	return s.runToolStdin(ctx, bin, args, kv, env, nil, out, nil)
+}
+
+// runToolStdin is runTool with the process's stdin read from in (nil: no
+// stdin). With kv nil the tool does not connect (pg_restore -l): no bridge
+// and no --dbname. trim, when set, filters the tool's stderr before it goes
+// into the error. It returns only after the copy into stdin has ended, so
+// the caller may close in's source afterwards.
+func (s *session) runToolStdin(ctx context.Context, bin string, args []string, kv [][2]string, env []string, in io.Reader, out io.Writer,
+	trim func(string) string) error {
+	var br *tunnelbridge.Bridge
+	if kv != nil {
+		var err error
+		br, err = tunnelbridge.Start(ctx, s.dial, maxBridgeConns)
+		if err != nil {
+			return err
+		}
+		defer br.Close()
+		kv = append(kv, [2]string{"hostaddr", "127.0.0.1"}, [2]string{"port", strconv.Itoa(br.Port())})
+		args = append(args, "--dbname="+render(kv))
 	}
-	defer br.Close()
-	kv = append(kv, [2]string{"hostaddr", "127.0.0.1"}, [2]string{"port", strconv.Itoa(br.Port())})
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cmd := exec.CommandContext(cctx, bin, append(args, "--dbname="+render(kv))...)
+	cmd := exec.CommandContext(cctx, bin, args...)
 	cmd.Env = env
 	cmd.Dir = filepath.Dir(bin)
 	sw := &cancelOnErr{w: out, cancel: cancel}
@@ -519,21 +541,59 @@ func (s *session) runTool(ctx context.Context, bin string, args []string, kv [][
 	stderr := &tailBuffer{max: 8 << 10}
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 10 * time.Second
-	err = cmd.Run()
+	var err error
+	if in == nil {
+		err = cmd.Run()
+	} else {
+		err = runWithStdin(cmd, in)
+	}
 	if sw.err != nil {
 		return fmt.Errorf("%s: write output: %w", filepath.Base(bin), sw.err)
 	}
 	if err != nil {
 		msg := stderr.String()
-		br.Close() // waits for the pipes, so a guard refusal is recorded
-		if bErr := br.Err(); errors.Is(bErr, ErrPlaintextPassword) {
-			return bErr
-		} else if bErr != nil {
-			msg += " (tunnel: " + bErr.Error() + ")"
+		if trim != nil {
+			msg = trim(msg)
+		}
+		if br != nil {
+			br.Close() // waits for the pipes, so a guard refusal is recorded
+			if bErr := br.Err(); errors.Is(bErr, ErrPlaintextPassword) {
+				return bErr
+			} else if bErr != nil {
+				msg += " (tunnel: " + bErr.Error() + ")"
+			}
 		}
 		return fmt.Errorf("%s failed: %v: %s", filepath.Base(bin), err, msg)
 	}
 	return nil
+}
+
+// runWithStdin runs cmd with in copied to its stdin through an os.Pipe by
+// a goroutine of ours, and waits for that goroutine: exec's own copy may be
+// abandoned after WaitDelay while still reading in. A tool that exits
+// before reading everything (pg_restore -l) is not an error.
+func runWithStdin(cmd *exec.Cmd, in io.Reader) error {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = pr
+	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
+		return err
+	}
+	pr.Close() // the child has its copy
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(pw, in) // EPIPE / closed when the child stops reading
+		_ = pw.Close()
+	}()
+	err = cmd.Wait()
+	_ = pw.Close() // unblocks a copy into a child that has exited
+	<-copied
+	return err
 }
 
 // cancelOnErr stops the child when the downstream writer fails (otherwise
@@ -556,109 +616,9 @@ func (c *cancelOnErr) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// ---------------------------------------------------------------- bridge
-
-// bridge is a 127.0.0.1 listener whose connections are piped to tunnels.
-// It accepts at most maxBridgeConns connections (one tool process).
-type bridge struct {
-	l      net.Listener
-	dial   func(ctx context.Context) (net.Conn, error)
-	ctx    context.Context
-	cancel func()
-	wg     sync.WaitGroup
-	mu     sync.Mutex
-	conns  []net.Conn
-	err    error
-}
-
+// maxBridgeConns is the connections one tool process may open through its
+// bridge.
 const maxBridgeConns = 2
-
-func startBridge(ctx context.Context, dial func(ctx context.Context) (net.Conn, error)) (*bridge, error) {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return nil, err
-	}
-	bctx, cancel := context.WithCancel(ctx)
-	b := &bridge{l: l, dial: dial, ctx: bctx, cancel: cancel}
-	b.wg.Add(1)
-	go b.accept()
-	return b, nil
-}
-
-func (b *bridge) Port() int { return b.l.Addr().(*net.TCPAddr).Port }
-
-func (b *bridge) Err() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.err
-}
-
-func (b *bridge) track(c net.Conn) {
-	b.mu.Lock()
-	b.conns = append(b.conns, c)
-	b.mu.Unlock()
-}
-
-func (b *bridge) accept() {
-	defer b.wg.Done()
-	for i := 0; i < maxBridgeConns; i++ {
-		c, err := b.l.Accept()
-		if err != nil {
-			return
-		}
-		b.track(c)
-		b.wg.Add(1)
-		go func() {
-			defer b.wg.Done()
-			defer c.Close()
-			t, err := b.dial(b.ctx)
-			if err != nil {
-				b.mu.Lock()
-				b.err = err
-				b.mu.Unlock()
-				return
-			}
-			b.track(t)
-			defer t.Close()
-			pipe(c, t)
-			if g, ok := t.(*authGuard); ok && g.Err() != nil {
-				b.mu.Lock()
-				b.err = g.Err()
-				b.mu.Unlock()
-			}
-		}()
-	}
-	_ = b.l.Close()
-}
-
-// pipe copies both ways and returns when either side is done.
-func pipe(a, b net.Conn) {
-	done := make(chan struct{}, 2)
-	cp := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
-			_ = cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}
-	go cp(a, b)
-	go cp(b, a)
-	<-done
-	_ = a.Close()
-	_ = b.Close()
-	<-done
-}
-
-func (b *bridge) Close() {
-	b.cancel()
-	_ = b.l.Close()
-	b.mu.Lock()
-	for _, c := range b.conns {
-		_ = c.Close()
-	}
-	b.mu.Unlock()
-	b.wg.Wait()
-}
 
 // ---------------------------------------------------------------- test
 

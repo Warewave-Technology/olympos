@@ -341,3 +341,48 @@ func LoadTarget(ctx context.Context, q store.Querier, kv secrets.KeyVault, env *
 	}
 	return t, nil
 }
+
+var _ Reader = (*Azure)(nil)
+
+// Open implements Reader: the size comes from the blob's properties, every
+// ReadAt is one ranged GET. ctx bounds the returned Object's reads.
+func (a *Azure) Open(ctx context.Context, path string) (Object, error) {
+	if err := validPath(path); err != nil {
+		return nil, err
+	}
+	bc := a.cc.NewBlobClient(path)
+	props, err := bc.GetProperties(ctx, nil)
+	if err != nil {
+		return nil, errors.New(Describe(err))
+	}
+	if props.ContentLength == nil {
+		return nil, fmt.Errorf("open %s: no content length", path)
+	}
+	opts := func(off, n int64) *blob.DownloadStreamOptions {
+		o := &blob.DownloadStreamOptions{Range: blob.HTTPRange{Offset: off, Count: n}}
+		if props.ETag != nil {
+			// Pin the blob: a replaced object fails with 412 instead of
+			// mixing bytes of two versions.
+			o.AccessConditions = &blob.AccessConditions{ModifiedAccessConditions: &blob.ModifiedAccessConditions{IfMatch: props.ETag}}
+		}
+		return o
+	}
+	return &rangeObject{ctx: ctx, size: *props.ContentLength, scrub: scrubAzure,
+		fetch: func(ctx context.Context, off, n int64) (io.ReadCloser, error) {
+			resp, err := bc.DownloadStream(ctx, opts(off, n))
+			if err != nil {
+				return nil, err
+			}
+			return resp.Body, nil
+		}}, nil
+}
+
+// scrubAzure removes request URLs (SAS queries) from errors of a range read;
+// the SDK's retrying body reader embeds them in transport errors.
+func scrubAzure(err error) error {
+	var re *azcore.ResponseError
+	if errors.As(err, &re) && re.StatusCode == http.StatusPreconditionFailed {
+		return &scrubbedError{msg: ErrObjectChanged.Error(), err: errors.Join(ErrObjectChanged, err)}
+	}
+	return &scrubbedError{msg: Describe(err), err: err}
+}

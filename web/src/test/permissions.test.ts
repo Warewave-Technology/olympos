@@ -44,9 +44,12 @@ describe('permission gating', () => {
     expect(can(me({ operate: true }), 'operate')).toBe(true);
   });
 
-  it('primaryRole picks the highest role', () => {
+  it('primaryRole shows every role, admin alone, viewer only when it is the only one', () => {
     expect(primaryRole(me({}, 'x', ['viewer', 'operator']))).toBe('operator');
     expect(primaryRole(me({}, 'x', ['vault-maker', 'admin']))).toBe('admin');
+    // a restore checker granted operator next to vault-approver sees both
+    expect(primaryRole(me({}, 'x', ['vault-approver', 'operator']))).toBe('operator, vault-approver');
+    expect(primaryRole(me({}, 'x', ['viewer']))).toBe('viewer');
     expect(primaryRole(null)).toBe('no role');
   });
 

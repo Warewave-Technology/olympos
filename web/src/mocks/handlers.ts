@@ -1,5 +1,5 @@
 // DEV-ONLY request handlers for the VITE_MOCK fixture layer.
-import type { BackupJob, BackupJobInput, BackupRun, BackupRunCopy, DestinationGroup, DestinationGroupInput, RestoreGuide, SelfBackup, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
+import type { BackupJob, BackupJobInput, BackupRun, BackupRunCopy, DestinationGroup, DestinationGroupInput, RestoreCheck, RestoreGuide, RestoreInput, RestoreRequest, RestoreTargetReport, SelfBackup, ChangeRequestInput, Cluster, Dashboard, Destination, DestinationInput, DestinationTest, Grant, RegistryInput, Role, Vault } from '../api/types';
 import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
@@ -228,6 +228,138 @@ function selfLastSuccess(): NonNullable<SelfBackup['destinations_last_success']>
     const run = selfBackup.runs.find((r) => r.trigger !== 'test' && r.finished_at && (r.copies?.length ? r.copies.some((c) => c.destination_id === d.id && c.status === 'succeeded') : !g && r.status === 'succeeded'));
     return { destination_id: d.id, name: d.name, last_success_at: run?.finished_at ?? null };
   });
+}
+
+
+// -------------------------------------------------------- restores (docs/design/ui-restore.md)
+const ENGINE_NAME: Record<string, string> = { postgresql: 'PostgreSQL', clickhouse: 'ClickHouse', vault: 'Vault/OpenBao' };
+
+/** What the signed-in user may do with a restore request (the server's CheckDecide / CheckCancel). */
+function restoreView(rq: RestoreRequest): RestoreRequest {
+  const mine = rq.maker.object_id === db.people.yigit.object_id;
+  let reason = '';
+  if (rq.status !== 'pending') reason = 'This restore request is no longer pending';
+  else if (mine) reason = 'You opened this request';
+  else if (!perms().operate) reason = 'Your role does not allow approving restore requests';
+  return { ...rq, can_approve: reason === '', approve_disabled_reason: reason, can_cancel: mine && (rq.status === 'pending' || rq.status === 'approved') };
+}
+
+/** Ends a request: the credential and the Vault token are wiped (never kept by the mock anyway). */
+function endRestore(rq: RestoreRequest, status: RestoreRequest['status']) {
+  rq.status = status;
+  rq.finished_at = new Date().toISOString();
+  rq.credential = null;
+  rq.has_vault_token = false;
+}
+
+type Evaluated = { res: RestoreCheck } | { err: MockRes };
+
+/**
+ * The open-time checks of the mock (internal/restore evaluate + CheckReport). Mock behaviour is keyed
+ * on harmless inputs: username "nobody" fails the target check, "app" is not a superuser; a Vault token
+ * starting with "deny" cannot read its capabilities, one starting with "nosudo" lacks sudo.
+ */
+function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
+  const run = db.runs.find((x) => x.id === b?.run_id);
+  if (!run) return { err: invalid('invalid restore request', { run_id: 'unknown run' }) };
+  const target = db.targets.find((t) => t.id === b.target_id);
+  if (!target) return { err: invalid('invalid restore request', { target_id: 'unknown target' }) };
+  if (!perms().operate) return { err: { status: 403, body: { error: "Your role does not allow restoring this backup into this target: you need read on the backup's cluster and operate on the target's cluster" } } };
+  if (b.break_glass && !perms().admin) return { err: { status: 403, body: { error: "Break-glass needs the admin role on both the backup's and the target's cluster" } } };
+  const engine = run.engine as RestoreCheck['engine'];
+  const source = db.tByService(run.target_service);
+  const fields: Record<string, string> = {};
+  if (run.trigger === 'test') fields.run_id = 'a dry run holds no data to restore';
+  else if (run.status !== 'succeeded' && run.status !== 'partial') fields.run_id = `only a succeeded or partial run can be restored (this run is ${run.status})`;
+  let copyDest: string | null = run.copies?.find((c) => c.status === 'succeeded')?.destination_id ?? db.destinations[0].id;
+  let copyRun = run.id;
+  if (b.copy_destination_id) {
+    const own = run.copies?.find((c) => c.destination_id === b.copy_destination_id);
+    const repair = db.runs.find((r) => r.repair_of === run.id && r.copies?.some((c) => c.destination_id === b.copy_destination_id && c.status === 'succeeded'));
+    if (own?.status === 'succeeded' || (!run.copies?.length && b.copy_destination_id)) copyDest = b.copy_destination_id;
+    else if (repair) {
+      copyDest = b.copy_destination_id;
+      copyRun = repair.id;
+    } else {
+      copyDest = null;
+      fields.copy_destination_id = 'the run has no succeeded copy in this destination';
+    }
+  }
+  if (target.id === source.id) fields.target_id = "a restore never writes to the backup's own target; choose a new target";
+  else if (target.engine !== engine) fields.target_id = `the target is ${ENGINE_NAME[target.engine] ?? 'an unknown engine'}, the backup is ${ENGINE_NAME[engine]}`;
+  else if (target.status === 'gone') fields.target_id = 'the target is gone';
+  else if (engine === 'vault' && db.vaults.some((v) => v.target.id === target.id && v.status === 'configured'))
+    fields.target_id = 'this Vault is configured in Olympos; a snapshot is restored into a new Vault only';
+  const c = b.credential;
+  if (engine === 'vault') {
+    if (c) fields.credential = 'not used for a Vault restore; give a token of the new Vault';
+    if (!b.vault_token?.trim()) fields.vault_token = 'required';
+  } else {
+    if (b.vault_token) fields.vault_token = 'only for a Vault restore';
+    if (!c) fields.credential = "required: the target's admin login";
+    else {
+      if (!c.username?.trim()) fields['credential.username'] = 'required';
+      if (c.source === 'keyvault_ref' && !/^kv:\/\/[a-zA-Z0-9-]{3,24}\/[a-zA-Z0-9-]{1,127}$/.test(c.ref ?? '')) fields['credential.ref'] = 'use kv://<vault>/<secret>';
+      if (c.source === 'stored' && !c.password) fields['credential.password'] = 'required';
+    }
+  }
+  if (b.globals != null && engine !== 'postgresql') fields.globals = 'only for PostgreSQL';
+  if (b.tls_ca_pem && !b.tls_ca_pem.includes('-----BEGIN CERTIFICATE-----')) fields.tls_ca_pem = 'contains no PEM certificate';
+  const inBackup = engine === 'vault' ? [] : (db.restoreBackupDatabases[run.target_service] ?? []);
+  let dbs: string[] = [];
+  const selected = b.databases ?? [];
+  if (engine === 'vault') {
+    if (selected.length) fields.databases = 'a vault restore loads the whole snapshot; no databases are selected';
+  } else if (selected.length === 0) dbs = [...inBackup];
+  else {
+    const missing = selected.filter((d) => !inBackup.includes(d));
+    if (missing.length) fields.databases = `not in the backup: ${missing.join(', ')}`;
+    else dbs = [...selected];
+  }
+  if (opening) {
+    const n = (b.justification ?? '').trim().length;
+    if (n < 10) fields.justification = 'at least 10 characters';
+    else if (n > 2000) fields.justification = 'at most 2000 characters';
+  }
+  const base: RestoreCheck = { ok: false, engine, copy_destination_id: copyDest, copy_run_id: copyDest ? copyRun : null, databases_in_backup: engine === 'vault' ? [] : inBackup, databases: dbs, options: b.tls_ca_pem ? { tls_ca_pem: b.tls_ca_pem } : {}, report: null };
+  if (Object.keys(fields).length) return { res: { ...base, error: 'invalid restore request', fields } };
+
+  // the target check (reads only, with the given credential)
+  if (engine !== 'vault' && c?.username === 'nobody') {
+    const msg = 'the target check failed: password authentication failed for user "nobody"';
+    return { res: { ...base, error: msg, fields: { target_id: msg } } };
+  }
+  const tok = b.vault_token?.trim() ?? '';
+  const report: RestoreTargetReport = {
+    existing: {},
+    superuser: engine === 'postgresql' && c?.username !== 'app',
+    initialized: engine === 'vault',
+    sealed: false,
+    can_snapshot_force: engine === 'vault' && !tok.startsWith('nosudo') && !tok.startsWith('deny'),
+    standby: false,
+    capabilities_denied: engine === 'vault' && tok.startsWith('deny'),
+    server_version: engine === 'vault' ? target.detected_version + '.0' : engine === 'clickhouse' ? '24.8.4.13' : target.detected_version,
+  };
+  const state = db.restoreTargetState[target.service] ?? {};
+  for (const d of dbs) if (d in state) report.existing[d] = state[d];
+  const notes: string[] = [];
+  if (engine === 'vault') {
+    if (report.capabilities_denied)
+      fields.vault_token =
+        'the target refused to show this token\'s capabilities (sys/capabilities-self refused it, HTTP 401/403): the token needs the default policy (or access to sys/capabilities-self) plus update and sudo on sys/storage/raft/snapshot-force';
+    else if (!report.can_snapshot_force) fields.vault_token = 'this token needs both update and sudo on sys/storage/raft/snapshot-force on the target';
+  } else {
+    const full = dbs.filter((d) => report.existing[d] === true).sort();
+    const empty = dbs.filter((d) => report.existing[d] === false);
+    if (full.length) fields.databases = `already exist on the target with data in them (nothing is overwritten): ${full.join(', ')}`;
+    if (empty.length) notes.push(`Exist on the target without user objects and are restored into: ${empty.join(', ')}`);
+    if (engine === 'postgresql' && !report.superuser) notes.push('The credential is not a superuser: owners, privileges and globals (roles) are not restored (pg_restore --no-owner --no-privileges)');
+  }
+  const options: RestoreCheck['options'] = { ...base.options, server_version: report.server_version, ...(notes.length ? { notes } : {}) };
+  if (engine === 'postgresql') Object.assign(options, { superuser: report.superuser, globals: report.superuser && (b.globals ?? true) });
+  const res: RestoreCheck = { ...base, options, report, ok: Object.keys(fields).length === 0 };
+  if (!res.ok) Object.assign(res, { error: 'the target cannot take this restore', fields });
+  return { res };
 }
 
 const routes: [string, string, Handler][] = [
@@ -1129,6 +1261,130 @@ const routes: [string, string, Handler][] = [
       c.status = 'cancelled';
       c.events.push({ at: new Date().toISOString(), kind: 'cancelled', actor_name: 'yigit@contoso.com', details: {} });
       return ok(withPerms(c));
+    },
+  ],
+
+  // -------------------------------------------------------- restores
+  [
+    'GET',
+    '/restores',
+    (r) => {
+      const meOid = db.people.yigit.object_id;
+      let list = db.restoreRequests.map(restoreView);
+      if (r.query.get('mine') === 'true') list = list.filter((x) => x.maker.object_id === meOid);
+      if (r.query.get('waiting_for_me') === 'true') list = list.filter((x) => x.status === 'pending' && x.can_approve);
+      const st = r.query.get('status');
+      if (st) list = list.filter((x) => x.status === st);
+      const run = r.query.get('run_id');
+      if (run) list = list.filter((x) => x.source.run_id === run);
+      return items(list.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)));
+    },
+  ],
+  [
+    'GET',
+    '/restores/:id',
+    (_r, p) => {
+      const x = db.restoreRequests.find((y) => y.id === p.id);
+      return x ? ok(restoreView(x)) : notFound();
+    },
+  ],
+  [
+    'POST',
+    '/restores/check',
+    async (r) => {
+      await sleep(600);
+      const e = evaluateRestore(r.body as RestoreInput, false);
+      return 'err' in e ? e.err : ok(e.res);
+    },
+  ],
+  [
+    'POST',
+    '/restores',
+    async (r) => {
+      await sleep(500);
+      const b = r.body as RestoreInput;
+      const e = evaluateRestore(b, true);
+      if ('err' in e) return e.err;
+      if (!e.res.ok) return invalid(e.res.error ?? 'invalid restore request', e.res.fields ?? {});
+      const t = db.targets.find((x) => x.id === b.target_id)!;
+      if (db.restoreRequests.some((x) => x.target.id === t.id && (x.status === 'approved' || x.status === 'running')) && b.break_glass)
+        return { status: 409, body: { error: 'another restore into this target is approved or running; try again when it has ended' } };
+      const now = new Date().toISOString();
+      const run = db.runs.find((x) => x.id === b.run_id)!;
+      const rq: RestoreRequest = {
+        id: db.uuid(),
+        status: b.break_glass ? 'approved' : 'pending',
+        engine: e.res.engine,
+        source: db.restoreSource(run.id, e.res.copy_destination_id ?? db.destinations[0].id, e.res.copy_run_id ?? run.id),
+        target: db.restoreTargetRef(t),
+        databases: e.res.databases ?? [],
+        options: e.res.options,
+        // only the public part: the mock never keeps a password or a token
+        credential: b.credential ? { source: b.credential.source, ref: b.credential.source === 'keyvault_ref' ? b.credential.ref : undefined, username: b.credential.username } : null,
+        has_vault_token: !!b.vault_token,
+        maker: db.people.yigit,
+        checker: null,
+        justification: b.justification.trim(),
+        break_glass: !!b.break_glass,
+        created_at: now,
+        expires_at: new Date(Date.now() + 72 * 3600_000).toISOString(),
+        decided_at: b.break_glass ? now : null,
+        decision_comment: '',
+        approved_expires_at: b.break_glass ? new Date(Date.now() + 24 * 3600_000).toISOString() : null,
+        started_at: null,
+        finished_at: null,
+        progress: {},
+        result: {},
+        error: '',
+        can_approve: false,
+        approve_disabled_reason: '',
+        can_cancel: false,
+      };
+      db.restoreRequests.unshift(rq);
+      db.record(b.break_glass ? 'restore.break_glass' : 'restore.requested', 'restore_request', rq.id, `${run.target_service} → ${t.service}`);
+      return ok(restoreView(rq), 201);
+    },
+  ],
+  [
+    'POST',
+    '/restores/:id/approve',
+    (r, p) => {
+      const x = db.restoreRequests.find((y) => y.id === p.id);
+      if (!x) return notFound();
+      const v = restoreView(x);
+      if (!v.can_approve) return { status: x.status === 'pending' ? 403 : 409, body: { error: v.approve_disabled_reason } };
+      Object.assign(x, { status: 'approved', checker: db.people.yigit, decided_at: new Date().toISOString(), decision_comment: String(r.body?.comment ?? '').trim(), approved_expires_at: new Date(Date.now() + 24 * 3600_000).toISOString() });
+      db.record('restore.approved', 'restore_request', x.id, `${x.source.service} → ${x.target.service}`);
+      return ok(restoreView(x));
+    },
+  ],
+  [
+    'POST',
+    '/restores/:id/reject',
+    (r, p) => {
+      const x = db.restoreRequests.find((y) => y.id === p.id);
+      if (!x) return notFound();
+      const v = restoreView(x);
+      if (!v.can_approve) return { status: x.status === 'pending' ? 403 : 409, body: { error: v.approve_disabled_reason } };
+      const comment = String(r.body?.comment ?? '').trim();
+      if (!comment) return invalid('a comment is required to reject', { comment: 'required' });
+      Object.assign(x, { checker: db.people.yigit, decided_at: new Date().toISOString(), decision_comment: comment });
+      endRestore(x, 'rejected');
+      db.record('restore.rejected', 'restore_request', x.id, comment);
+      return ok(restoreView(x));
+    },
+  ],
+  [
+    'POST',
+    '/restores/:id/cancel',
+    (_r, p) => {
+      const x = db.restoreRequests.find((y) => y.id === p.id);
+      if (!x) return notFound();
+      if (!restoreView(x).can_cancel) return { status: 409, body: { error: `This restore request is ${x.status}` } };
+      x.decided_at = x.decided_at ?? new Date().toISOString();
+      endRestore(x, 'cancelled');
+      db.record('restore.cancelled', 'restore_request', x.id, `${x.source.service} → ${x.target.service}`);
+      return ok(restoreView(x));
     },
   ],
 

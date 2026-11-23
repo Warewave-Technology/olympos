@@ -85,8 +85,8 @@ server (dev login, local key vault: no Azure needed). Requires Docker, [kind](ht
 ```
 
 Then follow **[Getting started](docs/getting-started.md)**: add both clusters, back up a database, change a
-Vault secret with a second person's approval, and run audits and image scans, with a screenshot for every
-step. `./test/e2e/env.sh down` removes the lab.
+Vault secret with a second person's approval, restore a backup into a new server, and run audits and image
+scans, with a screenshot for every step. `./test/e2e/env.sh down` removes the lab.
 
 ## Install
 

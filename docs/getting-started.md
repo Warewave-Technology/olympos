@@ -2,7 +2,8 @@
 
 This guide runs Olympos in a local lab and walks through what a new installation does: add clusters, back
 up a database, write each backup to two destinations, change a Vault secret with a second person's
-approval, and run audits and image scans. It takes about 40 minutes and needs no Azure account.
+approval, restore a backup into a new server, and run audits and image scans. It takes about 45 minutes and
+needs no Azure account.
 
 The lab uses a **development build**: sign-in without Entra ID (dev login) and a local key vault instead of
 Azure Key Vault. Release builds have neither. To install Olympos for real, see
@@ -144,8 +145,10 @@ Start the first real backup with **Run now** on **Backups › Jobs**. Runs are l
 
 ![Backup runs](images/backups-runs.png)
 
-Open a successful run to get the restore commands for exactly that backup: download, verify the checksum,
-restore into a new server. Restore is manual in v0.1; the full procedure is in [Restore](restore.md).
+Open a successful run to see its details. **Restore…** loads it into a new server after a second person
+approves ([step 9](#9-restore-a-backup-into-a-new-server)); below it are the commands to restore by hand,
+filled in for exactly that backup: download, verify the checksum, restore. Both are described in
+[Restore](restore.md).
 
 ![Restore commands of a run](images/start-12-backup-restore-commands.png)
 
@@ -301,7 +304,49 @@ included.
 
    ![Applied](images/start-20-change-applied.png)
 
-## 9. Run audits
+## 9. Restore a backup into a new server
+
+In a disaster the database is gone and a backup must go into a **new** server quickly. The lab has three
+new, empty servers in the `lab` namespace for that: `restore-pg` (PostgreSQL 16), `restore-ch` (ClickHouse)
+and `restore-vault` (Vault, not configured in Olympos). Their logins are in `ENV.md`. Like Vault changes,
+a restore needs a second person: the checker needs `operate` on both clusters, so first grant *Ali
+Approver* the `operator` role for `env=lab` as well (**Settings › Access › Grant access**).
+
+The lab's `orders` database starts empty. To see rows come back, add some and back it up again (**Backups ›
+Jobs › Run now** on `orders-pg`):
+
+```bash
+export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig-env
+kubectl --context kind-olympos-lab -n lab exec statefulset/orders-pg -- psql -U backup -d orders -c \
+  "CREATE TABLE customers AS SELECT g AS id, 'customer ' || g AS name FROM generate_series(1, 500) g"
+```
+
+1. **Open the request.** As the admin, on **Backups › Runs**, open a succeeded `orders-pg` run and choose
+   **Restore…**. Pick the target `lab / lab / restore-pg`, **Store in Olympos**, user `postgres` and its
+   password from `ENV.md`, then **Check target**: Olympos logs in through the agent, writes nothing, and
+   shows what it found. Add a justification and **Submit for approval**.
+
+   ![Restore dialog](images/restore-01-dialog.png)
+
+2. **Approve it.** As the approver, open **Approvals**: the restore request shows the backup, the target, the
+   databases and what the check found, never the password. **Approve restore**. (The sidebar footer lists
+   every role a person holds: `operator, vault-approver` for Ali now.)
+
+   ![Restore request waiting for the checker](images/restore-02-approvals.png)
+
+3. **Watch it run.** The server verifies the backup's SHA-256, checks the target again and restores through
+   the agent tunnel. The request then shows the result per database; the credential is already deleted.
+
+   ![Restore result](images/restore-03-result.png)
+
+Nothing is ever overwritten: try the same restore again and the check refuses it, because `orders` now exists
+on `restore-pg` with data in it. ClickHouse restores bring back databases and tables with their data and list
+everything else (views, materialized views, column defaults, …) for you to re-apply; a Vault restore must be
+unsealed afterwards with the **source** Vault's keys. Both are in [Restore from the UI](restore.md#restore-from-the-ui).
+`./test/e2e/env.sh` empties the three servers again, but it also resets Olympos to an empty installation:
+the clusters, destinations, jobs, grants and requests of steps 1–8 are gone.
+
+## 10. Run audits
 
 **Audit › New schedule** runs Kubescape (NSA, CIS, MITRE), Polaris or kube-bench on the clusters whose
 labels match the scope. Kubescape and Polaris read the cluster through the agent's read-only API proxy;
@@ -320,7 +365,7 @@ it. Olympos never deletes these reports, so add a lifecycle rule for `audit/` on
 
 ![Raw reports](images/audit-raw-reports.png)
 
-## 10. Look at security
+## 11. Look at security
 
 **Security** shows, per cluster, the running images with their CVEs (scanned by digest with Trivy on the
 server), Kyverno policy results, NetworkPolicy coverage and credentials found in ConfigMaps.
@@ -347,7 +392,7 @@ agent reported and explains which rule allowed or denied it.
 
 ![A Kyverno policy](images/security-kyverno-policy.png)
 
-## 11. Clean up
+## 12. Clean up
 
 ```bash
 ./test/e2e/env.sh down    # deletes both kind clusters

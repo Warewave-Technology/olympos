@@ -16,6 +16,27 @@ export function Badge({ tone = 'mute', children, title, className }: { tone?: To
   );
 }
 
+/** Errors longer than this are clamped to three lines with a toggle for the rest. */
+const LONG_ERROR = 120;
+
+/** An error that wraps anywhere; a long one is clamped to three lines, the full text one click away (and in the tooltip). */
+export function ClampedError({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const long = text.length > LONG_ERROR;
+  return (
+    <span className="clamp-wrap">
+      <span className={`clamp ico-crit${long && !open ? ' clamp-3' : ''}`} title={long ? text : undefined}>
+        {text}
+      </span>
+      {long && (
+        <button type="button" className="link-btn small" aria-expanded={open} onClick={() => setOpen(!open)}>
+          {open ? 'Show less' : 'Show the full error'}
+        </button>
+      )}
+    </span>
+  );
+}
+
 export function Chip({ children }: { children: ReactNode }) {
   return <span className="chip">{children}</span>;
 }
@@ -224,6 +245,7 @@ export function Modal({
   danger,
   eyebrowTone,
   initialFocus,
+  closeOnBackdrop = true,
 }: {
   open: boolean;
   onClose: () => void;
@@ -235,6 +257,8 @@ export function Modal({
   danger?: boolean;
   eyebrowTone?: 'crit';
   initialFocus?: React.RefObject<HTMLElement | null>;
+  /** false: a click on the backdrop does not close (a filled form); Esc and the close button still do. */
+  closeOnBackdrop?: boolean;
 }) {
   const titleId = useId();
   const descId = useId();
@@ -245,7 +269,7 @@ export function Modal({
     <div
       className="overlay"
       onMouseDown={(e) => {
-        if (e.target === e.currentTarget) onClose();
+        if (e.target === e.currentTarget && closeOnBackdrop) onClose();
       }}
     >
       <div

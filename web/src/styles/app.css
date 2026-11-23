@@ -1706,6 +1706,14 @@ fieldset.plain > legend {
   display: block;
   margin-top: 2px;
 }
+/* break-glass: a choice that skips the second person */
+.opt.opt-crit,
+.opt.opt-crit:has(input:checked) {
+  border-color: var(--crit-border);
+}
+.opt.opt-crit:has(input:checked) {
+  background: var(--crit-note-bg);
+}
 .chk {
   display: flex;
   gap: 10px;
@@ -1741,6 +1749,16 @@ label.chk {
   list-style: none;
   margin: 0;
   padding: 0;
+}
+
+/* bulleted lines inside a note (restore results: what was not restored, notes) */
+.note-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  line-height: 1.55;
+}
+.note-list li + li {
+  margin-top: 2px;
 }
 
 /* notes */

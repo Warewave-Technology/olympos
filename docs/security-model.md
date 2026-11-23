@@ -10,6 +10,8 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 | Database / ClickHouse passwords | Key Vault (`kv://` ref, recommended) or Postgres, envelope-encrypted | Server workers, in memory, per run |
 | Vault AppRole secret_id | Key Vault | Server (index, changes, snapshots) |
 | New secret values in change requests | `change_items.sealed_value` (envelope), nulled at every terminal state | Server, at apply time only |
+| Restore target credentials (admin login of the new database) | Key Vault ref, or a `credentials` row envelope-encrypted; deleted at every terminal state of the restore request | Server, at the check and while the restore runs; never returned by the API |
+| Vault restore tokens (token of the new Vault) | `restore_requests.sealed_token` (envelope, AAD `restore_requests:<id>`), wiped at every terminal state | Server, at the check and for `snapshot-force` only |
 | Blob credentials (MI or SAS) | MI: none stored. SAS: Key Vault ref or envelope-encrypted | Server only |
 | Registry credentials | Key Vault ref or envelope-encrypted | Server (trivy child env) |
 | Backups | Azure Blob, immutable versions, lifecycle retention | Written by the server; deleted only by lifecycle rules |
@@ -115,6 +117,14 @@ longest retention. *Test destination* verifies delete is refused and warns other
 - A compromised server can *write* Vault secrets (create/patch) but still cannot read them; drift
   detection only catches writes that bypass Olympos, so the change-request trail is the control here.
 - In `compressed` transfer mode the agent can observe backup data in cleartext (visible finding).
+- **Restores write to clusters.** A restore is the one path where the server writes data into a target:
+  the new server it restores into, through that target's agent tunnel, with the admin login or Vault
+  token given for the request. Controls: only targets the agent discovered, never the backup's own, no
+  drop or overwrite, the SHA-256 checked before any write, a second person's approval or a recorded,
+  notified break-glass, and the credential deleted when the request ends. A compromised server could still
+  write to any discovered target whose admin credential it is given.
+- In `compressed` transfer mode the agent can also observe **restore** data in cleartext, and the restore
+  credential too when the target has no TLS: the same trade-off and finding as for backups.
 - kube-bench pods are privileged-adjacent (`hostPID`, read-only host mounts) by necessity; opt-in only.
 - Dev mode (local key vault, dev login) must never be enabled in production; the server logs a loud
   warning and the config validator refuses `keyVault.provider=local` without it.

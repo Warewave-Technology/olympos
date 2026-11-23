@@ -651,6 +651,100 @@ paths:
         "403": {description: Not the maker}
         "409": {description: Not pending}
 
+  # ------------------------------------------------------------ restores
+  /restores:
+    get:
+      tags: [approvals]
+      summary: "Restore requests visible to the caller (read on the backup's cluster; read on the target's cluster alone is not enough), newest first."
+      parameters:
+        - {name: status, in: query, schema: {type: string, enum: [pending, approved, running, succeeded, failed, rejected, expired, cancelled]}}
+        - {name: waiting_for_me, in: query, description: "1 or true: pending requests the caller may approve", schema: {type: string}}
+        - {name: mine, in: query, description: "1 or true: requests the caller opened", schema: {type: string}}
+        - {name: run_id, in: query, schema: {type: string, format: uuid}}
+        - {name: limit, in: query, schema: {type: integer, default: 200}}
+      responses:
+        "200":
+          description: Restore requests
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/RestoreRequest"}}}}}}
+    post:
+      tags: [approvals]
+      summary: >-
+        Open a restore of a succeeded or partial run's copy into a new, discovered target (docs/design/ui-restore.md).
+        Needs read on the backup's cluster and operate on the target's cluster. The open-time checks run first
+        (see /restores/check); the target's credential is then stored (envelope, or a Key Vault reference) and a
+        Vault token sealed (AAD restore_requests:<id>); both are wiped when the request ends. Pending requests
+        expire after changeRequests.ttl (default 72h); approved requests that do not start within 24h expire.
+        break_glass (admin on both clusters, members only) starts the request at once, records the maker as the
+        decider and emits restore.break_glass.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RestoreInput"}}}}
+      responses:
+        "201": {description: Opened (pending, or approved with break_glass), content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
+        "403": {description: "Missing read on the backup's cluster or operate on the target's; break-glass without admin on both clusters or by a guest"}
+        "409": {description: "Break-glass: another restore into this target is approved or running"}
+        "422":
+          description: >-
+            A check failed (fields name it): unknown run or target (also outside scope), run not succeeded/partial,
+            dry run, no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
+            a Vault configured in Olympos, databases not in the backup, a selected database exists on the target
+            with data in it, Vault not initialized/sealed/token without snapshot-force, credential or vault_token
+            missing, justification 10–2000 chars, agent_offline, the target check failed, or "restores of <engine>
+            are not available yet".
+          content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}
+  /restores/check:
+    post:
+      tags: [approvals]
+      summary: >-
+        Run the open-time checks of a restore for the dialog without storing anything: the run and copy, the
+        target, the databases in the backup, and (when the input is complete) the target inspected over its
+        tunnel with the given credential, which tests it. Nothing is written to the target. Same permissions as
+        opening; justification is not checked. Every inspection of the target (here or when opening) is
+        recorded in the activity log as restore.checked, with the scrubbed reason when it failed.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RestoreInput"}}}}
+      responses:
+        "200": {description: "Checks ran: ok, or ok=false with error and fields", content: {application/json: {schema: {$ref: "#/components/schemas/RestoreCheck"}}}}
+        "403": {description: Not allowed to open this restore}
+        "422": {description: Unknown run or target (also outside scope), content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+  /restores/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [approvals]
+      responses:
+        "200": {description: Restore request, content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
+        "404": {description: "Missing, or the caller lacks read on the backup's cluster"}
+  /restores/{id}/approve:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      summary: "Another person than the maker (by tenant_id, object_id; no bypass, admin included), never a guest, with operate on both the backup's and the target's cluster. The backup worker starts the restore when the target's agent is connected; it must start within 24h."
+      requestBody: {content: {application/json: {schema: {type: object, properties: {comment: {type: string}}}}}}
+      responses:
+        "200": {description: Approved, content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
+        "403": {description: 'Own request ("You opened this request"), guest, or operate missing on a cluster'}
+        "404": {description: Missing or outside scope}
+        "409": {description: "Not pending, expired (it is expired now), or another restore into the target is approved or running"}
+  /restores/{id}/reject:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      summary: Same rules as approve. A comment is required. The credential and token are wiped.
+      requestBody: {content: {application/json: {schema: {type: object, required: [comment], properties: {comment: {type: string}}}}}}
+      responses:
+        "200": {description: Rejected, content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
+        "403": {description: Own request, guest, or operate missing on a cluster}
+        "404": {description: Missing or outside scope}
+        "409": {description: Not pending or expired}
+        "422": {description: Comment missing}
+  /restores/{id}/cancel:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [approvals]
+      summary: The maker withdraws a pending request, or an approved one that has not started (the target is free again). The credential and token are wiped.
+      responses:
+        "200": {description: Cancelled, content: {application/json: {schema: {$ref: "#/components/schemas/RestoreRequest"}}}}
+        "403": {description: Not the maker}
+        "404": {description: Missing or outside scope}
+        "409": {description: Running or ended}
+
   # ------------------------------------------------------------ audit (M4)
   /audit/settings:
     get:
@@ -1681,6 +1775,109 @@ components:
               kind: {type: string, enum: [opened, notified, approved, rejected, applied, failed, expired, cancelled], description: "notified = Slack link sent (details.channel)"}
               actor_name: {type: string}
               details: {type: object}
+
+    # ---------------------------------------------------- restores
+    RestoreInput:
+      type: object
+      required: [run_id, target_id, justification]
+      properties:
+        run_id: {type: string, format: uuid}
+        copy_destination_id: {type: [string, "null"], format: uuid, description: "The copy to read (group runs); default: the copy the run's restore guide selects"}
+        target_id: {type: string, description: A discovered target of the same engine, in any cluster, never the backup's own}
+        databases: {type: array, items: {type: string}, description: "PostgreSQL, ClickHouse: databases in the backup to restore; empty = all. Vault: none"}
+        globals: {type: [boolean, "null"], description: "PostgreSQL only: restore roles from globals.sql (default on; off without a superuser credential)"}
+        tls_ca_pem: {type: string, description: "PEM CA bundle to verify the target's certificate (shown to the checker)"}
+        credential: {$ref: "#/components/schemas/CredentialInput", description: "PostgreSQL, ClickHouse: the target's admin login"}
+        vault_token: {type: string, writeOnly: true, description: "Vault/OpenBao: a token of the new Vault that may call sys/storage/raft/snapshot-force; surrounding whitespace is trimmed; sealed until the request ends"}
+        justification: {type: string, description: "10–2000 characters, checked before the target is contacted (not checked by /restores/check)"}
+        break_glass: {type: boolean, description: Admins on both clusters start the request without a checker}
+    RestoreOptions:
+      type: object
+      properties:
+        globals: {type: boolean, description: PostgreSQL roles are restored}
+        superuser: {type: boolean, description: "PostgreSQL: the credential is a superuser (owners and privileges are kept)"}
+        tls_ca_pem: {type: string}
+        notes: {type: array, items: {type: string}, description: "Open-time findings: existing empty databases restored into, no superuser"}
+        server_version: {type: string}
+    RestoreTargetReport:
+      type: object
+      properties:
+        existing: {type: object, additionalProperties: {type: boolean}, description: "Selected databases that exist on the target: true when they hold user objects"}
+        superuser: {type: boolean}
+        initialized: {type: boolean, description: "Vault/OpenBao: the target is initialized"}
+        sealed: {type: boolean, description: "Vault/OpenBao: the target is sealed"}
+        can_snapshot_force: {type: boolean, description: "Vault/OpenBao: the token holds update and sudo (or root) on sys/storage/raft/snapshot-force"}
+        standby: {type: boolean, description: "Vault/OpenBao: the target is an HA node that is not the active node (sys/leader ha_enabled and not is_self); the request is refused until it points at the active node"}
+        capabilities_denied: {type: boolean, description: "Vault/OpenBao: sys/capabilities-self refused the token (HTTP 401/403), so its capabilities could not be read; the token needs the default policy (or access to sys/capabilities-self)"}
+        server_version: {type: string}
+    RestoreCheck:
+      type: object
+      properties:
+        ok: {type: boolean}
+        error: {type: string}
+        fields: {type: object, additionalProperties: {type: string}}
+        engine: {type: string, enum: [postgresql, clickhouse, vault]}
+        copy_destination_id: {type: [string, "null"], format: uuid}
+        copy_run_id: {type: [string, "null"], format: uuid, description: The run that wrote the copy (the run or one of its repairs)}
+        databases_in_backup: {type: [array, "null"], items: {type: string}}
+        databases: {type: [array, "null"], items: {type: string}, description: What would be restored}
+        options: {$ref: "#/components/schemas/RestoreOptions"}
+        report: {oneOf: [{$ref: "#/components/schemas/RestoreTargetReport"}, {type: "null"}]}
+    RestoreRequest:
+      type: object
+      description: Never carries a password or a token.
+      properties:
+        id: {type: string, format: uuid}
+        status: {type: string, enum: [pending, approved, running, succeeded, failed, rejected, expired, cancelled]}
+        engine: {type: string, enum: [postgresql, clickhouse, vault]}
+        source:
+          type: object
+          properties:
+            run_id: {type: string, format: uuid}
+            copy_run_id: {type: string, format: uuid}
+            target_id: {type: string}
+            cluster_id: {type: string, format: uuid}
+            cluster_name: {type: string}
+            namespace: {type: string}
+            service: {type: string}
+            destination_id: {type: string, format: uuid}
+            destination_name: {type: string}
+            destination_kind: {type: string}
+        target:
+          type: object
+          properties:
+            id: {type: string}
+            cluster_id: {type: string, format: uuid}
+            cluster_name: {type: string}
+            namespace: {type: string}
+            service: {type: string}
+            port: {type: integer}
+            vault_provider: {type: string}
+        databases: {type: array, items: {type: string}}
+        options: {$ref: "#/components/schemas/RestoreOptions"}
+        credential:
+          oneOf:
+            - {type: "null"}
+            - {type: object, properties: {source: {type: string, enum: [keyvault_ref, stored]}, ref: {type: string}, username: {type: string}}}
+          description: The target login's public part; null once the request has ended (the credential is deleted)
+        has_vault_token: {type: boolean}
+        maker: {$ref: "#/components/schemas/Principal"}
+        checker: {oneOf: [{$ref: "#/components/schemas/Principal"}, {type: "null"}]}
+        justification: {type: string}
+        break_glass: {type: boolean, description: "Started by the maker without a checker; the maker is the decider and checker stays null"}
+        created_at: {type: string, format: date-time}
+        expires_at: {type: string, format: date-time, description: When a pending request expires}
+        decided_at: {type: [string, "null"], format: date-time}
+        decision_comment: {type: string}
+        approved_expires_at: {type: [string, "null"], format: date-time, description: When an approved request that has not started expires (approval + 24h)}
+        started_at: {type: [string, "null"], format: date-time}
+        finished_at: {type: [string, "null"], format: date-time}
+        progress: {type: object}
+        result: {type: object}
+        error: {type: string}
+        can_approve: {type: boolean}
+        approve_disabled_reason: {type: string}
+        can_cancel: {type: boolean}
 
     # ---------------------------------------------------- audit
     AuditScheduleInput:

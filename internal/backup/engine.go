@@ -9,6 +9,8 @@ import (
 	"io"
 	"net"
 	"sync"
+
+	"github.com/Warewave-Technology/olympos/internal/blob"
 )
 
 // TargetInfo is what an engine knows about its target.
@@ -144,4 +146,106 @@ func CredentialProviderFor(engine string) (CredentialProvider, bool) {
 	defer credProvMu.RUnlock()
 	p, ok := credProvs[engine]
 	return p, ok
+}
+
+// ---------------------------------------------------------------- restore
+
+// Progress is what a restore reports while it runs; the restore executor
+// stores the latest one (restore_requests.progress, throttled).
+type Progress struct {
+	// Phase: "verify" (the checksum pass), "check" (the target re-check),
+	// "globals" (PostgreSQL roles) or "restore".
+	Phase    string `json:"phase,omitempty"`
+	Database string `json:"database,omitempty"`
+	Table    string `json:"table,omitempty"`
+	// Bytes of the backup read so far, of Total.
+	Bytes int64 `json:"bytes"`
+	Total int64 `json:"total,omitempty"`
+	// Done lists the databases restored so far. Created lists the
+	// databases the restore created on the target so far, cumulatively:
+	// after a failure (or a stopped server) they stay and are listed, never
+	// dropped. Report a database here right after creating it.
+	Done    []string `json:"done,omitempty"`
+	Created []string `json:"created,omitempty"`
+}
+
+// RestoreContext is passed to Restorer.Restore. The embedded EngineContext
+// dials the restore target (not a job's) with the request's credential;
+// its Options are the target's engine options (the CA bundle).
+type RestoreContext struct {
+	EngineContext
+	// RequestID is the restore request's id: it names what the restore
+	// creates outside the databases (ClickHouse Keeper paths of
+	// Replicated tables, /olympos-restore/<request id>/...).
+	RequestID string
+	// Archive is the backup copy for random reads (PostgreSQL, ClickHouse
+	// zip archives; each entry's CRC-32 is checked by archive/zip); nil for
+	// Vault. Its SHA-256 was verified before Restore is called. Small reads
+	// are served from a read-ahead window; the executor closes it.
+	Archive blob.Object
+	// Snapshot is the Vault/OpenBao snapshot, front to back; nil otherwise.
+	Snapshot io.Reader
+	// Databases to restore (empty for Vault).
+	Databases []string
+	// Options are the request's restore options (restore.Options as JSON:
+	// globals, superuser, tls_ca_pem, notes).
+	Options json.RawMessage
+	// Superuser: the PostgreSQL credential is a superuser (owners,
+	// privileges and globals are kept).
+	Superuser bool
+	// Progress reports progress; never nil. Cheap to call often.
+	Progress func(Progress)
+}
+
+// RestoreItem is the result for one database (or the snapshot).
+type RestoreItem struct {
+	Name string `json:"name"`
+	// Status: succeeded | failed | skipped.
+	Status string `json:"status"`
+	// Bytes of the backup restored for this item.
+	Bytes int64 `json:"bytes"`
+	// Duration in seconds.
+	Duration float64 `json:"duration_seconds"`
+	Tables   int     `json:"tables"`
+	// Rows written (ClickHouse).
+	Rows int64 `json:"rows"`
+	// Skipped lists what was not restored, with the reason (roles that
+	// exist, external tables with their DDL, ...).
+	Skipped []string `json:"skipped,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// RestoreResult is what a restore did. A restorer returns it also with an
+// error, filled as far as it got: Created always lists the databases it
+// created (they are left in place after a failure).
+type RestoreResult struct {
+	Items   []RestoreItem `json:"items"`
+	Notes   []string      `json:"notes"`
+	Created []string      `json:"created"`
+}
+
+// Restorer is the restore direction of an engine (docs/design/ui-restore.md
+// "Engines"). It never drops or replaces anything on the target.
+type Restorer interface {
+	Restore(ctx context.Context, rc RestoreContext) (*RestoreResult, error)
+}
+
+var (
+	restorersMu sync.RWMutex
+	restorers   = map[string]Restorer{}
+)
+
+// RegisterRestorer makes restores of engine possible (call from init()).
+func RegisterRestorer(engine string, r Restorer) {
+	restorersMu.Lock()
+	defer restorersMu.Unlock()
+	restorers[engine] = r
+}
+
+// RestorerFor returns the restorer registered for engine.
+func RestorerFor(engine string) (Restorer, bool) {
+	restorersMu.RLock()
+	defer restorersMu.RUnlock()
+	r, ok := restorers[engine]
+	return r, ok
 }

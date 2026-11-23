@@ -128,6 +128,15 @@ func TestAuthzMatrix(t *testing.T) {
 	if len(routes) < 60 {
 		t.Fatalf("only %d routes walked", len(routes))
 	}
+	walked := map[string]bool{}
+	for _, r := range routes {
+		walked[r.method+" "+r.pattern] = true
+	}
+	for _, want := range []string{"POST /api/v1/restores", "POST /api/v1/restores/check", "POST /api/v1/restores/{id}/approve"} {
+		if !walked[want] {
+			t.Fatalf("route %s not wired", want)
+		}
+	}
 	call := func(c *http.Client, method, path string) (int, string) {
 		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader("{}"))
 		req.Header.Set("Content-Type", "application/json")
@@ -140,7 +149,7 @@ func TestAuthzMatrix(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], "prod-secret-cluster"}
+	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], ids["restore"], ids["run"], "prod-secret-cluster"}
 	// Readable by every signed-in reader by design: global configuration
 	// that cluster-scoped operators pick from (destinations, notification
 	// channels; no secret material in the views; docs/security-review-v0.1.md).
@@ -182,7 +191,7 @@ func fill(pattern string, ids map[string]string) string {
 		{"/api/v1/backup/runs/", "run"}, {"/api/v1/vaults/", "vault"}, {"/api/v1/change-requests/", "cr"},
 		{"/api/v1/audit/schedules/", "schedule"}, {"/api/v1/audit/runs/", "audit_run"}, {"/api/v1/images/", "digest"},
 		{"/api/v1/destinations/", "destination"}, {"/api/v1/destination-groups/", "destination_group"}, {"/api/v1/notifications/channels/", "channel"},
-		{"/api/v1/registries/", "registry"}, {"/api/v1/grants/", "grant"},
+		{"/api/v1/registries/", "registry"}, {"/api/v1/grants/", "grant"}, {"/api/v1/restores/", "restore"},
 	}
 	id := uuid.NewString()
 	for _, p := range prefixes {
@@ -235,6 +244,22 @@ func seedProd(t *testing.T, db *store.DB) map[string]string {
 		t.Fatal(err)
 	}
 	q("cr", `INSERT INTO change_requests (vault_id, maker_principal_id, justification, expires_at) VALUES ($1, $2, 'rotate', now() + interval '1 day') RETURNING id::text`, ids["vault"], maker)
+	// A restore of the prod run into a target of an env=other cluster: the
+	// out-of-scope viewer reads the target's cluster but not the backup's,
+	// so the request (source names, run, databases) must stay hidden.
+	var otherCluster string
+	if err := db.QueryRow(ctx, `INSERT INTO clusters (name, labels, status, last_seen_at) VALUES ('dr-cluster', '{"env":"other"}', 'online', now()) RETURNING id::text`).
+		Scan(&otherCluster); err != nil {
+		t.Fatal(err)
+	}
+	newTarget := targetid.Compute(otherCluster, "shop", "orders-pg-new", 5432)
+	if _, err := db.Exec(ctx, `INSERT INTO targets (id, cluster_id, namespace, service, port, engine) VALUES ($1,$2,'shop','orders-pg-new',5432,'postgresql')`,
+		newTarget, otherCluster); err != nil {
+		t.Fatal(err)
+	}
+	q("restore", `INSERT INTO restore_requests (source_run_id, source_destination_id, source_copy_run_id, engine, target_id, maker_principal_id,
+		justification, expires_at) VALUES ($1, $2, $1, 'postgresql', $3, $4, 'disaster recovery', now() + interval '1 day') RETURNING id::text`,
+		ids["run"], ids["destination"], newTarget, maker)
 	q("schedule", `INSERT INTO audit_schedules (tool, cron, scope_selector) VALUES ('polaris', '0 3 * * *', 'env=prod') RETURNING id::text`)
 	q("audit_run", `INSERT INTO audit_runs (schedule_id, tool, cluster_id, status) VALUES ($1, 'polaris', $2, 'succeeded') RETURNING id::text`, ids["schedule"], ids["cluster"])
 	ids["digest"] = "sha256:" + strings.Repeat("ab", 32)

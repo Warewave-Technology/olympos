@@ -2,12 +2,14 @@ import { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { ChangeRequest, ItemList, Vault } from '../api/types';
+import type { ChangeRequest, ItemList, RestoreRequest, Vault } from '../api/types';
 import { useMe } from '../auth/me';
 import { approveControl, can, isSelf, rejectControl } from '../auth/permissions';
 import { dateTime, personName, relDateTime, shortId, timeLeft } from '../lib/format';
 import { approvalsRoute } from '../router';
-import { Badge, DetailPlaceholder, EmptyState, ErrorState, Field, FormError, Loading, QueryView, aria, fieldError, useNow, useToast } from '../ui/kit';
+import { Badge, DetailPlaceholder, EmptyState, ErrorState, Field, FormError, Loading, aria, fieldError, useNow, useToast } from '../ui/kit';
+import { RestoreStatusBadge, restoreEngineName } from '../ui/restore';
+import { RestoreDetail } from './RestoreDetail';
 import { CrStatusBadge, OpBadge, PageHead, crLabel, opLabel } from '../ui/status';
 import { VaultIdentity, vaultPath } from '../ui/vault';
 
@@ -46,71 +48,125 @@ function pathOf(cr: ChangeRequest): string {
   return paths.join(', ');
 }
 
+type Entry = { kind: 'vault'; id: string; created_at: string; cr: ChangeRequest } | { kind: 'restore'; id: string; created_at: string; rq: RestoreRequest };
+
+/** "billing, billing_audit" or "3 databases"; the snapshot for Vault. */
+function restoreScope(rq: RestoreRequest): string {
+  if (rq.engine === 'vault') return 'whole snapshot';
+  return rq.databases.length <= 2 ? rq.databases.join(', ') : `${rq.databases.length} databases`;
+}
+
 export function ApprovalsPage() {
   const me = useMe();
   const search = approvalsRoute.useSearch();
   const navigate = useNavigate({ from: '/approvals' });
-  const canApprove = can(me, 'vault_approve');
+  // Vault changes need vault-approver; a restore checker needs operate on both clusters.
+  const canApprove = can(me, 'vault_approve') || can(me, 'operate');
   const view: View = search.view ?? (canApprove ? 'waiting' : 'mine');
   const now = useNow(30_000);
   const params = view === 'waiting' ? { waiting_for_me: true, status: 'pending' } : view === 'mine' ? { mine: true } : {};
   const listQ = useQuery({ queryKey: ['change-requests', params], queryFn: () => api.get<ItemList<ChangeRequest>>('/change-requests', params), refetchInterval: 30_000 });
-  const items = listQ.data?.items ?? [];
-  const selectedId = search.cr ?? items[0]?.id;
+  const restoresQ = useQuery({ queryKey: ['restores', params], queryFn: () => api.get<ItemList<RestoreRequest>>('/restores', params), refetchInterval: 30_000 });
+  const entries: Entry[] = [
+    ...(listQ.data?.items ?? []).map((cr) => ({ kind: 'vault' as const, id: cr.id, created_at: cr.created_at, cr })),
+    ...(restoresQ.data?.items ?? []).map((rq) => ({ kind: 'restore' as const, id: rq.id, created_at: rq.created_at, rq })),
+  ].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  const first = entries[0];
+  const selected: { kind: 'vault' | 'restore'; id: string } | undefined = search.restore
+    ? { kind: 'restore', id: search.restore }
+    : search.cr
+      ? { kind: 'vault', id: search.cr }
+      : first && { kind: first.kind, id: first.id };
   const nsOf = useVaultNamespaces();
+  const loading = listQ.isPending || restoresQ.isPending;
+  const loaded = !loading && !listQ.isError && !restoresQ.isError;
 
   const views: { id: View; label: string }[] = [...(canApprove ? [{ id: 'waiting' as const, label: 'Waiting for me' }] : []), { id: 'mine', label: 'Opened by me' }, { id: 'all', label: 'All' }];
+  const pick = (e: Entry) => navigate({ search: (s) => ({ ...s, cr: e.kind === 'vault' ? e.id : undefined, restore: e.kind === 'restore' ? e.id : undefined }), replace: true });
 
   return (
     <>
-      <PageHead title="Approvals" sub="Vault changes wait here for a second person. You cannot approve a request you opened." />
+      <PageHead title="Approvals" sub="Vault changes and restores wait here for a second person. You cannot approve a request you opened." />
       <div className="split">
-        <aside className="card split-list" aria-label="Change requests">
+        <aside className="card split-list" aria-label="Requests">
           <div className="pills" role="group" aria-label="Show" style={{ padding: '4px 4px 10px' }}>
             {views.map((v) => (
               <button key={v.id} type="button" className="pill" aria-pressed={view === v.id} onClick={() => navigate({ search: { view: v.id }, replace: true })}>
                 {v.label}
-                {v.id === 'waiting' && view === 'waiting' && listQ.data ? ` · ${items.length}` : ''}
+                {v.id === 'waiting' && view === 'waiting' && loaded ? ` · ${entries.length}` : ''}
               </button>
             ))}
           </div>
-          <QueryView
-            q={listQ}
-            what="change requests"
-            isEmpty={(d) => d.items.length === 0}
-            empty={
-              <EmptyState title={view === 'waiting' ? 'Nothing waits for you' : view === 'mine' ? 'You have not opened any requests' : 'No change requests yet'}>
-                {view === 'waiting' ? 'When someone else opens a vault change in your scope, it shows up here. You also get the Slack link.' : 'Open one from Vaults: pick a key and choose Replace, Add key or Delete.'}
-              </EmptyState>
-            }
-          >
-            {(d) =>
-              d.items.map((cr) => {
-                const mine = isSelf(me, cr.maker);
+          {listQ.isError && <ErrorState what="change requests" error={listQ.error} onRetry={() => listQ.refetch()} />}
+          {restoresQ.isError && <ErrorState what="restore requests" error={restoresQ.error} onRetry={() => restoresQ.refetch()} />}
+          {loading && entries.length === 0 ? (
+            <Loading label="Loading requests…" />
+          ) : entries.length === 0 && loaded ? (
+            <EmptyState title={view === 'waiting' ? 'Nothing waits for you' : view === 'mine' ? 'You have not opened any requests' : 'No requests yet'}>
+              {view === 'waiting'
+                ? 'When someone else opens a vault change or a restore in your scope, it shows up here. You also get the Slack link.'
+                : 'Open a vault change from Vaults (pick a key and choose Replace, Add key or Delete), or a restore from a backup run (Restore…).'}
+            </EmptyState>
+          ) : (
+            entries.map((e) => {
+              const current = selected?.kind === e.kind && selected.id === e.id;
+              if (e.kind === 'restore') {
+                const rq = e.rq;
+                const mine = isSelf(me, rq.maker);
                 return (
-                  <button key={cr.id} type="button" className="li" aria-current={cr.id === selectedId} onClick={() => navigate({ search: (s) => ({ ...s, cr: cr.id }), replace: true })}>
+                  <button key={`r-${rq.id}`} type="button" className="li" aria-current={current} onClick={() => pick(e)}>
                     <div className="l1">
-                      <span className="mono">{crLabel(cr)}</span>
-                      {cr.status === 'pending' ? mine ? <Badge tone="mute">Awaiting other</Badge> : <span className="muted small">{timeLeft(cr.expires_at, now)}</span> : <CrStatusBadge cr={cr} />}
+                      <span className="inline-sm">
+                        <Badge tone="info">Restore</Badge>
+                        <span className="mono">{restoreEngineName(rq.engine, rq.target.vault_provider)}</span>
+                      </span>
+                      {rq.status === 'pending' ? mine ? <Badge tone="mute">Awaiting other</Badge> : <span className="muted small">{timeLeft(rq.expires_at, now)}</span> : <RestoreStatusBadge status={rq.status} />}
                     </div>
-                    <div className="l2">{summary(cr)}</div>
-                    <div className="l3 mono">{crVaultPath(cr, nsOf(cr))}</div>
-                    <div className="l3">{mine && cr.status === 'pending' ? `Approve disabled: you are the maker · ${pathOf(cr)}` : `${personName(cr.maker)} · ${pathOf(cr)}`}</div>
+                    <div className="l2">
+                      <span className="mono">{rq.source.service}</span> → <span className="mono">{rq.target.service}</span>
+                    </div>
+                    <div className="l3 mono">
+                      {rq.source.cluster_name} → {rq.target.cluster_name}
+                    </div>
+                    <div className="l3">
+                      {mine && rq.status === 'pending' ? 'Approve disabled: you are the maker' : personName(rq.maker)} · {restoreScope(rq)}
+                      {rq.break_glass && <span className="ico-crit"> · break-glass</span>}
+                    </div>
                   </button>
                 );
-              })
-            }
-          </QueryView>
+              }
+              const cr = e.cr;
+              const mine = isSelf(me, cr.maker);
+              return (
+                <button key={`v-${cr.id}`} type="button" className="li" aria-current={current} onClick={() => pick(e)}>
+                  <div className="l1">
+                    <span className="inline-sm">
+                      <Badge tone="mute">Vault</Badge>
+                      <span className="mono">{crLabel(cr)}</span>
+                    </span>
+                    {cr.status === 'pending' ? mine ? <Badge tone="mute">Awaiting other</Badge> : <span className="muted small">{timeLeft(cr.expires_at, now)}</span> : <CrStatusBadge cr={cr} />}
+                  </div>
+                  <div className="l2">{summary(cr)}</div>
+                  <div className="l3 mono">{crVaultPath(cr, nsOf(cr))}</div>
+                  <div className="l3">{mine && cr.status === 'pending' ? `Approve disabled: you are the maker · ${pathOf(cr)}` : `${personName(cr.maker)} · ${pathOf(cr)}`}</div>
+                </button>
+              );
+            })
+          )}
         </aside>
         <div className="split-detail">
-          {selectedId ? (
-            <CrDetail id={selectedId} key={selectedId} />
+          {selected ? (
+            selected.kind === 'restore' ? (
+              <RestoreDetail id={selected.id} key={`r-${selected.id}`} />
+            ) : (
+              <CrDetail id={selected.id} key={`v-${selected.id}`} />
+            )
           ) : (
-            <DetailPlaceholder title={listQ.isPending ? 'Loading change requests…' : view === 'waiting' ? 'Nothing to review right now' : 'No change request selected'}>
+            <DetailPlaceholder title={loading ? 'Loading requests…' : view === 'waiting' ? 'Nothing to review right now' : 'No request selected'}>
               {view === 'waiting'
-                ? 'When a request waits for you, its keys, operations and value fingerprints open here, with Approve & apply and Reject.'
+                ? 'When a request waits for you, it opens here: a vault change with its keys and value fingerprints, or a restore with its backup, target and databases, with Approve and Reject.'
                 : view === 'mine'
-                  ? 'Requests you open from Vaults show up in the list; pick one to follow its approval trail.'
+                  ? 'Requests you open from Vaults or from a backup run show up in the list; pick one to follow it.'
                   : 'Pick a request from the list to see what it changes and who decided.'}
             </DetailPlaceholder>
           )}

@@ -196,6 +196,153 @@ spec:
   selector: {app: metrics-ch}
   ports: [{name: native, port: 9000}, {name: http, port: 8123}]
 ---
+# Restore targets (docs/restore.md "Restore from the UI"): new, empty servers
+# that a backup of the lab's sources is restored into. Their data is an
+# emptyDir (reset_olympos restarts them, which empties them again).
+#
+# restore-pg: PostgreSQL 16 with TLS from the lab CA (secret restore-pg-tls is
+# created by run.sh). Same major as orders-pg, so a 16 -> 16 restore runs the
+# real pg_restore 16 of the server image. Admin login postgres (a superuser).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: restore-pg, namespace: lab}
+spec:
+  selector: {matchLabels: {app: restore-pg}}
+  template:
+    metadata: {labels: {app: restore-pg}}
+    spec:
+      initContainers:
+      - name: certs
+        image: busybox:1.36
+        command: [sh, -c, "cp /tls/tls.crt /tls/tls.key /certs/ && chown 70:70 /certs/* && chmod 0600 /certs/tls.key"]
+        volumeMounts: [{name: tls, mountPath: /tls}, {name: certs, mountPath: /certs}]
+      containers:
+      - name: pg
+        image: postgres:16-alpine
+        args: [-c, ssl=on, -c, ssl_cert_file=/certs/tls.crt, -c, ssl_key_file=/certs/tls.key]
+        env:
+        - {name: POSTGRES_USER, value: postgres}
+        - {name: POSTGRES_PASSWORD, value: CANARY-lab-restore-pg-password}
+        ports: [{containerPort: 5432, name: pg}]
+        readinessProbe: {exec: {command: [pg_isready, -h, 127.0.0.1, -U, postgres]}, periodSeconds: 3}
+        volumeMounts: [{name: certs, mountPath: /certs}, {name: data, mountPath: /var/lib/postgresql/data}]
+      volumes:
+      - {name: tls, secret: {secretName: restore-pg-tls}}
+      - {name: certs, emptyDir: {}}
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restore-pg
+  namespace: lab
+  annotations:
+    olympos.io/backup: postgresql
+    olympos.io/tls-server-name: restore-pg.lab.svc
+spec:
+  selector: {app: restore-pg}
+  ports: [{name: pg, port: 5432}]
+---
+# restore-ch: ClickHouse without TLS, like metrics-ch (the lab cluster's
+# transfer mode must be compressed to restore into it). Admin login restore.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: restore-ch, namespace: lab}
+spec:
+  selector: {matchLabels: {app: restore-ch}}
+  template:
+    metadata: {labels: {app: restore-ch}}
+    spec:
+      containers:
+      - name: ch
+        image: clickhouse/clickhouse-server:24.8
+        env:
+        - {name: CLICKHOUSE_USER, value: restore}
+        - {name: CLICKHOUSE_PASSWORD, value: CANARY-lab-restore-ch-password}
+        - {name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT, value: "1"}
+        ports: [{containerPort: 9000, name: native}]
+        volumeMounts: [{name: data, mountPath: /var/lib/clickhouse}]
+      volumes:
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restore-ch
+  namespace: lab
+  annotations:
+    olympos.io/backup: clickhouse
+    olympos.io/port: native
+spec:
+  selector: {app: restore-ch}
+  ports: [{name: native, port: 9000}, {name: http, port: 8123}]
+---
+# restore-vault: a new Vault (raft, TLS from the lab CA; secret
+# restore-vault-tls is created by run.sh), initialized and unsealed by
+# run.sh/env.sh with its own keys ($WORK/restore-vault-init.json). Not
+# configured in Olympos: a snapshot is only restored into such a Vault.
+# After a restore it holds the source's data: unseal it with the source's
+# keys ($WORK/vault-init.json).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: restore-vault, namespace: lab}
+spec:
+  selector: {matchLabels: {app: restore-vault}}
+  template:
+    metadata: {labels: {app: restore-vault}}
+    spec:
+      containers:
+      - name: vault
+        image: hashicorp/vault:1.20
+        args: [server, -config=/vault/olympos/raft.hcl]
+        env:
+        - {name: VAULT_ADDR, value: "https://127.0.0.1:8200"}
+        - {name: VAULT_SKIP_VERIFY, value: "true"}   # local admin CLI in the pod only
+        - {name: SKIP_SETCAP, value: "true"}
+        ports: [{containerPort: 8200}]
+        volumeMounts:
+        - {name: config, mountPath: /vault/olympos}
+        - {name: data, mountPath: /vault/data}
+        - {name: tls, mountPath: /vault/tls, readOnly: true}
+      volumes:
+      - name: config
+        configMap: {name: restore-vault-raft}
+      - name: tls
+        secret: {secretName: restore-vault-tls}
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: restore-vault-raft, namespace: lab}
+data:
+  raft.hcl: |
+    storage "raft" {
+      path    = "/vault/data"
+      node_id = "restore-vault-0"
+    }
+    listener "tcp" {
+      address       = "0.0.0.0:8200"
+      tls_cert_file = "/vault/tls/tls.crt"
+      tls_key_file  = "/vault/tls/tls.key"
+    }
+    api_addr      = "https://restore-vault.lab.svc:8200"
+    cluster_addr  = "https://restore-vault.lab.svc:8201"
+    disable_mlock = true
+    ui = false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restore-vault
+  namespace: lab
+  annotations:
+    olympos.io/vault: hashicorp
+    olympos.io/backup: vault
+    olympos.io/tls-server-name: restore-vault.lab.svc
+spec:
+  selector: {app: restore-vault}
+  ports: [{name: https, port: 8200}]
+---
 # Not annotated: must NOT be discovered.
 apiVersion: v1
 kind: Service

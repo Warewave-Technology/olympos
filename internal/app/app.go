@@ -173,6 +173,11 @@ func CheckConfig(cfgPath string, db bool) error {
 			problems = append(problems, fmt.Sprintf("%s (%s): %v", what, bin, err))
 		}
 	}
+	// Not a problem: without the client the server starts and ClickHouse
+	// restores fail with a clear message.
+	if _, err := exec.LookPath(cfg.Backup.ClickHouseClient); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: backup.clickhouseClient (%s): %v; restores of ClickHouse backups will fail\n", cfg.Backup.ClickHouseClient, err)
+	}
 	// What the server checks at start without the network: the target and
 	// storage CA bundles' contents and the kv:// reference rules.
 	if len(problems) == 0 {

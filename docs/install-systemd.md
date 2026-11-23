@@ -78,7 +78,7 @@ What it installs:
 | Path | |
 |---|---|
 | `/usr/bin/olympos-server` | static binary (release build: no dev login, no local key vault) |
-| `/usr/lib/olympos/bin/{trivy,kubescape,polaris}` | pinned tools, verified against the upstream checksums at build time |
+| `/usr/lib/olympos/bin/{trivy,kubescape,polaris,clickhouse}` | pinned tools, verified against the upstream checksums at build time. `clickhouse` is the static ClickHouse client used for ClickHouse restores: about 750 MB installed, and each package is about 200-230 MB larger per architecture |
 | `/etc/olympos/config.yaml` | configuration, `0640 root:olympos`, kept on upgrade |
 | `/usr/lib/systemd/system/olympos-server.service` | the hardened unit |
 | `/var/lib/olympos` | state: trivy DB cache, NFS mount roots, temp files (`olympos` user, 0750) |

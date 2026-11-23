@@ -1,0 +1,1122 @@
+[
+ {
+  "src": "probe10/probe2_test.go",
+  "ddl": "CREATE TABLE shop."
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.hex1 (id UInt64, m UInt64 MATERIALIZED 0x1e-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.hex2 (id UInt64, m UInt8 DEFAULT 0x1e-hasColumnInTable('secret', 'creds', 'password')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.hex3 (id UInt64, m Int64 MATERIALIZED 0x0e+joinGet('secret.j', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.hex4 (id UInt64, m String MATERIALIZED toString(0x0e+uptime())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.hex5 (id UInt64, m UInt64 ALIAS 0x1E-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.id1p (`1p` UInt64, m UInt64 MATERIALIZED 1p-uptime()) ENGINE = MergeTree ORDER BY `1p`"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.gv (id UInt64, m String DEFAULT @@version) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.agg (id UInt64, a AggregateFunction(sum, (SELECT 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.aggq (id UInt64, a UInt64 DEFAULT `AggregateFunction`(currentDatabase())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.ttldisk (d DateTime) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL 1 DAY TO DISK 'default', d + INTERVAL 2 DAY TO VOLUME 'v'"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.ttlgrp (d DateTime, k UInt8, v UInt64) ENGINE = MergeTree ORDER BY (k, d) TTL d + INTERVAL 1 DAY GROUP BY k SET v = max(v)"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.ttlwhere (d DateTime, k UInt8) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL 1 DAY DELETE WHERE k = 1, d + INTERVAL 1 DAY RECOMPRESS CODEC(ZSTD(3))"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.graph (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY Path"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rgraph (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = ReplicatedGraphiteMergeTree('graphite_rollup') ORDER BY Path"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep1 (x UInt8) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}') ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep2 (x UInt8) ENGINE = ReplicatedMergeTree(concat('/clickhouse/', 'x'), '{replica}') ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep3 (x UInt8) ENGINE = ReplicatedMergeTree($$/a/b$$, 'r') ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep4 (x UInt8) ENGINE = ReplicatedMergeTree('aux:/a/b', 'r') ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep5 (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep6 (x UInt8, v UInt8) ENGINE = ReplicatedReplacingMergeTree(v) ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.rep7 (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.pol (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS storage_policy = 'default'"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.codec (x UInt8 CODEC(AES_128_GCM_SIV), y UInt8 CODEC(Whatever)) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.idx (s String, INDEX i s TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1, INDEX j s TYPE set(100) GRANULARITY 1) ENGINE = MergeTree ORDER BY s"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.idx2 (s String, INDEX i (s) TYPE set(currentDatabase()) GRANULARITY 1) ENGINE = MergeTree ORDER BY s"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.proj (s String, PROJECTION p (SELECT s ORDER BY s)) ENGINE = MergeTree ORDER BY s"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.cmt (s String COMMENT 'x currentDatabase()') ENGINE = MergeTree ORDER BY s COMMENT 'hi'"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.obj (o Object('json'), e Enum8('a' = 1, 'b' = 2), j JSON(max_dynamic_paths = 10), dy Dynamic(max_types = 3)) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.lambda (a Array(UInt8) DEFAULT arrayMap(x -> x * 2, [1, 2])) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.lambda2 (a Array(String) DEFAULT arrayMap(x -> hostName(), [1, 2])) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.tscdb (s String DEFAULT toString(currentDatabase())) ENGINE = MergeTree ORDER BY s"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.nib (d DateTime DEFAULT nowInBlock(), r UInt32 DEFAULT rand(), n DateTime DEFAULT now()) ENGINE = MergeTree ORDER BY d"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.engset (x UInt8) ENGINE = MergeTree() ORDER BY x SETTINGS index_granularity = 8192, disk = 'default'"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.setmid (`settings` UInt8) ENGINE = MergeTree ORDER BY settings SETTINGS index_granularity = 1"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.setcol (x UInt8 SETTINGS (max_compress_block_size = 1)) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.globalvar2 (id UInt64, m String DEFAULT @@hostname) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.cast (id UInt64, m String DEFAULT id::String, p UInt64 DEFAULT position('a' IN 'b')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.memcmt (id UInt64) ENGINE = Memory COMMENT 'x'"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.memset (id UInt64) ENGINE = Memory SETTINGS max_rows_to_keep = 1"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.tolower (id UInt64, m UInt64 DEFAULT tOSTRING(id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe10/probe_test.go",
+  "ddl": "CREATE TABLE shop.keyw (id UInt64, m UInt64 DEFAULT 1 CHECK (id > 0)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe2_test.go",
+  "ddl": "CREATE TABLE shop.agudf (id UInt64, m String DEFAULT simpleAggregateFunction(dictGetString('secret.d', 's', 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe2_test.go",
+  "ddl": "CREATE TABLE shop.agudf2 (id UInt64, m UInt8 DEFAULT AggregateFunction(hasColumnInTable('secret', 'creds', 's'))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe2_test.go",
+  "ddl": "CREATE TABLE shop.agudf3 (id UInt64, m String DEFAULT toString(AggregateFunction(file('secret.txt')))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe2_test.go",
+  "ddl": "CREATE TABLE shop.agttl (d DateTime) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL AggregateFunction(sleep(3)) SECOND"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(concat('/clickhouse/', 'x'), '{replica}') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(, '/a/b', 'r') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(('/a/b'), 'r') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(x, 'r') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe4_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(currentDatabase, currentUser) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe5_test.go",
+  "ddl": "CREATE TABLE shop.r (id UInt64, m String DEFAULT toString(tuple(1, 'x').0x2.dead())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe5_test.go",
+  "ddl": "CREATE TABLE shop.r (id UInt64, m Float64 DEFAULT tuple(1).0x1.e()) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe5_test.go",
+  "ddl": "CREATE TABLE shop.r (id UInt64, m String DEFAULT shop.toString(id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.udfToday (id UInt64, a String DEFAULT TODAY()) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.udfMap (id UInt64, a String DEFAULT Map(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.udfText (id UInt64, a String DEFAULT text(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.udfMT (id UInt64, a String DEFAULT MergeTree(1), b String DEFAULT Memory('x'), c String DEFAULT ZSTD(1), d String DEFAULT Json(1), e String DEFAULT AND(1, 1), f String DEFAULT TrIm('x'), g String DEFAULT Date_Diff('day', now(), now())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.udfKey (id UInt64, a String DEFAULT key(1), b String DEFAULT check(1), c String DEFAULT when(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.applyChk (p String, CONSTRAINT c CHECK length(tuple(* APPLY file).1) > 0) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.applyDef (p String, m String DEFAULT toString(tuple(* APPLY file))) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.ixname (id UInt64, INDEX dictGetString('secret.d', 's', toUInt64(1)) TYPE set(10) GRANULARITY 1) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.caststr (id UInt64, m DEFAULT CAST(id, 'AggregateFunction(quantile(dictGetFloat64(''secret.d'',''v'',toUInt64(1))), Float64)')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.dotnum (t Tuple(UInt8, UInt8), m UInt8 DEFAULT t.1, k UInt8 DEFAULT tuple(1, 2).2, j UInt8 DEFAULT [1,2][1]) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.travel (x UInt8) ENGINE = ReplicatedMergeTree('/../../clickhouse/tables/src', 'r2') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.auxodd (x UInt8) ENGINE = ReplicatedMergeTree('zk2:/clickhouse/tables/src', 'r2') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.repwords (x UInt8) ENGINE = ReplicatedMergeTree(a, b) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.repnum (x UInt8) ENGINE = ReplicatedMergeTree(1, 2) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.repone (x UInt8) ENGINE = ReplicatedMergeTree('/clickhouse/tables/src') ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.repsrc (x UInt8) ENGINE = ReplicatedMergeTree('/clickhouse/tables/src', 'r2', x) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.replcol (x UInt8, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/p', '{replica}', v) ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.setcmt (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 1 COMMENT 'c'"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.setword (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS storage_policy = default, index_granularity = 1"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.ordset (settings UInt8) ENGINE = MergeTree ORDER BY settings index_granularity = 1"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.lt (x UInt8, y UInt8 DEFAULT x<=>1) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.colon (d Dynamic, y Int64 DEFAULT d.:Int64) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.alter (x UInt8) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.tailws (x UInt8) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.eesc (x String DEFAULT 'a\\eb') ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.lam (a Array(UInt8) DEFAULT arrayMap((x, y) -> x + y, [1], [2])) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.intv (d DateTime DEFAULT now() - INTERVAL 1 DAY, e DateTime DEFAULT DATE '2020-01-01', c UInt8 DEFAULT CASE WHEN 1 THEN 2 ELSE 3 END) ENGINE = MergeTree ORDER BY d"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.engq (x UInt8) ENGINE = `MergeTree` ORDER BY x"
+ },
+ {
+  "src": "probe11/probe_test.go",
+  "ddl": "CREATE TABLE shop.dictnoparen (x UInt8 DEFAULT CURRENT_USER) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe12/p12data_test.go",
+  "ddl": "CREATE TABLE shop.r (id UInt64, \"t.case\" UInt8, s UInt64 DEFAULT t.case + WHEN(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/p12data_test.go",
+  "ddl": "CREATE TABLE shop.r (id UInt64, \"t.case\" UInt8) ENGINE = MergeTree ORDER BY t.case + WHEN(id)"
+ },
+ {
+  "src": "probe8/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`k` String, `v` String) ENGINE = EmbeddedRocksDB(0, '/var/lib/clickhouse/store/abc/other_rocksdb', 1) PRIMARY KEY k"
+ },
+ {
+  "src": "probe8/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`query` String) ENGINE = Merge(currentDatabase(), '^query_log$')"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`id` UInt64) ENGINE = Dictionary(xmldict)"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`d` Date, `x` UInt64) ENGINE = MergeTree ORDER BY x TTL d + toIntervalDay(dictGet('secret.d', 'v', x))"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`x` UInt64, INDEX i joinGet('secret.j','v',x) TYPE minmax) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`x` UInt64) ENGINE = MergeTree ORDER BY x SETTINGS disk = 'default'"
+ },
+ {
+  "src": "probe9/probe_test.go",
+  "ddl": "CREATE TABLE shop.t (`x` UInt64) ENGINE = Buffer(currentDatabase(), 'query_log', 1, 1, 1, 1, 1, 1, 1)"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.events\n(\n    `d` Date\n)\nENGINE = MergeTree\nORDER BY d"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.`we/ird name` (`v` String) ENGINE = Memory"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.`.inner_id.1` (`v` String) ENGINE = Memory"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE \"shop\".\"t\" (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = Log; DROP DATABASE other"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE other.t (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.u (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE t (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE IF NOT EXISTS shop.t (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t ON CLUSTER c (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t UUID '6b2b0f4b-0d36-4bd4-9a0e-7d3b1e5c2f10' (x UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.`.inner_id.6b2b` (`d` Date) ENGINE = SummingMergeTree ORDER BY d"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.`mv\\`x__restored_data` (`d` Date) ENGINE = SummingMergeTree ORDER BY d"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r UUID 'a5d0b0e6-0000-4000-8000-000000000001' (`x` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('aux:/p/x', 'r') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('aux:/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree(s) ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (P String, T DateTime, V Float64, W UInt32) ENGINE = ReplicatedGraphiteMergeTree('graphite_rollup') ORDER BY P"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (P String, T DateTime, V Float64, W UInt32) ENGINE = ReplicatedGraphiteMergeTree('/olympos-restore/"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', x) ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (x UInt64) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (`ReplicatedMergeTree('/a', 'b')` UInt8) ENGINE = Log"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.e (`d` Date, `id` UInt64, `s` LowCardinality(Nullable(String)), `v2` UInt64 MATERIALIZED id * 2, `h` UInt64 DEFAULT cityHash64(s), `ts` DateTime DEFAULT now(), `a` Array(String) CODEC(ZSTD(1)), INDEX ix (id, s) TYPE bloom_filter(0.01) GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY (d, id) TTL d + toIntervalDay(30) SETTINGS index_granularity = 8192, storage_policy = 'default'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.agg (`k` UInt8, `u` AggregateFunction(quantiles(0.5, 0.9), UInt64)) ENGINE = AggregatingMergeTree ORDER BY k SETTINGS index_granularity = 8192"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.r (`x` UInt64, `v` UInt8) ENGINE = ReplicatedReplacingMergeTree('/p', '{replica}', v) ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.l (x UInt8) ENGINE = TinyLog"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.m (x UInt8) ENGINE = Memory COMMENT 'kept'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.c (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 8192 COMMENT 'x'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.ttl (d DateTime, k UInt8) ENGINE = MergeTree ORDER BY d TTL d + toIntervalDay(1) DELETE WHERE k = 1, d + toIntervalDay(2) RECOMPRESS CODEC(ZSTD(3))"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.cast (id UInt64, m String DEFAULT CAST(id, 'String'), n String DEFAULT id::String, h UInt64 DEFAULT 0x1e - 5) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.dotnum (t Tuple(UInt8, UInt8), m UInt8 DEFAULT t.1, k UInt8 DEFAULT tuple(1, 2).2, j UInt8 DEFAULT [1, 2][1]) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.intv (d DateTime DEFAULT now() - toIntervalDay(1), e Date DEFAULT toDate('2020-01-01'), c UInt8 DEFAULT CASE WHEN (d > now()) THEN (2) ELSE (3) END, f UInt8 DEFAULT (1 AND (0)) OR (1)) ENGINE = MergeTree ORDER BY d"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.lam (a Array(UInt8) DEFAULT arrayMap((x, y) -> x + y, [1], [2]), b UInt64 DEFAULT 2 * 3, s String DEFAULT replace('ab', 'a', 'b')) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.cst (x UInt64, y Decimal(18, 2) DEFAULT CAST(x AS Decimal(18, 2)), z String DEFAULT x::String, n Nullable(String) NOT NULL DEFAULT NULL CODEC(ZSTD(1), Delta) TTL toDateTime(x) + toIntervalDay(1) COMMENT 'c', CONSTRAINT k CHECK x > 0, INDEX i x TYPE minmax GRANULARITY 1) ENGINE = MergeTree PRIMARY KEY x ORDER BY x SAMPLE BY x TTL toDateTime(x) + toIntervalDay(1) DELETE WHERE x > 1, toDateTime(x) + toIntervalDay(2) TO DISK 'd'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.dec (a Decimal(18, 4), d DateTime64(3, 'UTC'), f Float64 DEFAULT 1.5e-3, s SimpleAggregateFunction(sum, UInt64)) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.k (x String) ENGINE = Kafka SETTINGS kafka_broker_list = 'b:9092'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.s (x String) ENGINE = S3('https://bucket/x', 'KEY', 'SECRET', 'CSV')"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.d (x String) ENGINE = Distributed('c', 'shop', 'e')"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.m (x UInt8) ENGINE = Merge('shop', '^e$')"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.b (x UInt8) ENGINE = Buffer(shop, e, 1, 10, 100, 1, 10, 1, 10)"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.dt (id UInt64) ENGINE = Dictionary(xmldict)"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.j (id UInt64) ENGINE = Join(ANY, LEFT, id)"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.st (id UInt64) ENGINE = Set"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.km (k String, v String) ENGINE = KeeperMap('/km') PRIMARY KEY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.rk (k String, v String) ENGINE = EmbeddedRocksDB(0, '/var/lib/x', 1) PRIMARY KEY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.n (x UInt8) ENGINE = Null"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.x (x String) ENGINE = SomethingNew"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.tf AS url('http://x/', 'CSV', 'a String')"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.cp AS shop.e ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.em ENGINE = MergeTree ORDER BY x EMPTY AS SELECT 1 AS x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.w (x String) ENGINE = MergeTree ORDER BY x SETTINGS disk = disk(type = s3, endpoint = 'https://b/')"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.w2 (x String) ENGINE = MergeTree ORDER BY x SETTINGS disk = 'default'"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.w3 (x String) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 8192, min_age_to_force_merge_seconds = 1"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.w4 (x String SETTINGS (max_compress_block_size = 1)) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.f (x String DEFAULT file('/etc/passwd')) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.h (x UInt64, y String DEFAULT hostName()) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.cd (x UInt64, y String DEFAULT currentDatabase()) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.gm (x UInt64, y String DEFAULT getMacro('shard')) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.sq (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.in (`k` UInt64 DEFAULT k IN (1, 2)) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.ni (`k` UInt64 DEFAULT nullIn(k, secret.t)) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.qf (`k` UInt64 DEFAULT `file`('x')) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.pr (`k` UInt64, PROJECTION p (SELECT k ORDER BY k)) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.na (`k` UInt64 COMMENT 'é') ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.nb (`k` UInt64 DEFAULT 1) ENGINE = MergeTree ORDER BY k"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.e2 (x UInt8) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt64 MATERIALIZED 0x1e-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt8 DEFAULT 0x1e-hasColumnInTable('secret', 'creds', 'password')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m Int64 MATERIALIZED 0x0e+joinGet('secret.j', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String MATERIALIZED toString(0x0e+uptime())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt64 ALIAS 0x1E-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, s String, m UInt8 DEFAULT 0x1e-in(s, secret.creds)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (`1p` UInt64, m UInt64 MATERIALIZED 1p-uptime()) ENGINE = MergeTree ORDER BY `1p`"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT 1.2.hostName()) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT @@version) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT @@hostname) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT {p:UInt64}) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a AggregateFunction(sum, (SELECT 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a UInt64 DEFAULT `AggregateFunction`(currentDatabase())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a UInt64 DEFAULT AggregateFunction(currentDatabase())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT tOSTRING(id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT toMyUDF(id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (a Array(String) DEFAULT arrayMap(x -> hostName(), [1, 2])) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (d DateTime DEFAULT nowInBlock()) ENGINE = MergeTree ORDER BY d"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (s String, INDEX i (s) TYPE set(currentDatabase()) GRANULARITY 1) ENGINE = MergeTree ORDER BY s"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64) ENGINE = Memory SETTINGS max_rows_to_keep = 1"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(concat('/clickhouse/', 'x'), '{replica}') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree($$/a/b$$, 'r') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a String DEFAULT TODAY()) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a String DEFAULT Map(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a String DEFAULT text(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a String DEFAULT MergeTree(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, b String DEFAULT Memory('x')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, c String DEFAULT ZSTD(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, d String DEFAULT Json(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, e String DEFAULT AND(1, 1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, f String DEFAULT TrIm('x')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, g UInt8 DEFAULT Date_Diff('day', now(), now())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, h UInt8 DEFAULT OR(1, 0)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, a String DEFAULT key(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, b String DEFAULT check(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, c String DEFAULT when(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, c String DEFAULT set(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, c String DEFAULT none(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT simpleAggregateFunction(dictGetString('secret.d', 's', 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m UInt8 DEFAULT AggregateFunction(hasColumnInTable('secret', 'creds', 's'))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT toString(AggregateFunction(file('secret.txt')))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (d DateTime) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL AggregateFunction(sleep(3)) SECOND"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT shop.toString(id)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m String DEFAULT toString(tuple(1, 'x').0x2.dead())) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m Float64 DEFAULT tuple(1).0x1.e()) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (p String, CONSTRAINT c CHECK length(tuple(* APPLY file).1) > 0) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(* APPLY file))) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(*))) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(COLUMNS('p')))) ENGINE = MergeTree ORDER BY p"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (id UInt64, m DEFAULT CAST(id, 'AggregateFunction(quantile(dictGetFloat64(''secret.d'',''v'',toUInt64(1))), Float64)')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8, y UInt8 DEFAULT x<=>1) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8 DEFAULT CURRENT_USER) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8, y UInt8 DEFAULT INTERVAL (1) DAY) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = MergeTree ORDER BY x TTL now() + toIntervalDay(1) GROUP BY x SET x = max(x)"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8 STATISTICS(tdigest)) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = MergeTree(currentDatabase()) ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = GraphiteMergeTree('../../etc/x') ORDER BY Path"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = ReplicatedGraphiteMergeTree('/p', 'r', 'a b') ORDER BY Path"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/../../clickhouse/tables/src', 'r2') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a//b', 'r2') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(, '/a/b', 'r') ORDER BY x"
+ },
+ {
+  "src": "ddl_test.go",
+  "ddl": "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(('/a/b'), 'r') ORDER BY x"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.events (`d` Date, `x` UInt64) ENGINE = MergeTree PARTITION BY d ORDER BY x"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.agg (`k` UInt8, `u` AggregateFunction(uniq, UInt64)) ENGINE = AggregatingMergeTree ORDER BY k"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.k (`x` String) ENGINE = Kafka SETTINGS kafka_broker_list = 'broker:9092', kafka_sasl_password = 'kafka-secret'"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.dt (`id` UInt64, `name` String) ENGINE = Dictionary(shop.users_dict)"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.`.inner_id.11111111-1111-1111-1111-111111111111` (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY d"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.`mv__restored_data` (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY d"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.mv__restored_data (x UInt8) ENGINE = Memory"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.other (`x` UInt8) ENGINE = MergeTree ORDER BY x"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.agg (x UInt8) ENGINE = AggregatingMergeTree ORDER BY x; DROP DATABASE other"
+ },
+ {
+  "src": "restore_test.go",
+  "ddl": "CREATE TABLE shop.other ("
+ },
+ {
+  "src": "probe11/t.out.sql",
+  "ddl": "CREATE TABLE rp.t\n(\n    `x` UInt8\n)\nENGINE = ReplicatedMergeTree('/olympos-restore/req-42/clickhouse/tables/{database}/{table}/{shard}', '{replica}')\nORDER BY x\nSETTINGS index_granularity = 8192"
+ },
+ {
+  "src": "probe11/t.sql",
+  "ddl": "CREATE TABLE rp.t\n(\n    `x` UInt8\n)\nENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')\nORDER BY x\nSETTINGS index_granularity = 8192"
+ },
+ {
+  "src": "probe11/v.out.sql",
+  "ddl": "CREATE TABLE rp.v\n(\n    `x` UInt8,\n    `ver` UInt8\n)\nENGINE = ReplicatedReplacingMergeTree('/olympos-restore/req-42/clickhouse/tables/{shard}/rp/v', '{replica}', ver)\nORDER BY x\nSETTINGS index_granularity = 8192"
+ },
+ {
+  "src": "probe11/v.sql",
+  "ddl": "CREATE TABLE rp.v\n(\n    `x` UInt8,\n    `ver` UInt8\n)\nENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/rp/v', '{replica}', ver)\nORDER BY x\nSETTINGS index_granularity = 8192"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b1 (engine UInt8) ENGINE = MergeTree ORDER BY engine = Map(1)"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b2 (d Date) ENGINE = MergeTree ORDER BY d TTL d DELETE WHERE 1, Map(d) + INTERVAL 1 DAY"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b3 (s String DEFAULT substring('abc' FROM AND(1, 2))) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b4 (s String DEFAULT accurateCastOrDefault(1 AS a, 'String', Map('x'))) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b5 (s String DEFAULT CAST(1 AS a, Map('String'))) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b6 (s UInt8 DEFAULT 'a' REGEXP AND(1, 2)) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe12/c1.sql",
+  "ddl": "CREATE TABLE shop.b7 (s String DEFAULT trim(BOTH AND('x', 1) FROM 'xax')) ENGINE = MergeTree ORDER BY tuple()"
+ },
+ {
+  "src": "probe12/c2.sql",
+  "ddl": "CREATE TABLE shop.c1 (engine String) ENGINE = MergeTree ORDER BY engine = file('/etc/hostname')"
+ },
+ {
+  "src": "probe12/c2.sql",
+  "ddl": "CREATE TABLE shop.c2 (d Date) ENGINE = MergeTree ORDER BY d TTL d DELETE WHERE 1, d + toIntervalDay(length(file('/etc/hostname')))"
+ },
+ {
+  "src": "probe12/c2.sql",
+  "ddl": "CREATE TABLE shop.c3 (engine String) ENGINE = MergeTree ORDER BY engine = currentUser()"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e1 (id UInt64, CONSTRAINT c ASSUME id OR(1, 0)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e2 (id UInt64, s String DEFAULT toString(DISTINCT AND(1, 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e3 (id UInt64, s String DEFAULT toString(id IS NOT DISTINCT FROM AND(1, 1))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e4 (id UInt64, d Date) ENGINE = MergeTree ORDER BY id PARTITION BY engine = TODAY(d)"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e4b (id UInt64, d Date, engine Date) ENGINE = MergeTree ORDER BY id PARTITION BY engine = TODAY(d)"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e5 (id UInt64, s String DEFAULT accurateCastOrDefault(id AS a, 'String', simpleAggregateFunction(file('secret')))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e6 (id UInt64, s String DEFAULT toString(DISTINCT *)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e7 (id UInt64, s String DEFAULT substring('abc' FROM *)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e8 (d Date) ENGINE = MergeTree ORDER BY d TTL d DELETE WHERE 1, d + toIntervalDay(toUInt8(file('secret')))"
+ },
+ {
+  "src": "probe12/c3.sql",
+  "ddl": "CREATE TABLE shop.e9 (id UInt64, s String DEFAULT accurateCastOrNull(id AS a, Nullable(TODAY))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c4.sql",
+  "ddl": "CREATE TABLE shop.f1 (id UInt64, s String DEFAULT Lower('ABC')) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g1 (id UInt64, s String) ENGINE = MergeTree ORDER BY Mod(id, 2)"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g2 (id UInt64, s String) ENGINE = MergeTree ORDER BY id PARTITION BY Mod(id, 2)"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g3 (id UInt64, s String, CONSTRAINT c CHECK Mod(id, 2) = 7777) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g4 (id UInt64, s String, INDEX i Mod(id, 2) TYPE minmax) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g5 (id UInt64, d Date) ENGINE = MergeTree ORDER BY id TTL d + toIntervalDay(Mod(id, 2))"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g6 (id UInt64, s UInt64 MATERIALIZED Mod(id, 2), t UInt64 ALIAS Mod(id,2), d Date TTL d + toIntervalDay(Mod(id, 2))) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c5.sql",
+  "ddl": "CREATE TABLE shop.g7 (id UInt64, s UInt64 DEFAULT arrayMap(x -> Mod(x, 2), [id])[1]) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c6.sql",
+  "ddl": "CREATE TABLE shop.h1 (id UInt64, t Tuple(`case` UInt8), s UInt64 DEFAULT t.case + WHEN(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c6.sql",
+  "ddl": "CREATE TABLE shop.h2 (id UInt64, t Tuple(`case` UInt8)) ENGINE = MergeTree ORDER BY t.case + WHEN(id)"
+ },
+ {
+  "src": "probe12/c7.sql",
+  "ddl": "CREATE TABLE shop.h3 (id UInt64, \"t.case\" UInt8, s UInt64 DEFAULT t.case + WHEN(1)) ENGINE = MergeTree ORDER BY id"
+ },
+ {
+  "src": "probe12/c7.sql",
+  "ddl": "CREATE TABLE shop.h4 (id UInt64, \"t.case\" UInt8) ENGINE = MergeTree ORDER BY t.case + WHEN(id)"
+ }
+]

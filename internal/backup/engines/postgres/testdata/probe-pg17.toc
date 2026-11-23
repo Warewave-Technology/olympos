@@ -1,0 +1,35 @@
+;
+; Archive created at 2026-11-23 02:35:28 +03
+;     dbname: toc_probe
+;     TOC Entries: 23
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 16.15
+;     Dumped by pg_dump version: 17.4
+;
+;
+; Selected TOC Entries:
+;
+3481; 1262 6601831 DATABASE - toc_probe olympos
+3482; 0 0 COMMENT - DATABASE toc_probe olympos
+3483; 0 0 ACL - DATABASE toc_probe olympos
+3484; 0 0 DATABASE PROPERTIES - toc_probe olympos
+6; 2615 6601862 SCHEMA - s olympos
+223; 1255 6601878 FUNCTION s f() olympos
+217; 1259 6601870 TABLE public Odd Name olympos
+220; 1259 6601879 MATERIALIZED VIEW s mv olympos
+221; 1259 6601883 TABLE s p olympos
+222; 1259 6601886 TABLE s p1 olympos
+219; 1259 6601877 SEQUENCE s q olympos
+216; 1259 6601863 TABLE s t olympos
+218; 1259 6601873 VIEW s v olympos
+3323; 0 0 TABLE ATTACH s p1 olympos
+3472; 0 6601870 TABLE DATA public Odd Name olympos
+3475; 0 6601886 TABLE DATA s p1 olympos
+3471; 0 6601863 TABLE DATA s t olympos
+3485; 0 0 SEQUENCE SET s q olympos
+3325; 2606 6601869 CONSTRAINT s t t_pkey olympos
+3474; 0 6601879 MATERIALIZED VIEW DATA s mv olympos

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Downloads trivy, kubescape and polaris (versions from deploy/tools.env) for
+# Downloads trivy, kubescape, polaris and clickhouse (versions from deploy/tools.env) for
 # linux/<arch> into dist/tools/linux_<arch>/, verified against the upstream
 # checksum files. Used to build the .deb/.rpm/tarball (F16).
 set -euo pipefail
@@ -24,8 +24,14 @@ curl -fsSLO "https://github.com/FairwindsOps/polaris/releases/download/v${POLARI
 curl -fsSLO "https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/checksums.txt"
 grep " polaris_${POLARIS_VERSION}_linux_${arch}.tar.gz$" checksums.txt | sha256sum -c -
 tar -xzf "polaris_${POLARIS_VERSION}_linux_${arch}.tar.gz" polaris
+ch="clickhouse-common-static-${CLICKHOUSE_VERSION}-${arch}.tgz"
+curl -fsSLO "https://github.com/ClickHouse/ClickHouse/releases/download/v${CLICKHOUSE_VERSION}-lts/$ch"
+curl -fsSLO "https://github.com/ClickHouse/ClickHouse/releases/download/v${CLICKHOUSE_VERSION}-lts/$ch.sha512"
+sha512sum -c "$ch.sha512"
+tar -xzf "$ch" --strip-components=3 "clickhouse-common-static-${CLICKHOUSE_VERSION}/usr/bin/clickhouse"
+rm -f "$ch"
 cd - >/dev/null
-install -m 0755 "$tmp/trivy" "$tmp/kubescape" "$tmp/polaris" "$out/"
+install -m 0755 "$tmp/trivy" "$tmp/kubescape" "$tmp/polaris" "$tmp/clickhouse" "$out/"
 # kubescape artifacts (JSON, arch-independent; F14): downloaded with a
 # kubescape for the build host.
 art=dist/tools/kubescape-artifacts

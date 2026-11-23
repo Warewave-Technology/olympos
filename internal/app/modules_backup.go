@@ -1,9 +1,14 @@
 package app
 
 import (
+	"fmt"
+	"os/exec"
+
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/backup/engines/clickhouse"
 	"github.com/Warewave-Technology/olympos/internal/backup/engines/postgres"
 	"github.com/Warewave-Technology/olympos/internal/blob"
+	"github.com/Warewave-Technology/olympos/internal/restore"
 	"github.com/Warewave-Technology/olympos/internal/server"
 )
 
@@ -11,6 +16,15 @@ import (
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		postgres.SetDumpDir(d.Cfg.Backup.PgDumpDir)
+		clickhouse.SetClientBin(d.Cfg.Backup.ClickHouseClient)
+		// Not fatal: without the client the server still runs, and restores
+		// of ClickHouse backups fail with a clear message.
+		if p, err := exec.LookPath(clickhouse.ClientBin()); err != nil {
+			d.Log.Warn("clickhouse client not found: restores of ClickHouse backups will fail",
+				"backup.clickhouseClient", clickhouse.ClientBin(), "err", err)
+		} else {
+			d.Log.Info("clickhouse client", "path", p)
+		}
 		storage, err := storageOptions(d.Cfg)
 		if err != nil {
 			return Wiring{}, err
@@ -32,9 +46,24 @@ func init() {
 		// olympos-self: Olympos' own database (F17).
 		self := &backup.SelfBackup{DB: d.DB, Log: log.With("loop", "olympos-self"), Blobs: blobs,
 			DSN: d.SelfDB.DSN, Password: d.SelfDB.Password}
+		// Restore requests (docs/design/ui-restore.md) read backups through
+		// the same destinations and reach targets through the same tunnels.
+		readers, ok := blobs.(blob.ReaderResolver)
+		if !ok {
+			return Wiring{}, fmt.Errorf("blob resolver %T cannot read backups", blobs)
+		}
+		rlog := d.Log.With("component", "restore")
+		restores := &restore.API{DB: d.DB, Log: rlog, Envelope: d.Envelope, Creds: creds,
+			Dialer: d.Gateway, Blobs: readers, TTL: d.Cfg.ChangeRequests.TTL}
+		// Approved restores run next to the backup worker: the same tunnels
+		// and the same per-cluster limit (backup runs and restores together).
+		executor := &restore.Executor{DB: d.DB, Log: rlog.With("loop", "executor"), Dialer: d.Gateway, Blobs: readers,
+			Creds: creds, Envelope: d.Envelope, PerCluster: d.Cfg.Backup.PerClusterConcurrency}
 		return Wiring{
-			Modules: []server.Module{api},
-			Workers: []Worker{sched.Run, worker.Run, self.Run},
+			Modules: []server.Module{api, restores},
+			// Restore expiry runs on its own leader lock, next to the module
+			// that owns restores (the vaults maintenance loop is Vault's).
+			Workers: []Worker{sched.Run, worker.Run, self.Run, restores.RunExpiry, executor.Run},
 		}, nil
 	})
 }

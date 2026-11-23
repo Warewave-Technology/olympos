@@ -23,6 +23,7 @@ import type {
   NetpolNamespace,
   Principal,
   Registry,
+  RestoreRequest,
   Role,
   Routes,
   SecretDetail,
@@ -442,6 +443,13 @@ export const targets: Target[] = [
   target({ service: 'vault-dev', namespace: 'vault', engine: '', vault_provider: 'hashicorp', detected_version: '1.17', port: 8200, tls_server_name: 'vault-dev.vault.svc' }, 'onprem-factory-01'),
   // backup candidate whose vault is not configured in Olympos yet (wizard step 2 blocks)
   target({ service: 'bao-retail', namespace: 'security', engine: 'vault', vault_provider: 'openbao', detected_version: '2.2', port: 8200, tls_ok: false }, 'cce-ist-retail'),
+  // new, empty servers in the DR cluster to restore into (docs/design/ui-restore.md)
+  target({ service: 'billing-pg-dr', namespace: 'billing', engine: 'postgresql', detected_version: '16.4', port_name: 'postgres', tls_server_name: 'billing-pg-dr.billing.svc', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
+  target({ service: 'metrics-ch-dr', namespace: 'observability', engine: 'clickhouse', detected_version: '24.8', port: 9440, port_name: 'native-tls', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
+  target({ service: 'openbao-dr', namespace: 'security', engine: 'vault', vault_provider: 'openbao', detected_version: '2.1', port: 8200, tls_server_name: 'openbao-dr.security.svc', first_seen_at: iso(3 * H) }, 'aks-neu-dr'),
+  // the same Service name recreated in another namespace of the backup's cluster (a CloudNativePG cluster rebuilt next
+  // to the broken one): a valid restore target, not the backup's own
+  target({ service: 'billing-pg', namespace: 'billing-restore', engine: 'postgresql', detected_version: '16.4', port_name: 'postgres', first_seen_at: iso(2 * H) }, 'prod-aks-weu-02'),
 ];
 export const tByService = (s: string) => targets.find((t) => t.service === s)!;
 
@@ -1121,6 +1129,173 @@ export const changeRequests: ChangeRequest[] = [
   ki[1].last_cr_label = 'CR-0139';
   secrets[vaults[0].id][0].pending_change_requests = 2;
 }
+
+// ------------------------------------------------------------ restores
+/** The DR databases of the restore mock: what each new target already holds (true = with user objects). */
+export const restoreTargetState: Record<string, Record<string, boolean>> = {
+  'billing-pg-dr': { postgres: false, billing_audit: true },
+  'metrics-ch-dr': { default: false },
+};
+/** The databases each source's backups hold (manifest details.databases / manifest.json). */
+export const restoreBackupDatabases: Record<string, string[]> = {
+  'billing-pg': ['billing', 'billing_audit', 'postgres'],
+  'metrics-ch': ['default', 'metrics'],
+};
+
+const tRef = (t: Target) => ({ id: t.id, cluster_id: t.cluster_id, cluster_name: t.cluster_name, namespace: t.namespace, service: t.service, port: t.port, vault_provider: t.vault_provider || undefined });
+export function restoreSource(runId: string, destinationId: string, copyRunId = runId): RestoreRequest['source'] {
+  const r = runs.find((x) => x.id === runId)!;
+  const t = tByService(r.target_service);
+  const d = destinations.find((x) => x.id === destinationId) ?? destinations[0];
+  return { run_id: runId, copy_run_id: copyRunId, target_id: t.id, cluster_id: t.cluster_id, cluster_name: t.cluster_name, namespace: t.namespace, service: t.service, destination_id: d.id, destination_name: d.name, destination_kind: d.kind };
+}
+export function restoreTargetRef(t: Target): RestoreRequest['target'] {
+  return tRef(t);
+}
+
+function restoreReq(p: Partial<RestoreRequest> & Pick<RestoreRequest, 'engine' | 'source' | 'target' | 'maker'>): RestoreRequest {
+  return {
+    id: uuid(),
+    status: 'pending',
+    databases: [],
+    options: {},
+    credential: p.engine === 'vault' ? null : { source: 'keyvault_ref', ref: 'kv://kv-dr-neu/dr-admin', username: 'postgres' },
+    has_vault_token: false,
+    checker: null,
+    justification: '',
+    break_glass: false,
+    created_at: iso(H),
+    expires_at: isoIn(71 * H),
+    decided_at: null,
+    decision_comment: '',
+    approved_expires_at: null,
+    started_at: null,
+    finished_at: null,
+    progress: {},
+    result: {},
+    error: '',
+    can_approve: false,
+    approve_disabled_reason: '',
+    can_cancel: false,
+    ...p,
+  };
+}
+
+const runBilling = runs.find((r) => r.target_service === 'billing-pg' && r.status === 'partial')!;
+const runMetrics = runs.find((r) => r.target_service === 'metrics-ch' && r.status === 'succeeded')!;
+const runBao = runs.find((r) => r.target_service === 'openbao' && r.status === 'succeeded')!;
+const blobWeu = destinations[0].id;
+
+export const restoreRequests: RestoreRequest[] = [
+  // waiting for a checker (the signed-in user may approve it)
+  restoreReq({
+    engine: 'postgresql',
+    source: restoreSource(runBilling.id, blobWeu),
+    target: tRef(tByService('billing-pg-dr')),
+    maker: people.selin,
+    databases: ['billing', 'postgres'],
+    options: { globals: true, superuser: true, server_version: '16.4', notes: ['Exist on the target without user objects and are restored into: postgres'] },
+    credential: { source: 'keyvault_ref', ref: 'kv://kv-dr-neu/billing-pg-dr-admin', username: 'postgres' },
+    justification: 'billing-pg in prod-aks-weu-02 lost its volume (INC-4411). Restore last night’s backup into the DR server.',
+    created_at: iso(40 * 60_000),
+    expires_at: isoIn(71 * H),
+  }),
+  // opened by the signed-in user, waiting for someone else
+  restoreReq({
+    engine: 'clickhouse',
+    source: restoreSource(runMetrics.id, destinations[1]?.id ?? blobWeu),
+    target: tRef(tByService('metrics-ch-dr')),
+    maker: people.yigit,
+    databases: ['metrics'],
+    options: { server_version: '24.8.4.13' },
+    credential: { source: 'stored', username: 'default' },
+    justification: 'Rebuild the metrics store in the DR cluster for the failover drill (CHG-1180).',
+    created_at: iso(2 * H),
+    expires_at: isoIn(70 * H),
+  }),
+  // running: approved by another person
+  restoreReq({
+    engine: 'postgresql',
+    status: 'running',
+    source: restoreSource(runBilling.id, blobWeu),
+    target: tRef(tByService('billing-pg-dr')),
+    maker: people.yigit,
+    checker: people.mert,
+    databases: ['billing'],
+    options: { globals: false, superuser: false, server_version: '16.4', notes: ['The credential is not a superuser: owners, privileges and globals (roles) are not restored (pg_restore --no-owner --no-privileges)'] },
+    credential: { source: 'stored', username: 'app' },
+    justification: 'Copy billing into the DR server to test the failover runbook (CHG-1177).',
+    created_at: iso(5 * H),
+    decided_at: iso(4.5 * H),
+    approved_expires_at: isoIn(19.5 * H),
+    started_at: iso(12 * 60_000),
+    progress: { phase: 'restore', database: 'billing', bytes: 1.4e9, total: 3.1e9, done: [], created: ['billing'] },
+  }),
+  // a ClickHouse restore that succeeded, with what it did not restore
+  restoreReq({
+    engine: 'clickhouse',
+    status: 'succeeded',
+    source: restoreSource(runMetrics.id, destinations[1]?.id ?? blobWeu),
+    target: tRef(tByService('metrics-ch-dr')),
+    maker: people.mert,
+    checker: people.yigit,
+    databases: ['default', 'metrics'],
+    options: { server_version: '24.8.4.13', notes: ['Exist on the target without user objects and are restored into: default'] },
+    credential: null,
+    justification: 'Restore metrics for the Q4 capacity review in the DR cluster (CHG-1150).',
+    created_at: iso(2 * D),
+    decided_at: iso(2 * D - 20 * 60_000),
+    started_at: iso(2 * D - 21 * 60_000),
+    finished_at: iso(2 * D - 31 * 60_000),
+    result: {
+      items: [
+        { name: 'default', status: 'succeeded', bytes: 4e6, duration_seconds: 2.1, tables: 1, rows: 12_400, skipped: ['the database existed on the target without tables: restored into it, without CREATE DATABASE'] },
+        {
+          name: 'metrics',
+          status: 'succeeded',
+          bytes: 17.9e9,
+          duration_seconds: 552,
+          tables: 6,
+          rows: 1_284_000_112,
+          skipped: [
+            'metrics.requests_by_minute (materialized view): not created: recreate it from your schema (Olympos restores tables and data)',
+            'metrics.top_paths (view): not created: recreate it from your schema (Olympos restores tables and data)',
+            'metrics.geo (dictionary): not created: recreate it from your schema (Olympos restores tables and data)',
+          ],
+        },
+      ],
+      notes: [
+        'Data was loaded with clickhouse-client 26.3.69.4.',
+        'the data of materialized view metrics.requests_by_minute was restored into table metrics.requests_by_minute__restored_data; recreate the view with TO `metrics`.`requests_by_minute__restored_data`',
+        'metrics.http_requests: created from its columns, types, engine and keys; not restored: TTL; codecs; 2 indexes; settings; re-apply them from your schema',
+      ],
+      created: ['metrics'],
+    },
+  }),
+  // a break-glass Vault restore: the result carries the unseal note
+  restoreReq({
+    engine: 'vault',
+    status: 'succeeded',
+    source: restoreSource(runBao.id, blobWeu),
+    target: tRef(tByService('openbao-dr')),
+    maker: people.yigit,
+    break_glass: true,
+    options: { server_version: '2.1.0' },
+    justification: 'openbao in prod-aks-weu-01 is gone after the node pool failure (INC-4398); restore the 08:00 snapshot into openbao-dr now.',
+    created_at: iso(26 * H),
+    decided_at: iso(26 * H),
+    started_at: iso(26 * H - 30_000),
+    finished_at: iso(26 * H - 34_000),
+    result: {
+      items: [{ name: 'snapshot', status: 'succeeded', bytes: 42e6, duration_seconds: 4.2, tables: 0, rows: 0 }],
+      notes: [
+        "The snapshot replaced all of the target's data. The target must now be unsealed with the SOURCE Vault's unseal keys (or by the source's auto-unseal, with access to the same seal key); its own unseal keys no longer apply. Its root token, policies, auth methods and secrets are now the source's. The token given for this request most likely no longer works.",
+        "After the restore the target reports sealed, as expected: unseal it with the source's unseal keys.",
+      ],
+      created: [],
+    },
+  }),
+];
 
 // ------------------------------------------------------------ audit
 const ksSched = uuid();

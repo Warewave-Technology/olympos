@@ -8,7 +8,7 @@ stored by Entra object ID. Entra group membership is ignored.
 | Role | Can |
 |---|---|
 | `viewer` | Read everything except secret values: inventory, backups, runs, audits, findings, security, the activity log |
-| `operator` | Everything a viewer can, plus configure and run backups, audits and image scans, and route notifications |
+| `operator` | Everything a viewer can, plus configure and run backups, audits and image scans, route notifications, and open and approve restores ([maker and checker](#maker-and-checker)) |
 | `vault-maker` | Read, and open Vault change requests |
 | `vault-approver` | Read, and approve or reject change requests **opened by someone else** |
 | `admin` | All of the above, plus grants, clusters and agents, destinations, registries, Vault configuration, and accepting changed target TLS names |
@@ -84,3 +84,10 @@ Every Vault change needs two different people: the maker opens the request, some
 `vault-approver` in the vault's cluster scope approves it. Olympos compares people by tenant and object ID,
 in code and in the database, and no role bypasses it: an admin cannot approve their own request either.
 [Getting started](getting-started.md#8-change-a-secret-with-approval) shows the whole flow.
+
+Restores from the UI follow the same rule with other roles, because they copy production data into another
+system: the maker needs `read` on the backup's cluster and `operate` on the target's cluster; the checker
+must be another person with `operate` on **both** clusters, never a guest. An admin on both clusters may
+start a restore without a checker as **break-glass**, with a justification; it is recorded and sends the
+critical event `restore.break_glass`. Only people with `read` on the backup's cluster see a restore request
+([Restore from the UI](restore.md#restore-from-the-ui)).

@@ -994,6 +994,24 @@ func newEngineContext(d Dialer, t *targetRow, opts json.RawMessage, cred func(ct
 	return ec, wc
 }
 
+// TargetEngineContext builds the EngineContext for a discovered target
+// (restores: the target is not a job's): Dial goes through the agent tunnel
+// with the target cluster's transfer mode, TLS is verified with the
+// configured target bundle and whatever opts carry. It also returns the
+// target's cluster.
+func TargetEngineContext(ctx context.Context, q store.Querier, d Dialer, targetID string, opts json.RawMessage,
+	cred func(ctx context.Context) (Credential, error)) (EngineContext, uuid.UUID, error) {
+	t, err := loadTargetInfo(ctx, q, targetID)
+	if err != nil {
+		return EngineContext{}, uuid.Nil, err
+	}
+	if len(opts) == 0 {
+		opts = json.RawMessage(`{}`)
+	}
+	ec, _ := newEngineContext(d, t, opts, cred, false)
+	return ec, t.clusterID, nil
+}
+
 // schedulePreview answers GET /backup/schedule-preview.
 func (a *API) schedulePreview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()

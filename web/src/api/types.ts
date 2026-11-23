@@ -624,6 +624,145 @@ export interface ChangeRequest {
   eligible_approvers?: number;
 }
 
+// ---------------------------------------------------- restores (docs/design/ui-restore.md)
+export type RestoreStatus = 'pending' | 'approved' | 'running' | 'succeeded' | 'failed' | 'rejected' | 'expired' | 'cancelled';
+export type RestoreEngine = 'postgresql' | 'clickhouse' | 'vault';
+/** POST /restores and /restores/check. credential.password and vault_token are write-only. */
+export interface RestoreInput {
+  run_id: string;
+  /** The copy to read (group runs); null = the copy the run's restore guide selects. */
+  copy_destination_id?: string | null;
+  target_id: string;
+  /** PostgreSQL, ClickHouse: databases in the backup; empty = all. Vault: none. */
+  databases?: string[];
+  /** PostgreSQL only: restore roles from globals.sql (default on; off without a superuser). */
+  globals?: boolean | null;
+  tls_ca_pem?: string;
+  /** PostgreSQL, ClickHouse: the target's admin login. */
+  credential?: CredentialInput;
+  /** Vault/OpenBao: a token of the new Vault that may call sys/storage/raft/snapshot-force. */
+  vault_token?: string;
+  /** 10–2000 characters; not checked by /restores/check. */
+  justification: string;
+  /** Admins on both clusters start the request without a checker. */
+  break_glass?: boolean;
+}
+export interface RestoreOptions {
+  globals?: boolean;
+  /** PostgreSQL: the credential is a superuser (owners and privileges are kept). */
+  superuser?: boolean;
+  tls_ca_pem?: string;
+  /** Open-time findings: existing empty databases restored into, no superuser. */
+  notes?: string[];
+  server_version?: string;
+}
+export interface RestoreTargetReport {
+  /** Selected databases that exist on the target: true when they hold user objects. */
+  existing: Record<string, boolean>;
+  superuser: boolean;
+  /** Vault/OpenBao */
+  initialized: boolean;
+  sealed: boolean;
+  /** The token holds update and sudo (or root) on sys/storage/raft/snapshot-force. */
+  can_snapshot_force: boolean;
+  /** An HA node that is not the active node. */
+  standby: boolean;
+  /** sys/capabilities-self refused the token (HTTP 401/403). */
+  capabilities_denied: boolean;
+  server_version: string;
+}
+/** POST /restores/check: 200 with ok=false, error and fields when a check failed. */
+export interface RestoreCheck {
+  ok: boolean;
+  error?: string;
+  fields?: Record<string, string>;
+  engine: RestoreEngine;
+  copy_destination_id: string | null;
+  /** The run that wrote the copy (the run or one of its repairs). */
+  copy_run_id: string | null;
+  databases_in_backup: string[] | null;
+  /** What would be restored. */
+  databases: string[] | null;
+  options: RestoreOptions;
+  report: RestoreTargetReport | null;
+}
+/** restore_requests.progress: the latest progress of a running restore ({} before it starts). */
+export interface RestoreProgress {
+  /** verify (the checksum pass) | check (the target re-check) | globals (PostgreSQL roles) | restore */
+  phase?: string;
+  database?: string;
+  table?: string;
+  /** Bytes of the backup read in the current phase, of total. */
+  bytes?: number;
+  total?: number;
+  done?: string[];
+  /** Databases created on the target so far: they stay after a failure. */
+  created?: string[];
+}
+/** One database (or the Vault snapshot) of a restore result. */
+export interface RestoreItem {
+  name: string;
+  status: 'succeeded' | 'failed' | 'skipped' | string;
+  bytes: number;
+  duration_seconds: number;
+  tables: number;
+  /** Rows written (ClickHouse). */
+  rows: number;
+  /** What was not restored, with the reason. */
+  skipped?: string[];
+  error?: string;
+}
+/** restore_requests.result ({} until the restore ends). */
+export interface RestoreResult {
+  items?: RestoreItem[];
+  notes?: string[];
+  created?: string[];
+}
+/** A restore request. Never carries a password or a token. */
+export interface RestoreRequest {
+  id: string;
+  status: RestoreStatus;
+  engine: RestoreEngine;
+  source: {
+    run_id: string;
+    copy_run_id: string;
+    target_id: string;
+    cluster_id: string;
+    cluster_name: string;
+    namespace: string;
+    service: string;
+    destination_id: string;
+    destination_name: string;
+    destination_kind: DestinationKind | string;
+  };
+  target: { id: string; cluster_id: string; cluster_name: string; namespace: string; service: string; port: number; vault_provider?: string };
+  databases: string[];
+  options: RestoreOptions;
+  /** The target login's public part; null once the request has ended. */
+  credential: { source: SecretSource; ref?: string; username: string } | null;
+  has_vault_token: boolean;
+  maker: Principal;
+  checker: Principal | null;
+  justification: string;
+  /** Started by the maker without a checker; the maker is the decider. */
+  break_glass: boolean;
+  created_at: string;
+  /** When a pending request expires. */
+  expires_at: string;
+  decided_at: string | null;
+  decision_comment: string;
+  /** When an approved request that has not started expires (approval + 24 h). */
+  approved_expires_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  progress: RestoreProgress | null;
+  result: RestoreResult | null;
+  error: string;
+  can_approve: boolean;
+  approve_disabled_reason: string;
+  can_cancel: boolean;
+}
+
 // ---------------------------------------------------- audit
 export type AuditTool = 'kubescape' | 'polaris' | 'kube-bench';
 export interface AuditScheduleInput {

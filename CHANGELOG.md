@@ -7,6 +7,35 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Restore from the UI into a new target, with approval** ([#22](https://github.com/Warewave-Technology/olympos/issues/22)):
+  *Restore…* on a succeeded or partial run loads its copy into a new PostgreSQL, ClickHouse or
+  Vault/OpenBao target that Olympos discovered, in any cluster, never the backup's own. The dialog checks
+  the target over its tunnel with the given credential (nothing written); the request then waits on
+  *Approvals* for another person with `operate` on both clusters (the maker needs `read` on the backup's
+  cluster and `operate` on the target's). Admins on both clusters can start it at once as **break-glass**
+  with a justification (event `restore.break_glass`). Pending requests expire after `changeRequests.ttl`,
+  approved ones that do not start within 24 hours. The server checks the target again, verifies the copy's
+  SHA-256 before writing anything and every zip entry's CRC while restoring, never drops or overwrites
+  anything (a database with user objects on the target refuses the request), and shows progress and a
+  result per database. The target credential and the Vault token are deleted when the request ends. API
+  `/api/v1/restores` (`/check`, `/{id}/approve`, `/reject`, `/cancel`); events `restore.requested`,
+  `restore.approved`, `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed`,
+  `restore.break_glass`. See `docs/restore.md` (Restore from the UI) and `docs/getting-started.md` (step 9).
+  - PostgreSQL: `pg_restore` of the target's major version (the dump's must be the same or older); roles
+    from `globals.sql` with a superuser only, roles that exist on the target are left alone.
+  - ClickHouse, deliberately conservative: databases and MergeTree-family, Replicated, Log and Memory tables
+    with their data, from DDL Olympos generates (no SQL text from the backup runs on the target). Views,
+    materialized views, dictionaries, other engines and secondary table features (defaults, TTL, indexes,
+    codecs, settings, …) are listed in the result to re-apply from your schema.
+  - Vault/OpenBao: `snapshot-force` with a token of the new Vault (default policy plus `update` and `sudo`
+    on `sys/storage/raft/snapshot-force`) into an initialized, unsealed, active node that is not configured
+    in Olympos; unseal it afterwards with the source's keys.
+- Lab: new, empty restore targets `restore-pg` (PostgreSQL 16, TLS), `restore-ch` (ClickHouse) and
+  `restore-vault` (Vault, raft, TLS), and the e2e test `TestM8Restores`.
+- The server image and the packages ship the pinned official `clickhouse` binary (LTS) as the restore client;
+  new key `backup.clickhouseClient`. Size: packages grow by about 200-230 MB per architecture
+  (about 750 MB more under `/usr/lib/olympos/bin`) and the server image goes from about 0.8 to 1.8 GB. See
+  `docs/configuration.md`.
 - **Signed kube-bench image** ([#26](https://github.com/Warewave-Technology/olympos/issues/26)): upstream
   kube-bench images are not signed, so each release copies the digest the agent pins to
   `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity. New agent chart value
@@ -59,6 +88,9 @@ All notable changes to this project are documented here. The format follows
   storage. Runs from before this release still use the job's destination.
 
 ### Upgrade notes
+- Migration `00023` adds restore requests. The new events `restore.failed` and `restore.break_glass` are
+  routed to every Slack channel that receives `backup.failed` (the migration adds those routes). The other
+  `restore.*` events get no route: add them, or move these two, under *Settings › Notifications › Routing*.
 - Migration `00022` runs at start. Existing jobs, runs and single-destination backups are unchanged.
 - The new event `backup.partial` is routed to every Slack channel that receives `backup.failed` (the
   migration adds those routes). Review *Settings › Notifications › Routing* if you want it elsewhere.

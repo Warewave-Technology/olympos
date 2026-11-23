@@ -39,7 +39,8 @@ type Worker struct {
 	Blobs  blob.Resolver
 	Creds  *Credentials
 	// Global is the max concurrent runs on this replica; PerCluster the max
-	// running runs per cluster (across replicas).
+	// running runs per cluster (across replicas), restores into the
+	// cluster's targets included (RunningInCluster).
 	Global, PerCluster int
 	// Poll is the idle wait between claims (default 2 s).
 	Poll time.Duration
@@ -199,8 +200,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			}
 			n, ok := running[c.cluster]
 			if !ok {
-				if err := tx.QueryRow(ctx, `SELECT count(*) FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id
-					JOIN targets t ON t.id = j.target_id WHERE r.status = 'running' AND t.cluster_id = $1`, c.cluster).Scan(&n); err != nil {
+				if n, err = RunningInCluster(ctx, tx, c.cluster); err != nil {
 					return err
 				}
 				running[c.cluster] = n
@@ -222,6 +222,20 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 		f.observe()
 	}
 	return claimed, nil
+}
+
+// RunningInCluster counts what holds the cluster's per-cluster slots: its
+// running backup runs and the running restores into its targets (both go
+// through the cluster's agent). Call it under the LockBackupClaim lock, as
+// both claim loops do, so the limit holds across replicas.
+func RunningInCluster(ctx context.Context, q store.Querier, clusterID uuid.UUID) (int, error) {
+	var n int
+	err := q.QueryRow(ctx, `SELECT
+		(SELECT count(*) FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id
+		 WHERE r.status = 'running' AND t.cluster_id = $1)
+		+ (SELECT count(*) FROM restore_requests rr JOIN targets t ON t.id = rr.target_id
+		 WHERE rr.status = 'running' AND t.cluster_id = $1)`, clusterID).Scan(&n)
+	return n, err
 }
 
 // skippedRepair is the outcome of a due repair whose job was disabled or

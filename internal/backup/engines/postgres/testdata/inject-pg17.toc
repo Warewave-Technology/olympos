@@ -1,0 +1,22 @@
+;
+; Archive created at 2026-11-23 03:11:41 +03
+;     dbname: inject_probe
+;     TOC Entries: 10
+;     Compression: gzip
+;     Dump Version: 1.16-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 16.15
+;     Dumped by pg_dump version: 17.4
+;
+;
+; Selected TOC Entries:
+;
+3450; 1262 6831446 DATABASE - inject_probe olympos
+3451; 0 0 COMMENT - DATABASE inject_probe olympos
+3452; 0 0 DATABASE PROPERTIES - inject_probe olympos
+216; 1255 6831450 FUNCTION public f() olympos
+215; 1259 6831447 TABLE public t olympos
+3453; 0 0 COMMENT public TABLE t olympos
+3444; 0 6831447 TABLE DATA public t olympos

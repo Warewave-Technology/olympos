@@ -90,10 +90,11 @@ const (
 	LockVaults          int64 = 0x4f4c5931
 	LockScanner         int64 = 0x4f4c5951
 	LockSelfBackup      int64 = 0x4f4c5960
+	LockRestores        int64 = 0x4f4c5970
 )
 
 // AllLocks lists every key (for the uniqueness test).
-var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance, LockSASExpiry, LockBackupClaim, LockVaults, LockScanner, LockSelfBackup}
+var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance, LockSASExpiry, LockBackupClaim, LockVaults, LockScanner, LockSelfBackup, LockRestores}
 
 // RunLeader runs tick every interval while holding the advisory lock. Only
 // one replica holds it at a time; others retry each interval.
