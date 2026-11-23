@@ -46,5 +46,6 @@ screenshot, no Azure account needed.
 | [SECURITY.md](../SECURITY.md) | Reporting a vulnerability privately |
 
 `docs/design/` holds the HTML mockups the UI was built from and the designs of features in progress
-([destination groups](design/destination-groups.md), [restore from the UI](design/ui-restore.md)); they are
+([destination groups](design/destination-groups.md), [restore from the UI](design/ui-restore.md),
+[synthetic monitoring](design/synthetic-monitoring.md)); they are
 not user documentation.
