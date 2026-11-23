@@ -1,0 +1,94 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app.kubernetes.io/instance: a
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/name: olympos-probe
+    app.kubernetes.io/version: 0.1.0
+    helm.sh/chart: olympos-agent-0.1.0
+  name: olympos-probe
+  namespace: olympos-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: a
+      app.kubernetes.io/name: olympos-probe
+  template:
+    metadata:
+      annotations:
+        checksum/ca: c1c19608a4078b91198b4f7b94d12511e15c7f008dd7a7951a2d7cc09eb6dfb6
+      labels:
+        app.kubernetes.io/instance: a
+        app.kubernetes.io/name: olympos-probe
+    spec:
+      automountServiceAccountToken: false
+      containers:
+      - env:
+        - name: OLYMPOS_SERVER
+          value: gw.example:8443
+        - name: OLYMPOS_SERVER_NAME
+          value: ""
+        - name: OLYMPOS_PROBE_IDENTITY_DIR
+          value: /etc/olympos-probe
+        - name: OLYMPOS_PROBE_MAX_CONCURRENCY
+          value: "20"
+        - name: OLYMPOS_HEALTH_ADDR
+          value: 127.0.0.1:8082
+        - name: GOMEMLIMIT
+          valueFrom:
+            resourceFieldRef:
+              containerName: probe
+              resource: limits.memory
+        image: ghcr.io/warewave-technology/olympos-probe:0.1.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - /olympos-probe
+            - health
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        name: probe
+        resources:
+          limits:
+            memory: 128Mi
+          requests:
+            cpu: 20m
+            memory: 32Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          readOnlyRootFilesystem: true
+        volumeMounts:
+        - mountPath: /etc/olympos-probe
+          name: identity
+          readOnly: true
+      enableServiceLinks: false
+      securityContext:
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      serviceAccountName: olympos-probe
+      volumes:
+      - name: identity
+        projected:
+          sources:
+          - secret:
+              items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+              name: olympos-probe-identity
+              optional: true
+          - configMap:
+              items:
+              - key: ca.crt
+                path: ca.crt
+              name: olympos-agent-ca

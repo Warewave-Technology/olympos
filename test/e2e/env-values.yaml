@@ -5,4 +5,4 @@ olympos:
 gatewayService: {type: NodePort, nodePort: 30443, annotations: {}}
 extraEnv:
 - {name: OLYMPOS_AGENT_CHART, value: ./deploy/helm/olympos-agent}
-- {name: OLYMPOS_AGENT_INSTALL_SETS, value: "image.repository=olympos-agent,image.tag=e2e,image.pullPolicy=Never"}
+- {name: OLYMPOS_AGENT_INSTALL_SETS, value: "image.repository=olympos-agent,image.tag=e2e,image.pullPolicy=Never,probe.image.repository=olympos-probe,probe.image.tag=e2e,probe.image.pullPolicy=Never"}

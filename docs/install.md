@@ -153,13 +153,15 @@ Olympos works without internet egress from the server:
   server updates the DB at most once an hour and keeps scanning with the last one while the mirror is
   unreachable.
 - **Images and charts**: mirror `ghcr.io/warewave-technology/*` and use `OLYMPOS_AGENT_INSTALL_SETS` to make
-  the generated agent install command point at the mirror.
+  the generated agent install command point at the mirror, for the agent and the probe
+  (`image.repository=…,probe.image.repository=…`).
 - **Entra ID, Key Vault, backup storage** need private endpoints (see §1 and §4).
 
 ## Verifying releases
 
 Every release (tag `v*`) is built by `.github/workflows/release.yml` and signed keyless with cosign through
-GitHub's OIDC identity: images, binaries, tarballs, `.deb`/`.rpm` and both Helm charts. Each artifact has an
+GitHub's OIDC identity: images (`olympos-server`, `olympos-agent` and, from v0.3.0, `olympos-probe`),
+binaries, tarballs, `.deb`/`.rpm` and both Helm charts. Each artifact has an
 SBOM (SPDX and CycloneDX) and SLSA provenance. Signatures and GitHub attestations are made only while the
 repository is public (keyless signing writes to the public Rekor log); a release from the private repository
 carries the SBOMs and `SHA256SUMS-<arch>` only. Verify before installing (`v0.1.0` as an example):
@@ -171,6 +173,10 @@ ISSUER=https://token.actions.githubusercontent.com
 # Images (signature, SBOM attestation)
 cosign verify ghcr.io/warewave-technology/olympos-server:0.1.0 --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
 cosign verify-attestation --type spdxjson ghcr.io/warewave-technology/olympos-server:0.1.0 \
+  --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" >/dev/null && echo sbom ok
+# The same for olympos-agent, and for olympos-probe (synthetic monitoring, v0.3.0 and later)
+cosign verify ghcr.io/warewave-technology/olympos-probe:0.3.0 --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER"
+cosign verify-attestation --type spdxjson ghcr.io/warewave-technology/olympos-probe:0.3.0 \
   --certificate-identity-regexp "$ID" --certificate-oidc-issuer "$ISSUER" >/dev/null && echo sbom ok
 
 # Helm charts (OCI)
@@ -194,7 +200,8 @@ do not install it. Checking the whole `SHA256SUMS` file while skipping missing f
 succeeds when none of the listed files is present (with a renamed download, for example). On macOS,
 `sha256sum` (macOS 14+) works the same way.
 
-Pin images by digest in production (`image.digest` in the chart values).
+Pin images by digest in production (`image.digest` in the chart values, and `probe.image.digest` for the
+probe in the agent chart).
 
 ### The kube-bench image
 
@@ -231,6 +238,14 @@ cluster. The cluster turns *online* within seconds. Show the command again from 
 if the token expired.
 
 For on-prem clusters set `--set providerOverride=onprem` (or change it later in *Settings › Clusters & agents*).
+
+The agent chart also installs `olympos-probe`, which runs synthetic monitoring scenarios from inside the
+cluster. It dials out to the same gateway, has a ServiceAccount with no RBAC and no token, and its identity
+is kept by the agent in the Secret `olympos-probe-identity`; the install command enrolls both. Opt out with
+`--set probe.enabled=false`. On a cluster added before the probe existed, `helm upgrade` adds the probe, and
+it waits ("Probe: not installed") until you run the command from *Settings › Clusters & agents › Install
+probe*. `probe.networkPolicy.egressCIDRs` restricts its egress at the network level too (see
+[configuration.md](configuration.md#agent-helm-values-deployhelmolympos-agent)).
 
 Annotate Services to be discovered (`olympos.io/backup`, `olympos.io/vault`, `olympos.io/port`,
 `olympos.io/tls-server-name`, see SPEC §5).

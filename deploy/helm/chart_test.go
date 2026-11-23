@@ -24,10 +24,16 @@ var update = flag.Bool("update", false, "rewrite golden files")
 
 func render(t *testing.T, extra ...string) []map[string]any {
 	t.Helper()
+	return renderChart(t, "olympos-agent", extra...)
+}
+
+// renderChart renders an agent chart directory (a copy, for old values).
+func renderChart(t *testing.T, chart string, extra ...string) []map[string]any {
+	t.Helper()
 	if _, err := exec.LookPath("helm"); err != nil {
 		t.Skip("helm not installed")
 	}
-	args := append([]string{"template", "a", "olympos-agent", "--namespace", "olympos-system",
+	args := append([]string{"template", "a", chart, "--namespace", "olympos-system",
 		"--set", "server=gw.example:8443", "--set", "bootstrapToken=olyb_x",
 		"--set", "serverCA=" + base64.StdEncoding.EncodeToString([]byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"))}, extra...)
 	cmd := exec.Command("helm", args...)
@@ -134,20 +140,36 @@ func TestAgentSecretsInventoryRBAC(t *testing.T) {
 	}
 }
 
+// The agent's Role names its own identity Secret and, with the probe
+// enabled (the default), the probe's, which it keeps (synthetic monitoring
+// decision 1): nothing else, and no list/watch/create/delete.
 func TestAgentIdentitySecretOnly(t *testing.T) {
-	docs := render(t)
-	role := find(docs, "Role", "olympos-agent-identity")
-	if role == nil {
-		t.Fatal("identity Role missing")
-	}
-	rs := rules(t, role)
-	if len(rs) != 1 || len(rs[0].ResourceNames) != 1 || rs[0].ResourceNames[0] != "olympos-agent-identity" {
-		t.Fatalf("identity Role must be resourceNames-restricted: %+v", rs)
-	}
-	for _, v := range rs[0].Verbs {
-		if v == "list" || v == "watch" || v == "create" || v == "delete" {
-			t.Fatalf("identity Role verb %q not allowed", v)
-		}
+	for _, tc := range []struct {
+		name  string
+		extra []string
+		want  []string
+	}{
+		{"probe enabled", nil, []string{"olympos-agent-identity", "olympos-probe-identity"}},
+		{"probe disabled", []string{"--set", "probe.enabled=false"}, []string{"olympos-agent-identity"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			role := find(render(t, tc.extra...), "Role", "olympos-agent-identity")
+			if role == nil {
+				t.Fatal("identity Role missing")
+			}
+			rs := rules(t, role)
+			if len(rs) != 1 || strings.Join(rs[0].ResourceNames, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("identity Role must name exactly %v: %+v", tc.want, rs)
+			}
+			if strings.Join(rs[0].Resources, ",") != "secrets" || len(rs[0].APIGroups) != 1 || rs[0].APIGroups[0] != "" {
+				t.Fatalf("identity Role must be for core secrets only: %+v", rs[0])
+			}
+			for _, v := range rs[0].Verbs {
+				if v == "list" || v == "watch" || v == "create" || v == "delete" {
+					t.Fatalf("identity Role verb %q not allowed", v)
+				}
+			}
+		})
 	}
 }
 

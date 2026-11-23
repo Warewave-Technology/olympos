@@ -1,9 +1,10 @@
 name: release
 
-# Tag v*: multi-arch images, binaries/tarballs/.deb/.rpm, SBOMs (SPDX +
-# CycloneDX), cosign keyless signatures (GitHub OIDC), SLSA provenance, the
-# Helm charts as signed OCI artifacts, and a GitHub release. Verify with the
-# commands in docs/install.md "Verifying releases".
+# Tag v*: multi-arch images (olympos-server, -agent, -probe),
+# binaries/tarballs/.deb/.rpm, SBOMs (SPDX + CycloneDX), cosign keyless
+# signatures (GitHub OIDC), SLSA provenance, the Helm charts as signed OCI
+# artifacts, and a GitHub release. Verify with the commands in
+# docs/install.md "Verifying releases".
 #
 # Pull requests and main pushes that touch the release inputs run the same
 # jobs as a dry run (version v0.0.0-dryrun): everything is built and checked,
@@ -81,7 +82,7 @@ jobs:
       - name: Build (both architectures); on a tag push, sign, attest
         run: |
           set -euo pipefail
-          for c in server agent; do
+          for c in server agent probe; do
             img=$REGISTRY/olympos-$c:${VERSION#v}
             out=(--output type=cacheonly)
             [ "$PUBLISH" != true ] || out=(--provenance=mode=max --sbom=true --push)

@@ -4,13 +4,13 @@
 (OrbStack works), with its own kubeconfig at `test/e2e/.work/kubeconfig`. Your current kube context
 is never used or changed.
 
-It builds `olympos-server:e2e` / `olympos-agent:e2e`, deploys:
+It builds `olympos-server:e2e` / `olympos-agent:e2e` / `olympos-probe:e2e`, deploys:
 
 | Namespace | Workload | Purpose |
 |---|---|---|
 | `olympos` | `olympos` (Helm chart, dev mode, local key vault on a PVC) | the server, UI at http://127.0.0.1:28080 |
 | `olympos` | `olympos-postgresql`, `azurite`, `minio` | Olympos's database (the chart's bundled PostgreSQL), Blob and S3 fakes |
-| `olympos-system` | `olympos-agent` (installed by the tests from the local chart) | the agent |
+| `olympos-system` | `olympos-agent`, `olympos-probe` (installed by the tests from the local chart) | the agent and the synthetic monitoring probe |
 | `lab` | `orders-pg` (TLS, lab CA), `vault` and `openbao` (TLS, raft), `metrics-ch` | annotated targets |
 | `lab` | `restore-pg` (PostgreSQL 16, TLS), `restore-ch`, `restore-vault` (TLS, raft, not configured in Olympos) | new, empty servers that `TestM8Restores` and the docs tour restore backups into (emptied by every reset) |
 

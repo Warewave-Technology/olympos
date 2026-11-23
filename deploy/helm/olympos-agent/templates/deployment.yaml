@@ -42,6 +42,8 @@ spec:
         - {name: OLYMPOS_BENCH_MAX_PARALLEL, value: {{ .Values.bench.maxParallel | quote }}}
         - {name: OLYMPOS_BENCH_NAMESPACE, value: {{ .Values.bench.namespace | quote }}}
         - {name: OLYMPOS_BENCH_IMAGE_REPOSITORY, value: {{ .Values.bench.imageRepository | quote }}}
+        - {name: OLYMPOS_PROBE_ENABLED, value: {{ include "olympos-probe.enabled" . | quote }}}
+        - {name: OLYMPOS_PROBE_IDENTITY_SECRET, value: olympos-probe-identity}
         - name: POD_NAMESPACE
           valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
         securityContext:

@@ -1,0 +1,50 @@
+{{- if eq (include "olympos-probe.enabled" .) "true" }}
+{{- /*
+The probe's identity (synthetic monitoring, decision 1). The agent enrolls
+the probe, writes tls.crt, tls.key and cluster-id here and renews them; the
+probe mounts tls.crt and tls.key read-only. The chart never drops what is
+there. It adds a bootstrap-token for the agent to enroll the probe with:
+probe.bootstrapToken ("Install probe") even when a certificate exists, or
+else, with no certificate yet, the cluster's bootstrapToken (a new cluster:
+one token enrolls the agent and the probe). Without either the Secret stays
+as it is, possibly empty: the upgrade succeeds and the probe waits.
+
+The agent treats a token in this Secret as a new install request and drops
+it once used or refused. --reuse-values keeps the token in the release
+values, so the chart notes the SHA-256 of the token it last wrote and does
+not write the same token again: a spent token is not replayed on every
+upgrade.
+*/}}
+{{- $p := .Values.probe | default dict }}
+{{- $sumKey := "olympos.io/bootstrap-token-sha256" }}
+{{- $existing := lookup "v1" "Secret" .Release.Namespace "olympos-probe-identity" }}
+{{- $data := dict }}
+{{- $sum := "" }}
+{{- if $existing }}
+{{- $data = deepCopy ($existing.data | default dict) }}
+{{- $sum = index (($existing.metadata).annotations | default dict) $sumKey | default "" }}
+{{- end }}
+{{- $token := $p.bootstrapToken | default "" }}
+{{- if and (not $token) (not (hasKey $data "tls.crt")) }}
+{{- $token = .Values.bootstrapToken | default "" }}
+{{- end }}
+{{- if and $token (ne (sha256sum $token) $sum) }}
+{{- $_ := set $data "bootstrap-token" (b64enc $token) }}
+{{- $sum = sha256sum $token }}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: olympos-probe-identity
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-probe.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- with $sum }}
+    {{ $sumKey }}: {{ . | quote }}
+    {{- end }}
+type: Opaque
+{{- with $data }}
+data: {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end }}

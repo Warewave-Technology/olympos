@@ -43,10 +43,11 @@ done
 if [ -z "${SKIP_BUILD:-}" ]; then
   log "building images"
   docker build -q -f deploy/docker/agent.Dockerfile -t olympos-agent:e2e . >/dev/null
+  docker build -q -f deploy/docker/probe.Dockerfile -t olympos-probe:e2e . >/dev/null
   docker build -q -f deploy/docker/server.Dockerfile -t olympos-server:e2e --build-arg PG_VERSIONS="16 17" --build-arg GO_TAGS=dev . >/dev/null
 fi
 log "loading images into kind"
-kind load docker-image olympos-agent:e2e olympos-server:e2e --name "$CLUSTER" >/dev/null
+kind load docker-image olympos-agent:e2e olympos-probe:e2e olympos-server:e2e --name "$CLUSTER" >/dev/null
 
 # Lab CA for target TLS (Postgres verify-full against orders-pg.lab.svc).
 if [ ! -f "$WORK/lab-ca.crt" ]; then
@@ -129,10 +130,16 @@ helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \
 kubectl -n olympos rollout restart deploy/olympos >/dev/null
 kubectl -n olympos rollout status deploy/olympos --timeout=180s >/dev/null
 if kubectl -n olympos-system get deploy olympos-agent >/dev/null 2>&1; then
-  # Pick up chart changes (RBAC) and the freshly loaded image.
-  helm upgrade olympos-agent deploy/helm/olympos-agent -n olympos-system --reuse-values --wait --timeout 3m >/dev/null
-  kubectl -n olympos-system rollout restart deploy/olympos-agent >/dev/null
-  kubectl -n olympos-system rollout status deploy/olympos-agent --timeout=180s >/dev/null
+  # Pick up chart changes (RBAC) and the freshly loaded images. A release
+  # from before the probe has no probe.image values to reuse.
+  helm upgrade olympos-agent deploy/helm/olympos-agent -n olympos-system --reuse-values \
+    --set probe.image.repository=olympos-probe --set probe.image.tag=e2e --set probe.image.pullPolicy=Never \
+    --wait --timeout 3m >/dev/null
+  for d in olympos-agent olympos-probe; do
+    kubectl -n olympos-system get "deploy/$d" >/dev/null 2>&1 || continue
+    kubectl -n olympos-system rollout restart "deploy/$d" >/dev/null
+    kubectl -n olympos-system rollout status "deploy/$d" --timeout=180s >/dev/null
+  done
 fi
 
 kubectl -n lab rollout status statefulset/orders-pg --timeout=180s >/dev/null

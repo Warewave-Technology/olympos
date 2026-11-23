@@ -32,7 +32,7 @@ if ! kind get clusters | grep -qx olympos-edge; then
   kind create cluster --config test/e2e/kind-edge.yaml --kubeconfig "$EDGE_KC"
 fi
 KUBECONFIG=$EDGE_KC kubectl wait --for=condition=Ready nodes --all --timeout=180s >/dev/null
-kind load docker-image olympos-agent:e2e --name olympos-edge >/dev/null
+kind load docker-image olympos-agent:e2e olympos-probe:e2e --name olympos-edge >/dev/null
 if [ ! -f "$WORK/payments-pg.crt" ]; then
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=payments-pg.shop.svc" \
     -keyout "$WORK/payments-pg.key" -out "$WORK/payments-pg.csr" 2>/dev/null

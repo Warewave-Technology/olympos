@@ -114,7 +114,8 @@ sets=$(grep -oE -- '--set [a-zA-Z.]+=[^ ]+' <<<"$cmd" | sed 's/--set //' | grep 
 args=()
 for s in $sets; do args+=(--set "$s"); done
 helm upgrade --install olympos-agent deploy/helm/olympos-agent -n olympos-system --create-namespace \
-  --set image.repository=olympos-agent --set image.tag=smoke --set image.pullPolicy=Never "${args[@]}" --wait --timeout 3m >/dev/null
+  --set image.repository=olympos-agent --set image.tag=smoke --set image.pullPolicy=Never --set probe.enabled=false \
+  "${args[@]}" --wait --timeout 3m >/dev/null
 for i in $(seq 90); do [ "$(api GET /clusters/"$cid" | jq -r .status)" = online ] && break; sleep 2; done
 [ "$(api GET /clusters/"$cid" | jq -r .status)" = online ] || { echo "agent did not come online" >&2; exit 1; }
 kubectl -n shop rollout status deploy/orders-pg --timeout=120s >/dev/null

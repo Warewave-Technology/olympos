@@ -26,6 +26,9 @@ docker build -q -f "$src/deploy/docker/server.Dockerfile" -t "olympos-server:$v-
   --build-arg PG_VERSIONS="16 17" --build-arg GO_TAGS=dev --build-arg VERSION="$from" "$src" >/dev/null
 kind load docker-image "olympos-server:$v-dev" --name olympos-lab >/dev/null
 echo "==> installing the released chart of $from"
+# A server from before the probe takes a probe enrollment for an agent one,
+# which spends the token: the agent is installed without the probe here.
+export OLYMPOS_E2E_PROBE=off
 helm upgrade --install olympos oci://ghcr.io/warewave-technology/charts/olympos-server --version "$v" -n olympos \
   -f test/e2e/server-values.yaml --set image.tag="$v-dev" --wait --timeout 5m
 OLYMPOS_E2E_KUBECONFIG=$KUBECONFIG OLYMPOS_E2E_URL=http://127.0.0.1:28080 \

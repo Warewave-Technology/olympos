@@ -1,0 +1,29 @@
+{{- $cidrs := dig "networkPolicy" "egressCIDRs" list (.Values.probe | default dict) }}
+{{- if and (eq (include "olympos-probe.enabled" .) "true") $cidrs }}
+# Opt-in (probe.networkPolicy.egressCIDRs): the probe may reach only these
+# CIDRs and the cluster DNS. The host allowlist in Olympos applies either
+# way; this adds the same limit at the network level.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: olympos-probe
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-probe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "olympos-probe.selector" . | nindent 6 }}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    {{- range $cidrs }}
+    - ipBlock: {cidr: {{ . | quote }}}
+    {{- end }}
+  - to:
+    - namespaceSelector:
+        matchLabels: {kubernetes.io/metadata.name: kube-system}
+      podSelector:
+        matchLabels: {k8s-app: kube-dns}
+    ports:
+    - {protocol: UDP, port: 53}
+    - {protocol: TCP, port: 53}
+{{- end }}
