@@ -568,7 +568,7 @@ describe('codes', () => {
   it('covers every failure, skip, error and blocked code of the API', () => {
     const codes = [
       ...['host_not_allowed', 'ip_denied', 'redirect_blocked', 'dns_error', 'connect_error', 'tls_error', 'timeout', 'assertion_failed', 'invalid_request', 'credential_error', 'runner_panic'],
-      ...['probe_offline', 'probe_disconnected', 'scenario_disabled', 'credential_unavailable', 'not_dispatched', 'probe_busy', 'allowlist_stale', 'credentials_unreadable', 'invalid_scenario', 'rejected'],
+      ...['probe_offline', 'probe_disconnected', 'ingest_failed', 'scenario_disabled', 'credential_unavailable', 'not_dispatched', 'probe_busy', 'allowlist_stale', 'credentials_unreadable', 'invalid_scenario', 'rejected'],
       ...['credential_expired', 'credential_error', 'dispatch_error', 'no_result', 'invalid_result'],
       'rate_limit',
       'no_longer_monitored',

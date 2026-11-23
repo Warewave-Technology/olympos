@@ -118,6 +118,7 @@ export const REASON_TEXT: Record<string, string> = {
   // server: skipped
   probe_offline: 'Probe offline',
   probe_disconnected: 'The probe disconnected during the run',
+  ingest_failed: "The probe's result could not be stored",
   scenario_disabled: 'Scenario paused',
   credential_unavailable: 'The credential could not be read',
   not_dispatched: 'Not sent to the probe in time',

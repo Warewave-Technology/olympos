@@ -52,6 +52,9 @@ func (s *Service) Ingest(ctx context.Context, clusterID uuid.UUID, r *pb.RunResu
 		return err
 	})
 	if err != nil {
+		// The probe sends a result once: the next dispatch pass ends the
+		// run skipped (ingest_failed) rather than wait for one.
+		s.lose(runID, clusterID)
 		return err
 	}
 	if stored {

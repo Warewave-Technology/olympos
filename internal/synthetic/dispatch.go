@@ -33,8 +33,9 @@ var runTimeoutSQL = fmt.Sprintf(`GREATEST(LEAST(COALESCE(
 //     end skipped (not_dispatched), so that the scheduler plans the next;
 //     due runs of disabled scenarios end skipped (scenario_disabled);
 //  3. runs this replica sent end skipped (probe_disconnected) when their
-//     stream is gone, or error (no_result) when the stream is open but the
-//     result is ResultGrace past the run's timeout; running runs that no
+//     stream is gone, skipped (ingest_failed) when their result came but
+//     could not be stored, or error (no_result) when the stream is open but
+//     the result is ResultGrace past the run's timeout; running runs that no
 //     live replica tracks end skipped (probe_disconnected) OrphanGrace
 //     later;
 //  4. due runs of the probes connected here are claimed (FOR UPDATE SKIP
@@ -266,6 +267,17 @@ func (s *Service) release(runID, clusterID uuid.UUID) {
 	s.Probes.RunDone(r.cluster, r.session)
 }
 
+// lose records that the result of a run of clusterID came but could not be
+// stored. A run this replica did not send is left alone: its own replica
+// ends it.
+func (s *Service) lose(runID, clusterID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if r := s.sent[runID]; r != nil && r.cluster == clusterID {
+		r.lost = true
+	}
+}
+
 // forget drops a finished run: its slot is freed if it was not yet.
 func (s *Service) forget(runID uuid.UUID) {
 	s.mu.Lock()
@@ -297,6 +309,9 @@ func (s *Service) reap(ctx context.Context, now time.Time) error {
 	for _, it := range due {
 		status, reason := "", ""
 		switch {
+		// Its result came and was lost: the probe will not send another.
+		case it.r.lost:
+			status, reason = StatusSkipped, ReasonIngestFailed
 		// A run whose result already came is not skipped because its
 		// stream ended: the result is being stored. Only the deadline
 		// applies to it.

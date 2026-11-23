@@ -2666,7 +2666,7 @@ components:
         finished_at: {type: [string, "null"], format: date-time}
         status: {type: string, enum: [scheduled, running, passed, failed, error, skipped]}
         failed_step: {type: [integer, "null"]}
-        failure_reason: {type: string, description: "Skipped: probe_offline, probe_disconnected, scenario_disabled, credential_unavailable, not_dispatched, probe_busy, allowlist_stale, credentials_unreadable, invalid_scenario, rejected"}
+        failure_reason: {type: string, description: "Skipped: probe_offline, probe_disconnected, ingest_failed, scenario_disabled, credential_unavailable, not_dispatched, probe_busy, allowlist_stale, credentials_unreadable, invalid_scenario, rejected"}
         total_ms: {type: [integer, "null"]}
         test: {type: boolean}
         manual: {type: boolean}

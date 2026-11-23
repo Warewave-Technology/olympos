@@ -51,6 +51,10 @@ const (
 	// ReasonNoResult: the stream stayed open but no result came within the
 	// run's timeout and ResultGrace (error).
 	ReasonNoResult = "no_result"
+	// ReasonIngestFailed: the probe's result came but the server could not
+	// store it (skipped): the probe sends a result once, and the fault is
+	// not the scenario's.
+	ReasonIngestFailed = "ingest_failed"
 	// ReasonNotDispatched: the probe was online but no replica could send
 	// the run within the scenario's interval (skipped).
 	ReasonNotDispatched = "not_dispatched"
@@ -178,6 +182,9 @@ type sentRun struct {
 	// released: RunDone was called (the result came), but the run is not
 	// finished in the database yet.
 	released bool
+	// lost: the result came but storing it failed. No other result will
+	// come: the run ends skipped (ingest_failed), not error (no_result).
+	lost bool
 }
 
 func (s *Service) now() time.Time {

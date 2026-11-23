@@ -1,13 +1,16 @@
 package synthetic
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
@@ -297,4 +300,42 @@ func TestCanaryNotInDBOrLogs(t *testing.T) {
 		!strings.Contains(string(excerpt), "GET /a HTTP/1.1") {
 		t.Fatalf("excerpt %q (%v)", excerpt, err)
 	}
+}
+
+// A result that came but could not be stored (the transaction failed after
+// the slot was released) ends the run skipped (ingest_failed) on the next
+// pass: the probe sends a result once, and it was not the scenario's fault.
+// It is not left to end error (no_result) at its deadline.
+func TestIngestFailureEndsSkipped(t *testing.T) {
+	e := newEnv(t)
+	e.allow("suffix", "example.com")
+	sc := e.scenario("s", true, httpStep("https://api.example.com/", nil))
+	cl := e.cluster("a", ProbeOnlineState)
+	sess := e.probes.connect(t, cl, 4)
+	run := e.dispatched(sc, cl)
+
+	apply := e.svc.OnResult
+	e.svc.OnResult = func(context.Context, pgx.Tx, RunOutcome) error { return errors.New("database went away") }
+	if err := e.svc.Ingest(e.ctx, cl, &pb.RunResult{RunId: run.String(), Status: StatusPassed}); err == nil {
+		t.Fatal("Ingest did not report the failure")
+	}
+	e.svc.OnResult = apply
+	e.wantRun(run, StatusRunning, "")
+	if e.probes.inFlight(sess) != 0 {
+		t.Fatal("slot not released")
+	}
+	// Well before the run's deadline.
+	e.clock.add(time.Second)
+	e.dispatch()
+	e.wantRun(run, StatusSkipped, ReasonIngestFailed)
+	if rs := e.results(); len(rs) != 1 || rs[0].Status != StatusSkipped || rs[0].Reason != ReasonIngestFailed {
+		t.Fatalf("outcomes %+v", rs)
+	}
+
+	// A run whose result never came still ends error (no_result) at its
+	// deadline.
+	other := e.dispatched(sc, cl)
+	e.clock.add(10*time.Second + ResultGrace + time.Second)
+	e.dispatch()
+	e.wantRun(other, StatusError, ReasonNoResult)
 }

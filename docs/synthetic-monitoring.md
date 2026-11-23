@@ -293,7 +293,7 @@ credential replaced by `$TOKEN`.
 | Passed | | Yes |
 | Failed | An assertion did not hold: `assertion_failed`, with the assertion and the actual value | Yes |
 | Error | A step could not complete, with the probe's code: `host_not_allowed`, `ip_denied`, `redirect_blocked`, `dns_error`, `connect_error`, `tls_error`, `timeout`, `invalid_request`, `credential_error`, `runner_panic`. Or Olympos could not run it as defined: `credential_expired`, `credential_error`, `credentials_unreadable`, `invalid_scenario`, `dispatch_error`, `no_result`, `invalid_result`, `rejected` | Yes |
-| Skipped | Not the scenario's fault: `probe_offline`, `probe_disconnected`, `scenario_disabled`, `credential_unavailable` (Key Vault or envelope outage on the server), `not_dispatched`, and the probe's refusals `probe_busy` and `allowlist_stale` | Never |
+| Skipped | Not the scenario's fault: `probe_offline`, `probe_disconnected`, `ingest_failed` (the result came but the server could not store it), `scenario_disabled`, `credential_unavailable` (Key Vault or envelope outage on the server), `not_dispatched`, and the probe's refusals `probe_busy` and `allowlist_stale` | Never |
 
 A skipped run neither counts as a failure nor breaks a streak.
 
