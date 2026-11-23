@@ -69,6 +69,7 @@ spec:
           readOnly: true
       enableServiceLinks: false
       securityContext:
+        fsGroup: 65532
         runAsGroup: 65532
         runAsNonRoot: true
         runAsUser: 65532
@@ -78,6 +79,7 @@ spec:
       volumes:
       - name: identity
         projected:
+          defaultMode: 288
           sources:
           - secret:
               items:

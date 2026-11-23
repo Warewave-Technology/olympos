@@ -29,6 +29,9 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        # The projected files belong to root; fsGroup gives them the probe's
+        # group, so the key can be 0440 instead of world-readable.
+        fsGroup: 65532
         seccompProfile: {type: RuntimeDefault}
       containers:
       - name: probe
@@ -62,6 +65,7 @@ spec:
       volumes:
       - name: identity
         projected:
+          defaultMode: 0440
           sources:
           - secret:
               name: olympos-probe-identity

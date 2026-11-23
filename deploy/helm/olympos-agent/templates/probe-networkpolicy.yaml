@@ -1,8 +1,15 @@
-{{- $cidrs := dig "networkPolicy" "egressCIDRs" list (.Values.probe | default dict) }}
+{{- $np := (.Values.probe | default dict).networkPolicy | default dict }}
+{{- $cidrs := $np.egressCIDRs | default list }}
 {{- if and (eq (include "olympos-probe.enabled" .) "true") $cidrs }}
+{{- /* probe.networkPolicy.dns; these fallbacks equal the values.yaml defaults (old values have none). */}}
+{{- $dnsSet := $np.dns | default dict }}
+{{- $nsSel := $dnsSet.namespaceSelector | default (dict "matchLabels" (dict "kubernetes.io/metadata.name" "kube-system")) }}
+{{- $podSel := $dnsSet.podSelector | default (dict "matchLabels" (dict "k8s-app" "kube-dns")) }}
+{{- $ports := $dnsSet.ports | default (list (dict "protocol" "UDP" "port" 53) (dict "protocol" "TCP" "port" 53)) }}
 # Opt-in (probe.networkPolicy.egressCIDRs): the probe may reach only these
-# CIDRs and the cluster DNS. The host allowlist in Olympos applies either
-# way; this adds the same limit at the network level.
+# CIDRs and the cluster DNS (probe.networkPolicy.dns, kube-dns by default).
+# The host allowlist in Olympos applies either way; this adds the same limit
+# at the network level.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -19,11 +26,7 @@ spec:
     - ipBlock: {cidr: {{ . | quote }}}
     {{- end }}
   - to:
-    - namespaceSelector:
-        matchLabels: {kubernetes.io/metadata.name: kube-system}
-      podSelector:
-        matchLabels: {k8s-app: kube-dns}
-    ports:
-    - {protocol: UDP, port: 53}
-    - {protocol: TCP, port: 53}
+    - namespaceSelector: {{- toYaml $nsSel | nindent 8 }}
+      podSelector: {{- toYaml $podSel | nindent 8 }}
+    ports: {{- toYaml $ports | nindent 4 }}
 {{- end }}

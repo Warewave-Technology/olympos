@@ -86,9 +86,26 @@ probe:
   maxConcurrency: 20
   networkPolicy:
     # Non-empty: a NetworkPolicy lets the probe reach only these CIDRs (and
-    # DNS on kube-dns). Include the Olympos gateway (`server`) and every
+    # the cluster DNS, below). Include the Olympos gateway (`server`) and every
     # allowlisted host; the allowlist in Olympos still applies.
     egressCIDRs: []
+    # The cluster DNS the policy allows (the probe asks the nameserver in
+    # the pod's resolv.conf). Unset or empty fields keep the defaults:
+    #   namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+    #   podSelector: {matchLabels: {k8s-app: kube-dns}}
+    #   ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    # A field you set replaces its default as a whole (the defaults are not
+    # here because Helm would merge your labels into them). OpenShift:
+    #   namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
+    #   podSelector: {matchLabels: {dns.operator.openshift.io/daemonset-dns: default}}
+    #   ports: [{protocol: UDP, port: 5353}, {protocol: TCP, port: 5353}]
+    # NodeLocal DNSCache answers on the node, not in a kube-dns pod: add the
+    # nameserver address of the pod's resolv.conf to egressCIDRs (169.254.20.10/32,
+    # or the kube-dns Service IP when the cache listens on it).
+    dns:
+      namespaceSelector: {}
+      podSelector: {}
+      ports: []
   resources:
     requests: {cpu: 20m, memory: 32Mi}
     limits: {memory: 128Mi}

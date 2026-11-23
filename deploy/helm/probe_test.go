@@ -90,6 +90,11 @@ func TestProbePodHardening(t *testing.T) {
 		psc.SeccompProfile == nil || psc.SeccompProfile.Type != corev1.SeccompProfileTypeRuntimeDefault {
 		t.Errorf("pod securityContext: %+v", psc)
 	}
+	// The projected files are root's: fsGroup and 0440 keep tls.key
+	// readable by the probe only, not world-readable.
+	if psc == nil || psc.FSGroup == nil || *psc.FSGroup != 65532 {
+		t.Errorf("pod securityContext.fsGroup must be 65532: %+v", psc)
+	}
 	if len(pod.Containers) != 1 || len(pod.InitContainers) != 0 {
 		t.Fatalf("containers: %d, init containers: %d", len(pod.Containers), len(pod.InitContainers))
 	}
@@ -108,6 +113,9 @@ func TestProbePodHardening(t *testing.T) {
 	}
 	if len(pod.Volumes) != 1 || pod.Volumes[0].Projected == nil {
 		t.Fatalf("the projected identity must be the only volume: %+v", pod.Volumes)
+	}
+	if m := pod.Volumes[0].Projected.DefaultMode; m == nil || *m != 0o440 {
+		t.Errorf("projected defaultMode must be 0440, got %v", m)
 	}
 	src := pod.Volumes[0].Projected.Sources
 	if len(src) != 2 || src[0].Secret == nil || src[1].ConfigMap == nil {
@@ -232,6 +240,40 @@ func TestProbeNetworkPolicyOptIn(t *testing.T) {
 	}
 }
 
+// probe.networkPolicy.dns replaces each default it sets as a whole (OpenShift
+// DNS here); unset fields keep the kube-dns defaults.
+func TestProbeNetworkPolicyDNSOverride(t *testing.T) {
+	values := filepath.Join(t.TempDir(), "values.yaml")
+	if err := os.WriteFile(values, []byte(`probe:
+  networkPolicy:
+    egressCIDRs: [10.20.0.0/16]
+    dns:
+      namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
+      podSelector: {matchLabels: {dns.operator.openshift.io/daemonset-dns: default}}
+      ports: [{protocol: UDP, port: 5353}, {protocol: TCP, port: 5353}]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dns := decode[networkingv1.NetworkPolicy](t, find(render(t, "-f", values), "NetworkPolicy", "olympos-probe")).Spec.Egress[1]
+	if ns := dns.To[0].NamespaceSelector.MatchLabels; len(ns) != 1 || ns["kubernetes.io/metadata.name"] != "openshift-dns" {
+		t.Errorf("namespaceSelector: %v", ns)
+	}
+	if pod := dns.To[0].PodSelector.MatchLabels; len(pod) != 1 || pod["dns.operator.openshift.io/daemonset-dns"] != "default" {
+		t.Errorf("podSelector must replace k8s-app=kube-dns, not add to it: %v", pod)
+	}
+	if len(dns.Ports) != 2 || dns.Ports[0].Port.IntValue() != 5353 || dns.Ports[1].Port.IntValue() != 5353 {
+		t.Errorf("ports: %+v", dns.Ports)
+	}
+
+	dns = decode[networkingv1.NetworkPolicy](t, find(render(t, "--set", "probe.networkPolicy.egressCIDRs[0]=10.0.0.0/8",
+		"--set", "probe.networkPolicy.dns.ports[0].port=1053", "--set", "probe.networkPolicy.dns.ports[0].protocol=UDP"),
+		"NetworkPolicy", "olympos-probe")).Spec.Egress[1]
+	if dns.To[0].PodSelector.MatchLabels["k8s-app"] != "kube-dns" || dns.To[0].NamespaceSelector.MatchLabels["kubernetes.io/metadata.name"] != "kube-system" ||
+		len(dns.Ports) != 1 || dns.Ports[0].Port.IntValue() != 1053 {
+		t.Errorf("only ports set: %+v", dns)
+	}
+}
+
 // The probe Secret in template mode (lookup finds nothing): a new cluster's
 // bootstrapToken enrolls the probe too; an Install probe token wins. With a
 // live Secret the chart keeps its keys (checked in the lab, see the task
@@ -285,6 +327,11 @@ func TestProbeToleratesOldValues(t *testing.T) {
 	}
 	if find(docs, "Role", "olympos-agent-identity") == nil || find(docs, "ServiceAccount", "olympos-probe") == nil {
 		t.Fatal("Install probe on old values: probe objects missing")
+	}
+	np := "probe.networkPolicy.egressCIDRs[0]=10.0.0.0/8"
+	wantNP, _ := yaml.Marshal(find(render(t, "--set", np), "NetworkPolicy", "olympos-probe"))
+	if got, _ := yaml.Marshal(find(renderChart(t, old, "--set", np), "NetworkPolicy", "olympos-probe")); !bytes.Equal(got, wantNP) {
+		t.Fatalf("NetworkPolicy on old values differs from the defaults:\n%s", got)
 	}
 	if find(renderChart(t, old, "--set", "probe.enabled=false"), "Deployment", "olympos-probe") != nil {
 		t.Fatal("probe.enabled=false on old values still renders the probe")
