@@ -17,7 +17,7 @@ import (
 // the status line, the redacted headers in name order, an empty line and
 // the redacted body. Everything is redacted here, before any truncation,
 // so that a secret cannot be cut where its pattern no longer matches.
-func (r *Runner) httpExcerpt(resp *http.Response, redactedBody []byte, credHeaders []string) []byte {
+func (r *Runner) httpExcerpt(resp *http.Response, redactedBody []byte, credHeaders []string, f *facts) []byte {
 	var b bytes.Buffer
 	b.WriteString(resp.Proto)
 	b.WriteByte(' ')
@@ -31,6 +31,9 @@ func (r *Runner) httpExcerpt(resp *http.Response, redactedBody []byte, credHeade
 	sort.Strings(names)
 	for _, n := range names {
 		for _, v := range h[n] {
+			if f.leaks([]byte(v)) {
+				v = sensitive.Redacted
+			}
 			b.WriteString(n)
 			b.WriteString(": ")
 			b.WriteString(v)

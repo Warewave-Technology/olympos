@@ -44,12 +44,14 @@ var tlsVersions = map[string]bool{"1.0": true, "1.1": true, "1.2": true, "1.3": 
 
 // Headers a step may not set. Host would pick another virtual host behind
 // an allowed address; Accept-Encoding would stop the probe from
-// decompressing, and a compressed body cannot be redacted; the others
-// belong to the transport.
+// decompressing, and a compressed body cannot be redacted; Range and
+// If-Range would let a step take a response apart slice by slice, out of
+// reach of the probe's checks on whole values; the others belong to the
+// transport.
 var reservedHeaders = map[string]bool{
 	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
 	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
-	"Accept-Encoding": true,
+	"Accept-Encoding": true, "Range": true, "If-Range": true,
 }
 
 // subject classes: which operators apply and what Value holds.

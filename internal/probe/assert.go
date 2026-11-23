@@ -33,9 +33,17 @@ const encodedBody = "[body not shown: content-encoded]"
 // compressed without saying so): redaction cannot see into it either.
 func binaryBody(n int) string { return fmt.Sprintf("[binary body, %d bytes]", n) }
 
-// isText reports whether b is UTF-8, allowing an incomplete last
-// character where the read limit cut it.
+// echoedBody stands for a body that still carries a credential once it
+// is redacted and scrubbed (in an escaped form the scrub does not know).
+const echoedBody = "[body not shown: it echoes a credential]"
+
+// isText reports whether b is UTF-8 without NUL bytes (UTF-16 text is
+// valid UTF-8 with a NUL after every ASCII letter), allowing an
+// incomplete last character where the read limit cut it.
 func isText(b []byte) bool {
+	if bytes.IndexByte(b, 0) >= 0 {
+		return false
+	}
 	if utf8.Valid(b) {
 		return true
 	}
@@ -63,6 +71,9 @@ type facts struct {
 	credHeader  []string
 	stored      bool // the scenario stores responses
 	encoded     bool // the body is still content-encoded
+	// leaky reports text that still carries a credential once redacted
+	// and scrubbed; nil when the run has no credential.
+	leaky func([]byte) bool
 
 	jsonOnce sync.Once
 	jsonDoc  any
@@ -113,9 +124,14 @@ func (f *facts) redactedBody() ([]byte, bool) {
 			return
 		}
 		f.redBody, f.redCut = f.redact.RedactPrefix(f.body, redactedPrefix)
+		if f.leaks([]byte(f.redBody)) {
+			f.redBody, f.redCut = []byte(echoedBody), false
+		}
 	})
 	return f.redBody, f.redCut
 }
+
+func (f *facts) leaks(b []byte) bool { return f.leaky != nil && f.leaky(b) }
 
 // defaultAssertions apply to a step without assertions: an HTTP status
 // below 400, at least one DNS record, a TCP connection, a TLS certificate
@@ -223,6 +239,9 @@ func (r *Runner) checkHeader(f *facts, name string, a spec.Assertion) (string, b
 // the excerpt's headers are.
 func (r *Runner) headerActual(f *facts, canon, v string) string {
 	h := r.Redactor.RedactHeaders(http.Header{canon: {v}}, f.credHeader)
+	if f.leaks([]byte(h.Get(canon))) {
+		return sensitive.Redacted
+	}
 	return h.Get(canon)
 }
 
@@ -252,6 +271,9 @@ func (r *Runner) checkJSON(f *facts, path string, a spec.Assertion) (string, boo
 	}
 	if actual != sensitive.Redacted {
 		actual = r.Redactor.RedactValue(key, repr)
+		if f.leaks([]byte(actual)) {
+			actual = sensitive.Redacted
+		}
 	}
 	switch a.Operator {
 	case spec.OpExists:

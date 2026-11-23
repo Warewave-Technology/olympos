@@ -16,6 +16,7 @@ import (
 	"golang.org/x/net/http/httpguts"
 
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/sensitive"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/hostallow"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
 )
@@ -23,11 +24,12 @@ import (
 // Headers a step may not set (as spec.Validate refuses them). Host would
 // pick another virtual host behind an allowed address. Accept-Encoding
 // would make the transport hand back the body still compressed, where
-// redaction cannot see a credential.
+// redaction cannot see a credential. Range and If-Range would let steps
+// take a response apart slice by slice.
 var reservedStepHeaders = map[string]bool{
 	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
 	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
-	"Accept-Encoding": true,
+	"Accept-Encoding": true, "Range": true, "If-Range": true,
 }
 
 // Size limits once the variables are substituted: a template within the
@@ -116,6 +118,19 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	if cred != nil {
 		credHeaders = []string{cred.header}
 	}
+	// Ruling P11: the variables this request uses carry the taint of the
+	// steps they come from; the request may only go where every credential
+	// of that taint is bound. The step's own extracts inherit it, plus the
+	// step's credential.
+	used := spec.Taint{}
+	for _, n := range spec.StepVars(st) {
+		used.Add(rs.taint[n])
+	}
+	o := &outcome{timings: &pb.StepTimings{}, taint: spec.Taint{}}
+	o.taint.Add(used)
+	if st.CredentialID != nil {
+		o.taint[*st.CredentialID] = true
+	}
 	origHost, err := hostallow.Normalize(u.Hostname())
 	if err != nil {
 		// The dialer refuses it with the right code.
@@ -179,15 +194,14 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	defer tr.CloseIdleConnections()
 	client := &http.Client{
 		Transport: &credTransport{
-			base: tr, r: r, cred: cred, cs: rs.creds, ctx: ctx,
+			base: tr, r: r, cred: cred, cs: rs.creds, ctx: ctx, taint: used,
 			origHost: origHost, origScheme: strings.ToLower(u.Scheme),
 		},
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
-			return checkRedirect(sess, rs.creds, h.FollowRedirects, next, via)
+			return checkRedirect(sess, rs.creds, used, h.FollowRedirects, next, via)
 		},
 	}
 
-	o := &outcome{timings: &pb.StepTimings{}}
 	resp, err := client.Do(req)
 	defer func() {
 		traceMu.Lock()
@@ -226,6 +240,11 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 		stored:     rs.s.StoreResponses,
 		encoded:    contentEncoded(resp.Header),
 	}
+	if len(rs.creds.byID) > 0 {
+		f.leaky = func(b []byte) bool {
+			return rs.creds.holdsCredential(sensitive.Scrub(b, rs.creds.lits.all()))
+		}
+	}
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		f.hasTLS = true
 		f.tlsDaysLeft = daysLeft(resp.TLS.PeerCertificates[0].NotAfter, r.now())
@@ -233,13 +252,25 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	// §6.2: a credential never goes into an extracted variable. Ruling
 	// P10: a response that echoes a credential gives no extracts at all,
 	// since several extracts could each take a piece of it.
-	if len(st.Extracts) > 0 && rs.creds.echoes(resp.Header, data) {
+	bodyExtracts := false
+	for _, e := range st.Extracts {
+		bodyExtracts = bodyExtracts || e.Source != spec.SourceHeader
+	}
+	switch {
+	case bodyExtracts && (f.encoded || !isText(data)):
+		// P11: a body the checks cannot read as text (encoded, binary,
+		// UTF-16) gives no body extracts: it may hide an echo.
+		for _, e := range st.Extracts {
+			o.names = append(o.names, e.Name)
+		}
+		err = errorf(CodeCredentialError, "the response body is not plain text, so no body extract is kept (%s)", strings.Join(o.names, ", "))
+	case len(st.Extracts) > 0 && rs.creds.echoes(resp.Header, data):
 		o.names = make([]string, 0, len(st.Extracts))
 		for _, e := range st.Extracts {
 			o.names = append(o.names, e.Name)
 		}
 		err = errorf(CodeCredentialError, "the response echoes a credential, so no extract is kept (%s)", strings.Join(o.names, ", "))
-	} else {
+	default:
 		o.names, o.extracted, err = extract(st.Extracts, f)
 		for _, n := range o.names {
 			// A value that carries a credential the response did not
@@ -254,7 +285,7 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	if rs.s.StoreResponses {
 		var red []byte
 		red, o.excerptCut = f.redactedBody()
-		o.excerpt = r.httpExcerpt(resp, red, credHeaders)
+		o.excerpt = r.httpExcerpt(resp, red, credHeaders, f)
 	}
 	o.assertions, o.actualCut = r.evaluate(st, f)
 	o.finish()
@@ -268,10 +299,11 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 }
 
 // checkRedirect runs every redirect hop through the same checks as the
-// first request: it must not carry a credential outside its bound hosts,
-// the host must normalize and match the allowlist, and it is resolved once (the session pins the answer for the dial) with every
-// answer checked. At most spec.MaxRedirects redirects are followed.
-func checkRedirect(sess *session, cs *credSet, follow bool, next *http.Request, via []*http.Request) error {
+// first request: tainted variables (P11) and credentials must stay within
+// their bound hosts, the host must normalize and match the allowlist, and
+// it is resolved once (the session pins the answer for the dial) with
+// every answer checked. At most spec.MaxRedirects redirects are followed.
+func checkRedirect(sess *session, cs *credSet, taint spec.Taint, follow bool, next *http.Request, via []*http.Request) error {
 	if !follow {
 		return http.ErrUseLastResponse
 	}
@@ -286,6 +318,13 @@ func checkRedirect(sess *session, cs *credSet, follow bool, next *http.Request, 
 	}
 	// Before the hop's host is resolved: the host name itself may carry a
 	// credential to the resolver.
+	hop, err := hostallow.Normalize(next.URL.Hostname())
+	if err != nil {
+		hop = ""
+	}
+	if err := cs.checkTaint(hop, taint); err != nil {
+		return err
+	}
 	if err := cs.checkRequest(next); err != nil {
 		return err
 	}

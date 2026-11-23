@@ -449,10 +449,11 @@ func TestNonSecretsDoNotTripLeakChecks(t *testing.T) {
 	if len(status.requests()) != 1 {
 		t.Fatal("the status host was not called")
 	}
-	// Extracting the user name, and using it elsewhere.
+	// Extracting the user name, and using it (on the bound host: a
+	// variable from a credentialed step stays there, P11).
 	s1 := withCred(httpStep("http://a.example.test/me"), basic)
 	s1.Extracts = []spec.Extract{{Name: "u", Source: spec.SourceJSONPath, Expr: "user"}}
-	res := e.run(scenario(s1, httpStep("http://status.example.test/${u}")), basic)
+	res := e.run(scenario(s1, httpStep("http://a.example.test/${u}")), basic)
 	wantPassed(t, res)
 	if resultHolds(t, res, "monitoring") {
 		t.Fatal("the user name is not scrubbed from the result")
@@ -513,5 +514,245 @@ func TestBinaryBodyNotShown(t *testing.T) {
 		if got := isText([]byte(in)); got != want {
 			t.Errorf("isText(%q) = %v", in, got)
 		}
+	}
+}
+
+// Ruling P11: a variable extracted by a credentialed step, or derived from
+// one, may only be sent to the bound hosts of every credential in its
+// taint: on the first request and on every redirect hop.
+func TestTaintedVariableStaysOnBoundHosts(t *testing.T) {
+	setup := func(t *testing.T) (*env, *headerRecorder, spec.RunCredential) {
+		e := newEnv(t)
+		e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/hop":
+				http.Redirect(w, r, "http://b.example.test/landing", http.StatusFound)
+			default:
+				fmt.Fprint(w, `{"sid":"session-abc-123","v":"derived-value-9"}`)
+			}
+		})))
+		b := &headerRecorder{h: func(w http.ResponseWriter, _ *http.Request) { fmt.Fprint(w, `{"v":"from-b"}`) }}
+		e.host("b.example.test", "203.0.113.2", server(t, b))
+		return e, b, bearer(leakCanary, "exact:a.example.test")
+	}
+	login := func(cred spec.RunCredential) spec.Step {
+		s := withCred(httpStep("http://a.example.test/login"), cred)
+		s.Extracts = []spec.Extract{{Name: "sid", Source: spec.SourceJSONPath, Expr: "sid"}}
+		return s
+	}
+
+	t.Run("bound host", func(t *testing.T) {
+		e, b, cred := setup(t)
+		next := httpStep("http://a.example.test/use?s=${sid}")
+		wantPassed(t, e.run(scenario(login(cred), next), cred))
+		if len(b.requests()) != 0 {
+			t.Fatal("b called")
+		}
+	})
+	t.Run("unbound host", func(t *testing.T) {
+		e, b, cred := setup(t)
+		next := httpStep("http://b.example.test/")
+		next.HTTP.Headers = map[string]string{"X-S": "${sid}"}
+		wantCode(t, e.run(scenario(login(cred), next), cred), 1, CodeCredentialError)
+		if len(b.requests()) != 0 {
+			t.Fatal("the unbound host got a tainted variable")
+		}
+	})
+	t.Run("redirect hop", func(t *testing.T) {
+		e, b, cred := setup(t)
+		next := httpStep("http://a.example.test/hop?s=${sid}")
+		wantCode(t, e.run(scenario(login(cred), next), cred), 1, CodeCredentialError)
+		if len(b.requests()) != 0 {
+			t.Fatal("the redirect hop reached the unbound host")
+		}
+	})
+	t.Run("inherited", func(t *testing.T) {
+		e, b, cred := setup(t)
+		derive := httpStep("http://a.example.test/derive?s=${sid}") // no credential of its own
+		derive.Extracts = []spec.Extract{{Name: "d", Source: spec.SourceJSONPath, Expr: "v"}}
+		leak := httpStep("http://b.example.test/${d}")
+		wantCode(t, e.run(scenario(login(cred), derive, leak), cred), 2, CodeCredentialError)
+		if len(b.requests()) != 0 {
+			t.Fatal("a derived variable reached the unbound host")
+		}
+	})
+	t.Run("untainted goes anywhere", func(t *testing.T) {
+		e, b, cred := setup(t)
+		free := httpStep("http://b.example.test/")
+		free.Extracts = []spec.Extract{{Name: "v", Source: spec.SourceJSONPath, Expr: "v"}}
+		wantPassed(t, e.run(scenario(free, withCred(httpStep("http://a.example.test/${v}"), cred), httpStep("http://b.example.test/${v}")), cred))
+		if len(b.requests()) != 2 {
+			t.Fatal("b not called twice")
+		}
+	})
+}
+
+// Tainted values are scrubbed from every excerpt and actual value,
+// whatever their length, so short pieces cannot come back in the result.
+func TestTaintedValuesScrubbedWhateverTheirLength(t *testing.T) {
+	e := newEnv(t)
+	e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/one" {
+			fmt.Fprint(w, `{"p":"Qz"}`)
+			return
+		}
+		fmt.Fprintf(w, "piece=%s", r.URL.Query().Get("p"))
+	})))
+	cred := bearer(leakCanary, "exact:a.example.test")
+	one := withCred(httpStep("http://a.example.test/one"), cred)
+	one.Extracts = []spec.Extract{{Name: "p", Source: spec.SourceJSONPath, Expr: "p"}}
+	two := httpStep("http://a.example.test/two?p=${p}", assertion(spec.SubjectBody, spec.OpContains, "piece"))
+	res := e.run(scenario(one, two), cred)
+	wantPassed(t, res)
+	if resultHolds(t, res, "Qz") {
+		t.Fatal("a 2-byte tainted value is in the result")
+	}
+}
+
+// Range and If-Range are reserved: a step cannot take a response apart.
+func TestRangeHeadersReserved(t *testing.T) {
+	e := newEnv(t)
+	got := &headerRecorder{}
+	e.host("a.example.test", "203.0.113.1", server(t, got))
+	for _, h := range []string{"Range", "If-Range", "range"} {
+		st := httpStep("http://a.example.test/")
+		st.HTTP.Headers = map[string]string{h: "bytes=0-6"}
+		wantCode(t, e.run(scenario(st)), 0, CodeInvalidRequest)
+	}
+	if len(got.requests()) != 0 {
+		t.Fatal("request sent")
+	}
+}
+
+// A body that is encoded, binary or UTF-16 gives no regex or JSON path
+// extracts (it may hide an echo the checks cannot read); header extracts
+// still work, and such a body is never shown.
+func TestNonTextBodyGivesNoBodyExtracts(t *testing.T) {
+	utf16 := func(s string) []byte {
+		var out []byte
+		for _, c := range []byte(s) {
+			out = append(out, c, 0)
+		}
+		return out
+	}
+	gz := func(s string) []byte {
+		var buf bytes.Buffer
+		zw := gzip.NewWriter(&buf)
+		_, _ = zw.Write([]byte(s))
+		_ = zw.Close()
+		return buf.Bytes()
+	}
+	for name, tc := range map[string]struct {
+		enc  string
+		body func(auth string) []byte
+	}{
+		"utf-16":             {"", func(a string) []byte { return utf16("you are " + a) }},
+		"gzip no header":     {"", func(a string) []byte { return gz("you are " + a) }},
+		"x-gzip not decoded": {"x-gzip", func(a string) []byte { return gz("you are " + a) }},
+		"br":                 {"br", func(a string) []byte { return gz("you are " + a) }},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.enc != "" {
+					w.Header().Set("Content-Encoding", tc.enc)
+				}
+				w.Header().Set("X-Id", "id-42")
+				echo := r.Header.Get("Authorization")
+				if r.URL.Path == "/quiet" {
+					echo = "nothing to see"
+				}
+				_, _ = w.Write(tc.body(echo))
+			})))
+			cred := bearer(leakCanary, "exact:a.example.test")
+			for _, src := range []string{spec.SourceRegex, spec.SourceJSONPath} {
+				st := withCred(httpStep("http://a.example.test/"), cred)
+				expr := `(?s)(.+)`
+				if src == spec.SourceJSONPath {
+					expr = "x"
+				}
+				st.Extracts = []spec.Extract{{Name: "z", Source: src, Expr: expr}}
+				res := e.run(scenario(st), cred)
+				wantCode(t, res, 0, CodeCredentialError)
+				ex := res.Steps[0].ResponseExcerpt
+				if bytes.Contains(bytes.ReplaceAll(ex, []byte{0}, nil), []byte(leakCanary)) || bytes.Contains(ex, []byte{0x1f, 0x8b}) {
+					t.Fatalf("body shown: %q", ex)
+				}
+			}
+			// A header extract from a binary body that echoes nothing.
+			st := withCred(httpStep("http://a.example.test/quiet"), cred)
+			st.Extracts = []spec.Extract{{Name: "id", Source: spec.SourceHeader, Expr: "X-Id"}}
+			wantPassed(t, e.run(scenario(st), cred))
+		})
+	}
+}
+
+// Echoes are matched after decoding JSON \u escapes (either case) and
+// percent-encoding; and a short secret is matched in its own case only.
+func TestEchoMatchedAfterDecoding(t *testing.T) {
+	const tok = "CANARYab+cd/ef+gh/ij0123=="
+	for name, enc := range map[string]func(string) string{
+		".NET \\u002B": func(s string) string { return strings.ReplaceAll(s, "+", `+`) },
+		"all \\u lower": func(s string) string {
+			var b strings.Builder
+			for _, c := range []byte(s) {
+				fmt.Fprintf(&b, `\u%04x`, c)
+			}
+			return b.String()
+		},
+		"all \\U upper hex": func(s string) string {
+			var b strings.Builder
+			for _, c := range []byte(s) {
+				fmt.Fprintf(&b, `\u%04X`, c)
+			}
+			return b.String()
+		},
+		"escaped slash": func(s string) string { return strings.ReplaceAll(s, "/", `\/`) },
+		"percent":       func(s string) string { return url.PathEscape(s) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				v := enc(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+				w.Header().Set("X-Seen", v)
+				// Not valid JSON as a whole, so the JSON pass does not
+				// decode it for the scrub.
+				fmt.Fprintf(w, `seen "%s" {`, v)
+			})))
+			cred := bearer(tok, "exact:a.example.test")
+			st := withCred(httpStep("http://a.example.test/", assertion("header:X-Seen", spec.OpExists, "")), cred)
+			st.Extracts = []spec.Extract{{Name: "t", Source: spec.SourceRegex, Expr: `seen "([^"]+)"`}}
+			res := e.run(scenario(st), cred)
+			wantCode(t, res, 0, CodeCredentialError)
+			// Without extracts, the excerpt still hides what decodes to
+			// the credential.
+			st.Extracts = nil
+			res = e.run(scenario(st), cred)
+			wantPassed(t, res)
+			ex := res.Steps[0].ResponseExcerpt
+			check := newCredSet([]spec.RunCredential{bearer(tok, "exact:a.example.test")})
+			defer check.close()
+			if check.holdsCredential(ex) || !bytes.Contains(ex, []byte("X-Seen: [redacted]")) || res.Steps[0].Assertions[0].Actual != "[redacted]" {
+				t.Fatalf("excerpt %q actual %q", ex, res.Steps[0].Assertions[0].Actual)
+			}
+			if strings.HasPrefix(name, "all") && !bytes.Contains(ex, []byte(echoedBody)) {
+				t.Fatalf("escaped echo not hidden: %q", ex)
+			}
+		})
+	}
+
+	// A short, common-word password does not match a capitalized word.
+	e := newEnv(t)
+	e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"service":"Monitoring API","id":"42"}`)
+	})))
+	cred := spec.RunCredential{ID: uuid.New(), Kind: spec.CredBasic, BoundHosts: []string{"exact:a.example.test"},
+		Username: secret("probe"), Secret: secret("monitor")}
+	st := withCred(httpStep("http://a.example.test/"), cred)
+	st.Extracts = []spec.Extract{{Name: "id", Source: spec.SourceJSONPath, Expr: "id"}}
+	wantPassed(t, e.run(scenario(st), cred))
+	// A long secret is still found lower-cased.
+	if !newCredSet([]spec.RunCredential{bearer("LongSecretValue99", "exact:a.example.test")}).holdsCredential([]byte("x longsecretvalue99 y")) {
+		t.Fatal("lower-cased long secret not found")
 	}
 }

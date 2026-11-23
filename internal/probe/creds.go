@@ -13,6 +13,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -43,6 +45,11 @@ const minExtractLiteral = 4
 // in requests, responses and extracted values. Shorter forms would refuse
 // ordinary traffic; they are still scrubbed from reports.
 const minLeakLiteral = 6
+
+// minFoldLiteral is the shortest credential form that is also looked for
+// in lower-cased text. Shorter secrets are matched in their own case only,
+// so that a short password such as "monitor" does not match "Monitoring".
+const minFoldLiteral = 8
 
 // credential is one RunCredential prepared for the run.
 type credential struct {
@@ -107,18 +114,125 @@ func (cs *credSet) addCredLiteral(cr *credential, b []byte) {
 }
 
 // holdsCredential reports whether b carries a secret form of a
-// credential of the run, as it is or lower-cased.
+// credential of the run (see foundIn).
 func (cs *credSet) holdsCredential(b []byte) bool {
-	lb := bytes.ToLower(b)
-	defer clear(lb)
+	texts := matchTexts(b)
 	for _, c := range cs.byID {
-		for _, l := range c.lits.all() {
-			if len(l) >= minLeakLiteral && (bytes.Contains(b, l) || bytes.Contains(lb, l)) {
+		if c.foundIn(texts) {
+			return true
+		}
+	}
+	return false
+}
+
+// foundIn reports whether one of texts carries a secret form of c: as it
+// is, and, for forms of minFoldLiteral bytes or more, lower-cased.
+func (c *credential) foundIn(texts [][]byte) bool {
+	lits := c.lits.all()
+	for _, t := range texts {
+		var lt []byte
+		for _, l := range lits {
+			if len(l) < minLeakLiteral {
+				continue
+			}
+			if bytes.Contains(t, l) {
 				return true
+			}
+			if len(l) >= minFoldLiteral {
+				if lt == nil {
+					lt = bytes.ToLower(t)
+				}
+				if bytes.Contains(lt, l) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// matchTexts returns b and b with its escapes decoded (once and twice):
+// JSON \uXXXX (either case), \/, \\ and \", and percent-encoding. A server
+// that writes the credential through an encoder still echoes it.
+func matchTexts(b []byte) [][]byte {
+	out := [][]byte{b}
+	d := b
+	for range 2 {
+		n := decodeEscapes(d)
+		if bytes.Equal(n, d) {
+			break
+		}
+		out = append(out, n)
+		d = n
+	}
+	return out
+}
+
+func unhex(c byte) (byte, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+// decodeEscapes decodes the escapes matchTexts names; anything else is
+// copied as it is.
+func decodeEscapes(b []byte) []byte {
+	out := make([]byte, 0, len(b))
+	for i := 0; i < len(b); i++ {
+		c := b[i]
+		switch {
+		case c == '%' && i+2 < len(b):
+			h, ok1 := unhex(b[i+1])
+			l, ok2 := unhex(b[i+2])
+			if ok1 && ok2 {
+				out = append(out, h<<4|l)
+				i += 2
+				continue
+			}
+		case c == '\\' && i+1 < len(b):
+			switch b[i+1] {
+			case '/', '\\', '"':
+				out = append(out, b[i+1])
+				i++
+				continue
+			case 'u', 'U':
+				if i+5 < len(b) {
+					var r rune
+					ok := true
+					for _, x := range b[i+2 : i+6] {
+						v, k := unhex(x)
+						ok = ok && k
+						r = r<<4 | rune(v)
+					}
+					if ok && !utf16.IsSurrogate(r) {
+						out = utf8.AppendRune(out, r)
+						i += 5
+						continue
+					}
+				}
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// checkTaint refuses sending tainted variables (ruling P11) to host unless
+// it is within the bound hosts of every credential of the taint.
+func (cs *credSet) checkTaint(host string, t spec.Taint) error {
+	for _, id := range t.IDs() {
+		c := cs.byID[id]
+		if c == nil || c.boundErr != nil || host == "" || !c.allows(host) {
+			return errorf(CodeCredentialError, "the request uses a variable from a step with credential %s, and its host is not one of that credential's bound hosts", id)
+		}
+	}
+	return nil
 }
 
 // echoes reports whether a response's headers or body carry a secret form
@@ -156,7 +270,7 @@ func (cs *credSet) checkRequest(req *http.Request) error {
 	built := false
 	build := func() error {
 		u := req.URL.String()
-		hay = append(hay, []byte(u), bytes.ToLower([]byte(u)), []byte(req.URL.Path), []byte(req.Host))
+		hay = append(hay, []byte(u), []byte(req.URL.Path), []byte(req.Host))
 		if q, err := url.QueryUnescape(req.URL.RawQuery); err == nil {
 			hay = append(hay, []byte(q))
 		}
@@ -196,14 +310,9 @@ func (cs *credSet) checkRequest(req *http.Request) error {
 			}
 			built = true
 		}
-		for _, l := range lits {
-			if len(l) < minLeakLiteral {
-				continue
-			}
-			for _, h := range hay {
-				if bytes.Contains(h, l) {
-					return errorf(CodeCredentialError, "a request to a host outside the bound hosts of credential %s would carry it", c.c.ID)
-				}
+		for _, h := range hay {
+			if c.foundIn(matchTexts(h)) {
+				return errorf(CodeCredentialError, "a request to a host outside the bound hosts of credential %s would carry it", c.c.ID)
 			}
 		}
 	}
@@ -474,6 +583,8 @@ type credTransport struct {
 	r    *Runner
 	cred *credential // nil when the step has none
 	cs   *credSet
+	// taint is that of the variables the step's request uses (P11).
+	taint spec.Taint
 	// ctx is the run's context, without the step's trace, for the OAuth2
 	// token request.
 	ctx context.Context
@@ -497,6 +608,10 @@ func (t *credTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	if host != t.origHost {
 		// The previous URL may carry an extracted value in its query.
 		req.Header.Del("Referer")
+	}
+	if err := t.cs.checkTaint(host, t.taint); err != nil {
+		closeBody(req)
+		return nil, err
 	}
 	if err := t.cs.checkRequest(req); err != nil {
 		closeBody(req)

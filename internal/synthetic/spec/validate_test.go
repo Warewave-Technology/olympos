@@ -235,6 +235,8 @@ func TestValidateHTTP(t *testing.T) {
 		{"host header", func(h *HTTPSpec) { h.Headers = map[string]string{"host": "internal.wrw.com"} }, "headers.host"},
 		{"transfer-encoding", func(h *HTTPSpec) { h.Headers = map[string]string{"Transfer-Encoding": "chunked"} }, "headers.Transfer-Encoding"},
 		{"accept-encoding", func(h *HTTPSpec) { h.Headers = map[string]string{"accept-encoding": "gzip"} }, "headers.accept-encoding"},
+		{"range", func(h *HTTPSpec) { h.Headers = map[string]string{"Range": "bytes=0-6"} }, "headers.Range"},
+		{"if-range", func(h *HTTPSpec) { h.Headers = map[string]string{"If-Range": "x"} }, "headers.If-Range"},
 		{"bad header name", func(h *HTTPSpec) { h.Headers = map[string]string{"X Bad": "1"} }, "headers.X Bad"},
 		{"header injection", func(h *HTTPSpec) { h.Headers = map[string]string{"X-A": "1\r\nHost: evil"} }, "headers.X-A"},
 		{"duplicate header", func(h *HTTPSpec) { h.Headers = map[string]string{"X-A": "1", "x-a": "2"} }, "headers.x-a"},

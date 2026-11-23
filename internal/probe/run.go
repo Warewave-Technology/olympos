@@ -50,6 +50,7 @@ func (r *Runner) now() time.Time {
 type runState struct {
 	s     *spec.Scenario
 	vars  map[string]string
+	taint map[string]spec.Taint // per variable (P11)
 	creds *credSet
 	local netip.Addr
 }
@@ -84,6 +85,9 @@ type outcome struct {
 	actualCut  []bool   // per assertion, likewise
 	statusCode int
 	remote     netip.Addr
+	// taint is that of the step's extracts: the taint of the variables
+	// its request used, plus its own credential (P11).
+	taint spec.Taint
 }
 
 // Run runs s with creds and returns its result. The run stops at the first
@@ -110,7 +114,7 @@ func (r *Runner) Run(ctx context.Context, s *spec.Scenario, creds []spec.RunCred
 	}
 	cs := newCredSet(creds)
 	defer cs.close()
-	rs := &runState{s: s, vars: map[string]string{}, creds: cs}
+	rs := &runState{s: s, vars: map[string]string{}, taint: map[string]spec.Taint{}, creds: cs}
 
 	failed := -1
 	var failErr *Error
@@ -124,13 +128,25 @@ func (r *Runner) Run(ctx context.Context, s *spec.Scenario, creds []spec.RunCred
 		}
 		o := r.runStep(ctx, rs, st)
 		for _, n := range o.names {
-			if v, ok := o.extracted[n]; ok {
+			v, ok := o.extracted[n]
+			switch {
+			case !ok:
+			case len(o.taint) > 0:
+				// A tainted value may be a piece of a credential:
+				// scrubbed whatever its length (P11).
+				cs.lits.addSecret([]byte(v))
+			default:
 				cs.lits.addExtracted(v)
 			}
 		}
 		if o.status == StatusPassed {
 			for n, v := range o.extracted {
 				rs.vars[n] = v
+				if len(o.taint) > 0 {
+					t := spec.Taint{}
+					t.Add(o.taint)
+					rs.taint[n] = t
+				}
 			}
 		}
 		sr, c := r.stepResult(st, o, cs.lits.all())
