@@ -127,7 +127,8 @@ func CheckDatabases(engine string, selected, inBackup []string) ([]string, strin
 // CheckReport applies the open-time (and start-time) checks to what the
 // target's inspector found: no selected database may exist with user
 // objects in it (an existing empty one is restored into), and a Vault must
-// be initialized, unsealed and let the token snapshot-force. It returns
+// be initialized, unsealed, the active node, and let the token
+// snapshot-force. It returns
 // field errors and notes for the request.
 func CheckReport(engine string, databases []string, r *TargetReport) (map[string]string, []string) {
 	f := map[string]string{}
@@ -138,8 +139,14 @@ func CheckReport(engine string, databases []string, r *TargetReport) (map[string
 			f["target_id"] = "the target Vault is not initialized"
 		case r.Sealed:
 			f["target_id"] = "the target Vault is sealed; unseal it before the restore"
+		case r.Standby:
+			f["target_id"] = "the target is a standby node of an HA Vault, not the active node; point the target at the active " +
+				"node (a Service that selects only the active pod) and check again"
+		case r.CapabilitiesDenied:
+			f["vault_token"] = "the target refused to show this token's capabilities (sys/capabilities-self answered 403): the token " +
+				"needs the default policy (or access to sys/capabilities-self) plus update and sudo on sys/storage/raft/snapshot-force"
 		case !r.CanSnapshotForce:
-			f["vault_token"] = "this token cannot call sys/storage/raft/snapshot-force on the target"
+			f["vault_token"] = "this token needs both update and sudo on sys/storage/raft/snapshot-force on the target"
 		}
 		return f, notes
 	}

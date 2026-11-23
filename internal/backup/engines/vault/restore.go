@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -49,28 +50,41 @@ var errDatabases = errors.New("a Vault/OpenBao restore loads the whole snapshot;
 // targetCheck is what the inspector and the restore's preflight read.
 type targetCheck struct {
 	health vclient.Health
-	// canForce: the token's capabilities on SnapshotForcePath allow the
-	// restore (only read when the target is initialized and unsealed).
+	// standby: an HA node that is not the active one (sys/leader).
+	standby bool
+	// capsDenied: sys/capabilities-self answered 401/403.
+	capsDenied bool
+	// canForce: the token holds update and sudo (or root) on
+	// SnapshotForcePath, as Vault enforces for the restore. Only read on an
+	// initialized, unsealed, active node.
 	canForce bool
 }
 
 func (c targetCheck) report() *restore.TargetReport {
 	return &restore.TargetReport{Existing: map[string]bool{}, Initialized: c.health.Initialized, Sealed: c.health.Sealed,
-		CanSnapshotForce: c.canForce, ServerVersion: c.health.Version}
+		Standby: c.standby, CapabilitiesDenied: c.capsDenied, CanSnapshotForce: c.canForce, ServerVersion: c.health.Version}
 }
 
-// refusal is why the target cannot take the snapshot ("": it can), as
-// restore.CheckReport words it.
+// refusal is why the target cannot take the snapshot ("": it can), in
+// restore.CheckReport's words.
 func (c targetCheck) refusal() string {
-	switch {
-	case !c.health.Initialized:
-		return "the target Vault is not initialized"
-	case c.health.Sealed:
-		return "the target Vault is sealed; unseal it before the restore"
-	case !c.canForce:
-		return "the token cannot call " + SnapshotForcePath + " on the target"
+	fields, _ := restore.CheckReport("vault", nil, c.report())
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		keys = append(keys, k)
 	}
-	return ""
+	slices.Sort(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = fields[k]
+	}
+	return strings.Join(parts, "; ")
+}
+
+// allowsForce: Vault requires both update (POST) and sudo (a
+// root-protected path) on SnapshotForcePath; root allows everything.
+func allowsForce(caps []string) bool {
+	return slices.Contains(caps, "root") || (slices.Contains(caps, "update") && slices.Contains(caps, "sudo"))
 }
 
 // session is a client of the restore target with the request's token set.
@@ -109,9 +123,9 @@ func (s *session) close() {
 	s.c.Close()
 }
 
-// check reads the seal status (no token) and, on an initialized and
-// unsealed target, the token's capabilities on SnapshotForcePath. It writes
-// nothing. A target without integrated storage is an error: it cannot take
+// check reads the seal status and sys/leader (no token) and, on an
+// initialized, unsealed, active node, the token's capabilities on
+// SnapshotForcePath. It writes nothing. A target without integrated storage is an error: it cannot take
 // a raft snapshot whatever the token may do.
 func (s *session) check(ctx context.Context) (targetCheck, error) {
 	var tc targetCheck
@@ -126,15 +140,26 @@ func (s *session) check(ctx context.Context) (targetCheck, error) {
 	if h.StorageType != "" && h.StorageType != "raft" {
 		return tc, fmt.Errorf("the target Vault uses %s storage; a raft snapshot is restored into integrated (raft) storage only", h.StorageType)
 	}
+	l, err := s.c.Sys().LeaderWithContext(ctx)
+	if err != nil {
+		return tc, safeError("read the target's leader status", err)
+	}
+	if l.HAEnabled && !l.IsSelf {
+		// The POST would be redirected or forwarded to another node.
+		tc.standby = true
+		return tc, nil
+	}
 	caps, err := s.capabilities(ctx)
 	if err != nil {
 		if code := vclient.StatusCode(err); code == http.StatusForbidden || code == http.StatusUnauthorized {
-			// An invalid or expired token: a refusal, not a failed check.
+			// An invalid token, or one without the default policy: a
+			// refusal, not a failed check.
+			tc.capsDenied = true
 			return tc, nil
 		}
 		return tc, safeError("read the token's capabilities", err)
 	}
-	tc.canForce = slices.Contains(caps, "root") || slices.Contains(caps, "update") || slices.Contains(caps, "sudo")
+	tc.canForce = allowsForce(caps)
 	return tc, nil
 }
 
@@ -255,8 +280,14 @@ func (e Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backu
 	start := time.Now()
 	body := &countReader{r: rc.Snapshot}
 	item := backup.RestoreItem{Name: SnapshotItem, Status: "failed"}
-	werr := s.c.Sys().RaftSnapshotRestoreWithContext(ctx, body, true)
+	werr := s.snapshotForce(ctx, body)
 	item.Bytes, item.Duration = body.n, time.Since(start).Seconds()
+	var redirect *redirectError
+	if errors.As(werr, &redirect) {
+		item.Error = redirect.Error()
+		res.Items = append(res.Items, item)
+		return res, werr
+	}
 	if werr != nil {
 		msg := safeError("snapshot-force", werr).Error()
 		if body.err != nil {
@@ -287,6 +318,43 @@ func (e Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backu
 	res.Notes = append(res.Notes, s.afterRestore(ctx))
 	progress(backup.Progress{Phase: "restore", Bytes: body.n, Done: []string{SnapshotItem}})
 	return res, nil
+}
+
+// snapshotForce streams body to POST /v1/sys/storage/raft/snapshot-force
+// (the request vaultapi's RaftSnapshotRestoreWithContext(ctx, r, true)
+// makes) over the target's transport, without following redirects: the
+// API client follows one redirect itself and would resend the consumed
+// body to another node. A 3xx is a *redirectError, another non-2xx a
+// *vaultapi.ResponseError with the status only (the body is discarded).
+func (s *session) snapshotForce(ctx context.Context, body io.Reader) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.c.Address()+"/v1/"+SnapshotForcePath, body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set(vaultapi.AuthHeaderName, s.c.Token())
+	req.Header.Set(vaultapi.RequestHeaderName, "true")
+	resp, err := s.c.NoRedirectHTTP().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	switch {
+	case resp.StatusCode >= 200 && resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode >= 300 && resp.StatusCode < 400:
+		return &redirectError{code: resp.StatusCode}
+	}
+	return &vaultapi.ResponseError{HTTPMethod: http.MethodPost, StatusCode: resp.StatusCode}
+}
+
+// redirectError: the target redirected the snapshot (a standby pointing
+// at the active node). Olympos does not follow it.
+type redirectError struct{ code int }
+
+func (e *redirectError) Error() string {
+	return fmt.Sprintf("snapshot-force: the target answered HTTP %d, a redirect to another node, which Olympos does not "+
+		"follow: the target is not the active node and did not install the snapshot; point the target at the active node", e.code)
 }
 
 // afterRestore reads the seal status once (no token) and describes it. A

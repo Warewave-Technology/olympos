@@ -118,11 +118,17 @@ type TargetReport struct {
 	// Superuser: the PostgreSQL credential is a superuser.
 	Superuser bool `json:"superuser"`
 	// Vault: initialized, sealed, and whether the token may call
-	// sys/storage/raft/snapshot-force.
-	Initialized      bool   `json:"initialized"`
-	Sealed           bool   `json:"sealed"`
-	CanSnapshotForce bool   `json:"can_snapshot_force"`
-	ServerVersion    string `json:"server_version"`
+	// sys/storage/raft/snapshot-force (update and sudo, or root).
+	Initialized      bool `json:"initialized"`
+	Sealed           bool `json:"sealed"`
+	CanSnapshotForce bool `json:"can_snapshot_force"`
+	// Standby (Vault): the target is an HA node that is not the active
+	// node (sys/leader: ha_enabled and not is_self).
+	Standby bool `json:"standby"`
+	// CapabilitiesDenied (Vault): sys/capabilities-self refused the token
+	// (403), so its capabilities could not be read.
+	CapabilitiesDenied bool   `json:"capabilities_denied"`
+	ServerVersion      string `json:"server_version"`
 }
 
 // TargetInspector checks a restore target over its tunnel with the request's

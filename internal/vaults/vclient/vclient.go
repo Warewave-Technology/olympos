@@ -49,6 +49,14 @@ type Client struct {
 // Close drops idle connections (tunnels).
 func (c *Client) Close() { c.tr.CloseIdleConnections() }
 
+// NoRedirectHTTP is an HTTP client over c's transport (tunnel, TLS) that
+// never follows a redirect: a 3xx is returned to the caller. For streamed
+// request bodies, which the Vault API client's own single redirect would
+// resend already consumed.
+func (c *Client) NoRedirectHTTP() *http.Client {
+	return &http.Client{Transport: c.tr, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+}
+
 // RootCAs returns the server-wide target CA bundle (targetTLS.caBundleFile,
 // plus the system pool with targetTLS.systemRoots) and the per-vault PEM
 // bundle. With none of them nothing verifies the vault: targettls.ErrNoRoots.

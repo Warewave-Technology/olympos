@@ -212,9 +212,12 @@ func TestRestoreIntegration(t *testing.T) {
 			// refused, as the inspector cannot show the token may restore.
 			noDefault := dst.token(t, "olympos-restore", forceHCL, true)
 			tok := dst.token(t, "olympos-restore", forceHCL, false)
+			// Vault requires both update and sudo on snapshot-force.
+			updateOnly := dst.token(t, "olympos-update-only", `path "sys/storage/raft/snapshot-force" { capabilities = ["update"] }`, false)
+			sudoOnly := dst.token(t, "olympos-sudo-only", `path "sys/storage/raft/snapshot-force" { capabilities = ["sudo"] }`, false)
 
 			// The inspector: a token without the capability is refused.
-			for name, bad := range map[string]string{"weak": weak, "no default policy": noDefault} {
+			for name, bad := range map[string]string{"weak": weak, "no default policy": noDefault, "update only": updateOnly, "sudo only": sudoOnly} {
 				r, err := Engine{}.InspectRestoreTarget(ctx, dst.engineContext(bad), nil)
 				if err != nil {
 					t.Fatalf("inspect (%s): %v", name, err)

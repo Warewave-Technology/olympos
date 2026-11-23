@@ -237,9 +237,24 @@ func TestCheckReport(t *testing.T) {
 		{Initialized: false, CanSnapshotForce: true},
 		{Initialized: true, Sealed: true, CanSnapshotForce: true},
 		{Initialized: true},
+		{Initialized: true, Standby: true, CanSnapshotForce: true},
+		{Initialized: true, CapabilitiesDenied: true},
 	} {
 		if f, _ := CheckReport("vault", nil, rep); len(f) == 0 {
 			t.Fatalf("vault %+v accepted", rep)
+		}
+	}
+	for _, c := range []struct {
+		rep        TargetReport
+		key, words string
+	}{
+		{TargetReport{Initialized: true, Standby: true, CanSnapshotForce: true}, "target_id", "active node"},
+		{TargetReport{Initialized: true, CapabilitiesDenied: true}, "vault_token", "default policy"},
+		{TargetReport{Initialized: true}, "vault_token", "update and sudo"},
+	} {
+		f, _ := CheckReport("vault", nil, &c.rep)
+		if !strings.Contains(f[c.key], c.words) {
+			t.Errorf("vault %+v: %v, want %q on %s", c.rep, f, c.words, c.key)
 		}
 	}
 }

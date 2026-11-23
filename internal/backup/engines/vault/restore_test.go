@@ -36,6 +36,10 @@ type fakeVault struct {
 	forceStatus int // non-zero: snapshot-force answers this (after reading the body)
 	// sealedAfter: seal-status answers 503 after a successful restore.
 	sealedAfter bool
+	// standby: sys/leader says HA and not the active node.
+	standby bool
+	// redirectTo: non-empty: snapshot-force answers 307 to this URL.
+	redirectTo string
 
 	restored  bool
 	received  []byte
@@ -61,6 +65,12 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 		_ = json.NewEncoder(w).Encode(map[string]any{"type": "shamir", "initialized": f.initialized, "sealed": f.sealed,
 			"t": 1, "n": 1, "version": "1.20.0", "storage_type": f.storage})
 	})
+	mux.HandleFunc("/v1/sys/leader", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		_ = json.NewEncoder(w).Encode(map[string]any{"ha_enabled": true, "is_self": !f.standby, "active_time": "0001-01-01T00:00:00Z",
+			"leader_address": "http://127.0.0.1:8200", "leader_cluster_address": "https://127.0.0.1:8201", "raft_committed_index": 1})
+	})
 	mux.HandleFunc("/v1/sys/capabilities-self", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -83,6 +93,10 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 		f.forced++
 		f.received = b
 		f.tokens = append(f.tokens, r.Header.Get("X-Vault-Token"))
+		if f.redirectTo != "" {
+			http.Redirect(w, r, f.redirectTo, http.StatusTemporaryRedirect)
+			return
+		}
 		if f.forceStatus != 0 {
 			errBody(w, f.forceStatus)
 			return
@@ -149,10 +163,20 @@ func TestInspectRestoreTarget(t *testing.T) {
 			}
 		}, ""},
 		{"sudo only", func(f *fakeVault) { f.caps = []string{"sudo"} }, func(t *testing.T, r *restore.TargetReport) {
-			if !r.CanSnapshotForce {
-				t.Errorf("sudo: %+v", r)
+			if r.CanSnapshotForce {
+				t.Errorf("sudo only: %+v", r)
 			}
-		}, ""},
+		}, "vault_token"},
+		{"update only", func(f *fakeVault) { f.caps = []string{"create", "update"} }, func(t *testing.T, r *restore.TargetReport) {
+			if r.CanSnapshotForce {
+				t.Errorf("update only: %+v", r)
+			}
+		}, "vault_token"},
+		{"standby", func(f *fakeVault) { f.standby = true }, func(t *testing.T, r *restore.TargetReport) {
+			if !r.Standby || r.CanSnapshotForce {
+				t.Errorf("standby: %+v", r)
+			}
+		}, "target_id"},
 		{"uninitialized", func(f *fakeVault) { f.initialized, f.sealed = false, true }, func(t *testing.T, r *restore.TargetReport) {
 			if r.Initialized || r.CanSnapshotForce {
 				t.Errorf("report %+v", r)
@@ -174,7 +198,7 @@ func TestInspectRestoreTarget(t *testing.T) {
 			}
 		}, "vault_token"},
 		{"invalid token", func(f *fakeVault) { f.capsStatus = http.StatusForbidden }, func(t *testing.T, r *restore.TargetReport) {
-			if r.CanSnapshotForce {
+			if r.CanSnapshotForce || !r.CapabilitiesDenied {
 				t.Errorf("report %+v", r)
 			}
 		}, "vault_token"},
@@ -209,7 +233,7 @@ func TestInspectRestoreTarget(t *testing.T) {
 					t.Errorf("token header %q", tok)
 				}
 			}
-			if (f.initialized && !f.sealed) != (len(f.capBodies) == 1) {
+			if (f.initialized && !f.sealed && !f.standby) != (len(f.capBodies) == 1) {
 				t.Errorf("capabilities read %d times (initialized %v, sealed %v)", len(f.capBodies), f.initialized, f.sealed)
 			}
 		})
@@ -349,8 +373,11 @@ func TestRestorePreflightWritesNothing(t *testing.T) {
 	}{
 		{"sealed", func(f *fakeVault) { f.sealed = true }, "sealed"},
 		{"uninitialized", func(f *fakeVault) { f.initialized, f.sealed = false, true }, "not initialized"},
-		{"missing capability", func(f *fakeVault) { f.caps = []string{"read"} }, "cannot call " + SnapshotForcePath},
-		{"invalid token", func(f *fakeVault) { f.capsStatus = http.StatusForbidden }, "cannot call " + SnapshotForcePath},
+		{"missing capability", func(f *fakeVault) { f.caps = []string{"read"} }, "update and sudo on " + SnapshotForcePath},
+		{"update only", func(f *fakeVault) { f.caps = []string{"update"} }, "update and sudo on " + SnapshotForcePath},
+		{"sudo only", func(f *fakeVault) { f.caps = []string{"sudo"} }, "update and sudo on " + SnapshotForcePath},
+		{"invalid token", func(f *fakeVault) { f.capsStatus = http.StatusForbidden }, "default policy"},
+		{"standby", func(f *fakeVault) { f.standby = true }, "active node"},
 		{"capabilities error", func(f *fakeVault) { f.capsStatus = http.StatusBadGateway }, "HTTP 502"},
 		{"not raft", func(f *fakeVault) { f.storage = "consul" }, "raft"},
 	}
@@ -425,5 +452,54 @@ func TestRegistered(t *testing.T) {
 	}
 	if i, ok := restore.InspectorFor("vault"); !ok || i == nil {
 		t.Error("no inspector for vault")
+	}
+}
+
+func TestRestoreDoesNotFollowRedirect(t *testing.T) {
+	// The active node the standby points at: it must never be contacted.
+	var other int
+	active := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		other++
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer active.Close()
+	f := okVault()
+	f.redirectTo = active.URL + "/v1/" + SnapshotForcePath
+	rc, _ := restoreContext(start(t, f), []byte("snapshot"))
+	res, err := Engine{}.Restore(context.Background(), rc)
+	checkResult(t, res, err)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 307") || !strings.Contains(err.Error(), "active node") {
+		t.Fatalf("err %v", err)
+	}
+	if f.forced != 1 || other != 0 {
+		t.Fatalf("snapshot-force called %d times, redirect target %d times", f.forced, other)
+	}
+	if len(res.Items) != 1 || res.Items[0].Status != "failed" || !strings.Contains(res.Items[0].Error, "307") {
+		t.Fatalf("items %+v", res.Items)
+	}
+	for _, n := range res.Notes {
+		if strings.Contains(n, "SOURCE") {
+			t.Errorf("success note on a redirect: %s", n)
+		}
+	}
+}
+
+func TestAllowsForce(t *testing.T) {
+	for _, c := range []struct {
+		caps []string
+		ok   bool
+	}{
+		{[]string{"root"}, true},
+		{[]string{"update", "sudo"}, true},
+		{[]string{"create", "read", "update", "sudo"}, true},
+		{[]string{"update"}, false},
+		{[]string{"sudo"}, false},
+		{[]string{"create", "sudo"}, false},
+		{[]string{"deny"}, false},
+		{nil, false},
+	} {
+		if got := allowsForce(c.caps); got != c.ok {
+			t.Errorf("%v: %v", c.caps, got)
+		}
 	}
 }
