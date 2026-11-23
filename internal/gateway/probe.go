@@ -52,7 +52,10 @@ type ProbeInfo struct {
 	SessionID uint64
 	// PublicKey is the stream's HPKE public key (raw X25519): what a run's
 	// credentials are sealed to.
-	PublicKey      []byte
+	PublicKey []byte
+	// CertSerial is the serial of the certificate the stream connected
+	// with (pki.SerialHex).
+	CertSerial     string
 	Version        string
 	MaxConcurrency int
 	// InFlight counts the runs sent on the stream and not yet RunDone.
@@ -61,8 +64,12 @@ type ProbeInfo struct {
 
 // probeSession is one probe stream on this replica.
 type probeSession struct {
-	id             uint64
-	clusterID      uuid.UUID
+	id        uint64
+	clusterID uuid.UUID
+	// serial is the certificate the stream connected with. After a
+	// renewal the stream stays open until the probe reconnects with the
+	// new certificate; runs go only to streams of the current one.
+	serial         string
 	publicKey      []byte
 	version        string
 	maxConcurrency int
@@ -91,7 +98,7 @@ func (s *probeSession) send(m *pb.ServerProbeMessage) error {
 
 // info snapshots the session. The caller holds Gateway.mu.
 func (s *probeSession) info() ProbeInfo {
-	return ProbeInfo{SessionID: s.id, PublicKey: bytes.Clone(s.publicKey), Version: s.version,
+	return ProbeInfo{SessionID: s.id, PublicKey: bytes.Clone(s.publicKey), CertSerial: s.serial, Version: s.version,
 		MaxConcurrency: s.maxConcurrency, InFlight: s.inFlight}
 }
 
@@ -178,7 +185,7 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	}
 	ctx, cancel := context.WithCancel(stream.Context())
 	defer cancel()
-	s := &probeSession{clusterID: clusterID, publicKey: bytes.Clone(hello.HpkePublicKey), version: hello.ProbeVersion,
+	s := &probeSession{clusterID: clusterID, serial: pki.SerialHex(cert.SerialNumber), publicKey: bytes.Clone(hello.HpkePublicKey), version: hello.ProbeVersion,
 		maxConcurrency: maxConc, ctx: ctx, cancel: cancel, stream: stream}
 
 	// The stream attaches in this order, so that a revoke can never miss it
@@ -345,41 +352,62 @@ func (g *Gateway) probeDispatch(ctx context.Context, s *probeSession, m *pb.Prob
 	}
 }
 
+// anySerial makes pickProbe consider the streams of every certificate.
+const anySerial = ""
+
 // pickProbe returns the cluster's ready stream with the fewest runs in flight
-// (the newest on a tie: an older one may be a replica going away). With
+// (the newest on a tie: an older one may be a replica going away). Unless
+// serial is anySerial, only the streams of that certificate count: a stream
+// of a certificate that was renewed since it connected gets no run. With
 // needRoom, only a stream below its max_concurrency counts. The caller
 // holds g.mu.
-func (g *Gateway) pickProbe(clusterID uuid.UUID, needRoom bool) (*probeSession, error) {
-	streams := g.probes[clusterID]
-	if len(streams) == 0 {
-		return nil, ErrProbeOffline
-	}
+func (g *Gateway) pickProbe(clusterID uuid.UUID, serial string, needRoom bool) (*probeSession, error) {
 	var best *probeSession
-	for _, s := range streams {
-		if !s.ready || (needRoom && s.inFlight >= s.maxConcurrency) {
+	ready := false
+	for _, s := range g.probes[clusterID] {
+		if !s.ready || (serial != anySerial && s.serial != serial) {
+			continue
+		}
+		ready = true
+		if needRoom && s.inFlight >= s.maxConcurrency {
 			continue
 		}
 		if best == nil || s.inFlight < best.inFlight || (s.inFlight == best.inFlight && s.id > best.id) {
 			best = s
 		}
 	}
-	if best == nil {
-		for _, s := range streams {
-			if s.ready {
-				return nil, ErrProbeBusy
-			}
-		}
+	switch {
+	case best != nil:
+		return best, nil
+	case ready:
+		return nil, ErrProbeBusy
+	default:
 		return nil, ErrProbeOffline
 	}
-	return best, nil
 }
 
 // ProbeConnected reports whether a probe stream of clusterID is attached to
-// this replica, and describes the least loaded one.
+// this replica, whatever its certificate, and describes the least loaded
+// one.
 func (g *Gateway) ProbeConnected(clusterID uuid.UUID) (ProbeInfo, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	s, err := g.pickProbe(clusterID, false)
+	s, err := g.pickProbe(clusterID, anySerial, false)
+	if err != nil {
+		return ProbeInfo{}, false
+	}
+	return s.info(), true
+}
+
+// ProbeStream is ProbeConnected for the streams of certificate certSerial
+// only (clusters.probe_cert_serial): those SendRun may use.
+func (g *Gateway) ProbeStream(clusterID uuid.UUID, certSerial string) (ProbeInfo, bool) {
+	if certSerial == anySerial {
+		return ProbeInfo{}, false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s, err := g.pickProbe(clusterID, certSerial, false)
 	if err != nil {
 		return ProbeInfo{}, false
 	}
@@ -387,14 +415,21 @@ func (g *Gateway) ProbeConnected(clusterID uuid.UUID) (ProbeInfo, bool) {
 }
 
 // SendRun sends one run to the least loaded probe stream of clusterID that
-// has room. build makes the run for that stream: it seals the credentials
-// to info.PublicKey, and the run goes out on that same stream, so the seal
-// always matches the key that can open it. The run counts as in flight on
-// the stream until RunDone (or the stream's end). The returned info is the
-// stream's, with this run counted.
-func (g *Gateway) SendRun(clusterID uuid.UUID, build func(ProbeInfo) (*pb.RunScenario, error)) (ProbeInfo, error) {
+// holds certificate certSerial and has room. certSerial is the cluster's
+// current probe certificate (clusters.probe_cert_serial): a stream that
+// connected with a certificate renewed since stays open until the probe
+// reconnects, and gets no run, so that no run is sealed to the key of a
+// stream that is going away. build makes the run for the chosen stream: it
+// seals the credentials to info.PublicKey, and the run goes out on that
+// same stream, so the seal always matches the key that can open it. The
+// run counts as in flight on the stream until RunDone (or the stream's
+// end). The returned info is the stream's, with this run counted.
+func (g *Gateway) SendRun(clusterID uuid.UUID, certSerial string, build func(ProbeInfo) (*pb.RunScenario, error)) (ProbeInfo, error) {
+	if certSerial == anySerial {
+		return ProbeInfo{}, ErrProbeOffline
+	}
 	g.mu.Lock()
-	s, err := g.pickProbe(clusterID, true)
+	s, err := g.pickProbe(clusterID, certSerial, true)
 	if err != nil {
 		g.mu.Unlock()
 		return ProbeInfo{}, err

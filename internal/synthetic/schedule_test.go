@@ -26,8 +26,8 @@ func (e *env) labeledCluster(name, probeStatus string, labels map[string]string)
 		l[k] = v
 	}
 	var id uuid.UUID
-	if err := e.db.QueryRow(e.ctx, `INSERT INTO clusters (name, labels, status, last_seen_at, probe_status, probe_last_seen_at)
-		VALUES ($1, $2, 'online', now(), $3, $4) RETURNING id`, name, l, probeStatus, e.clock.now()).Scan(&id); err != nil {
+	if err := e.db.QueryRow(e.ctx, `INSERT INTO clusters (name, labels, status, last_seen_at, probe_status, probe_last_seen_at, probe_cert_serial)
+		VALUES ($1, $2, 'online', now(), $3, $4, 'cert-' || $1) RETURNING id`, name, l, probeStatus, e.clock.now()).Scan(&id); err != nil {
 		e.t.Fatal(err)
 	}
 	return id

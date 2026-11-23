@@ -40,7 +40,8 @@ var runTimeoutSQL = fmt.Sprintf(`GREATEST(LEAST(COALESCE(
 //  4. due runs of the probes connected here are claimed (FOR UPDATE SKIP
 //     LOCKED, up to the stream's free room), marked running, and sent once
 //     each, with the allowlist and the scenario's credentials sealed to the
-//     stream's key. An expired or invalid credential ends the run as an
+//     stream's key. Only streams of the cluster's current probe
+//     certificate count: one that connected before a renewal gets nothing. An expired or invalid credential ends the run as an
 //     error; one the server cannot resolve skips it (credential_unavailable).
 //
 // It returns how many runs it sent.
@@ -76,8 +77,9 @@ func (s *Service) Dispatch(ctx context.Context) (int, error) {
 	}
 	sent := 0
 	var snap *pb.AllowlistSnapshot
-	for _, cl := range clusters {
-		info, ok := s.Probes.ProbeConnected(cl)
+	for _, due := range clusters {
+		cl := due.id
+		info, ok := s.Probes.ProbeStream(cl, due.serial)
 		if !ok {
 			continue
 		}
@@ -100,7 +102,7 @@ func (s *Service) Dispatch(ctx context.Context) (int, error) {
 			continue
 		}
 		for _, id := range ids {
-			ok, err := s.send(ctx, cl, id, snap)
+			ok, err := s.send(ctx, cl, due.serial, id, snap)
 			if err != nil {
 				errs = append(errs, fmt.Errorf("send run %s: %w", id, err))
 			}
@@ -112,14 +114,25 @@ func (s *Service) Dispatch(ctx context.Context) (int, error) {
 	return sent, errors.Join(errs...)
 }
 
+// dueCluster is a cluster with an online probe and a due run, with the
+// serial of its current probe certificate.
+type dueCluster struct {
+	id     uuid.UUID
+	serial string
+}
+
 // dueClusters lists the clusters with an online probe and a due run.
-func (s *Service) dueClusters(ctx context.Context, now time.Time) ([]uuid.UUID, error) {
-	rows, err := s.DB.Query(ctx, `SELECT DISTINCT r.cluster_id FROM synthetic_runs r JOIN clusters c ON c.id = r.cluster_id
-		WHERE r.status = 'scheduled' AND r.scheduled_for <= $1 AND c.probe_status = 'online'`, now)
+func (s *Service) dueClusters(ctx context.Context, now time.Time) ([]dueCluster, error) {
+	rows, err := s.DB.Query(ctx, `SELECT c.id, c.probe_cert_serial FROM clusters c
+		WHERE c.probe_status = 'online' AND c.probe_cert_serial <> ''
+		  AND EXISTS (SELECT 1 FROM synthetic_runs r WHERE r.cluster_id = c.id AND r.status = 'scheduled' AND r.scheduled_for <= $1)`, now)
 	if err != nil {
 		return nil, err
 	}
-	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (dueCluster, error) {
+		var d dueCluster
+		return d, r.Scan(&d.id, &d.serial)
+	})
 }
 
 // claim marks up to n due runs of clusterID running, oldest first. A run
@@ -148,7 +161,7 @@ func (s *Service) claim(ctx context.Context, clusterID uuid.UUID, n int, now tim
 // send sends one claimed run. It reports whether the run went out. A run
 // that never left goes back to scheduled; one that may have left is never
 // sent again (the probe ignores a run id it has seen): it ends skipped.
-func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb.AllowlistSnapshot) (bool, error) {
+func (s *Service) send(ctx context.Context, clusterID uuid.UUID, certSerial string, runID uuid.UUID, snap *pb.AllowlistSnapshot) (bool, error) {
 	var scenarioID *uuid.UUID
 	var testSpec []byte
 	var test bool
@@ -172,7 +185,7 @@ func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb
 
 	built := false
 	var credErr error
-	info, err := s.Probes.SendRun(clusterID, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
+	info, err := s.Probes.SendRun(clusterID, certSerial, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
 		built = true
 		msg := &pb.RunScenario{RunId: runID.String(), ScenarioJson: body, Allowlist: snap, Test: test}
 		if len(credIDs) > 0 {
@@ -197,8 +210,8 @@ func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb
 		s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason, "err", credErr)
 		return false, s.finishOne(ctx, runID, clusterID, status, reason)
 	case !built:
-		// No stream was free (ErrProbeBusy, or the stream went away): the
-		// run never left.
+		// No stream of the current certificate was free (ErrProbeBusy,
+		// or the stream went away or was renewed): the run never left.
 		_, uerr := s.DB.Exec(ctx, `UPDATE synthetic_runs SET status = 'scheduled', started_at = NULL WHERE id = $1 AND status = 'running'`, runID)
 		return false, uerr
 	default:

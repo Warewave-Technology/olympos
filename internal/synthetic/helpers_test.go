@@ -71,9 +71,11 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// fakeSession is one probe stream with its own HPKE key.
+// fakeSession is one probe stream with its own HPKE key, connected with
+// certificate serial.
 type fakeSession struct {
 	id       uint64
+	serial   string
 	key      hpke.PrivateKey
 	pub      []byte
 	max      int
@@ -96,9 +98,23 @@ type fakeProbes struct {
 	// failSend makes the send fail after build ran; busyBeforeBuild makes
 	// SendRun refuse before it.
 	failSend, busyBeforeBuild bool
+	// serial gives a cluster's current probe certificate: what connect
+	// gives a new stream.
+	serial func(cluster uuid.UUID) string
 }
 
+// connect adds a stream with the cluster's current probe certificate.
 func (f *fakeProbes) connect(t *testing.T, cluster uuid.UUID, max int) *fakeSession {
+	t.Helper()
+	serial := ""
+	if f.serial != nil {
+		serial = f.serial(cluster)
+	}
+	return f.connectWith(t, cluster, serial, max)
+}
+
+// connectWith adds a stream with certificate serial.
+func (f *fakeProbes) connectWith(t *testing.T, cluster uuid.UUID, serial string, max int) *fakeSession {
 	t.Helper()
 	key, err := spec.GenerateKey()
 	if err != nil {
@@ -107,7 +123,7 @@ func (f *fakeProbes) connect(t *testing.T, cluster uuid.UUID, max int) *fakeSess
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.next++
-	s := &fakeSession{id: f.next, key: key, pub: key.PublicKey().Bytes(), max: max, alive: true}
+	s := &fakeSession{id: f.next, serial: serial, key: key, pub: key.PublicKey().Bytes(), max: max, alive: true}
 	if f.sessions == nil {
 		f.sessions = map[uuid.UUID][]*fakeSession{}
 	}
@@ -122,13 +138,13 @@ func (f *fakeProbes) drop(s *fakeSession) {
 }
 
 func (f *fakeProbes) info(s *fakeSession) gateway.ProbeInfo {
-	return gateway.ProbeInfo{SessionID: s.id, PublicKey: bytes.Clone(s.pub), Version: "test", MaxConcurrency: s.max, InFlight: s.inFlight}
+	return gateway.ProbeInfo{SessionID: s.id, PublicKey: bytes.Clone(s.pub), CertSerial: s.serial, Version: "test", MaxConcurrency: s.max, InFlight: s.inFlight}
 }
 
-func (f *fakeProbes) pick(cluster uuid.UUID, room bool) *fakeSession {
+func (f *fakeProbes) pick(cluster uuid.UUID, serial string, room bool) *fakeSession {
 	var best *fakeSession
 	for _, s := range f.sessions[cluster] {
-		if !s.alive || room && s.inFlight >= s.max {
+		if !s.alive || serial == "" || s.serial != serial || room && s.inFlight >= s.max {
 			continue
 		}
 		if best == nil || s.inFlight < best.inFlight {
@@ -138,23 +154,23 @@ func (f *fakeProbes) pick(cluster uuid.UUID, room bool) *fakeSession {
 	return best
 }
 
-func (f *fakeProbes) ProbeConnected(cluster uuid.UUID) (gateway.ProbeInfo, bool) {
+func (f *fakeProbes) ProbeStream(cluster uuid.UUID, serial string) (gateway.ProbeInfo, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	s := f.pick(cluster, false)
+	s := f.pick(cluster, serial, false)
 	if s == nil {
 		return gateway.ProbeInfo{}, false
 	}
 	return f.info(s), true
 }
 
-func (f *fakeProbes) SendRun(cluster uuid.UUID, build func(gateway.ProbeInfo) (*pb.RunScenario, error)) (gateway.ProbeInfo, error) {
+func (f *fakeProbes) SendRun(cluster uuid.UUID, serial string, build func(gateway.ProbeInfo) (*pb.RunScenario, error)) (gateway.ProbeInfo, error) {
 	f.mu.Lock()
 	if f.busyBeforeBuild {
 		f.mu.Unlock()
 		return gateway.ProbeInfo{}, gateway.ErrProbeBusy
 	}
-	s := f.pick(cluster, true)
+	s := f.pick(cluster, serial, true)
 	if s == nil {
 		f.mu.Unlock()
 		return gateway.ProbeInfo{}, gateway.ErrProbeOffline
@@ -249,6 +265,15 @@ func newEnv(t *testing.T) *env {
 	e := &env{t: t, ctx: context.Background(), db: testutil.DB(t), probes: &fakeProbes{},
 		clock: &clock{t: time.Now().UTC().Truncate(time.Second)}, LogBuf: &syncBuffer{}}
 	log := slog.New(secrets.NewRedactingHandler(slog.NewJSONHandler(e.LogBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	e.probes.serial = func(cluster uuid.UUID) string {
+		var serial string
+		// A cluster the database does not know: a stream no run can use.
+		err := e.db.QueryRow(e.ctx, `SELECT probe_cert_serial FROM clusters WHERE id = $1`, cluster).Scan(&serial)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			t.Fatal(err)
+		}
+		return serial
+	}
 	kv := testKV{}
 	e.svc = &Service{DB: e.db, Log: log, Probes: e.probes, Creds: &backup.Credentials{KV: kv, Envelope: &secrets.Envelope{KV: kv}},
 		Cfg: config.Synthetic{ProbeOfflineAlertAfter: 5 * time.Minute}, Now: e.clock.now,
@@ -277,8 +302,8 @@ func (e *env) exec(sql string, args ...any) {
 func (e *env) cluster(name, probeStatus string) uuid.UUID {
 	e.t.Helper()
 	var id uuid.UUID
-	if err := e.db.QueryRow(e.ctx, `INSERT INTO clusters (name, status, last_seen_at, probe_status, probe_last_seen_at)
-		VALUES ($1, 'online', now(), $2, $3) RETURNING id`, name, probeStatus, e.clock.now()).Scan(&id); err != nil {
+	if err := e.db.QueryRow(e.ctx, `INSERT INTO clusters (name, status, last_seen_at, probe_status, probe_last_seen_at, probe_cert_serial)
+		VALUES ($1, 'online', now(), $2, $3, 'cert-' || $1) RETURNING id`, name, probeStatus, e.clock.now()).Scan(&id); err != nil {
 		e.t.Fatal(err)
 	}
 	return id

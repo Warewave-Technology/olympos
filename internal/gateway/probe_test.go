@@ -1,6 +1,7 @@
 package gateway_test
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,6 +10,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -456,7 +458,7 @@ func TestSendRunSealsForChosenSession(t *testing.T) {
 	e := start(t)
 	n := countConnects(e.gw)
 	id, _, probe := e.enrolled(t)
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) {
 		t.Fatal("build called with no probe")
 		return nil, nil
 	}); !errors.Is(err, gateway.ErrProbeOffline) {
@@ -480,7 +482,7 @@ func TestSendRunSealsForChosenSession(t *testing.T) {
 	secret := []byte("s3cr3t-bearer")
 	send := func(runID string) gateway.ProbeInfo {
 		t.Helper()
-		info, err := e.gw.SendRun(id, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
+		info, err := e.gw.SendRun(id, serialOf(t, probe), func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
 			enc, ct, err := spec.SealCredentials(info.PublicKey, runID, id.String(), []spec.RunCredential{{
 				ID: uuid.New(), Kind: "bearer", BoundHosts: []string{"api.example.com"}, Secret: spec.NewSecret(append([]byte(nil), secret...)),
 			}})
@@ -539,7 +541,7 @@ func TestSendRunSealsForChosenSession(t *testing.T) {
 	if second.SessionID == first.SessionID {
 		t.Fatal("second run went to the full stream")
 	}
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) {
 		t.Fatal("build called with every stream full")
 		return nil, nil
 	}); !errors.Is(err, gateway.ErrProbeBusy) {
@@ -557,14 +559,14 @@ func TestSendRunSealsForChosenSession(t *testing.T) {
 	// A failing build sends nothing and keeps no reservation.
 	e.gw.RunDone(id, third.SessionID)
 	boom := errors.New("boom")
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) { return nil, boom }); !errors.Is(err, boom) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) { return nil, boom }); !errors.Is(err, boom) {
 		t.Fatalf("build error: %v", err)
 	}
 	receive(send("run-4"), "run-4")
 
 	cancel()
 	waitGone(t, "probe streams", probeConnected(e.gw, id))
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) { return nil, nil }); !errors.Is(err, gateway.ErrProbeOffline) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) { return nil, nil }); !errors.Is(err, gateway.ErrProbeOffline) {
 		t.Fatalf("after disconnect: %v", err)
 	}
 }
@@ -641,4 +643,85 @@ func TestProbeSessionAlive(t *testing.T) {
 	}
 	cancel()
 	waitGone(t, "probe stream", func() bool { return e.gw.ProbeSessionAlive(id, info.SessionID) })
+}
+
+// A stream that connected with a certificate renewed since stays open
+// until the probe reconnects, but gets no run: SendRun and ProbeStream use
+// only the streams of the serial they are given, the cluster's current
+// one, so that no run is sealed to the key of a stream that is going away.
+func TestSendRunSkipsStreamsOfARenewedCertificate(t *testing.T) {
+	e := start(t)
+	n := countConnects(e.gw)
+	id, _, probe := e.enrolled(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	old, err := connectProbe(t, ctx, e.dialProbe(t, probe), id.String(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitProbes(t, e.gw, id, n, 1)
+	oldSerial := serialOf(t, probe)
+	if info, ok := e.gw.ProbeStream(id, oldSerial); !ok || info.CertSerial != oldSerial {
+		t.Fatalf("stream of the current certificate: %+v %v", info, ok)
+	}
+	if _, ok := e.gw.ProbeStream(id, ""); ok {
+		t.Fatal("ProbeStream with no serial found a stream")
+	}
+
+	renewed, err := e.renewProbe(t, probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, _ := e.probeSerials(t, id)
+	if cur != serialOf(t, renewed) {
+		t.Fatalf("current serial %s, want the renewed one", cur)
+	}
+	// The old stream is still attached, but not for the current serial.
+	if _, ok := e.gw.ProbeConnected(id); !ok {
+		t.Fatal("old stream dropped by the renewal")
+	}
+	if _, ok := e.gw.ProbeStream(id, cur); ok {
+		t.Fatal("old stream offered for the renewed certificate")
+	}
+	if _, err := e.gw.SendRun(id, cur, func(gateway.ProbeInfo) (*pb.RunScenario, error) {
+		t.Error("build called for the stream of a renewed certificate")
+		return nil, nil
+	}); !errors.Is(err, gateway.ErrProbeOffline) {
+		t.Fatalf("SendRun with only an old stream: %v", err)
+	}
+	if _, err := e.gw.SendRun(id, "", func(gateway.ProbeInfo) (*pb.RunScenario, error) {
+		t.Error("build called with no serial")
+		return nil, nil
+	}); !errors.Is(err, gateway.ErrProbeOffline) {
+		t.Fatalf("SendRun with no serial: %v", err)
+	}
+
+	// The probe reconnects with the new certificate: runs go there only.
+	fresh, err := connectProbe(t, ctx, e.dialProbe(t, renewed), id.String(), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitProbes(t, e.gw, id, n, 2)
+	for i := range 3 {
+		runID := fmt.Sprintf("run-%d", i)
+		info, err := e.gw.SendRun(id, cur, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
+			if !bytes.Equal(info.PublicKey, fresh.pub) {
+				t.Errorf("run %s built for the old stream's key", runID)
+			}
+			return &pb.RunScenario{RunId: runID}, nil
+		})
+		if err != nil || info.CertSerial != cur {
+			t.Fatalf("SendRun %s: %+v %v", runID, info, err)
+		}
+		select {
+		case r := <-fresh.runs:
+			if r.RunId != runID {
+				t.Fatalf("got %s, want %s", r.RunId, runID)
+			}
+		case r := <-old.runs:
+			t.Fatalf("run %s went to the stream of the renewed certificate", r.RunId)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("run %s not delivered", runID)
+		}
+	}
 }

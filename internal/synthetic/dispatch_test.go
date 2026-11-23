@@ -343,3 +343,31 @@ func TestAllowlistVersionAfterRestore(t *testing.T) {
 		t.Fatalf("snapshot version %d, want %d", got, again)
 	}
 }
+
+// A stream of a probe certificate that was renewed since it connected gets
+// no run: dispatch reads the cluster's current serial and sends only on
+// its streams (the run waits for one), so no run is sealed to the key of a
+// stream that is going away.
+func TestDispatchOnlyToTheCurrentCertificate(t *testing.T) {
+	e := newEnv(t)
+	e.allow("suffix", "example.com")
+	cl := e.cluster("c1", "online")
+	stale := e.probes.connectWith(t, cl, "cert-before-renewal", 4)
+	run := e.schedule(e.scenario("s", true, httpStep("https://api.example.com/", nil)), cl, 0)
+	if n := e.dispatch(); n != 0 || len(e.probes.messages()) != 0 {
+		t.Fatalf("sent %d runs on a stream of a renewed certificate", n)
+	}
+	e.wantRun(run, StatusScheduled, "")
+	if e.probes.inFlight(stale) != 0 {
+		t.Fatal("a run was counted on the stale stream")
+	}
+
+	cur := e.probes.connect(t, cl, 4)
+	if n := e.dispatch(); n != 1 {
+		t.Fatalf("sent %d runs once the current certificate connected", n)
+	}
+	if m := e.probes.messages(); len(m) != 1 || m[0].session != cur.id {
+		t.Fatalf("run went to session %d, want %d", m[0].session, cur.id)
+	}
+	e.wantRun(run, StatusRunning, "")
+}

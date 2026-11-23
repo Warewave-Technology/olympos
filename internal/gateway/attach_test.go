@@ -176,7 +176,7 @@ func TestRevokeJustAfterAttachIsCaught(t *testing.T) {
 	if _, ok := e.gw.ProbeConnected(id); ok || n.Load() != 0 {
 		t.Fatalf("probe usable after revoke (connected hooks: %d)", n.Load())
 	}
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) { return &pb.RunScenario{RunId: "r"}, nil }); !errors.Is(err, gateway.ErrProbeOffline) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) { return &pb.RunScenario{RunId: "r"}, nil }); !errors.Is(err, gateway.ErrProbeOffline) {
 		t.Fatalf("SendRun to a revoked probe: %v", err)
 	}
 
@@ -262,7 +262,7 @@ func TestProbeUsableOnlyAfterConnectedHook(t *testing.T) {
 	if _, ok := e.gw.ProbeConnected(id); ok {
 		t.Fatal("stream usable while its Connected hook runs")
 	}
-	if _, err := e.gw.SendRun(id, func(gateway.ProbeInfo) (*pb.RunScenario, error) {
+	if _, err := e.gw.SendRun(id, serialOf(t, probe), func(gateway.ProbeInfo) (*pb.RunScenario, error) {
 		t.Error("build called for a stream whose Connected hook has not returned")
 		return nil, nil
 	}); !errors.Is(err, gateway.ErrProbeOffline) {

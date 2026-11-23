@@ -121,8 +121,10 @@ const (
 // ProbeSender is the part of the gateway that reaches probe streams on this
 // replica (*gateway.Gateway).
 type ProbeSender interface {
-	ProbeConnected(clusterID uuid.UUID) (gateway.ProbeInfo, bool)
-	SendRun(clusterID uuid.UUID, build func(gateway.ProbeInfo) (*pb.RunScenario, error)) (gateway.ProbeInfo, error)
+	// ProbeStream and SendRun use only the streams of certificate
+	// certSerial, the cluster's current one (clusters.probe_cert_serial).
+	ProbeStream(clusterID uuid.UUID, certSerial string) (gateway.ProbeInfo, bool)
+	SendRun(clusterID uuid.UUID, certSerial string, build func(gateway.ProbeInfo) (*pb.RunScenario, error)) (gateway.ProbeInfo, error)
 	RunDone(clusterID uuid.UUID, sessionID uint64)
 	// ProbeSessionAlive reports whether stream sessionID is still open.
 	ProbeSessionAlive(clusterID uuid.UUID, sessionID uint64) bool
