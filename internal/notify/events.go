@@ -41,6 +41,15 @@ const (
 	GrantChanged        = "grant.changed"
 	GrantStale          = "grant.stale"
 	SASExpiring         = "sas.expiring"
+
+	// Synthetic monitoring (docs/design/synthetic-monitoring.md §5, §6.1).
+	SyntheticFailing            = "synthetic.failing"
+	SyntheticCritical           = "synthetic.critical"
+	SyntheticRecovered          = "synthetic.recovered"
+	ProbeOffline                = "probe.offline"
+	ProbeOnline                 = "probe.online"
+	SyntheticCredentialExpiring = "synthetic.credential_expiring"
+	SyntheticAllowlistChanged   = "synthetic.allowlist_changed"
 )
 
 // Catalog lists every event type, in display order. backup.succeeded is
@@ -49,6 +58,7 @@ var Catalog = []string{
 	BackupFailed, BackupPartial, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
 	RestoreRequested, RestoreApproved, RestoreRejected, RestoreStarted, RestoreSucceeded, RestoreFailed, RestoreBreakGlass,
 	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, SecretFindings, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
+	SyntheticFailing, SyntheticCritical, SyntheticRecovered, ProbeOffline, ProbeOnline, SyntheticCredentialExpiring, SyntheticAllowlistChanged,
 }
 
 // Event is what modules emit. Payload MUST NOT contain secret values;

@@ -91,10 +91,16 @@ const (
 	LockScanner         int64 = 0x4f4c5951
 	LockSelfBackup      int64 = 0x4f4c5960
 	LockRestores        int64 = 0x4f4c5970
+	// Synthetic monitoring: the scheduler, the alert loop (probe offline
+	// and alert messages) and maintenance (retention, credential expiry).
+	LockSyntheticScheduler   int64 = 0x4f4c5980
+	LockSyntheticAlerts      int64 = 0x4f4c5981
+	LockSyntheticMaintenance int64 = 0x4f4c5982
 )
 
 // AllLocks lists every key (for the uniqueness test).
-var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance, LockSASExpiry, LockBackupClaim, LockVaults, LockScanner, LockSelfBackup, LockRestores}
+var AllLocks = []int64{LockBackupScheduler, LockAuditScheduler, LockMaintenance, LockSASExpiry, LockBackupClaim, LockVaults, LockScanner, LockSelfBackup, LockRestores,
+	LockSyntheticScheduler, LockSyntheticAlerts, LockSyntheticMaintenance}
 
 // RunLeader runs tick every interval while holding the advisory lock. Only
 // one replica holds it at a time; others retry each interval.

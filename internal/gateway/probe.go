@@ -418,6 +418,16 @@ func (g *Gateway) SendRun(clusterID uuid.UUID, build func(ProbeInfo) (*pb.RunSce
 	return info, nil
 }
 
+// ProbeSessionAlive reports whether probe stream sessionID of clusterID is
+// still open on this replica. A run sent on a stream that is gone gets no
+// result: the probe sends a result only on the stream the run came on.
+func (g *Gateway) ProbeSessionAlive(clusterID uuid.UUID, sessionID uint64) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.probes[clusterID][sessionID]
+	return s != nil && s.ctx.Err() == nil
+}
+
 // RunDone releases a run that SendRun counted on stream sessionID: its
 // result or rejection arrived, or the caller gave up on it. A stream that
 // is gone is ignored.

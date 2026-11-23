@@ -619,3 +619,26 @@ func TestProbeResultHooks(t *testing.T) {
 		t.Fatal("Disconnected hook not called")
 	}
 }
+
+// ProbeSessionAlive follows one stream: true while it is open, false once it
+// ended, and false for an id no stream has.
+func TestProbeSessionAlive(t *testing.T) {
+	e := start(t)
+	n := countConnects(e.gw)
+	id, _, probe := e.enrolled(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := connectProbe(t, ctx, e.dialProbe(t, probe), id.String(), 2); err != nil {
+		t.Fatal(err)
+	}
+	waitProbes(t, e.gw, id, n, 1)
+	info, _ := e.gw.ProbeConnected(id)
+	if !e.gw.ProbeSessionAlive(id, info.SessionID) {
+		t.Fatal("open stream not alive")
+	}
+	if e.gw.ProbeSessionAlive(id, info.SessionID+1) || e.gw.ProbeSessionAlive(uuid.New(), info.SessionID) {
+		t.Fatal("unknown stream alive")
+	}
+	cancel()
+	waitGone(t, "probe stream", func() bool { return e.gw.ProbeSessionAlive(id, info.SessionID) })
+}

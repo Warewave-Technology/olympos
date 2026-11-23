@@ -1,0 +1,419 @@
+package synthetic
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+
+	"github.com/Warewave-Technology/olympos/internal/gateway"
+	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/store"
+	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
+)
+
+// runTimeoutSQL is a run's timeout in seconds: the test spec's for a test
+// run, else the scenario's, at most spec.MaxRunTimeout. r is
+// synthetic_runs, s the scenario (LEFT JOIN).
+const runTimeoutSQL = `LEAST(COALESCE(
+	CASE WHEN jsonb_typeof(r.test_spec->'timeout_seconds') = 'number' THEN (r.test_spec->>'timeout_seconds')::numeric::int END,
+	s.timeout_seconds, 60), 60)`
+
+// Dispatch is one pass of this replica's dispatcher:
+//
+//  1. due runs of clusters whose probe is not online end skipped
+//     (probe_offline): no failure for an offline probe;
+//  2. scheduled runs that no replica sent within the scenario's interval
+//     end skipped (not_dispatched), so that the scheduler plans the next;
+//  3. runs this replica sent end skipped (probe_disconnected) when their
+//     stream is gone, or error (no_result) when the stream is open but the
+//     result is ResultGrace past the run's timeout; running runs that no
+//     live replica tracks end skipped (probe_disconnected) OrphanGrace
+//     later;
+//  4. due runs of the probes connected here are claimed (FOR UPDATE SKIP
+//     LOCKED, up to the stream's free room), marked running, and sent once
+//     each, with the allowlist and the scenario's credentials sealed to the
+//     stream's key.
+//
+// It returns how many runs it sent.
+func (s *Service) Dispatch(ctx context.Context) (int, error) {
+	now := s.now()
+	var errs []error
+	if err := s.finishWhere(ctx, StatusSkipped, ReasonProbeOffline, `SELECT r.id, r.cluster_id FROM synthetic_runs r
+		JOIN clusters c ON c.id = r.cluster_id
+		WHERE r.status = 'scheduled' AND r.scheduled_for <= $1 AND c.probe_status <> 'online'
+		FOR UPDATE OF r SKIP LOCKED`, now); err != nil {
+		errs = append(errs, fmt.Errorf("skip runs of offline probes: %w", err))
+	}
+	if err := s.finishWhere(ctx, StatusSkipped, ReasonNotDispatched, `SELECT r.id, r.cluster_id FROM synthetic_runs r
+		LEFT JOIN scenarios s ON s.id = r.scenario_id
+		WHERE r.status = 'scheduled'
+		  AND r.scheduled_for + make_interval(secs => CASE WHEN r.test THEN $2 ELSE COALESCE(s.interval_seconds, $2) END) < $1
+		FOR UPDATE OF r SKIP LOCKED`, now, int(defaultTestInterval.Seconds())); err != nil {
+		errs = append(errs, fmt.Errorf("skip undispatched runs: %w", err))
+	}
+	if err := s.reap(ctx, now); err != nil {
+		errs = append(errs, err)
+	}
+
+	clusters, err := s.dueClusters(ctx, now)
+	if err != nil {
+		return 0, errors.Join(append(errs, err)...)
+	}
+	sent := 0
+	var snap *pb.AllowlistSnapshot
+	for _, cl := range clusters {
+		info, ok := s.Probes.ProbeConnected(cl)
+		if !ok {
+			continue
+		}
+		room := info.MaxConcurrency - info.InFlight
+		if room <= 0 {
+			continue
+		}
+		if snap == nil {
+			var dropped int
+			if snap, dropped, err = loadAllowlist(ctx, s.DB); err != nil {
+				return sent, errors.Join(append(errs, fmt.Errorf("load allowlist: %w", err))...)
+			}
+			if dropped > 0 {
+				s.Log.Warn("allowlist rules that do not validate are not sent to probes", "rules", dropped)
+			}
+		}
+		ids, err := s.claim(ctx, cl, room, now, snap.Version)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("claim runs of cluster %s: %w", cl, err))
+			continue
+		}
+		for _, id := range ids {
+			ok, err := s.send(ctx, cl, id, snap)
+			if err != nil {
+				errs = append(errs, fmt.Errorf("send run %s: %w", id, err))
+			}
+			if ok {
+				sent++
+			}
+		}
+	}
+	return sent, errors.Join(errs...)
+}
+
+// dueClusters lists the clusters with an online probe and a due run.
+func (s *Service) dueClusters(ctx context.Context, now time.Time) ([]uuid.UUID, error) {
+	rows, err := s.DB.Query(ctx, `SELECT DISTINCT r.cluster_id FROM synthetic_runs r JOIN clusters c ON c.id = r.cluster_id
+		WHERE r.status = 'scheduled' AND r.scheduled_for <= $1 AND c.probe_status = 'online'`, now)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[uuid.UUID])
+}
+
+// claim marks up to n due runs of clusterID running, oldest first. A run
+// another replica holds is skipped, not waited for.
+func (s *Service) claim(ctx context.Context, clusterID uuid.UUID, n int, now time.Time, allowVersion int64) ([]uuid.UUID, error) {
+	var ids []uuid.UUID
+	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, `SELECT r.id FROM synthetic_runs r JOIN clusters c ON c.id = r.cluster_id
+			WHERE r.cluster_id = $1 AND r.status = 'scheduled' AND r.scheduled_for <= $2 AND c.probe_status = 'online'
+			ORDER BY r.scheduled_for, r.id LIMIT $3 FOR UPDATE OF r SKIP LOCKED`, clusterID, now, n)
+		if err != nil {
+			return err
+		}
+		if ids, err = pgx.CollectRows(rows, pgx.RowTo[uuid.UUID]); err != nil || len(ids) == 0 {
+			return err
+		}
+		_, err = tx.Exec(ctx, `UPDATE synthetic_runs SET status = 'running', started_at = $2, allowlist_version = $3
+			WHERE id = ANY($1)`, ids, now, allowVersion)
+		return err
+	})
+	return ids, err
+}
+
+// send sends one claimed run. It reports whether the run went out. A run
+// that never left goes back to scheduled; one that may have left is never
+// sent again (the probe ignores a run id it has seen): it ends skipped.
+func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb.AllowlistSnapshot) (bool, error) {
+	var scenarioID *uuid.UUID
+	var testSpec []byte
+	var test bool
+	if err := s.DB.QueryRow(ctx, `SELECT scenario_id, test_spec, test FROM synthetic_runs WHERE id = $1`, runID).
+		Scan(&scenarioID, &testSpec, &test); err != nil {
+		return false, err
+	}
+	sc, err := runScenario(ctx, s.DB, scenarioID, testSpec)
+	if err != nil {
+		s.Log.Warn("synthetic run has no usable scenario", "run_id", runID, "err", err)
+		return false, s.finishOne(ctx, runID, clusterID, StatusError, ReasonInvalidScenario)
+	}
+	body, err := json.Marshal(sc)
+	if err != nil {
+		return false, s.finishOne(ctx, runID, clusterID, StatusError, ReasonInvalidScenario)
+	}
+	credIDs := CredentialIDs(sc)
+	timeout := time.Duration(min(max(sc.TimeoutSeconds, 1), int(spec.MaxRunTimeout/time.Second))) * time.Second
+
+	built := false
+	var credErr error
+	info, err := s.Probes.SendRun(clusterID, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
+		built = true
+		msg := &pb.RunScenario{RunId: runID.String(), ScenarioJson: body, Allowlist: snap, Test: test}
+		if len(credIDs) > 0 {
+			sealed, err := s.seal(ctx, info.PublicKey, runID, clusterID, credIDs)
+			if err != nil {
+				credErr = err
+				return nil, err
+			}
+			msg.Credentials = sealed
+		}
+		// Tracked before the run goes out: its result may come before
+		// SendRun returns.
+		s.track(runID, &sentRun{cluster: clusterID, session: info.SessionID, deadline: s.now().Add(timeout + ResultGrace)})
+		return msg, nil
+	})
+	switch {
+	case err == nil:
+		s.Log.Debug("synthetic run sent", "run_id", runID, "cluster_id", clusterID, "session", info.SessionID)
+		return true, nil
+	case credErr != nil:
+		s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "err", credErr)
+		return false, s.finishOne(ctx, runID, clusterID, StatusError, ReasonCredentialError)
+	case !built:
+		// No stream was free (ErrProbeBusy, or the stream went away): the
+		// run never left.
+		_, uerr := s.DB.Exec(ctx, `UPDATE synthetic_runs SET status = 'scheduled', started_at = NULL WHERE id = $1 AND status = 'running'`, runID)
+		return false, uerr
+	default:
+		// Sending failed: the stream is gone, and the run may have reached
+		// it all the same.
+		s.untrack(runID)
+		return false, s.finishOne(ctx, runID, clusterID, StatusSkipped, ReasonProbeDisconnected)
+	}
+}
+
+// seal resolves the credentials and seals them to the stream's key for this
+// run on this cluster. Every plaintext copy is zeroed before it returns.
+func (s *Service) seal(ctx context.Context, pub []byte, runID, clusterID uuid.UUID, ids []uuid.UUID) (*pb.SealedCredentials, error) {
+	creds, err := runCredentials(ctx, s.DB, s.Creds, ids)
+	defer spec.ZeroCredentials(creds)
+	if err != nil {
+		return nil, err
+	}
+	enc, ct, err := spec.SealCredentials(pub, runID.String(), clusterID.String(), creds)
+	if err != nil {
+		return nil, err
+	}
+	return &pb.SealedCredentials{Enc: enc, Ciphertext: ct}, nil
+}
+
+func (s *Service) track(runID uuid.UUID, r *sentRun) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sent == nil {
+		s.sent = map[uuid.UUID]*sentRun{}
+	}
+	s.sent[runID] = r
+}
+
+func (s *Service) untrack(runID uuid.UUID) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.sent, runID)
+}
+
+// release frees the stream slot of a run whose answer came from clusterID,
+// once. A run of another cluster is left alone.
+func (s *Service) release(runID, clusterID uuid.UUID) {
+	s.mu.Lock()
+	r := s.sent[runID]
+	if r == nil || r.cluster != clusterID || r.released {
+		s.mu.Unlock()
+		return
+	}
+	r.released = true
+	s.mu.Unlock()
+	s.Probes.RunDone(r.cluster, r.session)
+}
+
+// forget drops a finished run: its slot is freed if it was not yet.
+func (s *Service) forget(runID uuid.UUID) {
+	s.mu.Lock()
+	r := s.sent[runID]
+	delete(s.sent, runID)
+	s.mu.Unlock()
+	if r != nil && !r.released {
+		s.Probes.RunDone(r.cluster, r.session)
+	}
+}
+
+// reap ends the running runs whose result will not come (step 3 of
+// Dispatch).
+func (s *Service) reap(ctx context.Context, now time.Time) error {
+	type item struct {
+		id uuid.UUID
+		r  sentRun
+	}
+	s.mu.Lock()
+	mine := make([]uuid.UUID, 0, len(s.sent))
+	var due []item
+	for id, r := range s.sent {
+		mine = append(mine, id)
+		due = append(due, item{id, *r})
+	}
+	s.mu.Unlock()
+
+	var errs []error
+	for _, it := range due {
+		status, reason := "", ""
+		switch {
+		case !s.Probes.ProbeSessionAlive(it.r.cluster, it.r.session):
+			// The probe sends a result only on the stream the run came
+			// on: none will come.
+			status, reason = StatusSkipped, ReasonProbeDisconnected
+		case now.After(it.r.deadline):
+			status, reason = StatusError, ReasonNoResult
+		default:
+			continue
+		}
+		if err := s.finishOne(ctx, it.id, it.r.cluster, status, reason); err != nil {
+			errs = append(errs, fmt.Errorf("end run %s: %w", it.id, err))
+			continue
+		}
+		s.forget(it.id)
+	}
+
+	if err := s.finishWhere(ctx, StatusSkipped, ReasonProbeDisconnected, `SELECT r.id, r.cluster_id FROM synthetic_runs r
+		LEFT JOIN scenarios s ON s.id = r.scenario_id
+		WHERE r.status = 'running' AND NOT (r.id = ANY($2))
+		  AND COALESCE(r.started_at, r.created_at) + make_interval(secs => `+runTimeoutSQL+` + $3) < $1
+		FOR UPDATE OF r SKIP LOCKED`, now, mine, int((ResultGrace+OrphanGrace)/time.Second)); err != nil {
+		errs = append(errs, fmt.Errorf("end orphaned runs: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// finishOne ends one open run of clusterID, unless it finished already.
+func (s *Service) finishOne(ctx context.Context, runID, clusterID uuid.UUID, status, reason string) error {
+	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		_, err := s.finish(ctx, tx, runID, clusterID, status, reason)
+		return err
+	})
+}
+
+// finishWhere ends, in one transaction, every open run the query selects.
+// The query returns the runs' id and cluster_id and takes them FOR UPDATE
+// SKIP LOCKED, so that a run another replica is sending is left alone.
+func (s *Service) finishWhere(ctx context.Context, status, reason, query string, args ...any) error {
+	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		rows, err := tx.Query(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		type run struct{ id, cluster uuid.UUID }
+		runs, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (run, error) {
+			var x run
+			return x, r.Scan(&x.id, &x.cluster)
+		})
+		if err != nil {
+			return err
+		}
+		for _, x := range runs {
+			if _, err := s.finish(ctx, tx, x.id, x.cluster, status, reason); err != nil {
+				return err
+			}
+			s.forget(x.id)
+		}
+		if len(runs) > 0 {
+			s.Log.Info("synthetic runs ended", "status", status, "reason", reason, "runs", len(runs))
+		}
+		return nil
+	})
+}
+
+// finish ends an open run (scheduled or running) of clusterID without a
+// result, and calls OnResult. It reports whether the run was open.
+func (s *Service) finish(ctx context.Context, tx pgx.Tx, runID, clusterID uuid.UUID, status, reason string) (bool, error) {
+	now := s.now()
+	var scenarioID *uuid.UUID
+	var test bool
+	err := tx.QueryRow(ctx, `UPDATE synthetic_runs SET status = $3, finished_at = $4, failure_reason = $5, failed_step = NULL
+		WHERE id = $1 AND cluster_id = $2 AND status IN ('scheduled','running') RETURNING scenario_id, test`,
+		runID, clusterID, status, now, reason).Scan(&scenarioID, &test)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, s.outcome(ctx, tx, RunOutcome{RunID: runID, ScenarioID: deref(scenarioID), ClusterID: clusterID,
+		Status: status, Reason: reason, Test: test, FinishedAt: now})
+}
+
+func (s *Service) outcome(ctx context.Context, tx pgx.Tx, o RunOutcome) error {
+	if s.OnResult == nil {
+		return nil
+	}
+	return s.OnResult(ctx, tx, o)
+}
+
+func deref(id *uuid.UUID) uuid.UUID {
+	if id == nil {
+		return uuid.Nil
+	}
+	return *id
+}
+
+// rejection maps a probe's RunRejected reason to how the run ends.
+func rejection(reason string) (status, failure string) {
+	switch reason {
+	case "busy":
+		return StatusSkipped, ReasonProbeBusy
+	case "allowlist_stale":
+		return StatusSkipped, ReasonAllowlistStale
+	case "credentials_unreadable":
+		return StatusError, ReasonCredentialsUnreadable
+	case "invalid_scenario":
+		return StatusError, ReasonInvalidScenario
+	}
+	return StatusError, ReasonRejected
+}
+
+// Reject records that the probe of clusterID did not start a run. Only a
+// running run of that cluster changes; the stream slot is freed.
+func (s *Service) Reject(ctx context.Context, clusterID uuid.UUID, r *pb.RunRejected) error {
+	runID, err := uuid.Parse(r.GetRunId())
+	if err != nil {
+		return nil
+	}
+	ctx, cancel := detached(ctx)
+	defer cancel()
+	s.release(runID, clusterID)
+	status, reason := rejection(r.GetReason())
+	var open bool
+	err = store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		// Only a running run: a scheduled one was never sent.
+		var st string
+		err := tx.QueryRow(ctx, `SELECT status FROM synthetic_runs WHERE id = $1 AND cluster_id = $2 FOR UPDATE`, runID, clusterID).Scan(&st)
+		if errors.Is(err, pgx.ErrNoRows) || err == nil && st != StatusRunning {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		open, err = s.finish(ctx, tx, runID, clusterID, status, reason)
+		return err
+	})
+	if err == nil && open {
+		s.forget(runID)
+	}
+	return err
+}
+
+// detached keeps the work of a message that arrived alive when its stream
+// ends meanwhile, for a bounded time.
+func detached(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+}

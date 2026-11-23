@@ -161,6 +161,71 @@ type Server struct {
 			ReportUnmanaged *bool `yaml:"reportUnmanaged"`
 		} `yaml:"secretsInventory"`
 	} `yaml:"security"`
+
+	Synthetic Synthetic `yaml:"synthetic"`
+}
+
+// Synthetic configures synthetic monitoring
+// (docs/design/synthetic-monitoring.md). Zero values take the defaults.
+type Synthetic struct {
+	// RunRetention keeps runs and their step results (default 720h, 30
+	// days), then only the hourly aggregates remain.
+	RunRetention time.Duration `yaml:"runRetention"`
+	// AggregateRetention keeps the hourly aggregates (default 9600h, 400
+	// days).
+	AggregateRetention time.Duration `yaml:"aggregateRetention"`
+	// ExcerptRetention keeps response excerpts (default 168h, 7 days).
+	ExcerptRetention time.Duration `yaml:"excerptRetention"`
+	// MaxRequestsPerMinutePerCluster caps what all scenarios together may
+	// make one cluster's probe send (default 600, §6.3).
+	MaxRequestsPerMinutePerCluster int `yaml:"maxRequestsPerMinutePerCluster"`
+	// MaxRequestsPerMinutePerScenario caps one scenario on one cluster
+	// (default 120, decision 4).
+	MaxRequestsPerMinutePerScenario int `yaml:"maxRequestsPerMinutePerScenario"`
+	// ProbeOfflineAlertAfter: probe.offline fires after a probe has been
+	// offline this long (default 5m). One probe.online follows when it
+	// comes back.
+	ProbeOfflineAlertAfter time.Duration `yaml:"probeOfflineAlertAfter"`
+}
+
+func (s *Synthetic) defaults() {
+	dur := func(p *time.Duration, v time.Duration) {
+		if *p == 0 {
+			*p = v
+		}
+	}
+	dur(&s.RunRetention, 720*time.Hour)
+	dur(&s.AggregateRetention, 9600*time.Hour)
+	dur(&s.ExcerptRetention, 168*time.Hour)
+	dur(&s.ProbeOfflineAlertAfter, 5*time.Minute)
+	if s.MaxRequestsPerMinutePerCluster == 0 {
+		s.MaxRequestsPerMinutePerCluster = 600
+	}
+	if s.MaxRequestsPerMinutePerScenario == 0 {
+		s.MaxRequestsPerMinutePerScenario = 120
+	}
+}
+
+func (s *Synthetic) validate() []string {
+	var errs []string
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{
+		{"synthetic.runRetention", s.RunRetention}, {"synthetic.aggregateRetention", s.AggregateRetention},
+		{"synthetic.excerptRetention", s.ExcerptRetention}, {"synthetic.probeOfflineAlertAfter", s.ProbeOfflineAlertAfter},
+	} {
+		if d.v < 0 {
+			errs = append(errs, d.name+" must not be negative")
+		}
+	}
+	if s.MaxRequestsPerMinutePerCluster < 0 {
+		errs = append(errs, "synthetic.maxRequestsPerMinutePerCluster must not be negative")
+	}
+	if s.MaxRequestsPerMinutePerScenario < 0 {
+		errs = append(errs, "synthetic.maxRequestsPerMinutePerScenario must not be negative")
+	}
+	return errs
 }
 
 // Load reads path (may be empty) and applies defaults and env overrides.
@@ -245,6 +310,7 @@ func (c *Server) defaults() {
 	if c.Security.SystemNamespaces == nil {
 		c.Security.SystemNamespaces = []string{"kube-system", "kube-public", "kube-node-lease", "olympos-system", "olympos-bench"}
 	}
+	c.Synthetic.defaults()
 }
 
 // Validate checks required settings.
@@ -286,6 +352,7 @@ func (c *Server) Validate() error {
 	if c.Database.DSN != "" && c.Database.DSNRef != "" {
 		errs = append(errs, "set database.dsn or database.dsnRef, not both")
 	}
+	errs = append(errs, c.Synthetic.validate()...)
 	if len(errs) > 0 {
 		return errors.New("invalid config: " + strings.Join(errs, "; "))
 	}
