@@ -440,7 +440,7 @@ func parseURL(raw string) (*url.URL, bool) {
 func checkVars(s string, defined map[string]bool) string {
 	names, ok := varRefs(s)
 	if !ok {
-		return `"${" must start a variable such as ${token}`
+		return `"${" must start a variable such as ${token}; a literal "${" cannot be written (there is no escape)`
 	}
 	for _, n := range names {
 		if !defined[n] {

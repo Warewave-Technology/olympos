@@ -4,13 +4,14 @@ import (
 	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/server"
 	"github.com/Warewave-Technology/olympos/internal/synthetic"
 )
 
 // Synthetic monitoring (docs/design/synthetic-monitoring.md): probe state,
 // the scheduler, dispatch of runs to the probe streams on this replica,
 // result ingestion, the alert state machine and its messages, credential
-// expiry.
+// expiry, and the API under /api/v1/synthetic.
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		svc := &synthetic.Service{
@@ -20,7 +21,9 @@ func init() {
 		}
 		svc.OnResult = svc.ApplyOutcome
 		svc.InstallHooks(&d.Gateway.ProbeHooks)
+		api := &synthetic.API{Svc: svc, Log: d.Log.With("component", "synthetic-api")}
 		return Wiring{
+			Modules: []server.Module{api},
 			// The dispatcher runs on every replica (each sends the runs of
 			// the probes connected to it); the scheduler, the alert loop
 			// and maintenance on the leader of their locks.

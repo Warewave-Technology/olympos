@@ -45,37 +45,7 @@ const matrixTenant = "00000000-0000-0000-0000-0000000000aa"
 func TestAuthzMatrix(t *testing.T) {
 	db := testutil.DB(t)
 	ctx := context.Background()
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(`olympos:
-  devMode: true
-  publicURL: http://olympos.test
-  agentGatewayURL: gw.test:8443
-  keyVault: {provider: local, name: test, localDir: `+dir+`/kv}
-`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	cfg, err := config.Load(cfgPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	kv := &secrets.LocalKeyVault{Dir: filepath.Join(dir, "kv")}
-	fp, _ := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
-	d := &Deps{Cfg: cfg, Log: log, DB: db, KV: kv, Envelope: &secrets.Envelope{KV: kv}, HMAC: fp, CA: pki.NewForTest()}
-	d.Gateway = gateway.New(db, d.CA, log)
-	d.Inventory = &inventory.Service{DB: db, Log: log}
-	srv := &server.Server{DB: db, Log: log, TenantID: matrixTenant, DevMode: true, InsecureCookies: true,
-		Directory: server.LocalDirectory{DB: db}, SPA: fstest.MapFS{"index.html": {Data: []byte("spa")}}}
-	srv.Modules = append(srv.Modules, &inventory.API{DB: db, Log: log, Gateway: d.Gateway, CA: d.CA, GatewayURL: "gw.test:8443"})
-	for _, f := range moduleFactories {
-		w, err := f(d)
-		if err != nil {
-			t.Fatal(err)
-		}
-		srv.Modules = append(srv.Modules, w.Modules...)
-	}
-	h := srv.Handler()
+	h := wiredHandler(t, db)
 	ts := httptest.NewServer(h)
 	defer ts.Close()
 
@@ -149,7 +119,8 @@ func TestAuthzMatrix(t *testing.T) {
 		b, _ := io.ReadAll(resp.Body)
 		return resp.StatusCode, string(b)
 	}
-	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], ids["restore"], ids["run"], "prod-secret-cluster"}
+	leaks := []string{ids["cluster"], ids["target"], ids["job"], ids["vault"], ids["cr"], ids["restore"], ids["run"], "prod-secret-cluster",
+		ids["scenario"], ids["synthetic_run"], "prod-secret-scenario", "secret-host.prod.test"}
 	// Readable by every signed-in reader by design: global configuration
 	// that cluster-scoped operators pick from (destinations, notification
 	// channels; no secret material in the views; docs/security-review-v0.1.md).
@@ -184,6 +155,43 @@ func TestAuthzMatrix(t *testing.T) {
 	t.Logf("%d routes × 3 principals", len(routes))
 }
 
+// wiredHandler is the user-facing router with the production module
+// wiring (every module factory), on db.
+func wiredHandler(t *testing.T, db *store.DB) http.Handler {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(cfgPath, []byte(`olympos:
+  devMode: true
+  publicURL: http://olympos.test
+  agentGatewayURL: gw.test:8443
+  keyVault: {provider: local, name: test, localDir: `+dir+`/kv}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	kv := &secrets.LocalKeyVault{Dir: filepath.Join(dir, "kv")}
+	fp, _ := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
+	d := &Deps{Cfg: cfg, Log: log, DB: db, KV: kv, Envelope: &secrets.Envelope{KV: kv}, HMAC: fp, CA: pki.NewForTest()}
+	d.Gateway = gateway.New(db, d.CA, log)
+	d.Inventory = &inventory.Service{DB: db, Log: log}
+	srv := &server.Server{DB: db, Log: log, TenantID: matrixTenant, DevMode: true, InsecureCookies: true,
+		Directory: server.LocalDirectory{DB: db}, SPA: fstest.MapFS{"index.html": {Data: []byte("spa")}}}
+	srv.Modules = append(srv.Modules, &inventory.API{DB: db, Log: log, Gateway: d.Gateway, CA: d.CA, GatewayURL: "gw.test:8443"})
+	for _, f := range moduleFactories {
+		w, err := f(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv.Modules = append(srv.Modules, w.Modules...)
+	}
+	return srv.Handler()
+}
+
 // fill substitutes route parameters with the seeded prod objects.
 func fill(pattern string, ids map[string]string) string {
 	prefixes := []struct{ prefix, key string }{
@@ -192,6 +200,8 @@ func fill(pattern string, ids map[string]string) string {
 		{"/api/v1/audit/schedules/", "schedule"}, {"/api/v1/audit/runs/", "audit_run"}, {"/api/v1/images/", "digest"},
 		{"/api/v1/destinations/", "destination"}, {"/api/v1/destination-groups/", "destination_group"}, {"/api/v1/notifications/channels/", "channel"},
 		{"/api/v1/registries/", "registry"}, {"/api/v1/grants/", "grant"}, {"/api/v1/restores/", "restore"},
+		{"/api/v1/synthetic/scenarios/", "scenario"}, {"/api/v1/synthetic/runs/", "synthetic_run"},
+		{"/api/v1/synthetic/allowlist/", "allow_rule"}, {"/api/v1/synthetic/credentials/", "synthetic_credential"},
 	}
 	id := uuid.NewString()
 	for _, p := range prefixes {
@@ -273,5 +283,23 @@ func seedProd(t *testing.T, db *store.DB) map[string]string {
 	q("channel", `INSERT INTO notification_channels (name, slack_channel_id) VALUES ('#prod-alerts', 'C0PROD') RETURNING id::text`)
 	q("registry", `INSERT INTO registries (host_pattern) VALUES ('registry.prod') RETURNING id::text`)
 	q("grant", `INSERT INTO grants (principal_id, role, scope_selector) VALUES ($1, 'operator', 'env=prod') RETURNING id::text`, maker)
+	// Synthetic monitoring: a scenario that runs on the prod cluster only,
+	// with a run there, and the global settings it uses.
+	q("allow_rule", `INSERT INTO synthetic_allowlist (pattern, kind) VALUES ('prod.test', 'suffix') RETURNING id::text`)
+	var secret string
+	if err := db.QueryRow(ctx, `INSERT INTO credentials (kind, keyvault_name, secret_name, username) VALUES ('keyvault_ref', 'kv', 'synthetic', 'probe')
+		RETURNING id::text`).Scan(&secret); err != nil {
+		t.Fatal(err)
+	}
+	q("synthetic_credential", `INSERT INTO synthetic_credentials (name, kind, bound_hosts, credential_id) VALUES ('prod-token', 'bearer', '{suffix:prod.test}', $1)
+		RETURNING id::text`, secret)
+	q("scenario", `INSERT INTO scenarios (name, type, run_on, run_on_selector) VALUES ('prod-secret-scenario', 'http', 'selector', 'env=prod') RETURNING id::text`)
+	if _, err := db.Exec(ctx, `INSERT INTO scenario_steps (scenario_id, position, kind, spec, credential_id)
+		VALUES ($1, 0, 'http', '{"method":"GET","url":"https://secret-host.prod.test/","follow_redirects":false}', $2)`,
+		ids["scenario"], ids["synthetic_credential"]); err != nil {
+		t.Fatal(err)
+	}
+	q("synthetic_run", `INSERT INTO synthetic_runs (scenario_id, cluster_id, status, finished_at, started_at) VALUES ($1, $2, 'passed', now(), now())
+		RETURNING id::text`, ids["scenario"], ids["cluster"])
 	return ids
 }

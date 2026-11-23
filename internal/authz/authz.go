@@ -10,7 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 )
 
-// Role is one of the five Olympos roles.
+// Role is one of the Olympos roles.
 type Role string
 
 const (
@@ -19,10 +19,15 @@ const (
 	RoleVaultMaker    Role = "vault-maker"
 	RoleVaultApprover Role = "vault-approver"
 	RoleAdmin         Role = "admin"
+	// RoleSyntheticEditor creates and edits synthetic monitoring scenarios
+	// in its scope and uses the existing synthetic credentials
+	// (docs/design/synthetic-monitoring.md §6.2). The allowlist and the
+	// credentials themselves stay admin only.
+	RoleSyntheticEditor Role = "synthetic-editor"
 )
 
 // Roles lists every valid role.
-var Roles = []Role{RoleViewer, RoleOperator, RoleVaultMaker, RoleVaultApprover, RoleAdmin}
+var Roles = []Role{RoleViewer, RoleOperator, RoleVaultMaker, RoleVaultApprover, RoleAdmin, RoleSyntheticEditor}
 
 // ParseRole validates a role string.
 func ParseRole(s string) (Role, error) {
@@ -48,14 +53,20 @@ const (
 	PermVaultApprove
 	// PermAdmin: grants, clusters, destinations, vault configure.
 	PermAdmin
+	// PermSyntheticEdit: create, edit, run and delete synthetic scenarios.
+	// A scenario that runs on all clusters needs it with scope all; one
+	// that runs on a selector needs it on every cluster the selector
+	// matches.
+	PermSyntheticEdit
 )
 
 var rolePerms = map[Role][]Permission{
-	RoleViewer:        {PermRead},
-	RoleOperator:      {PermRead, PermOperate},
-	RoleVaultMaker:    {PermRead, PermVaultMake},
-	RoleVaultApprover: {PermRead, PermVaultApprove},
-	RoleAdmin:         {PermRead, PermOperate, PermVaultMake, PermVaultApprove, PermAdmin},
+	RoleViewer:          {PermRead},
+	RoleOperator:        {PermRead, PermOperate},
+	RoleVaultMaker:      {PermRead, PermVaultMake},
+	RoleVaultApprover:   {PermRead, PermVaultApprove},
+	RoleAdmin:           {PermRead, PermOperate, PermVaultMake, PermVaultApprove, PermAdmin, PermSyntheticEdit},
+	RoleSyntheticEditor: {PermRead, PermSyntheticEdit},
 }
 
 // Principal is an Entra user identified by (tenant_id, object_id).
