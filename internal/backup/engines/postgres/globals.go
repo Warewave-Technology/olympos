@@ -180,6 +180,19 @@ type globalsStmt struct {
 	drop                         string // "DROP ROLE", ... when the statement drops something
 }
 
+// specialRole: CURRENT_USER, SESSION_USER or CURRENT_ROLE written as a
+// role name (the restore's own login); pg_dumpall never writes them.
+func specialRole(t token) bool {
+	if t.kind != tokWord {
+		return false
+	}
+	switch strings.ToUpper(t.text) {
+	case "CURRENT_USER", "SESSION_USER", "CURRENT_ROLE":
+		return true
+	}
+	return false
+}
+
 // sessionParams are the settings pg_dumpall writes at the top of the script.
 var sessionParams = map[string]bool{"default_transaction_read_only": true, "client_encoding": true, "standard_conforming_strings": true}
 
@@ -197,7 +210,9 @@ func classify(st string) globalsStmt {
 		}
 		return ""
 	}
-	isName := func(i int) bool { return i < len(toks) && (toks[i].kind == tokWord || toks[i].kind == tokIdent) }
+	isName := func(i int) bool {
+		return i < len(toks) && (toks[i].kind == tokWord || toks[i].kind == tokIdent) && !specialRole(toks[i])
+	}
 	name := func(i int) string {
 		if i < len(toks) {
 			return toks[i].name()
@@ -226,7 +241,7 @@ func classify(st string) globalsStmt {
 		}
 	case "ALTER":
 		switch {
-		case kw(1) == "ROLE" && isName(2) && toks[2].kind == tokWord && (kw(2) == "ALL" || kw(2) == "CURRENT_USER" || kw(2) == "SESSION_USER" || kw(2) == "CURRENT_ROLE"):
+		case kw(1) == "ROLE" && (kw(2) == "ALL" || len(toks) > 2 && specialRole(toks[2])):
 			c.allRoles = kw(2)
 		case kw(1) == "ROLE" && isName(2) && kw(3) == "IN" && kw(4) == "DATABASE":
 			c.roles, c.inDatabase = []string{name(2)}, name(5)
@@ -296,7 +311,7 @@ func classifyGrant(toks []token, c *globalsStmt) {
 				}
 				continue
 			}
-			if t.kind != tokWord && t.kind != tokIdent {
+			if t.kind != tokWord && t.kind != tokIdent || specialRole(t) {
 				return nil, false
 			}
 			out = append(out, t.name())
@@ -327,7 +342,8 @@ func classifyGrant(toks []token, c *globalsStmt) {
 	for i := end; i < len(toks); i++ {
 		t := toks[i]
 		if t.kind == tokWord && strings.EqualFold(t.text, "GRANTED") {
-			if i+3 != len(toks) || !strings.EqualFold(toks[i+1].text, "BY") || (toks[i+2].kind != tokWord && toks[i+2].kind != tokIdent) {
+			if i+3 != len(toks) || !strings.EqualFold(toks[i+1].text, "BY") || (toks[i+2].kind != tokWord && toks[i+2].kind != tokIdent) ||
+				specialRole(toks[i+2]) {
 				return
 			}
 			c.grantedBy, c.grantedByStart, c.grantedByEnd = toks[i+2].name(), t.pos, toks[i+2].end

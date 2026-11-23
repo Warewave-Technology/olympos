@@ -261,10 +261,12 @@ func TestRestoreDev(t *testing.T) {
 	sfx := randSuffix()
 	src, owner, reader, plain := "rs_shop_"+sfx, "rs_owner_"+sfx, "rs_reader_"+sfx, "rs_cdb_"+sfx
 	inj := "rs_inject_" + sfx
+	quoted := "Rs-Quoted_" + sfx // pg_dump quotes it in COMMENT and ACL tags
+	qid := pgx.Identifier{quoted}.Sanitize()
 	const plainPW = "rs-plain-PW-1"
 	t.Cleanup(func() {
-		for _, db := range []string{src, src + "_orig", inj} {
-			_, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, db))
+		for _, db := range []string{src, src + "_orig", inj, quoted} {
+			_, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, pgx.Identifier{db}.Sanitize()))
 		}
 		for _, r := range []string{owner, reader, reader + "_gone"} {
 			_, _ = admin.Exec(context.Background(), `DROP ROLE IF EXISTS `+r)
@@ -280,6 +282,14 @@ func TestRestoreDev(t *testing.T) {
 		fmt.Sprintf(`CREATE DATABASE %s OWNER %s`, src, owner),
 		fmt.Sprintf(`ALTER DATABASE %s SET work_mem = '8MB'`, src),
 		fmt.Sprintf(`COMMENT ON DATABASE %s IS 'restore test'`, src),
+		// Per-role settings in the database: the reader exists on the
+		// target already (not changed), the owner is created by globals.
+		fmt.Sprintf(`ALTER ROLE %s IN DATABASE %s SET work_mem = '3MB'`, owner, src),
+		fmt.Sprintf(`ALTER ROLE %s IN DATABASE %s SET work_mem = '4MB'`, reader, src),
+		// A name pg_dump quotes, closed to PUBLIC.
+		fmt.Sprintf(`CREATE DATABASE %s`, qid),
+		fmt.Sprintf(`REVOKE CONNECT, TEMPORARY ON DATABASE %s FROM PUBLIC`, qid),
+		fmt.Sprintf(`COMMENT ON DATABASE %s IS 'quoted name'`, qid),
 	)
 	sc := connectDB(t, du, src, devUser, devPW)
 	execAll(t, sc,
@@ -324,7 +334,7 @@ ALTER ROLE postgres PASSWORD ''pwned'';'`, inj),
 
 	// Back it up with the engine, as a run would.
 	var buf bytes.Buffer
-	if _, err := e.Run(ctx, devContext(du, devUser, devPW, map[string]any{"databases": []string{src, inj}}), &buf); err != nil {
+	if _, err := e.Run(ctx, devContext(du, devUser, devPW, map[string]any{"databases": []string{src, inj, quoted}}), &buf); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	archive := buf.Bytes()
@@ -466,6 +476,30 @@ ALTER ROLE postgres PASSWORD ''pwned'';'`, inj),
 			t.Fatalf("database setting %q", s)
 		}
 		if s := queryOne[string](t, c, `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()`); s != "restore test" {
+			t.Fatalf("comment %q", s)
+		}
+		roleSetting := func(r string) string {
+			return queryOne[string](t, c, `SELECT COALESCE((SELECT array_to_string(setconfig, ',') FROM pg_db_role_setting s
+				JOIN pg_database d ON d.oid = s.setdatabase JOIN pg_roles r ON r.oid = s.setrole
+				WHERE d.datname = current_database() AND r.rolname = $1), '')`, r)
+		}
+		if a, b := roleSetting(owner), roleSetting(reader); a != "work_mem=3MB" || b != "" {
+			t.Fatalf("role settings: owner %q, reader %q", a, b)
+		}
+		if !strings.Contains(strings.Join(it.Skipped, "\n"), "role "+reader+": exists on the target, its setting in the database was not applied") {
+			t.Fatalf("skipped %v", it.Skipped)
+		}
+	})
+
+	t.Run("a database name that needs quotes keeps its comment and privileges", func(t *testing.T) {
+		res, _, err := runDBs(targetContext(tg, "postgres", superPW), []string{quoted}, true, map[string]any{"globals": false})
+		if err != nil || item(t, res, quoted).Status != "succeeded" {
+			t.Fatalf("restore: %v %+v", err, res)
+		}
+		if queryOne[bool](t, target, `SELECT has_database_privilege('public', $1, 'CONNECT')`, quoted) {
+			t.Fatal("REVOKE CONNECT FROM PUBLIC not restored")
+		}
+		if s := queryOne[string](t, target, `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = $1`, quoted); s != "quoted name" {
 			t.Fatalf("comment %q", s)
 		}
 	})

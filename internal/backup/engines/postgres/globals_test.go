@@ -199,3 +199,30 @@ func TestSplitSQLDollarAndComments(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+func TestFilterGlobalsRefusesTheRestoresOwnLogin(t *testing.T) {
+	sql := `CREATE ROLE newbie;
+GRANT newbie TO CURRENT_USER;
+GRANT CURRENT_ROLE TO newbie;
+GRANT newbie TO SESSION_USER WITH ADMIN OPTION;
+CREATE ROLE other;
+GRANT newbie TO other GRANTED BY CURRENT_USER;
+COMMENT ON ROLE CURRENT_USER IS 'x';
+SECURITY LABEL ON ROLE SESSION_USER IS 'x';
+CREATE ROLE "current_user";
+`
+	stmts, skipped := filterGlobals(sql, map[string]bool{})
+	want := []string{"CREATE ROLE newbie;", "CREATE ROLE other;", `CREATE ROLE "current_user";`}
+	if !reflect.DeepEqual(stmts, want) {
+		t.Fatalf("statements %q", stmts)
+	}
+	wantSkipped := []string{
+		"statement not run (GRANT newbie TO): not a role statement pg_dumpall writes",
+		"statement not run (GRANT CURRENT_ROLE TO): not a role statement pg_dumpall writes",
+		"statement not run (COMMENT ON ROLE): not a role statement pg_dumpall writes",
+		"statement not run (SECURITY LABEL ON): not a role statement pg_dumpall writes",
+	}
+	if !reflect.DeepEqual(skipped, wantSkipped) {
+		t.Fatalf("skipped %q", skipped)
+	}
+}

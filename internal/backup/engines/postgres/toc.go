@@ -119,18 +119,28 @@ func readArchiveHeader(r io.Reader) (archiveHeader, error) {
 type tocScan struct {
 	DB     string // the database the entries must name
 	Tables int
-	// DBEntries are the dump IDs of the database's own entries.
+	// DBEntries are the dump IDs of the database's own entries (after
+	// Close).
 	DBEntries []string
 
-	partial []byte
-	err     error
+	dbID, owner string // from the DATABASE entry (catalog pg_database)
+	cands       []tocCand
+	partial     []byte
+	err         error
 }
+
+// tocCand is a line that may be one of the database's own entries.
+type tocCand struct{ id, rest string }
 
 // maxTOCLine bounds one line of the listing.
 const maxTOCLine = 1 << 20
 
-// maxDBEntries bounds the database's own entries (pg_dump writes at most 5).
-const maxDBEntries = 16
+// maxDBEntries bounds the database's own entries (pg_dump writes at most
+// 5); maxTOCCands the lines kept until the database's owner is known.
+const (
+	maxDBEntries = 16
+	maxTOCCands  = 4096
+)
 
 // tocLine is "<dump id>; <catalog oid> <oid> <desc> <schema> <tag> <owner>".
 var tocLine = regexp.MustCompile(`^(\d+); (\d+) (\d+) (.*)$`)
@@ -160,14 +170,42 @@ func (s *tocScan) Write(p []byte) (int, error) {
 	return n, s.err
 }
 
-// Close handles a last line without a newline.
+// Close handles a last line without a newline and picks the database's
+// entries: lines equal to "<desc> - <tag> <owner>" exactly, with the tag
+// pg_dump writes (the name raw for DATABASE PROPERTIES; "DATABASE " and
+// the name, quoted by pg_dump when it needs quotes, for COMMENT, ACL and
+// SECURITY LABEL) and the owner of the DATABASE entry. A schema named
+// "- DATABASE x" makes longer lines, which do not match.
 func (s *tocScan) Close() error {
 	if len(s.partial) > 0 {
 		s.line(string(s.partial))
 		s.partial = nil
 	}
-	return s.err
+	if s.err != nil || s.dbID == "" {
+		return s.err
+	}
+	s.DBEntries = []string{s.dbID}
+	want := map[string]bool{"DATABASE PROPERTIES - " + s.DB + " " + s.owner: true}
+	for _, n := range []string{s.DB, quoteIdent(s.DB)} {
+		for _, desc := range []string{"COMMENT", "ACL", "SECURITY LABEL"} {
+			want[desc+" - DATABASE "+n+" "+s.owner] = true
+		}
+	}
+	for _, c := range s.cands {
+		if !want[c.rest] {
+			continue
+		}
+		if len(s.DBEntries) == maxDBEntries {
+			s.err = errors.New("the archive has too many entries about the database itself")
+			return s.err
+		}
+		s.DBEntries = append(s.DBEntries, c.id)
+	}
+	return nil
 }
+
+// quoteIdent quotes a name as pg_dump's fmtId does when it must.
+func quoteIdent(n string) string { return `"` + strings.ReplaceAll(n, `"`, `""`) + `"` }
 
 func (s *tocScan) line(l string) {
 	m := tocLine.FindStringSubmatch(l)
@@ -178,20 +216,20 @@ func (s *tocScan) line(l string) {
 	switch {
 	case catalog == "1259" && strings.HasPrefix(rest, "TABLE "): // pg_class: not TABLE DATA / ATTACH (catalog 0)
 		s.Tables++
-		return
-	case catalog == "1262" && strings.HasPrefix(rest, "DATABASE - "+s.DB+" "): // pg_database
-	case catalog == "0" && (strings.HasPrefix(rest, "DATABASE PROPERTIES - "+s.DB+" ") ||
-		strings.HasPrefix(rest, "COMMENT - DATABASE "+s.DB+" ") ||
-		strings.HasPrefix(rest, "ACL - DATABASE "+s.DB+" ") ||
-		strings.HasPrefix(rest, "SECURITY LABEL - DATABASE "+s.DB+" ")):
-	default:
-		return
+	case catalog == "1262" && strings.HasPrefix(rest, "DATABASE - "+s.DB+" "): // pg_database: only the database
+		if s.dbID != "" {
+			s.err = errors.New("the archive has two entries for the database")
+			return
+		}
+		s.dbID, s.owner = id, strings.TrimPrefix(rest, "DATABASE - "+s.DB+" ")
+	case catalog == "0" && (strings.HasPrefix(rest, "DATABASE PROPERTIES - ") || strings.HasPrefix(rest, "COMMENT - DATABASE ") ||
+		strings.HasPrefix(rest, "ACL - DATABASE ") || strings.HasPrefix(rest, "SECURITY LABEL - DATABASE ")):
+		if len(s.cands) == maxTOCCands {
+			s.err = errors.New("the archive's table of contents has too many entries that look like the database's")
+			return
+		}
+		s.cands = append(s.cands, tocCand{id, rest})
 	}
-	if len(s.DBEntries) == maxDBEntries {
-		s.err = errors.New("the archive has too many entries about the database itself")
-		return
-	}
-	s.DBEntries = append(s.DBEntries, id)
 }
 
 // listFile is the pg_restore -L list selecting the given dump IDs.
@@ -274,6 +312,9 @@ func databaseDefinition(script, db string) (dbDefinition, error) {
 			}
 		case kw(0) == "SELECT" || kw(0) == "RESET":
 		case isWords(toks, "CREATE", "DATABASE"):
+			if len(toks) < 3 {
+				return d, errors.New("the archive's CREATE DATABASE names no database")
+			}
 			if !named(2) {
 				return d, fmt.Errorf("the archive creates database %s, not %s", toks[2].name(), db)
 			}
@@ -285,7 +326,7 @@ func databaseDefinition(script, db string) (dbDefinition, error) {
 		case isWords(toks, "ALTER", "DATABASE") && named(2) && (kw(3) == "SET" && kw(4) != "TABLESPACE" || kw(3) == "RESET" ||
 			kw(3) == "CONNECTION" && kw(4) == "LIMIT"):
 			d.Settings = append(d.Settings, st)
-		case isWords(toks, "ALTER", "ROLE") && isName(2) && kw(3) == "IN" && kw(4) == "DATABASE" && named(5) && (kw(6) == "SET" || kw(6) == "RESET"):
+		case isWords(toks, "ALTER", "ROLE") && isName(2) && !specialRole(toks[2]) && kw(3) == "IN" && kw(4) == "DATABASE" && named(5) && (kw(6) == "SET" || kw(6) == "RESET"):
 			d.RoleSettings = append(d.RoleSettings, st)
 		case isWords(toks, "COMMENT", "ON", "DATABASE") && named(3) && literalEnd(4):
 			d.Comment = append(d.Comment, st)

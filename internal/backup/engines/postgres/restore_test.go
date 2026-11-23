@@ -79,6 +79,27 @@ func TestTOCScan(t *testing.T) {
 	if s.Tables != 1 || !reflect.DeepEqual(s.DBEntries, []string{"3450", "3451", "3452"}) {
 		t.Fatalf("tables %d, entries %v", s.Tables, s.DBEntries)
 	}
+	// A name pg_dump quotes in the COMMENT and ACL tags (a real dump of
+	// "My-DB").
+	s = &tocScan{DB: "My-DB"}
+	chunky(t, s, readTestdata(t, "quoted-pg17.toc"))
+	if s.Tables != 1 || !reflect.DeepEqual(s.DBEntries, []string{"3449", "3450", "3451", "3452"}) {
+		t.Fatalf("quoted: tables %d, entries %v", s.Tables, s.DBEntries)
+	}
+	// A schema named "- DATABASE shop" makes lines that start like the
+	// database's: they are not taken, however many there are.
+	var spoof strings.Builder
+	spoof.WriteString("9; 1262 5 DATABASE - shop o\n")
+	for i := 0; i < 40; i++ {
+		fmt.Fprintf(&spoof, "%d; 0 0 COMMENT - DATABASE shop TABLE t%d o\n", 100+i, i)
+		fmt.Fprintf(&spoof, "%d; 0 0 ACL - DATABASE shop SCHEMA x o\n", 200+i)
+	}
+	spoof.WriteString("10; 0 0 COMMENT - DATABASE shop o\n")
+	s = &tocScan{DB: "shop"}
+	chunky(t, s, []byte(spoof.String()))
+	if !reflect.DeepEqual(s.DBEntries, []string{"9", "10"}) {
+		t.Fatalf("spoofed: entries %v", s.DBEntries)
+	}
 	// Entries about another database, or not about a database, are not taken.
 	s = &tocScan{DB: "shop"}
 	chunky(t, s, []byte("7; 0 0 COMMENT - DATABASE shopping x\n8; 0 0 COMMENT - SCHEMA shop x\n9; 1262 5 DATABASE - shop o\n"))
@@ -159,6 +180,14 @@ SELECT pg_catalog.set_config('search_path', '', false);
 	}
 	if _, err := databaseDefinition("CREATE DATABASE other WITH ENCODING = 'UTF8';", "shop"); err == nil {
 		t.Fatal("another database's CREATE accepted")
+	}
+	if _, err := databaseDefinition("CREATE DATABASE;", "shop"); err == nil {
+		t.Fatal("CREATE DATABASE without a name accepted")
+	}
+	// The restore's own login is never a role setting's role.
+	if d, err := databaseDefinition("ALTER ROLE CURRENT_USER IN DATABASE shop SET work_mem TO '1MB';", "shop"); err != nil ||
+		len(d.RoleSettings) != 0 || len(d.Unused) != 1 {
+		t.Fatalf("CURRENT_USER role setting: %#v %v", d, err)
 	}
 }
 

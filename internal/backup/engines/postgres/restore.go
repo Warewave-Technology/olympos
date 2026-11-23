@@ -335,6 +335,18 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 		return res, nil
 	}
 
+	// The roles the target had before the restore: they are never changed
+	// (globals, per-role settings in a database).
+	existingRoles, err := listRoles(ctx, conn)
+	if err != nil {
+		return res, err
+	}
+	// The statements run here are split by our own lexer, which reads
+	// literals as standard_conforming_strings = on does.
+	if err := execOne(ctx, conn, "SET standard_conforming_strings = on"); err != nil {
+		return res, err
+	}
+
 	// Globals: roles, superuser only.
 	switch {
 	case !rc.Superuser:
@@ -346,7 +358,7 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 		res.Notes = append(res.Notes, "The backup holds no globals.sql (taken without globals): no roles were restored.")
 	default:
 		progress(backup.Progress{Phase: "globals"})
-		item, err := s.restoreGlobals(ctx, conn, entries["globals.sql"])
+		item, err := s.restoreGlobals(ctx, conn, entries["globals.sql"], existingRoles)
 		res.Items = append(res.Items, item)
 		if err != nil {
 			return res, err
@@ -360,7 +372,7 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 			return res, err
 		}
 		progress(backup.Progress{Phase: "restore", Database: db, Done: done, Created: res.Created})
-		item := s.restoreDatabase(ctx, conn, rc, plan, tmp, env, func(created string) {
+		item := s.restoreDatabase(ctx, conn, rc, plan, existingRoles, tmp, env, func(created string) {
 			res.Created = append(res.Created, created)
 			progress(backup.Progress{Phase: "restore", Database: db, Done: done, Created: res.Created})
 		})
@@ -382,7 +394,7 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 // tunnel connection, so a failure creates no role. Each statement is sent
 // alone with the extended protocol, which runs exactly one statement: text
 // the splitter misread can never smuggle in a second one.
-func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.File) (backup.RestoreItem, error) {
+func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.File, existing map[string]bool) (backup.RestoreItem, error) {
 	start := time.Now()
 	item := backup.RestoreItem{Name: "globals.sql", Status: "failed", Bytes: int64(f.UncompressedSize64)}
 	finish := func(err error) (backup.RestoreItem, error) {
@@ -406,23 +418,6 @@ func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.Fil
 	if err != nil {
 		return finish(fmt.Errorf("read: %w", err))
 	}
-	existing := map[string]bool{}
-	rows, err := conn.Query(ctx, `SELECT rolname FROM pg_roles`)
-	if err != nil {
-		return finish(fmt.Errorf("list roles: %w", err))
-	}
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			rows.Close()
-			return finish(err)
-		}
-		existing[n] = true
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return finish(fmt.Errorf("list roles: %w", err))
-	}
 	stmts, skipped := filterGlobals(string(b), existing)
 	item.Skipped = skipped
 	if turnsOffStandardStrings(stmts) {
@@ -441,6 +436,27 @@ func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.Fil
 		return finish(err)
 	}
 	return finish(nil)
+}
+
+// listRoles returns the names of the target's roles.
+func listRoles(ctx context.Context, conn *pgx.Conn) (map[string]bool, error) {
+	rows, err := conn.Query(ctx, `SELECT rolname FROM pg_roles`)
+	if err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]bool{}
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("list roles: %w", err)
+		}
+		out[n] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list roles: %w", err)
+	}
+	return out, nil
 }
 
 // execOne runs one statement with the extended protocol (a single
@@ -568,7 +584,7 @@ func (b *limitBuffer) Write(p []byte) (int, error) {
 // restoreDatabase restores one prepared database; onCreated is called
 // right after CREATE DATABASE succeeded.
 func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup.RestoreContext, plan *dbPlan,
-	tmp string, env []string, onCreated func(string)) backup.RestoreItem {
+	existingRoles map[string]bool, tmp string, env []string, onCreated func(string)) backup.RestoreItem {
 	start := time.Now()
 	db := plan.db
 	item := backup.RestoreItem{Name: db, Status: "failed", Bytes: plan.bytes(), Tables: plan.tables}
@@ -608,7 +624,7 @@ func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup
 	}
 
 	if !plan.exists {
-		skipped, err := applyDatabaseEntries(ctx, conn, def, rc.Superuser)
+		skipped, err := applyDatabaseEntries(ctx, conn, def, rc.Superuser, existingRoles)
 		item.Skipped = append(item.Skipped, skipped...)
 		if err != nil {
 			return fail("%v", err)
@@ -676,10 +692,14 @@ func (r *readErr) Read(p []byte) (int, error) {
 
 // applyDatabaseEntries runs the archive's statements about the database
 // itself (pg_restore applies them only with --create), each alone: its
-// settings and comment, and with a superuser the per-role settings in it
-// and its privileges.
-func applyDatabaseEntries(ctx context.Context, conn *pgx.Conn, def dbDefinition, superuser bool) ([]string, error) {
+// settings and comment, and with a superuser its privileges and the
+// per-role settings in it, except those of roles the target had before the
+// restore (existing roles are never changed).
+func applyDatabaseEntries(ctx context.Context, conn *pgx.Conn, def dbDefinition, superuser bool, existingRoles map[string]bool) ([]string, error) {
 	var skipped []string
+	if err := execOne(ctx, conn, "SET standard_conforming_strings = on"); err != nil {
+		return skipped, err
+	}
 	run := func(sts []string) error {
 		for _, st := range sts {
 			if err := execOne(ctx, conn, st); err != nil {
@@ -703,7 +723,15 @@ func applyDatabaseEntries(ctx context.Context, conn *pgx.Conn, def dbDefinition,
 		}
 		return skipped, nil
 	}
-	if err := run(def.RoleSettings); err != nil {
+	var roleSettings []string
+	for _, st := range def.RoleSettings {
+		if r := lexSQL(st)[2].name(); existingRoles[r] {
+			skipped = append(skipped, "role "+r+": exists on the target, its setting in the database was not applied")
+			continue
+		}
+		roleSettings = append(roleSettings, st)
+	}
+	if err := run(roleSettings); err != nil {
 		return skipped, err
 	}
 	return skipped, run(def.ACL)
