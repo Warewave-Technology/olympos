@@ -221,6 +221,10 @@ CREATE INDEX synthetic_runs_scenario ON synthetic_runs (scenario_id, cluster_id,
 CREATE INDEX synthetic_runs_cluster ON synthetic_runs (cluster_id, scheduled_for DESC);
 CREATE INDEX synthetic_runs_open ON synthetic_runs (status) WHERE status IN ('scheduled','running');
 CREATE INDEX synthetic_runs_created ON synthetic_runs (created_at);
+-- The retention pass (every 10 minutes, 8) rolls up, deletes and clears
+-- excerpts by finished_at; without this it reads the whole table each time.
+CREATE INDEX synthetic_runs_finished ON synthetic_runs (finished_at)
+  WHERE status IN ('passed','failed','error','skipped');
 
 -- Append-only once finished: whatever code does, a run in a terminal state
 -- cannot be changed again (a delete, for retention or a removed scenario, is
@@ -252,6 +256,9 @@ CREATE TABLE synthetic_step_results (
   error           text NOT NULL DEFAULT '',
   PRIMARY KEY (run_id, position)
 );
+-- The excerpts still to clear (the retention pass, 8): a week's worth at
+-- most, not every step result of the 30 days.
+CREATE INDEX synthetic_step_results_excerpt ON synthetic_step_results (run_id) WHERE excerpt IS NOT NULL;
 
 -- ---------------------------------------------------------------- alerts
 
@@ -280,6 +287,7 @@ CREATE UNIQUE INDEX synthetic_alerts_one_firing
   ON synthetic_alerts (scenario_id, COALESCE(cluster_id, '00000000-0000-0000-0000-000000000000'::uuid))
   WHERE state = 'firing';
 CREATE INDEX synthetic_alerts_cluster ON synthetic_alerts (cluster_id) WHERE cluster_id IS NOT NULL;
+CREATE INDEX synthetic_alerts_last_run ON synthetic_alerts (last_run_id) WHERE last_run_id IS NOT NULL;
 -- The alerts whose opening or resolution has no message yet: what the
 -- notifier looks for every 15 s, while the table only grows.
 CREATE INDEX synthetic_alerts_unnotified ON synthetic_alerts (scenario_id)
@@ -305,6 +313,9 @@ CREATE TABLE synthetic_state (
 CREATE INDEX synthetic_state_cluster ON synthetic_state (cluster_id);
 CREATE TRIGGER synthetic_state_touch BEFORE UPDATE ON synthetic_state
   FOR EACH ROW EXECUTE FUNCTION olympos_touch_updated_at();
+-- Deleting a run sets last_run_id to NULL here (and in synthetic_alerts):
+-- the referential action looks the rows up once per deleted run.
+CREATE INDEX synthetic_state_last_run ON synthetic_state (last_run_id) WHERE last_run_id IS NOT NULL;
 
 -- The roll-up that outlives the runs (8): one row per scenario, cluster and hour.
 CREATE TABLE synthetic_hourly (
@@ -319,6 +330,8 @@ CREATE TABLE synthetic_hourly (
   PRIMARY KEY (scenario_id, cluster_id, hour)
 );
 CREATE INDEX synthetic_hourly_cluster ON synthetic_hourly (cluster_id, hour);
+-- max(hour) of the roll-up and the delete past the aggregate retention.
+CREATE INDEX synthetic_hourly_hour ON synthetic_hourly (hour);
 
 -- ---------------------------------------------------------------- routes
 

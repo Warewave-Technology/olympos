@@ -71,20 +71,24 @@ func (s *Service) maintenanceTick(ctx context.Context, lastExpiry time.Time) (ti
 //     computed again: its row is replaced, not added to, so a second pass
 //     changes nothing;
 //  2. fills the hours of the runs about to be deleted that have no row yet
-//     (a hole, never overwriting), so no run is deleted before it is rolled
-//     up;
-//  3. deletes terminal runs (and, by cascade, their step results) that
-//     finished before the hour that RunRetention ago falls in, whole hours
-//     at a time, so a rolled hour never loses part of its runs afterwards;
+//     (a hole, never overwriting), so no run is deleted before it is
+//     rolled up;
+//  3. deletes terminal runs (their step results go with them) that
+//     finished before the hour RunRetention ago falls in. Whole hours go at
+//     a time, so a rolled hour never loses part of its runs afterwards;
 //  4. deletes test runs older than TestRunRetention;
 //  5. clears response excerpts older than ExcerptRetention;
 //  6. deletes hourly rows older than AggregateRetention.
 //
-// What is rolled up per scenario, cluster and hour: the runs that ended
-// passed, failed or error, never a skipped run (the probe was not there) and never a test run. runs is their number, passed the
-// passed ones and failed the failed and error ones, so availability is
-// passed / runs = passed / (passed + failed + error). p50_ms and p95_ms are
+// A row of synthetic_hourly counts, per scenario, cluster and hour, the
+// runs that ended passed, failed or error. A skipped run and a test run
+// are never counted. runs is their number, passed the passed ones and
+// failed the failed and error ones, so availability is passed / runs =
+// passed / (passed + failed + error). p50_ms and p95_ms are
 // percentile_cont of total_ms, rounded.
+//
+// The rollups insert in key order, so that two leaders that overlap (a
+// lock lost and regained) take their row locks in the same order.
 func (s *Service) Maintain(ctx context.Context) error {
 	now := s.now().UTC()
 	boundary := now.Truncate(time.Hour) // the current hour is not finished
@@ -123,9 +127,9 @@ func (s *Service) Maintain(ctx context.Context) error {
 			WHERE test AND status IN ('passed','failed','error','skipped') AND finished_at < $1`, testCut); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `UPDATE synthetic_step_results SET excerpt = NULL
-			WHERE excerpt IS NOT NULL AND run_id IN (SELECT id FROM synthetic_runs
-				WHERE COALESCE(finished_at, started_at, created_at) < $1)`, excerptCut); err != nil {
+		if _, err := tx.Exec(ctx, `UPDATE synthetic_step_results sr SET excerpt = NULL FROM synthetic_runs r
+			WHERE sr.excerpt IS NOT NULL AND r.id = sr.run_id
+			  AND r.status IN ('passed','failed','error','skipped') AND r.finished_at < $1`, excerptCut); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `DELETE FROM synthetic_hourly WHERE hour < $1`, aggCut)
@@ -143,6 +147,7 @@ SELECT scenario_id, cluster_id, date_trunc('hour', finished_at, 'UTC') AS h,
 FROM synthetic_runs
 WHERE NOT test AND scenario_id IS NOT NULL AND status IN ('passed','failed','error') AND finished_at >= $1 AND finished_at < $2
 GROUP BY scenario_id, cluster_id, h
+ORDER BY scenario_id, cluster_id, h
 `
 
 const (

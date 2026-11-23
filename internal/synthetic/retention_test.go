@@ -323,6 +323,36 @@ func TestAlertsAreKept(t *testing.T) {
 	}
 }
 
+func TestStateLosesLinkToDeletedRun(t *testing.T) {
+	e, cur := retentionEnv(t)
+	sc := simpleScenario(e, "pay")
+	cl := e.cluster("c1", ProbeOnlineState)
+	old := e.finished(sc, cl, StatusFailed, cur.Add(-40*24*hour), 10, false)
+	young := e.finished(sc, cl, StatusPassed, cur.Add(-hour), 10, false)
+	c2 := e.cluster("c2", ProbeOnlineState)
+	e.exec(`INSERT INTO synthetic_state (scenario_id, cluster_id, consecutive_failures, last_run_id, last_status, last_finished_at) VALUES ($1, $2, 1, $3, 'failed', $4)`,
+		sc, cl, old, cur.Add(-40*24*hour))
+	e.exec(`INSERT INTO synthetic_state (scenario_id, cluster_id, consecutive_passes, last_run_id, last_status, last_finished_at) VALUES ($1, $2, 1, $3, 'passed', $4)`,
+		sc, c2, young, cur.Add(-hour))
+
+	e.maintain()
+
+	if e.runExists(old) {
+		t.Fatal("the old run is kept")
+	}
+	var lastRun *uuid.UUID
+	var failures int
+	if err := e.db.QueryRow(e.ctx, `SELECT last_run_id, consecutive_failures FROM synthetic_state WHERE scenario_id = $1 AND cluster_id = $2`, sc, cl).Scan(&lastRun, &failures); err != nil {
+		t.Fatalf("the state row of the deleted run is gone: %v", err)
+	}
+	if lastRun != nil || failures != 1 {
+		t.Fatalf("state: last_run_id=%v failures=%d, want NULL and the rest unchanged", lastRun, failures)
+	}
+	if err := e.db.QueryRow(e.ctx, `SELECT last_run_id FROM synthetic_state WHERE cluster_id = $1`, c2).Scan(&lastRun); err != nil || lastRun == nil || *lastRun != young {
+		t.Fatalf("the state of a kept run changed: %v %v", lastRun, err)
+	}
+}
+
 func TestMaintenanceTickRunsExpiryDaily(t *testing.T) {
 	e, _ := retentionEnv(t)
 	t0 := e.clock.now()

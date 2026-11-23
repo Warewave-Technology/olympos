@@ -230,6 +230,14 @@ func TestSyntheticMonitoringMigration(t *testing.T) {
 	mustExec(`INSERT INTO synthetic_hourly (scenario_id, cluster_id, hour, runs, passed, failed, p50_ms, p95_ms) VALUES ($1, $2, '2026-01-01T00:00:00Z', 4, 3, 1, 20, 90)`, scn, cluster)
 	requireSQLState(t, exec(`INSERT INTO synthetic_hourly (scenario_id, cluster_id, hour, runs, passed, failed, p50_ms, p95_ms) VALUES ($1, $2, '2026-01-01T00:00:00Z', 1, 1, 0, 1, 1)`, scn, cluster), "23505")
 
+	// The indexes the retention pass and the SET NULL of deleted runs rely on.
+	for _, idx := range []string{"synthetic_runs_finished", "synthetic_step_results_excerpt", "synthetic_hourly_hour", "synthetic_alerts_last_run", "synthetic_state_last_run"} {
+		var n int
+		if err := db.QueryRow(ctx, `SELECT count(*) FROM pg_indexes WHERE indexname = $1`, idx).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("index %s: %d, %v", idx, n, err)
+		}
+	}
+
 	// updated_at moves on update.
 	var before, after string
 	if err := db.QueryRow(ctx, `SELECT updated_at::text FROM scenarios WHERE id = $1`, scn).Scan(&before); err != nil {
