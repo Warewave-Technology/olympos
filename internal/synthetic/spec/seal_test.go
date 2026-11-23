@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"crypto/ecdh"
 	"crypto/hpke"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,24 +21,37 @@ const (
 	clusterID = "d2a7b0c4-5e61-4f3a-8c2d-9e1b7a6f0c22"
 )
 
+// canaries are every user name and secret in testCreds.
+var canaries = []string{
+	"CANARY-bearer-token", "CANARY-USER-probe", "CANARY-password",
+	"CANARY-USER-client-id", "CANARY-client-secret", "CANARY-key",
+}
+
+func secret(s string) *Secret { return NewSecret([]byte(s)) }
+
+// fieldsOf shows a credential's non-secret fields, for failure messages.
+func fieldsOf(c RunCredential) []any {
+	return []any{c.ID.String(), c.Kind, c.BoundHosts, c.HeaderName, c.TokenURL, c.Scopes}
+}
+
 func testCreds() []RunCredential {
 	return []RunCredential{
 		{
 			ID: uuid.MustParse("11111111-1111-4111-8111-111111111111"), Kind: CredBearer,
-			BoundHosts: []string{"api.wrw.com", "*.dev.wrw.com"}, Secret: []byte("CANARY-bearer-token"),
+			BoundHosts: []string{"api.wrw.com", "*.dev.wrw.com"}, Secret: secret("CANARY-bearer-token"),
 		},
 		{
 			ID: uuid.MustParse("22222222-2222-4222-8222-222222222222"), Kind: CredBasic,
-			BoundHosts: []string{"wrw.com"}, Username: "probe", Secret: []byte("CANARY-password"),
+			BoundHosts: []string{"wrw.com"}, Username: secret("CANARY-USER-probe"), Secret: secret("CANARY-password"),
 		},
 		{
 			ID: uuid.MustParse("33333333-3333-4333-8333-333333333333"), Kind: CredOAuth2,
-			BoundHosts: []string{"api.wrw.com"}, Username: "client-id", Secret: []byte("CANARY-client-secret"),
+			BoundHosts: []string{"api.wrw.com"}, Username: secret("CANARY-USER-client-id"), Secret: secret("CANARY-client-secret"),
 			TokenURL: "https://login.wrw.com/oauth2/token", Scopes: "orders.read orders.write",
 		},
 		{
 			ID: uuid.MustParse("44444444-4444-4444-8444-444444444444"), Kind: CredHeader,
-			BoundHosts: []string{"partner.acme.net"}, HeaderName: "X-Api-Key", Secret: []byte("CANARY-key"),
+			BoundHosts: []string{"partner.acme.net"}, HeaderName: "X-Api-Key", Secret: secret("CANARY-key"),
 		},
 	}
 }
@@ -68,12 +85,20 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("round trip:\n got %#v\nwant %#v", got, want)
+	if len(got) != len(want) {
+		t.Fatalf("round trip: %d credentials, want %d", len(got), len(want))
 	}
 	for i := range got {
-		if !bytes.Equal(got[i].Secret, want[i].Secret) {
-			t.Fatalf("secret %d differs", i)
+		g, w := got[i], want[i]
+		g.Username, g.Secret, w.Username, w.Secret = nil, nil, nil, nil
+		if !reflect.DeepEqual(g, w) {
+			t.Fatalf("credential %d: %+v, want %+v", i, fieldsOf(g), fieldsOf(w))
+		}
+	}
+	for i := range got {
+		if !bytes.Equal(got[i].Secret.Bytes(), want[i].Secret.Bytes()) ||
+			!bytes.Equal(got[i].Username.Bytes(), want[i].Username.Bytes()) {
+			t.Fatalf("credential %d differs", i)
 		}
 	}
 
@@ -81,7 +106,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	for _, creds := range [][]RunCredential{nil, {{ID: uuid.New(), Kind: CredBearer}}} {
 		enc, ct := seal(t, k, creds)
 		got, err := OpenCredentials(k, runID, clusterID, enc, ct)
-		if err != nil || len(got) != len(creds) || len(creds) == 1 && (got[0].ID != creds[0].ID || got[0].Secret != nil) {
+		if err != nil || len(got) != len(creds) || len(creds) == 1 && (got[0].ID != creds[0].ID || got[0].Secret != nil || got[0].Username != nil) {
 			t.Fatalf("open %v: %v, %v", creds, got, err)
 		}
 	}
@@ -233,40 +258,144 @@ func TestPlaintextZeroed(t *testing.T) {
 		}
 	}
 	// The opened secrets are copies, still intact.
-	if string(got[0].Secret) != "CANARY-bearer-token" {
-		t.Fatalf("opened secret %q", got[0].Secret)
+	if string(got[0].Secret.Bytes()) != "CANARY-bearer-token" || string(got[1].Username.Bytes()) != "CANARY-USER-probe" {
+		t.Fatal("opened secrets are not intact")
 	}
 }
 
 func TestZeroCredentials(t *testing.T) {
 	creds := testCreds()
-	secrets := make([][]byte, len(creds))
+	var bufs [][]byte
 	for i := range creds {
-		secrets[i] = creds[i].Secret
+		bufs = append(bufs, creds[i].Secret.Bytes(), creds[i].Username.Bytes())
 	}
 	ZeroCredentials(creds)
 	for i := range creds {
-		if creds[i].Secret != nil {
-			t.Errorf("credential %d keeps its secret", i)
+		if creds[i].Secret != nil || creds[i].Username != nil {
+			t.Errorf("credential %d keeps its secret or user name", i)
 		}
-		if !bytes.Equal(secrets[i], make([]byte, len(secrets[i]))) {
-			t.Errorf("secret %d not zeroed: %q", i, secrets[i])
+	}
+	for i, b := range bufs {
+		if !bytes.Equal(b, make([]byte, len(b))) {
+			t.Errorf("buffer %d not zeroed", i)
 		}
 	}
 	ZeroCredentials(nil)
 }
 
-func TestRunCredentialPrinting(t *testing.T) {
-	c := testCreds()[1]
-	for _, format := range []string{"%v", "%+v", "%#v", "%s"} {
-		out := fmt.Sprintf(format, c)
-		if strings.Contains(out, "CANARY") || strings.Contains(out, "probe") {
-			t.Errorf("%s prints secret or user name: %s", format, out)
+func TestSecret(t *testing.T) {
+	var nilSecret *Secret
+	if nilSecret.Bytes() != nil || nilSecret.Len() != 0 {
+		t.Fatal("nil secret not empty")
+	}
+	nilSecret.Zero()
+	if NewSecret(nil) != nil || NewSecret([]byte{}) != nil {
+		t.Fatal("empty secret not nil")
+	}
+	b := []byte("CANARY-x")
+	sec := NewSecret(b)
+	if &sec.Bytes()[0] != &b[0] || sec.Len() != 8 {
+		t.Fatal("NewSecret copied or lost its bytes")
+	}
+	sec.Zero()
+	if sec.Bytes() != nil || !bytes.Equal(b, make([]byte, 8)) {
+		t.Fatal("Zero did not clear the bytes")
+	}
+	j, err := json.Marshal(struct{ S *Secret }{secret("CANARY-x")})
+	if err != nil || string(j) != `{"S":"[redacted]"}` {
+		t.Fatalf("JSON %s, %v", j, err)
+	}
+}
+
+// leaks reports which canary, in any of the forms fmt can print bytes in,
+// appears in out.
+func leaks(out string) string {
+	for _, c := range canaries {
+		forms := []string{
+			c, hex.EncodeToString([]byte(c)), strings.ToUpper(hex.EncodeToString([]byte(c))),
+			base64.StdEncoding.EncodeToString([]byte(c)), strings.Trim(fmt.Sprint([]byte(c)), "[]"),
+			strings.Trim(fmt.Sprintf("% x", []byte(c)), " "),
+		}
+		for _, f := range forms {
+			if strings.Contains(out, f) {
+				return f
+			}
 		}
 	}
-	out := fmt.Sprintf("%+v", []RunCredential{c})
-	if strings.Contains(out, "CANARY") {
-		t.Errorf("slice prints secret: %s", out)
+	// The common prefix, in case a form above was cut.
+	for _, f := range []string{"CANARY", "43414e415259", "43414E415259", "67 65 78 65 82 89"} {
+		if strings.Contains(out, f) {
+			return f
+		}
+	}
+	return ""
+}
+
+type exportedHolder struct {
+	Creds []RunCredential
+	One   RunCredential
+	Ptr   *RunCredential
+	Map   map[string]RunCredential
+}
+
+type unexportedHolder struct {
+	creds []RunCredential
+	one   RunCredential
+	ptr   *RunCredential
+	m     map[string]RunCredential
+}
+
+func TestRunCredentialPrinting(t *testing.T) {
+	creds := testCreds()
+	c := creds[1] // basic: user name and password
+	values := map[string]any{
+		"value":      c,
+		"pointer":    &c,
+		"slice":      creds,
+		"exported":   exportedHolder{creds, c, &c, map[string]RunCredential{"k": c}},
+		"unexported": unexportedHolder{creds, c, &c, map[string]RunCredential{"k": c}},
+		"secret":     c.Secret,
+	}
+	values["exported pointer"] = &exportedHolder{creds, c, &c, nil}
+	values["unexported pointer"] = &unexportedHolder{creds, c, &c, nil}
+	verbs := []string{"%v", "%+v", "%#v", "%s", "%q", "%d", "%x", "%X", "% x"}
+	for name, v := range values {
+		for _, verb := range verbs {
+			if f := leaks(fmt.Sprintf(verb, v)); f != "" {
+				t.Errorf("%s with %s prints %q: %s", name, verb, f, fmt.Sprintf(verb, v))
+			}
+		}
+		for _, h := range []struct {
+			name string
+			new  func(*bytes.Buffer) slog.Handler
+		}{
+			{"text", func(b *bytes.Buffer) slog.Handler { return slog.NewTextHandler(b, nil) }},
+			{"json", func(b *bytes.Buffer) slog.Handler { return slog.NewJSONHandler(b, nil) }},
+		} {
+			var buf bytes.Buffer
+			slog.New(h.new(&buf)).Info("run", "v", v)
+			if f := leaks(buf.String()); f != "" {
+				t.Errorf("%s with slog %s prints %q: %s", name, h.name, f, buf.String())
+			}
+		}
+	}
+	// What a credential prints as.
+	want := "RunCredential{22222222-2222-4222-8222-222222222222 basic}"
+	if got := fmt.Sprintf("%x", c); got != want {
+		t.Errorf("%%x = %q, want %q", got, want)
+	}
+	if got := fmt.Sprint(c.Secret); got != "[redacted]" {
+		t.Errorf("secret prints %q", got)
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("run", "cred", c)
+	if !strings.Contains(buf.String(), `"cred":{"id":"22222222-2222-4222-8222-222222222222","kind":"basic"}`) {
+		t.Errorf("slog JSON: %s", buf.String())
+	}
+	// The JSON form of a credential has neither field.
+	j, err := json.Marshal(c)
+	if err != nil || leaks(string(j)) != "" || strings.Contains(string(j), "username") || strings.Contains(string(j), "secret") {
+		t.Errorf("JSON %s, %v", j, err)
 	}
 }
 

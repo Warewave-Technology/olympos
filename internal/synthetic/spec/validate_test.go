@@ -134,6 +134,10 @@ func TestValidateLimits(t *testing.T) {
 		}, "steps.0.http.body"},
 		{"name missing", func(s *Scenario) { s.Name = "  " }, "name"},
 		{"name too long", func(s *Scenario) { s.Name = strings.Repeat("é", maxName+1) }, "name"},
+		{"name at maximum", func(s *Scenario) { s.Name = strings.Repeat("é", maxName) }, ""},
+		{"name with newline", func(s *Scenario) { s.Name = "check\nout" }, "name"},
+		{"name with escape", func(s *Scenario) { s.Name = "check\x1b[31mout" }, "name"},
+		{"name with C1 control", func(s *Scenario) { s.Name = "check\u0085out" }, "name"},
 		{"unknown type", func(s *Scenario) { s.Type = "grpc" }, "type"},
 	}
 	for _, c := range cases {
@@ -304,6 +308,18 @@ func TestValidateVariables(t *testing.T) {
 		{"var in body", func(s *Scenario) {
 			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body, s.Steps[1].HTTP.BodyType = "POST", `{"t":"${token}"}`, BodyJSON
 		}, ""},
+		{"var as json number", func(s *Scenario) {
+			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body, s.Steps[1].HTTP.BodyType = "POST", `{"n":${sid},"${token}":true}`, BodyJSON
+		}, ""},
+		{"invalid json body with var", func(s *Scenario) {
+			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body, s.Steps[1].HTTP.BodyType = "POST", `{"a":"${token}"`, BodyJSON
+		}, "steps.1.http.body"},
+		{"json body broken around var", func(s *Scenario) {
+			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body, s.Steps[1].HTTP.BodyType = "POST", `{"a" ${token}}`, BodyJSON
+		}, "steps.1.http.body"},
+		{"text body with var is not checked as json", func(s *Scenario) {
+			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body, s.Steps[1].HTTP.BodyType = "POST", `{"a":"${token}"`, BodyText
+		}, ""},
 		{"undefined var in body", func(s *Scenario) {
 			s.Steps[1].HTTP.Method, s.Steps[1].HTTP.Body = "POST", "${other}"
 		}, "steps.1.http.body"},
@@ -354,7 +370,14 @@ func TestValidateAssertions(t *testing.T) {
 		{KindHTTP, Assertion{"status_code", "contains", "2"}, "operator"},
 		{KindHTTP, Assertion{"status_code", "equals", "ok"}, "value"},
 		{KindHTTP, Assertion{"status_code", "equals", "NaN"}, "value"},
-		{KindHTTP, Assertion{"latency_ms", "less_than", "250.5"}, ""},
+		{KindHTTP, Assertion{"latency_ms", "less_than", "250"}, ""},
+		{KindHTTP, Assertion{"latency_ms", "less_than", "250.5"}, "value"},
+		{KindHTTP, Assertion{"status_code", "equals", "2e2"}, "value"},
+		{KindHTTP, Assertion{"tls_days_left", "greater_than", "-1"}, ""},
+		{KindHTTP, Assertion{"tls_days_left", "greater_than", "14.5"}, "value"},
+		{KindDNS, Assertion{"record_count", "equals", "1.0"}, "value"},
+		{KindTLS, Assertion{"tls_days_left", "less_than", " 7"}, "value"},
+		{KindHTTP, Assertion{"json:data.ratio", "less_than", "0.5"}, ""},
 		{KindHTTP, Assertion{"header:Content-Type", "contains", "json"}, ""},
 		{KindHTTP, Assertion{"header:X-Id", "exists", ""}, ""},
 		{KindHTTP, Assertion{"header:X-Id", "exists", "yes"}, "value"},

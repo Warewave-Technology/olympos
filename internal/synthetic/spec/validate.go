@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"golang.org/x/net/http/httpguts"
@@ -52,7 +53,7 @@ var reservedHeaders = map[string]bool{
 type subjectClass int
 
 const (
-	classNumber subjectClass = iota
+	classInteger subjectClass = iota
 	classBool
 	classTLSVersion
 	classHeader
@@ -62,7 +63,7 @@ const (
 )
 
 var classOps = map[subjectClass][]string{
-	classNumber:     {OpEquals, OpNotEquals, OpLessThan, OpGreaterThan},
+	classInteger:    {OpEquals, OpNotEquals, OpLessThan, OpGreaterThan},
 	classBool:       {OpEquals, OpNotEquals},
 	classTLSVersion: {OpEquals, OpNotEquals, OpLessThan, OpGreaterThan},
 	classHeader:     {OpEquals, OpNotEquals, OpContains, OpMatches, OpExists},
@@ -80,18 +81,18 @@ var knownOps = map[string]bool{
 // take header:<Name> and json:<path>.
 var kindSubjects = map[string]map[string]subjectClass{
 	KindHTTP: {
-		SubjectStatusCode: classNumber, SubjectLatencyMS: classNumber,
-		SubjectBody: classBody, SubjectTLSDaysLeft: classNumber,
+		SubjectStatusCode: classInteger, SubjectLatencyMS: classInteger,
+		SubjectBody: classBody, SubjectTLSDaysLeft: classInteger,
 	},
 	KindDNS: {
-		SubjectRecordCount: classNumber, SubjectRecord: classRecord, SubjectLatencyMS: classNumber,
+		SubjectRecordCount: classInteger, SubjectRecord: classRecord, SubjectLatencyMS: classInteger,
 	},
 	KindTCP: {
-		SubjectConnects: classBool, SubjectLatencyMS: classNumber,
+		SubjectConnects: classBool, SubjectLatencyMS: classInteger,
 	},
 	KindTLS: {
-		SubjectTLSDaysLeft: classNumber, SubjectChainValid: classBool, SubjectHostnameMatches: classBool,
-		SubjectTLSVersion: classTLSVersion, SubjectLatencyMS: classNumber,
+		SubjectTLSDaysLeft: classInteger, SubjectChainValid: classBool, SubjectHostnameMatches: classBool,
+		SubjectTLSVersion: classTLSVersion, SubjectLatencyMS: classInteger,
 	},
 }
 
@@ -119,6 +120,8 @@ func Validate(s *Scenario) map[string]string {
 		f["name"] = "required"
 	case utf8.RuneCountInString(s.Name) > maxName || !utf8.ValidString(s.Name):
 		f["name"] = fmt.Sprintf("at most %d characters of valid UTF-8", maxName)
+	case strings.IndexFunc(s.Name, unicode.IsControl) >= 0:
+		f["name"] = "must not contain control characters"
 	}
 
 	single, singleOK := typeKind[s.Type]
@@ -338,8 +341,10 @@ func validateHTTP(f map[string]string, p string, h *HTTPSpec, defined map[string
 	default:
 		if msg := checkVars(h.Body, defined); msg != "" {
 			f[p+".body"] = msg
-		} else if h.BodyType == BodyJSON && !strings.Contains(h.Body, "${") && !json.Valid([]byte(h.Body)) {
-			f[p+".body"] = "not valid JSON"
+		} else if h.BodyType == BodyJSON && !json.Valid([]byte(placeholderVars(h.Body, "0"))) {
+			// "0" is valid both inside a JSON string and as a value, so a
+			// body valid with its variables in place is valid here.
+			f[p+".body"] = "not valid JSON (variables are checked as 0)"
 		}
 	}
 }
@@ -418,7 +423,7 @@ func parseURL(raw string) (*url.URL, bool) {
 	if _, ok := varRefs(raw); !ok || authorityHasVar(raw) {
 		return nil, false
 	}
-	u, err := url.Parse(placeholderVars(raw))
+	u, err := url.Parse(placeholderVars(raw, "x"))
 	if err != nil || u.Opaque != "" || u.Host == "" {
 		return nil, false
 	}
@@ -538,9 +543,9 @@ func checkValue(class subjectClass, op, v string) string {
 		}
 	}
 	switch class {
-	case classNumber:
-		if !isNumber(v) {
-			return "must be a number"
+	case classInteger:
+		if _, err := strconv.Atoi(v); err != nil {
+			return "must be a whole number"
 		}
 	case classBool:
 		if v != "true" && v != "false" {

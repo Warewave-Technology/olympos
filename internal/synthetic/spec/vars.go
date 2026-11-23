@@ -80,14 +80,14 @@ func Substitute(in string, vars map[string]string) string {
 	}
 }
 
-// placeholderVars replaces each ${name} in s with "x", so that a URL with
-// variables can be parsed to check its structure. s must have passed
-// varRefs.
-func placeholderVars(s string) string {
+// placeholderVars replaces each ${name} in s with ph, so that a URL or a
+// JSON body with variables can be checked for its structure. s must have
+// passed varRefs.
+func placeholderVars(s, ph string) string {
 	names, _ := varRefs(s)
 	vars := make(map[string]string, len(names))
 	for _, n := range names {
-		vars[n] = "x"
+		vars[n] = ph
 	}
 	return Substitute(s, vars)
 }

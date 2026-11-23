@@ -1,45 +1,59 @@
 package spec
 
 import (
+	"bytes"
 	"crypto/ecdh"
 	"crypto/hpke"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"strings"
 
 	"github.com/google/uuid"
 )
 
 // RunCredential is a credential as one run needs it: the secret and what it
-// may be sent to. It travels only sealed (SealCredentials). Secret is
-// never encoded as JSON and String leaves it out, so that a credential
-// printed or logged by mistake does not carry it; call ZeroCredentials when
-// the run is over.
+// may be sent to. It travels only sealed (SealCredentials).
+//
+// Username and Secret are *Secret: never encoded as JSON, and printed as
+// "[redacted]" or as an address, whatever the verb and however the
+// credential is reached (value, pointer, slice, a struct's exported or
+// unexported field, fmt or slog). RunCredential itself prints and logs as
+// its id and kind only. Call ZeroCredentials when the run is over.
 type RunCredential struct {
 	ID         uuid.UUID `json:"id"`
 	Kind       string    `json:"kind"`
 	BoundHosts []string  `json:"bound_hosts"`
-	Username   string    `json:"username,omitempty"`
-	Secret     []byte    `json:"-"`
+	Username   *Secret   `json:"-"`
+	Secret     *Secret   `json:"-"`
 	HeaderName string    `json:"header_name,omitempty"`
 	TokenURL   string    `json:"token_url,omitempty"`
 	Scopes     string    `json:"scopes,omitempty"`
 }
 
-// String describes c without its secret or user name.
+// String describes c by its id and kind, without its user name or secret.
 func (c RunCredential) String() string {
 	return fmt.Sprintf("RunCredential{%s %s}", c.ID, c.Kind)
 }
 
-// GoString describes c for %#v, without its secret or user name.
-func (c RunCredential) GoString() string { return c.String() }
+// Format writes String for every verb, so that %x, %d or %#v cannot reach
+// the fields.
+func (c RunCredential) Format(f fmt.State, _ rune) { io.WriteString(f, c.String()) }
 
-// ZeroCredentials overwrites every secret with zeros and drops it.
+// LogValue logs c by its id and kind.
+func (c RunCredential) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("id", c.ID.String()), slog.String("kind", c.Kind))
+}
+
+// ZeroCredentials overwrites every user name and secret with zeros and
+// drops them.
 func ZeroCredentials(creds []RunCredential) {
 	for i := range creds {
-		clear(creds[i].Secret)
-		creds[i].Secret = nil
+		creds[i].Username.Zero()
+		creds[i].Secret.Zero()
+		creds[i].Username, creds[i].Secret = nil, nil
 	}
 }
 
@@ -158,49 +172,35 @@ func encodeCredentials(creds []RunCredential) ([]byte, error) {
 	if len(creds) > maxRunCredentials {
 		return nil, fmt.Errorf("spec: at most %d credentials per run", maxRunCredentials)
 	}
-	// The fields of c after its id, in order. Strings are appended as they
-	// are, without a []byte copy that would stay behind unzeroed.
-	fields := func(c *RunCredential) [6]string {
-		return [6]string{c.Kind, c.Username, "", c.HeaderName, c.TokenURL, c.Scopes}
-	}
-	const secretField = 2
 	size := 1 + uvarintLen(uint64(len(creds)))
 	for i := range creds {
 		c := &creds[i]
-		size += 16
-		for j, f := range fields(c) {
-			n := len(f)
-			if j == secretField {
-				n = len(c.Secret)
-			}
-			size += uvarintLen(uint64(n)) + n
-		}
+		size += 16 +
+			fieldLen(c.Kind) + fieldLen(c.Username.Bytes()) + fieldLen(c.Secret.Bytes()) +
+			fieldLen(c.HeaderName) + fieldLen(c.TokenURL) + fieldLen(c.Scopes)
 		size += uvarintLen(uint64(len(c.BoundHosts)))
 		for _, h := range c.BoundHosts {
-			size += uvarintLen(uint64(len(h))) + len(h)
+			size += fieldLen(h)
 		}
 	}
 	// Sized exactly, so that append never moves the plaintext and leaves
-	// a copy behind.
+	// a copy behind. Strings are appended as they are, without a []byte
+	// copy that would stay behind unzeroed.
 	buf := make([]byte, 0, size)
 	buf = append(buf, encodingVersion)
 	buf = binary.AppendUvarint(buf, uint64(len(creds)))
 	for i := range creds {
 		c := &creds[i]
 		buf = append(buf, c.ID[:]...)
-		for j, f := range fields(c) {
-			if j == secretField {
-				buf = binary.AppendUvarint(buf, uint64(len(c.Secret)))
-				buf = append(buf, c.Secret...)
-				continue
-			}
-			buf = binary.AppendUvarint(buf, uint64(len(f)))
-			buf = append(buf, f...)
-		}
+		buf = appendField(buf, c.Kind)
+		buf = appendField(buf, c.Username.Bytes())
+		buf = appendField(buf, c.Secret.Bytes())
+		buf = appendField(buf, c.HeaderName)
+		buf = appendField(buf, c.TokenURL)
+		buf = appendField(buf, c.Scopes)
 		buf = binary.AppendUvarint(buf, uint64(len(c.BoundHosts)))
 		for _, h := range c.BoundHosts {
-			buf = binary.AppendUvarint(buf, uint64(len(h)))
-			buf = append(buf, h...)
+			buf = appendField(buf, h)
 		}
 	}
 	if len(buf) != size || cap(buf) != size {
@@ -209,6 +209,14 @@ func encodeCredentials(creds []RunCredential) ([]byte, error) {
 		return nil, errors.New("spec: credentials: encoding size mismatch")
 	}
 	return buf, nil
+}
+
+// fieldLen is the encoded length of a length-prefixed field.
+func fieldLen[T string | []byte](v T) int { return uvarintLen(uint64(len(v))) + len(v) }
+
+func appendField[T string | []byte](buf []byte, v T) []byte {
+	buf = binary.AppendUvarint(buf, uint64(len(v)))
+	return append(buf, v...)
 }
 
 func uvarintLen(v uint64) int {
@@ -271,10 +279,9 @@ func decodeCredentials(pt []byte) (out []RunCredential, err error) {
 			}
 		}
 		c.Kind = string(fields[0])
-		c.Username = string(fields[1])
-		if len(fields[2]) > 0 {
-			c.Secret = append([]byte(nil), fields[2]...)
-		}
+		// Copies: the plaintext they come from is zeroed.
+		c.Username = NewSecret(bytes.Clone(fields[1]))
+		c.Secret = NewSecret(bytes.Clone(fields[2]))
 		c.HeaderName = string(fields[3])
 		c.TokenURL = string(fields[4])
 		c.Scopes = string(fields[5])
