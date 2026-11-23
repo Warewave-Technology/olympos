@@ -65,6 +65,12 @@ gets no probe token: its *Add cluster* command already installs the probe.
 **Opting out.** `--set probe.enabled=false` installs no probe; the cluster shows *Probe: not installed* and
 scenarios skip it.
 
+**Removing a probe.** On a cluster that already has a probe, `helm upgrade … --set probe.enabled=false`
+removes the Deployment, but Olympos still expects the probe: the cluster shows it *offline*, `probe.offline`
+fires, and the scenarios' alerts on that cluster keep firing (an offline probe is not a recovery). Choose
+**Revoke probe** on the cluster as well: its alerts then resolve without a message and scenarios skip the
+cluster. To bring the probe back later, use *Install probe*.
+
 The *Status* column of *Settings › Clusters & agents* shows the probe next to the agent: online with its
 version, offline, pending (enrolled, not connected yet), not installed or revoked. A scope-all admin can
 **Revoke probe** there: the probe's certificate stops working at once and the agent keeps working.

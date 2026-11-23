@@ -395,7 +395,7 @@ variables that the chart renders; the chart has no `extraEnv`.
 | `bench.kyverno.policyRefs` | `[]` | Render a `policies.kyverno.io/v1` PolicyException naming these policies (Kyverno CEL policies), e.g. `[{name: require-run-as-nonroot, kind: ValidatingPolicy}]`. |
 | `resources` | requests `50m`/`64Mi`, limit `256Mi` memory | |
 | `nodeSelector` / `tolerations` / `affinity` / `podAnnotations` | `{}` / `[]` / `{}` / `{}` | Agent pod. |
-| `probe.enabled` | `true` | Install `olympos-probe` (synthetic monitoring) next to the agent: the Deployment, ServiceAccount and Secret `olympos-probe-identity`, the agent's Role on that Secret, and `OLYMPOS_PROBE_ENABLED`. The probe's ServiceAccount has no RBAC and no token. `false`: none of these, and the cluster shows *Probe: not installed*. |
+| `probe.enabled` | `true` | Install `olympos-probe` (synthetic monitoring) next to the agent: the Deployment, ServiceAccount and Secret `olympos-probe-identity`, the agent's Role on that Secret, and `OLYMPOS_PROBE_ENABLED`. The probe's ServiceAccount has no RBAC and no token. `false`: none of these, and the cluster shows *Probe: not installed*. On a cluster that already had a probe, Olympos shows it *offline* and its alerts keep firing: also choose *Revoke probe* ([Synthetic monitoring](synthetic-monitoring.md#install-the-probe)). |
 | `probe.replicas` | `1` | Probe replicas. Runs are idempotent by run id. |
 | `probe.image.repository` | `ghcr.io/warewave-technology/olympos-probe` | |
 | `probe.image.tag` | `""` (chart `appVersion`) | |
