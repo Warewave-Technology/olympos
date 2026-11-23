@@ -19,6 +19,13 @@ func (e *env) probeState(id uuid.UUID) (status string, alerted bool) {
 	return status, alerted
 }
 
+// seen is traffic from a stream of the cluster's current probe
+// certificate.
+func (e *env) seen(cl uuid.UUID) {
+	e.t.Helper()
+	e.svc.probeSeen(e.ctx, cl, e.probes.serial(cl))
+}
+
 func (e *env) events(eventType string) int {
 	e.t.Helper()
 	return e.count(`SELECT count(*) FROM outbox WHERE event_type = $1`, eventType)
@@ -48,7 +55,7 @@ func TestProbeOfflineDebounce(t *testing.T) {
 	}
 
 	// Last traffic at t0; offline after gateway.OfflineAfter, silently.
-	e.svc.probeSeen(e.ctx, cl)
+	e.seen(cl)
 	e.clock.add(gateway.OfflineAfter - time.Second)
 	e.checkOffline()
 	if st, _ := e.probeState(cl); st != ProbeOnlineState {
@@ -75,11 +82,11 @@ func TestProbeOfflineDebounce(t *testing.T) {
 		t.Fatalf("%d probe.offline messages", n)
 	}
 	// Back: one probe.online.
-	e.svc.probeSeen(e.ctx, cl)
+	e.seen(cl)
 	if st, alerted := e.probeState(cl); st != ProbeOnlineState || alerted {
 		t.Fatalf("after traffic: %s alerted=%v", st, alerted)
 	}
-	e.svc.probeSeen(e.ctx, cl)
+	e.seen(cl)
 	if err := e.svc.probeConnected(e.ctx, cl, &pb.ProbeHello{ProbeVersion: "0.3.0"}); err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +110,7 @@ func TestProbeOfflineDebounce(t *testing.T) {
 	}
 	for range 40 { // 10 minutes of traffic every 15 s
 		e.clock.add(15 * time.Second)
-		e.svc.probeSeen(e.ctx, cl)
+		e.seen(cl)
 		e.checkOffline()
 	}
 	if st, _ := e.probeState(cl); st != ProbeOnlineState {
@@ -148,7 +155,7 @@ func TestRevokedProbeStaysRevoked(t *testing.T) {
 	if err := e.svc.probeConnected(e.ctx, cl, &pb.ProbeHello{ProbeVersion: "x"}); err == nil {
 		t.Fatal("revoked probe connected")
 	}
-	e.svc.probeSeen(e.ctx, cl)
+	e.seen(cl)
 	e.clock.add(time.Hour)
 	e.checkOffline()
 	if st, _ := e.probeState(cl); st != ProbeRevoked {
@@ -167,5 +174,46 @@ func TestInstallHooks(t *testing.T) {
 	e.svc.InstallHooks(&h)
 	if h.Connected == nil || h.Seen == nil || h.Result == nil || h.Rejected == nil || h.Disconnected != nil {
 		t.Fatalf("hooks %+v", h)
+	}
+}
+
+// Ruling P26: a probe whose certificate was renewed but which still runs on
+// the old one (the agent could not write the new certificate) gets no run.
+// Its traffic does not keep it online: it goes offline after
+// gateway.OfflineAfter and probe.offline fires after the alert delay, as for
+// a probe that is gone. Traffic of the current certificate brings it back.
+func TestProbeOnAnOldCertificateGoesOffline(t *testing.T) {
+	e := newEnv(t)
+	cl := e.cluster("c1", ProbeOnlineState)
+	e.seen(cl)
+	// Renewed: the stream that stays open holds the old certificate.
+	old := e.probes.serial(cl)
+	e.exec(`UPDATE clusters SET probe_prev_cert_serial = probe_cert_serial, probe_cert_serial = 'cert-renewed' WHERE id = $1`, cl)
+	for range 4 { // a minute of heartbeats on the old stream
+		e.clock.add(15 * time.Second)
+		e.svc.probeSeen(e.ctx, cl, old)
+	}
+	e.clock.add(time.Second)
+	e.checkOffline()
+	if st, _ := e.probeState(cl); st != ProbeOfflineState {
+		t.Fatalf("probe on the old certificate is %s, want offline", st)
+	}
+	for range 20 { // 5 minutes more of the same
+		e.clock.add(15 * time.Second)
+		e.svc.probeSeen(e.ctx, cl, old)
+		e.checkOffline()
+	}
+	if st, alerted := e.probeState(cl); st != ProbeOfflineState || !alerted || e.events(notify.ProbeOffline) != 1 {
+		t.Fatalf("after 5 minutes on the old certificate: %s alerted=%v, %d probe.offline", st, alerted, e.events(notify.ProbeOffline))
+	}
+	// No traffic at all names no certificate.
+	e.svc.probeSeen(e.ctx, cl, "")
+	if st, _ := e.probeState(cl); st != ProbeOfflineState {
+		t.Fatalf("traffic with no serial: %s", st)
+	}
+	// The probe reconnects with the new certificate.
+	e.seen(cl)
+	if st, alerted := e.probeState(cl); st != ProbeOnlineState || alerted || e.events(notify.ProbeOnline) != 1 {
+		t.Fatalf("after traffic on the new certificate: %s alerted=%v, %d probe.online", st, alerted, e.events(notify.ProbeOnline))
 	}
 }

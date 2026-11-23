@@ -42,8 +42,12 @@ type ProbeHooks struct {
 	// probe reconnected meanwhile).
 	Result   func(ctx context.Context, clusterID uuid.UUID, r *pb.RunResult)
 	Rejected func(ctx context.Context, clusterID uuid.UUID, r *pb.RunRejected)
-	// Seen is called (throttled) whenever traffic arrives from a probe.
-	Seen func(ctx context.Context, clusterID uuid.UUID)
+	// Seen is called (throttled) whenever traffic arrives from a probe,
+	// with the serial of the certificate its stream connected with: after
+	// a renewal, a stream of the old certificate stays open until the probe
+	// reconnects, and its traffic must not keep the probe online (ruling
+	// P26).
+	Seen func(ctx context.Context, clusterID uuid.UUID, certSerial string)
 }
 
 // ProbeInfo describes one probe stream.
@@ -327,7 +331,7 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 			idle.Reset(OfflineAfter)
 			if g.ProbeHooks.Seen != nil && time.Since(lastSeenWrite) > PingInterval/2 {
 				lastSeenWrite = time.Now()
-				g.ProbeHooks.Seen(ctx, clusterID)
+				g.ProbeHooks.Seen(ctx, clusterID, s.serial)
 			}
 			g.probeDispatch(ctx, s, m)
 		}

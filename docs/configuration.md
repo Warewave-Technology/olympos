@@ -371,7 +371,7 @@ variables that the chart renders; the chart has no `extraEnv`.
 | Value | Default | What it sets |
 |---|---|---|
 | `server` | `""` | **Required.** Gateway `host:port` (`OLYMPOS_SERVER`). |
-| `bootstrapToken` | `""` | **Required on first install.** One-time enrollment token (valid 1 h), stored in the Secret `olympos-agent-identity` (and, while the probe has no certificate, in `olympos-probe-identity`: the same token enrolls the agent and the probe once each). Once the agent has enrolled (the Secret holds `tls.crt`), upgrades keep the Secret and ignore this value. |
+| `bootstrapToken` | `""` | **Required on first install.** One-time enrollment token (valid 1 h), stored in the Secret `olympos-agent-identity` (and, while the probe has no certificate, in `olympos-probe-identity`: the same token enrolls the agent and the probe once each). A token issued again for a cluster that already has a probe (*Show install command*) enrolls only the agent; use *Install probe* for the probe. Once the agent has enrolled (the Secret holds `tls.crt`), upgrades keep the Secret and ignore this value. |
 | `serverCA` | `""` | **Required.** Base64-encoded PEM of the Olympos internal CA. Rendered into the ConfigMap `olympos-agent-ca` and mounted at `/etc/olympos/ca.crt`; the agent pins it. |
 | `serverName` | `""` | TLS server name override (`OLYMPOS_SERVER_NAME`). Empty: the host part of `server`. |
 | `clusterName` | `""` | Not used by any chart template. The agent's identity comes from its enrolled certificate. |

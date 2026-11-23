@@ -46,7 +46,7 @@ These change or settle parts of the spec below. Where they conflict, they win.
 
 ## Decisions taken during implementation
 
-Rulings P1–P25 of the implementation (in the order they were taken). Where they differ from the spec below,
+Rulings P1–P26 of the implementation (in the order they were taken). Where they differ from the spec below,
 they win. The user-visible ones:
 
 | Ruling | Decision | Cost |
@@ -76,6 +76,7 @@ they win. The user-visible ones:
 | P23 | The probe's state is part of the *Status* cell of *Settings › Clusters & agents* (no extra column; no sideways scroll at 1440 px). | None. |
 | P24 | `POST /clusters/{id}/probe-token` answers 409 while the cluster waits for its first agent: its *Add cluster* command already installs the probe. | None. |
 | P25 | The allowlist version is a time: every change, and every server start, sets it to `greatest(version + 1, now in milliseconds)`. A database restored from an older dump is then ahead of every version a probe has seen once a server starts on it; the probe's check that versions never go back is unchanged. A probe whose certificate was renewed after the dump needs *Install probe* (P6), and credentials rotated after it must be rotated again (`docs/restore-olympos.md`). | Versions are large numbers; runs after a restore wait for a server start. |
+| P26 | Only traffic on a stream of the **current** probe certificate (`clusters.probe_cert_serial`) keeps a probe online. A probe left on a certificate that was renewed (the agent could not write the new one to the Secret) gets no run (runs go only to streams of the current certificate), so it goes offline after `gateway.OfflineAfter` and `probe.offline` fires after `synthetic.probeOfflineAlertAfter`, instead of looking online while every run ends `not_dispatched`. | A normal renewal can show the probe offline for about a minute, until it reconnects; that never alerts. |
 
 Also settled while building, and documented for users: names must be fully qualified (no search list), a
 literal `${` cannot be written, `Accept-Encoding`, `Range`, `If-Range` and `Host` are reserved headers, a header

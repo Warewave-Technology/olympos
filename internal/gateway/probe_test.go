@@ -725,3 +725,43 @@ func TestSendRunSkipsStreamsOfARenewedCertificate(t *testing.T) {
 		}
 	}
 }
+
+// The Seen hook gets the serial of the certificate the stream connected
+// with, also after that certificate was renewed (ruling P26: the hook
+// decides that such traffic does not count).
+func TestProbeSeenNamesTheStreamCertificate(t *testing.T) {
+	e := start(t)
+	n := countConnects(e.gw)
+	seen := make(chan string, 8)
+	e.gw.ProbeHooks.Seen = func(_ context.Context, _ uuid.UUID, serial string) { seen <- serial }
+	id, _, probe := e.enrolled(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	key, _ := spec.GenerateKey()
+	st, err := e.dialProbe(t, probe).Connect(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Send(&pb.ProbeMessage{Msg: &pb.ProbeMessage_Hello{Hello: &pb.ProbeHello{ClusterId: id.String(),
+		HpkePublicKey: key.PublicKey().Bytes(), MaxConcurrency: 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	waitProbes(t, e.gw, id, n, 1)
+	if _, err := e.renewProbe(t, probe); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Send(&pb.ProbeMessage{Msg: &pb.ProbeMessage_Pong{Pong: &pb.Pong{}}}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-seen:
+		if got != serialOf(t, probe) {
+			t.Fatalf("Seen with serial %s, want the stream's %s", got, serialOf(t, probe))
+		}
+		if cur, _ := e.probeSerials(t, id); got == cur {
+			t.Fatal("the stream's serial is the renewed one")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Seen not called")
+	}
+}

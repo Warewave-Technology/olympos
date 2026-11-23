@@ -55,7 +55,9 @@ contained.
 **New clusters.** The *Add cluster* command installs the probe together with the agent (`probe.enabled: true`
 in the agent chart). The same one-time token enrolls the agent and then the probe. A command shown again
 (*Show install command*) enrolls the probe only while the cluster has none; once a probe has enrolled,
-replace it with *Install probe*.
+replace it with *Install probe*. So if the Secret `olympos-probe-identity` was lost, or the
+`olympos-system` namespace was recreated, on a cluster that had a probe: run the command, then *Install
+probe*.
 
 **Clusters added before v0.3.** `helm upgrade` of the agent chart adds the probe Deployment, which waits
 without an identity; the cluster shows *Probe: not installed*. An admin with scope `all` opens
@@ -88,9 +90,11 @@ keeps it**:
   agent's Role gains this one Secret name.
 - The probe mounts that Secret read-only, the key with mode 0440 for group 65532 (the probe's group), and
   reloads it when it changes. After a renewal the probe reconnects within the kubelet's sync period plus
-  30 seconds; that gap never raises an alert.
-- Only the probe's **current** certificate can connect. If a renewal's answer is lost, the agent retries the
-  renewal with the previous certificate until the new one has connected once.
+  30 seconds; meanwhile it may show *offline* for about a minute, which never raises an alert.
+- Only the probe's **current** certificate can connect, get runs and keep the probe online. If a renewal's
+  answer is lost, the agent retries the renewal with the previous certificate until the new one has
+  connected once. A probe left on a replaced certificate (the agent could not write the new one) shows
+  *offline* and `probe.offline` fires; see the agent's log, or use *Install probe*.
 - *Install probe* writes the new token into the same Secret; the agent then enrolls the probe again, even
   over a certificate that still looks valid. This also recovers a revoked probe.
 

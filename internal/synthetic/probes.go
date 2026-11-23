@@ -117,12 +117,16 @@ func emitProbeOnline(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, name s
 
 // probeSeen is the gateway's Seen hook (throttled by the gateway): it
 // records the probe's traffic, and a probe marked offline while its stream
-// stayed open comes back online.
-func (s *Service) probeSeen(ctx context.Context, clusterID uuid.UUID) {
+// stayed open comes back online. Only the traffic of a stream of the
+// current certificate counts (ruling P26): a probe left on a certificate
+// that was renewed (the agent could not write the new one) gets no run, so
+// it must go offline and alert rather than look online.
+func (s *Service) probeSeen(ctx context.Context, clusterID uuid.UUID, certSerial string) {
 	now := s.now()
 	var st string
 	err := s.DB.QueryRow(ctx, `UPDATE clusters SET probe_last_seen_at = $2
-		WHERE id = $1 AND probe_status IN ('online','offline') RETURNING probe_status`, clusterID, now).Scan(&st)
+		WHERE id = $1 AND probe_status IN ('online','offline') AND probe_cert_serial <> '' AND probe_cert_serial = $3
+		RETURNING probe_status`, clusterID, now, certSerial).Scan(&st)
 	if err == nil && st == ProbeOfflineState {
 		err = store.Tx(ctx, s.DB, func(tx pgx.Tx) error { return s.markProbeOnline(ctx, tx, clusterID, now) })
 	}
