@@ -19,7 +19,7 @@ with the pull request):
    parameters, bare-column keys, an Olympos-generated Keeper path); **no SQL text from the backup runs on the
    target**. Column defaults, `MATERIALIZED`/`ALIAS` columns, TTL, skip indexes, projections, constraints,
    codecs and table settings are not restored and are listed per table ("re-apply from your schema").
-   `Replacing`, `Summing`, `Aggregating` and `Collapsing` tables with expression keys are not created and
+   `Replacing`, `Summing`, `Aggregating`, `Collapsing` and `VersionedCollapsing` tables with expression keys are not created and
    are listed with the reason, while the rest of the database is restored (an `ORDER BY tuple()` would merge
    their rows); a `Replicated` or proxy-engine database fails the whole request before anything is written, and server errors are reported as code and name only. See
    *ClickHouse objects* below.

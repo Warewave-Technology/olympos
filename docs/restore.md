@@ -157,8 +157,9 @@ target and drop them before you open a new request.
   constraints, codecs, comments, the sampling key, table settings, and keys that are not plain columns (a
   `MergeTree` table then gets `ORDER BY tuple()`).
 - **Not created, data not restored, listed with the reason; the rest of the database is restored** (and
-  its result still says *Succeeded*, so read the list): `Replacing`, `Summing`, `Aggregating` and
-  `Collapsing` tables whose keys or engine parameters are expressions (an `ORDER BY tuple()` would merge
+  its result still says *Succeeded*, so read the list): `Replacing`, `Summing`, `Aggregating`, `Collapsing`
+  and `VersionedCollapsing` tables (and their `Replicated*` variants) whose keys or engine parameters are
+  expressions (an `ORDER BY tuple()` would merge
   their rows differently), and tables with a column type outside the supported list. Restore their data by
   hand from the backup ([Restore by hand](#clickhouse)).
 - **The whole request fails before anything is written:** a database with the `Replicated` engine (its
