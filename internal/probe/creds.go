@@ -41,9 +41,10 @@ const minExtractLiteral = 4
 
 // credential is one RunCredential prepared for the run.
 type credential struct {
-	c      *spec.RunCredential
-	bound  hostallow.List
-	header string // canonical name of the header it sets
+	c        *spec.RunCredential
+	bound    hostallow.List
+	boundErr error  // a bound host did not parse: the credential is refused
+	header   string // canonical name of the header it sets
 
 	mu       sync.Mutex
 	token    *spec.Secret // OAuth2 access token, for this run only
@@ -60,7 +61,8 @@ func newCredSet(creds []spec.RunCredential) *credSet {
 	cs := &credSet{byID: map[uuid.UUID]*credential{}, lits: &literals{}}
 	for i := range creds {
 		c := &creds[i]
-		cr := &credential{c: c, bound: boundList(c.BoundHosts), header: "Authorization"}
+		cr := &credential{c: c, header: "Authorization"}
+		cr.bound, cr.boundErr = boundList(c.BoundHosts)
 		if c.Kind == spec.CredHeader {
 			cr.header = textproto.CanonicalMIMEHeaderKey(c.HeaderName)
 		}
@@ -104,22 +106,29 @@ func (cs *credSet) get(id *uuid.UUID) (*credential, error) {
 	if !ok {
 		return nil, errorf(CodeCredentialError, "credential %s was not sent with the run", *id)
 	}
+	if c.boundErr != nil {
+		return nil, c.boundErr
+	}
 	return c, nil
 }
 
-// boundList turns bound host patterns into a list: "*.example.com" is a
-// wildcard rule, anything else an exact rule. Patterns that do not
-// validate match nothing.
-func boundList(hosts []string) hostallow.List {
+// boundList parses a credential's bound hosts (hostallow.FormatRule
+// form) into a list matched with the allowlist rules: a suffix bound
+// includes its apex, a wildcard bound does not. A bound that does not
+// parse, or no bound at all, refuses the credential: it fails closed.
+func boundList(hosts []string) (hostallow.List, error) {
 	l := hostallow.List{}
-	for _, h := range hosts {
-		k := hostallow.Exact
-		if strings.HasPrefix(h, "*.") {
-			k = hostallow.Wildcard
-		}
-		l.Rules = append(l.Rules, hostallow.Rule{Pattern: h, Kind: k})
+	if len(hosts) == 0 {
+		return l, errorf(CodeCredentialError, "the credential has no bound hosts")
 	}
-	return l
+	for i, h := range hosts {
+		r, err := hostallow.ParseRule(h)
+		if err != nil {
+			return hostallow.List{}, errorf(CodeCredentialError, "bound host %d of the credential is not a valid rule", i)
+		}
+		l.Rules = append(l.Rules, r)
+	}
+	return l, nil
 }
 
 // allows reports whether the credential may be sent to host.

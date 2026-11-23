@@ -23,14 +23,16 @@ import (
 // unexported field, fmt or slog). RunCredential itself prints and logs as
 // its id and kind only. Call ZeroCredentials when the run is over.
 type RunCredential struct {
-	ID         uuid.UUID `json:"id"`
-	Kind       string    `json:"kind"`
-	BoundHosts []string  `json:"bound_hosts"`
-	Username   *Secret   `json:"-"`
-	Secret     *Secret   `json:"-"`
-	HeaderName string    `json:"header_name,omitempty"`
-	TokenURL   string    `json:"token_url,omitempty"`
-	Scopes     string    `json:"scopes,omitempty"`
+	ID   uuid.UUID `json:"id"`
+	Kind string    `json:"kind"`
+	// BoundHosts are allowlist-style rules in hostallow.FormatRule form
+	// ("suffix:wrw.com", "wildcard:*.dev.wrw.com", "exact:api.wrw.com").
+	BoundHosts []string `json:"bound_hosts"`
+	Username   *Secret  `json:"-"`
+	Secret     *Secret  `json:"-"`
+	HeaderName string   `json:"header_name,omitempty"`
+	TokenURL   string   `json:"token_url,omitempty"`
+	Scopes     string   `json:"scopes,omitempty"`
 }
 
 // String describes c by its id and kind, without its user name or secret.

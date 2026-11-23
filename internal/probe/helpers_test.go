@@ -202,6 +202,7 @@ func assertion(subject, op, value string) spec.Assertion {
 
 func secret(s string) *spec.Secret { return spec.NewSecret([]byte(s)) }
 
+// bearer is a bearer credential; bound are hostallow.FormatRule strings.
 func bearer(token string, bound ...string) spec.RunCredential {
 	return spec.RunCredential{ID: uuid.New(), Kind: spec.CredBearer, BoundHosts: bound, Secret: secret(token)}
 }

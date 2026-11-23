@@ -111,10 +111,10 @@ func TestRedirectChainLimit(t *testing.T) {
 // credential's own header.
 func TestCredentialDroppedOnRedirectToUnboundHost(t *testing.T) {
 	creds := map[string]spec.RunCredential{
-		"bearer": bearer("CANARY-bearer-1", "api.example.test"),
-		"basic": {ID: uuid.New(), Kind: spec.CredBasic, BoundHosts: []string{"api.example.test"},
+		"bearer": bearer("CANARY-bearer-1", "exact:api.example.test"),
+		"basic": {ID: uuid.New(), Kind: spec.CredBasic, BoundHosts: []string{"exact:api.example.test"},
 			Username: secret("probe-user"), Secret: secret("CANARY-basic-pw")},
-		"header": {ID: uuid.New(), Kind: spec.CredHeader, BoundHosts: []string{"api.example.test"},
+		"header": {ID: uuid.New(), Kind: spec.CredHeader, BoundHosts: []string{"exact:api.example.test"},
 			HeaderName: "X-Partner-Key", Secret: secret("CANARY-header-1")},
 	}
 	// Go's client keeps Authorization and Cookie on a redirect to a
@@ -165,8 +165,8 @@ func TestCredentialOnlyOnBoundHosts(t *testing.T) {
 	e.host("api.example.test", "203.0.113.10", server(t, a))
 	e.host("other.example.test", "203.0.113.20", server(t, b))
 	e.host("x.dev.example.test", "203.0.113.30", server(t, w))
-	cred := bearer("CANARY-bound-token", "api.example.test", "*.dev.example.test")
-	basic := spec.RunCredential{ID: uuid.New(), Kind: spec.CredBasic, BoundHosts: []string{"api.example.test"},
+	cred := bearer("CANARY-bound-token", "exact:api.example.test", "wildcard:*.dev.example.test")
+	basic := spec.RunCredential{ID: uuid.New(), Kind: spec.CredBasic, BoundHosts: []string{"exact:api.example.test"},
 		Username: secret("u"), Secret: secret("p@ss:w")}
 	s := scenario(
 		withCred(httpStep("http://api.example.test/"), cred),
@@ -193,12 +193,67 @@ func TestCredentialOnlyOnBoundHosts(t *testing.T) {
 	}
 }
 
+// Bound hosts carry their kind and match like allowlist rules: a suffix
+// bound includes its apex, a wildcard bound does not, an exact bound is
+// that host only; a bound that does not parse refuses the credential.
+func TestBoundHostKinds(t *testing.T) {
+	hosts := []string{"example.test", "api.example.test", "x.api.example.test", "other.example.test"}
+	for _, tc := range []struct {
+		bound string
+		want  map[string]bool // host → gets the credential
+	}{
+		{"suffix:api.example.test", map[string]bool{"api.example.test": true, "x.api.example.test": true}},
+		{"wildcard:*.api.example.test", map[string]bool{"x.api.example.test": true}},
+		{"exact:api.example.test", map[string]bool{"api.example.test": true}},
+		{"suffix:example.test", map[string]bool{"example.test": true, "api.example.test": true, "x.api.example.test": true, "other.example.test": true}},
+	} {
+		t.Run(tc.bound, func(t *testing.T) {
+			e := newEnv(t)
+			recs := map[string]*headerRecorder{}
+			var steps []spec.Step
+			cred := bearer("CANARY-kind-token", tc.bound)
+			for i, h := range hosts {
+				recs[h] = &headerRecorder{}
+				e.host(h, fmt.Sprintf("203.0.113.%d", 10+i), server(t, recs[h]))
+				steps = append(steps, withCred(httpStep("http://"+h+"/"), cred))
+			}
+			wantPassed(t, e.run(scenario(steps...), cred))
+			for _, h := range hosts {
+				got := recs[h].requests()[0].Header.Get("Authorization") == "Bearer CANARY-kind-token"
+				if got != tc.want[h] {
+					t.Errorf("%s: credential attached = %v, want %v", h, got, tc.want[h])
+				}
+			}
+		})
+	}
+
+	for _, bad := range [][]string{
+		{"api.example.test"},                // no kind
+		{"exact:api.example.test", "*.x.y"}, // one bad entry refuses all
+		{"prefix:api.example.test"},
+		{"wildcard:api.example.test"},
+		{"exact:127.0.0.1"},
+		{"suffix:test"},
+		{},
+	} {
+		e := newEnv(t)
+		rec := &headerRecorder{}
+		e.host("api.example.test", "203.0.113.10", server(t, rec))
+		cred := bearer("CANARY-bad-bound", bad...)
+		res := e.run(scenario(withCred(httpStep("http://api.example.test/"), cred)), cred)
+		wantCode(t, res, 0, CodeCredentialError)
+		if len(rec.requests()) != 0 {
+			t.Errorf("%q: request sent", bad)
+		}
+	}
+}
+
 // A step that names a credential the run does not carry fails.
 func TestMissingCredential(t *testing.T) {
 	e := newEnv(t)
 	srv := &headerRecorder{}
 	e.host("api.example.test", "203.0.113.10", server(t, srv))
-	res := e.run(scenario(withCred(httpStep("http://api.example.test/"), bearer("x", "api.example.test"))))
+	res := e.run(scenario(withCred(httpStep("http://api.example.test/"), bearer("x", "exact:api.example.test"))))
 	wantCode(t, res, 0, CodeCredentialError)
 	if len(srv.requests()) != 0 {
 		t.Fatal("request sent")
@@ -228,7 +283,7 @@ func TestCanaryNeverInResult(t *testing.T) {
 			fmt.Fprintf(w, "you sent %s and %s, q=%s", r.Header.Get("X-Session"), auth, r.URL.Query().Get("s"))
 		}
 	})))
-	cred := bearer(canary, "api.example.test")
+	cred := bearer(canary, "exact:api.example.test")
 	login := withCred(httpStep("http://api.example.test/login",
 		assertion(spec.SubjectBody, spec.OpContains, canary),
 		assertion("header:X-Echo", spec.OpContains, "Bearer"),
@@ -283,7 +338,7 @@ func TestOAuth2Credential(t *testing.T) {
 		fmt.Fprintf(w, "auth=%s", r.Header.Get("Authorization"))
 	}}
 	e.host("api.example.test", "203.0.113.10", server(t, api))
-	cred := spec.RunCredential{ID: uuid.New(), Kind: spec.CredOAuth2, BoundHosts: []string{"api.example.test", "token.example.test"},
+	cred := spec.RunCredential{ID: uuid.New(), Kind: spec.CredOAuth2, BoundHosts: []string{"exact:api.example.test", "exact:token.example.test"},
 		Username: secret("client-1"), Secret: secret("CANARY-client-secret"),
 		TokenURL: "http://token.example.test/oauth/token", Scopes: "read write"}
 	s := scenario(
@@ -306,7 +361,7 @@ func TestOAuth2Credential(t *testing.T) {
 	}
 
 	// A token URL outside the bound hosts is refused.
-	cred.BoundHosts = []string{"api.example.test"}
+	cred.BoundHosts = []string{"exact:api.example.test"}
 	res = e.run(scenario(withCred(httpStep("http://api.example.test/a"), cred)), cred)
 	wantCode(t, res, 0, CodeCredentialError)
 	if fetches.Load() != 1 {

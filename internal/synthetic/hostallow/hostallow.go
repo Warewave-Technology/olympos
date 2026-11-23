@@ -243,6 +243,25 @@ func ValidateRule(r Rule) (Rule, error) {
 	return Rule{Pattern: n, Kind: r.Kind}, nil
 }
 
+// FormatRule writes a rule as "<kind>:<pattern>", for example
+// "suffix:wrw.com", "wildcard:*.dev.wrw.com" or "exact:api.wrw.com". It is
+// the form a credential's bound hosts travel in (RunCredential.BoundHosts).
+// It does not validate r; ParseRule does when it reads the form back.
+func FormatRule(r Rule) string {
+	return string(r.Kind) + ":" + r.Pattern
+}
+
+// ParseRule reads the form FormatRule writes and returns the rule
+// validated and normalized by ValidateRule. Anything else, including an
+// unknown kind or a missing ":", fails with ErrInvalidHost.
+func ParseRule(s string) (Rule, error) {
+	kind, pattern, ok := strings.Cut(s, ":")
+	if !ok {
+		return Rule{}, fmt.Errorf("%w %q: a rule is written <kind>:<pattern>", ErrInvalidHost, s)
+	}
+	return ValidateRule(Rule{Pattern: pattern, Kind: Kind(kind)})
+}
+
 // matches reports whether normalized host h is matched by validated rule v.
 func matches(v Rule, h string) bool {
 	switch v.Kind {

@@ -638,3 +638,34 @@ func FuzzNormalizeMatch(f *testing.F) {
 		}
 	})
 }
+
+// FormatRule and ParseRule are the wire form of a credential's bound
+// hosts: ParseRule reads what FormatRule writes, normalized and validated.
+func TestFormatParseRule(t *testing.T) {
+	for _, r := range []Rule{
+		{Pattern: "wrw.com", Kind: Suffix},
+		{Pattern: "*.dev.wrw.com", Kind: Wildcard},
+		{Pattern: "api.wrw.com", Kind: Exact},
+	} {
+		s := FormatRule(r)
+		if want := string(r.Kind) + ":" + r.Pattern; s != want {
+			t.Fatalf("FormatRule = %q, want %q", s, want)
+		}
+		got, err := ParseRule(s)
+		if err != nil || got != r {
+			t.Fatalf("ParseRule(%q) = %v, %v", s, got, err)
+		}
+	}
+	if got, err := ParseRule("suffix:WRW.com."); err != nil || got != (Rule{Pattern: "wrw.com", Kind: Suffix}) {
+		t.Fatalf("not normalized: %v %v", got, err)
+	}
+	for _, bad := range []string{
+		"", "wrw.com", "*.dev.wrw.com", ":wrw.com", "suffix:", "prefix:wrw.com", "Suffix:wrw.com",
+		"wildcard:dev.wrw.com", "exact:*.wrw.com", "suffix:com", "exact:127.0.0.1", "exact:localhost",
+		"exact:kubernetes.default.svc", "exact:api.wrw.com:443",
+	} {
+		if r, err := ParseRule(bad); err == nil {
+			t.Errorf("ParseRule(%q) = %v, want an error", bad, r)
+		}
+	}
+}
