@@ -230,14 +230,24 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 		f.hasTLS = true
 		f.tlsDaysLeft = daysLeft(resp.TLS.PeerCertificates[0].NotAfter, r.now())
 	}
-	o.names, o.extracted, err = extract(st.Extracts, f)
-	// §6.2: a credential never goes into an extracted variable, from a
-	// bound host that echoes it or otherwise.
-	for _, n := range o.names {
-		if v, ok := o.extracted[n]; ok && rs.creds.holdsCredential([]byte(v)) {
-			delete(o.extracted, n)
-			if err == nil || codeOf(err) != CodeCredentialError {
-				err = errorf(CodeCredentialError, "extract %s captured a credential; it is not kept", n)
+	// §6.2: a credential never goes into an extracted variable. Ruling
+	// P10: a response that echoes a credential gives no extracts at all,
+	// since several extracts could each take a piece of it.
+	if len(st.Extracts) > 0 && rs.creds.echoes(resp.Header, data) {
+		o.names = make([]string, 0, len(st.Extracts))
+		for _, e := range st.Extracts {
+			o.names = append(o.names, e.Name)
+		}
+		err = errorf(CodeCredentialError, "the response echoes a credential, so no extract is kept (%s)", strings.Join(o.names, ", "))
+	} else {
+		o.names, o.extracted, err = extract(st.Extracts, f)
+		for _, n := range o.names {
+			// A value that carries a credential the response did not
+			// show as it is (decoded from JSON, for instance).
+			if v, ok := o.extracted[n]; ok && rs.creds.holdsCredential([]byte(v)) {
+				o.extracted = nil
+				err = errorf(CodeCredentialError, "extract %s holds a credential, so no extract of the step is kept", n)
+				break
 			}
 		}
 	}

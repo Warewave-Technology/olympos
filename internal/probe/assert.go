@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/textproto"
 	"regexp"
@@ -27,6 +28,24 @@ const notStored = "(not stored)"
 // encodedBody stands for a body that is still content-encoded: redaction
 // cannot see into it, so it is not shown.
 const encodedBody = "[body not shown: content-encoded]"
+
+// binaryBody stands for a body that is not UTF-8 text (it may be
+// compressed without saying so): redaction cannot see into it either.
+func binaryBody(n int) string { return fmt.Sprintf("[binary body, %d bytes]", n) }
+
+// isText reports whether b is UTF-8, allowing an incomplete last
+// character where the read limit cut it.
+func isText(b []byte) bool {
+	if utf8.Valid(b) {
+		return true
+	}
+	for i := 1; i < utf8.UTFMax && i <= len(b); i++ {
+		if utf8.RuneStart(b[len(b)-i]) {
+			return !utf8.FullRune(b[len(b)-i:]) && utf8.Valid(b[:len(b)-i])
+		}
+	}
+	return false
+}
 
 // facts are what one step attempt observed, for its assertions and
 // extracts.
@@ -85,8 +104,12 @@ const redactedPrefix = 32 << 10
 // excerpt and body assertions), and whether it is cut.
 func (f *facts) redactedBody() ([]byte, bool) {
 	f.redOnce.Do(func() {
-		if f.encoded {
+		switch {
+		case f.encoded:
 			f.redBody = []byte(encodedBody)
+			return
+		case !isText(f.body):
+			f.redBody = []byte(binaryBody(len(f.body)))
 			return
 		}
 		f.redBody, f.redCut = f.redact.RedactPrefix(f.body, redactedPrefix)

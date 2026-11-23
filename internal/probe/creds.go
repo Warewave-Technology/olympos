@@ -40,13 +40,9 @@ const maxTokenResponse = 64 << 10
 const minExtractLiteral = 4
 
 // minLeakLiteral is the shortest credential form the leak checks look for
-// in requests and extracted values. Shorter forms (a one-letter user name)
-// would refuse ordinary requests; they are still scrubbed from reports.
+// in requests, responses and extracted values. Shorter forms would refuse
+// ordinary traffic; they are still scrubbed from reports.
 const minLeakLiteral = 6
-
-// minCapturedPart is the shortest extracted value that is refused for
-// being a piece of a credential.
-const minCapturedPart = 8
 
 // credential is one RunCredential prepared for the run.
 type credential struct {
@@ -54,9 +50,13 @@ type credential struct {
 	bound    hostallow.List
 	boundErr error  // a bound host did not parse: the credential is refused
 	header   string // canonical name of the header it sets
-	// lits are this credential's own values in all their forms (the
-	// OAuth2 token too, once fetched): what must not reach a host outside
-	// its bound hosts.
+	// lits are this credential's secret values in all their forms: the
+	// secret, the basic or OAuth2 client pair, and the OAuth2 token once
+	// fetched. They must not reach a host outside the bound hosts, and a
+	// response that echoes one gives no extracts. The basic user name and
+	// the OAuth2 client id are not among them (they are not secret and
+	// appear in ordinary URLs and responses); they are only scrubbed from
+	// reports.
 	lits *literals
 
 	mu       sync.Mutex
@@ -80,7 +80,7 @@ func newCredSet(creds []spec.RunCredential) *credSet {
 			cr.header = textproto.CanonicalMIMEHeaderKey(c.HeaderName)
 		}
 		cs.byID[c.ID] = cr
-		cs.addCredLiteral(cr, c.Username.Bytes())
+		cs.lits.addSecret(c.Username.Bytes())
 		cs.addCredLiteral(cr, c.Secret.Bytes())
 		switch c.Kind {
 		case spec.CredBasic:
@@ -106,34 +106,41 @@ func (cs *credSet) addCredLiteral(cr *credential, b []byte) {
 	cs.lits.addSecret(b)
 }
 
-// holdsCredential reports whether an extracted value carries a credential
-// of the run: one of its forms, or a piece of its raw value. Such a value
-// is never kept as a variable (§6.2: credentials never go into extracted
-// variables), whatever host it would be sent to.
-func (cs *credSet) holdsCredential(v []byte) bool {
-	lv := bytes.ToLower(v)
-	defer clear(lv)
+// holdsCredential reports whether b carries a secret form of a
+// credential of the run, as it is or lower-cased.
+func (cs *credSet) holdsCredential(b []byte) bool {
+	lb := bytes.ToLower(b)
+	defer clear(lb)
 	for _, c := range cs.byID {
 		for _, l := range c.lits.all() {
-			if len(l) >= minLeakLiteral && (bytes.Contains(v, l) || bytes.Contains(lv, l)) {
+			if len(l) >= minLeakLiteral && (bytes.Contains(b, l) || bytes.Contains(lb, l)) {
 				return true
-			}
-		}
-		if len(v) >= minCapturedPart {
-			for _, raw := range [][]byte{c.c.Secret.Bytes(), c.c.Username.Bytes(), c.tokenBytes()} {
-				if bytes.Contains(raw, v) {
-					return true
-				}
 			}
 		}
 	}
 	return false
 }
 
-func (c *credential) tokenBytes() []byte {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.token.Bytes()
+// echoes reports whether a response's headers or body carry a secret form
+// of a credential of the run. Ruling P10: no extract is taken from such a
+// response, since an extract (or several, piece by piece) could carry the
+// credential to another host (§6.2: credentials never go into extracted
+// variables).
+func (cs *credSet) echoes(h http.Header, body []byte) bool {
+	if len(cs.byID) == 0 {
+		return false
+	}
+	if cs.holdsCredential(body) {
+		return true
+	}
+	for name, vals := range h {
+		for _, v := range vals {
+			if cs.holdsCredential([]byte(name + ": " + v)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // checkRequest refuses a request that would carry a credential of the run
@@ -601,7 +608,8 @@ const minShiftedBase64 = 6
 // lowered before it is shown), base64 (standard and URL, with and without
 // padding), the stable inner part of its base64 at each of the three
 // offsets it can have inside a longer encoded text (such as
-// base64("Bearer " + token)), percent-encoded (query and path style) and
+// base64("Bearer " + token)), percent-encoded (query and path style, upper
+// and lower case hex) and
 // JSON-escaped (with and without "\/" and HTML escapes).
 func forms(b []byte) [][]byte {
 	out := [][]byte{bytes.Clone(b), bytes.ToLower(b)}
@@ -625,7 +633,9 @@ func forms(b []byte) [][]byte {
 			out = append(out, e)
 		}
 	}
-	out = append(out, formEscape(b), pathEscape(b))
+	for _, hex := range []string{upperHex, lowerHex} {
+		out = append(out, percentEscape(b, true, hex), percentEscape(b, false, hex))
+	}
 	for _, slash := range []bool{false, true} {
 		for _, html := range []bool{false, true} {
 			out = append(out, jsonEscape(b, slash, html))
@@ -644,29 +654,21 @@ func unreserved(c byte) bool {
 }
 
 // formEscape is url.QueryEscape into a fresh []byte (space as "+").
-func formEscape(b []byte) []byte {
+func formEscape(b []byte) []byte { return percentEscape(b, true, upperHex) }
+
+// percentEscape percent-encodes every byte that is not unreserved, with
+// the hex digits given (servers echo either case); form style writes a
+// space as "+".
+func percentEscape(b []byte, form bool, hex string) []byte {
 	out := make([]byte, 0, len(b)*3)
 	for _, c := range b {
 		switch {
 		case unreserved(c):
 			out = append(out, c)
-		case c == ' ':
+		case c == ' ' && form:
 			out = append(out, '+')
 		default:
-			out = append(out, '%', upperHex[c>>4], upperHex[c&15])
-		}
-	}
-	return out
-}
-
-// pathEscape percent-encodes every byte that is not unreserved.
-func pathEscape(b []byte) []byte {
-	out := make([]byte, 0, len(b)*3)
-	for _, c := range b {
-		if unreserved(c) {
-			out = append(out, c)
-		} else {
-			out = append(out, '%', upperHex[c>>4], upperHex[c&15])
+			out = append(out, '%', hex[c>>4], hex[c&15])
 		}
 	}
 	return out

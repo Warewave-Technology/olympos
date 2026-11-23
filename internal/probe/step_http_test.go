@@ -261,9 +261,11 @@ func TestMissingCredential(t *testing.T) {
 }
 
 // The canary bearer token comes back in the body, in Set-Cookie, in a
-// JSON access_token, base64-encoded and URL-encoded; a second token is
-// extracted and used in the next step, which echoes it. Nothing in the
-// marshalled result holds either.
+// JSON access_token, base64-encoded and URL-encoded; a session token is
+// extracted from a response that does not echo the credential (one that
+// does gives no extracts, TestExtractCannotCaptureCredential) and used in
+// the next step, which echoes both. Nothing in the marshalled result
+// holds either.
 func TestCanaryNeverInResult(t *testing.T) {
 	const canary = "CANARY-tok/en+Value=42"
 	const extracted = "EXTRACTED-session-9f8e7d"
@@ -279,6 +281,8 @@ func TestCanaryNeverInResult(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"access_token":%q,"note":"got %s","enc":%q,"b64":%q,"session":{"id":%q}}`,
 				tok, tok, url.QueryEscape(tok), base64.RawURLEncoding.EncodeToString([]byte(tok)), extracted)
+		case "/session":
+			fmt.Fprintf(w, `{"session":{"id":%q}}`, extracted)
 		case "/use":
 			fmt.Fprintf(w, "you sent %s and %s, q=%s", r.Header.Get("X-Session"), auth, r.URL.Query().Get("s"))
 		}
@@ -293,13 +297,14 @@ func TestCanaryNeverInResult(t *testing.T) {
 		assertion("json:note", spec.OpContains, "got"),
 		assertion("json:session.id", spec.OpEquals, extracted),
 	), cred)
-	login.Extracts = []spec.Extract{{Name: "sess", Source: spec.SourceJSONPath, Expr: "session.id"}}
+	session := withCred(httpStep("http://api.example.test/session"), cred)
+	session.Extracts = []spec.Extract{{Name: "sess", Source: spec.SourceJSONPath, Expr: "session.id"}}
 	use := withCred(httpStep("http://api.example.test/use?s=${sess}",
 		assertion(spec.SubjectBody, spec.OpContains, extracted)), cred)
 	use.HTTP.Headers = map[string]string{"X-Session": "${sess}"}
-	res := e.run(scenario(login, use), cred)
+	res := e.run(scenario(login, session, use), cred)
 	wantPassed(t, res)
-	if got := res.Steps[0].ExtractedNames; len(got) != 1 || got[0] != "sess" {
+	if got := res.Steps[1].ExtractedNames; len(got) != 1 || got[0] != "sess" {
 		t.Fatalf("extracted names %v", got)
 	}
 	if len(res.Steps[0].ResponseExcerpt) == 0 || !bytes.Contains(res.Steps[0].ResponseExcerpt, []byte(sensitive.Redacted)) {
