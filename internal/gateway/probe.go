@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -26,11 +27,14 @@ var (
 // ProbeHooks connect ProbeGateway to the synthetic module. Any hook may be
 // nil.
 type ProbeHooks struct {
-	// Connected is called for each new probe stream, after its hello.
+	// Connected is called for each new probe stream, after its hello and
+	// the second identity check, and before SendRun may use the stream. An
+	// error refuses the stream.
 	Connected func(ctx context.Context, clusterID uuid.UUID, h *pb.ProbeHello) error
 	// Disconnected is called when the last probe stream of the cluster on
-	// this replica ends. A stream may connect while it runs: the hook can
-	// check ProbeConnected before it marks the probe offline.
+	// this replica whose Connected was called ends, also when that Connected
+	// failed. A stream may connect while it runs: the hook can check
+	// ProbeConnected before it marks the probe offline.
 	Disconnected func(clusterID uuid.UUID)
 	// Result and Rejected receive what a probe reports. The run id comes
 	// from the probe, so the hook checks that the run belongs to clusterID.
@@ -68,8 +72,12 @@ type probeSession struct {
 	sendMu sync.Mutex
 	stream pb.ProbeGateway_ConnectServer
 
-	// inFlight is guarded by Gateway.mu: SendRun picks a stream by it.
+	// Guarded by Gateway.mu. SendRun picks a stream by inFlight, and only a
+	// ready one: its identity was checked again after it was registered and
+	// its Connected hook succeeded. hooked says Connected was called.
 	inFlight int
+	hooked   bool
+	ready    bool
 }
 
 func (s *probeSession) send(m *pb.ServerProbeMessage) error {
@@ -146,7 +154,10 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	if err != nil {
 		return err
 	}
-	first, err := stream.Recv()
+	if h := g.testHooks.awaitingHello; h != nil {
+		h(pki.RoleProbe)
+	}
+	first, err := recvFirst(stream.Context(), g.helloTimeout, stream.Recv)
 	if err != nil {
 		return err
 	}
@@ -161,13 +172,6 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	if _, err := ecdh.X25519().NewPublicKey(hello.HpkePublicKey); err != nil {
 		return status.Error(codes.InvalidArgument, "hpke_public_key must be a raw X25519 public key")
 	}
-	// The probe has the current certificate: the one it replaced may no
-	// longer renew.
-	if _, err := g.DB.Exec(stream.Context(), `UPDATE clusters SET probe_prev_cert_serial = ''
-		WHERE id = $1 AND probe_cert_serial = $2 AND probe_prev_cert_serial <> ''`,
-		clusterID, pki.SerialHex(cert.SerialNumber)); err != nil {
-		return status.Error(codes.Unavailable, "database error")
-	}
 	maxConc := int(hello.MaxConcurrency)
 	if maxConc < 1 {
 		maxConc = 1
@@ -177,6 +181,19 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	s := &probeSession{clusterID: clusterID, publicKey: bytes.Clone(hello.HpkePublicKey), version: hello.ProbeVersion,
 		maxConcurrency: maxConc, ctx: ctx, cancel: cancel, stream: stream}
 
+	// The stream attaches in this order, so that a revoke can never miss it
+	// and SendRun can never pick it too early:
+	//
+	//  1. Register it, not ready: DisconnectProbe now sees it, SendRun and
+	//     ProbeConnected do not.
+	//  2. Check the identity again, in the statement that clears the
+	//     previous serial: a revoke or a fresh enrollment that committed
+	//     while the probe was sending its hello is seen here (it waits for a
+	//     revoke still in progress, which holds the row). A revoke that
+	//     commits later finds the stream registered and cancels it.
+	//  3. Run the Connected hook.
+	//  4. Mark it ready, unless it was cancelled meanwhile.
+	//
 	// Unlike the agent, every stream is kept: each probe replica has one.
 	g.mu.Lock()
 	g.probeSeqNum++
@@ -189,8 +206,15 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 	defer func() {
 		g.mu.Lock()
 		delete(g.probes[clusterID], s.id)
-		last := len(g.probes[clusterID]) == 0
-		if last {
+		// Disconnected follows Connected: it runs when the last stream
+		// whose Connected ran ends, even if that hook failed.
+		last := s.hooked
+		for _, o := range g.probes[clusterID] {
+			if o.hooked {
+				last = false
+			}
+		}
+		if len(g.probes[clusterID]) == 0 {
 			delete(g.probes, clusterID)
 		}
 		g.mu.Unlock()
@@ -200,12 +224,45 @@ func (g *Gateway) probeConnect(stream pb.ProbeGateway_ConnectServer) error {
 		g.Log.Info("probe disconnected", "cluster_id", clusterID, "session", s.id)
 	}()
 
+	// The probe holds the current certificate: the one it replaced may no
+	// longer renew.
+	var still uuid.UUID
+	err = g.DB.QueryRow(ctx, `UPDATE clusters SET probe_prev_cert_serial = ''
+		WHERE id = $1 AND status <> 'revoked' AND probe_status <> 'revoked' AND probe_cert_serial = $2
+		RETURNING id`, clusterID, pki.SerialHex(cert.SerialNumber)).Scan(&still)
+	if errors.Is(err, pgx.ErrNoRows) {
+		g.Log.Warn("probe revoked or replaced before it attached", "cluster_id", clusterID)
+		return status.Error(codes.PermissionDenied, "probe revoked")
+	}
+	if err != nil {
+		if ctx.Err() != nil {
+			return status.Error(codes.Aborted, "session closed")
+		}
+		return status.Error(codes.Unavailable, "identity check failed")
+	}
+	if h := g.testHooks.attached; h != nil {
+		h(pki.RoleProbe)
+	}
+	if ctx.Err() != nil {
+		return status.Error(codes.Aborted, "session closed")
+	}
+
+	g.mu.Lock()
+	s.hooked = true
+	g.mu.Unlock()
 	if g.ProbeHooks.Connected != nil {
 		if err := g.ProbeHooks.Connected(ctx, clusterID, hello); err != nil {
 			g.Log.Error("probe connect hook", "cluster_id", clusterID, "err", err)
 			return status.Error(codes.Unavailable, "server error")
 		}
 	}
+	g.mu.Lock()
+	if ctx.Err() != nil {
+		g.mu.Unlock()
+		return status.Error(codes.Aborted, "session closed")
+	}
+	s.ready = true
+	g.mu.Unlock()
 	g.Log.Info("probe connected", "cluster_id", clusterID, "session", s.id, "probe_version", hello.ProbeVersion,
 		"max_concurrency", maxConc)
 
@@ -288,7 +345,7 @@ func (g *Gateway) probeDispatch(ctx context.Context, s *probeSession, m *pb.Prob
 	}
 }
 
-// pickProbe returns the cluster's stream with the fewest runs in flight
+// pickProbe returns the cluster's ready stream with the fewest runs in flight
 // (the newest on a tie: an older one may be a replica going away). With
 // needRoom, only a stream below its max_concurrency counts. The caller
 // holds g.mu.
@@ -299,7 +356,7 @@ func (g *Gateway) pickProbe(clusterID uuid.UUID, needRoom bool) (*probeSession, 
 	}
 	var best *probeSession
 	for _, s := range streams {
-		if needRoom && s.inFlight >= s.maxConcurrency {
+		if !s.ready || (needRoom && s.inFlight >= s.maxConcurrency) {
 			continue
 		}
 		if best == nil || s.inFlight < best.inFlight || (s.inFlight == best.inFlight && s.id > best.id) {
@@ -307,7 +364,12 @@ func (g *Gateway) pickProbe(clusterID uuid.UUID, needRoom bool) (*probeSession, 
 		}
 	}
 	if best == nil {
-		return nil, ErrProbeBusy
+		for _, s := range streams {
+			if s.ready {
+				return nil, ErrProbeBusy
+			}
+		}
+		return nil, ErrProbeOffline
 	}
 	return best, nil
 }
@@ -377,5 +439,31 @@ func (g *Gateway) DisconnectProbe(clusterID uuid.UUID) {
 	g.mu.Unlock()
 	for _, s := range streams {
 		s.cancel()
+	}
+}
+
+// recvFirst waits at most d for a stream's first message, so that an
+// authenticated client cannot hold a stream open without saying hello.
+// On a timeout the handler returns, which ends the pending Recv.
+func recvFirst[M any](ctx context.Context, d time.Duration, recv func() (M, error)) (M, error) {
+	type result struct {
+		m   M
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		m, err := recv()
+		ch <- result{m, err}
+	}()
+	t := time.NewTimer(d)
+	defer t.Stop()
+	var zero M
+	select {
+	case r := <-ch:
+		return r.m, r.err
+	case <-t.C:
+		return zero, status.Error(codes.DeadlineExceeded, "no hello in time")
+	case <-ctx.Done():
+		return zero, status.FromContextError(ctx.Err()).Err()
 	}
 }

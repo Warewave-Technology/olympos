@@ -38,6 +38,9 @@ const (
 	// dialTimeout bounds how long Dial waits for the agent to attach.
 	dialTimeout = 20 * time.Second
 	maxMsgSize  = 32 << 20
+	// HelloTimeout bounds how long an authenticated agent or probe may
+	// take to send its hello.
+	HelloTimeout = 30 * time.Second
 )
 
 // Errors returned by Dial.
@@ -80,12 +83,19 @@ type Gateway struct {
 	// several replicas, each with its own stream and HPKE key.
 	probes      map[uuid.UUID]map[uint64]*probeSession
 	probeSeqNum uint64
+
+	helloTimeout time.Duration
+	// testHooks let tests act between the steps of a stream's attach.
+	testHooks struct {
+		awaitingHello func(pki.IdentityRole) // authenticated, before the hello
+		attached      func(pki.IdentityRole) // registered and checked again
+	}
 }
 
 // New returns a gateway; call Serve to start it.
 func New(db *store.DB, ca *pki.CA, log *slog.Logger) *Gateway {
 	g := &Gateway{DB: db, CA: ca, Log: log, sessions: map[uuid.UUID]*session{},
-		probes: map[uuid.UUID]map[uint64]*probeSession{}}
+		probes: map[uuid.UUID]map[uint64]*probeSession{}, helloTimeout: HelloTimeout}
 	g.Limits.MaxTunnels = 16
 	return g
 }
@@ -128,11 +138,12 @@ func (g *Gateway) GRPCServer(tlsCfg *tls.Config) *grpc.Server {
 // Only the current probe certificate is accepted, because older serials are
 // not kept (RevokeProbe can revoke only the current and the previous one),
 // and a reinstall clears probe_status: an older unexpired certificate, from
-// before a renewal or before the reinstall, must not come back. The cost is a short gap after each
-// renewal: the new serial is issued, but the probe has not yet reloaded the
-// Secret the agent writes, so a reconnect in that gap is refused until it
-// reloads. Streams that are already open are not affected, and the
-// probe's offline state is debounced well past that gap. The agent keeps
+// before a renewal or before the reinstall, must not come back. The cost is
+// a short gap after each renewal: the new serial is issued, but the probe
+// has not yet reloaded the Secret the agent writes, so a reconnect in that
+// gap is refused until it reloads. Streams that are already open are not
+// affected, and the probe's offline state is debounced well past that gap.
+// The agent keeps
 // the old rule: any unrevoked certificate of the cluster.
 func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid.UUID, *x509.Certificate, error) {
 	return g.checkIdentity(ctx, want, false)
@@ -244,6 +255,10 @@ func (g *Gateway) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.Enroll
 	if err := tx.Commit(ctx); err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
+	if role == pki.RoleProbe {
+		// The identity was replaced: streams of the old one go.
+		g.DisconnectProbe(clusterID)
+	}
 	g.Log.Info(role.String()+" enrolled", "cluster_id", clusterID, "serial", pki.SerialHex(cert.SerialNumber))
 	return &pb.EnrollResponse{ClusterId: clusterID.String(), CertDer: cert.Raw, CaDer: g.CA.Cert.Raw}, nil
 }
@@ -278,6 +293,11 @@ const revokeProbeSerialsSQL = `INSERT INTO revoked_certs (serial, cluster_id)
 // probe's behalf (decision 1), so the activity is the agent's. The probe's
 // version is recorded when it connects, not here.
 func (g *Gateway) enrollProbe(ctx context.Context, tx store.Querier, tokenID, clusterID uuid.UUID, req *pb.EnrollRequest) (*x509.Certificate, error) {
+	// Two probe enrollments with two tokens run one after the other, so the
+	// later one revokes the earlier one's serial.
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM clusters WHERE id = $1 FOR UPDATE`, clusterID); err != nil {
+		return nil, status.Error(codes.Unavailable, "database error")
+	}
 	cert, err := g.CA.SignProbeCSR(req.CsrDer, clusterID.String(), pki.ProbeCertValidity)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
