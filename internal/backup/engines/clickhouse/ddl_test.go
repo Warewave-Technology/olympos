@@ -32,6 +32,7 @@ func TestLexSQL(t *testing.T) {
 		"SELECT @@version", "SELECT ?", "SELECT {x:String}", "SELECT {'a': 1}", "SELECT a & b", "SELECT !a",
 		"SELECT 1p-uptime()", "SELECT 1e-x", "SELECT 1.2.hostName()", "SELECT 0x", "SELECT 0xg", "SELECT 12abc",
 		"SELECT 'a\\Nb'", "SELECT 'a\\x4'", "SELECT 1e", "SELECT x == 1",
+		"SELECT t.0x2", "SELECT t.1e5", "SELECT t.1.5", "SELECT t.0b1", "SELECT x<=>1",
 	} {
 		if _, err := lexSQL(bad); err == nil || !errors.Is(err, errLex) {
 			t.Errorf("%q: expected an errLex, got %v", bad, err)
@@ -184,6 +185,11 @@ func TestClassifyTables(t *testing.T) {
 		{tbl("obj", "MergeTree"), "CREATE TABLE shop.obj (o Object('json'), e Enum8('a' = 1, 'b' = 2), j JSON(max_dynamic_paths = 10), dy Dynamic(max_types = 3)) ENGINE = MergeTree ORDER BY tuple()"},
 		{tbl("lambda", "MergeTree"), "CREATE TABLE shop.lambda (a Array(UInt8) DEFAULT arrayMap(x -> x * 2, [1, 2])) ENGINE = MergeTree ORDER BY tuple()"},
 		{tbl("cast", "MergeTree"), "CREATE TABLE shop.cast (id UInt64, m String DEFAULT CAST(id, 'String'), n String DEFAULT id::String, h UInt64 DEFAULT 0x1e - 5) ENGINE = MergeTree ORDER BY id"},
+		{tbl("dotnum", "MergeTree"), "CREATE TABLE shop.dotnum (t Tuple(UInt8, UInt8), m UInt8 DEFAULT t.1, k UInt8 DEFAULT tuple(1, 2).2, j UInt8 DEFAULT [1, 2][1]) ENGINE = MergeTree ORDER BY tuple()"},
+		{tbl("intv", "MergeTree"), "CREATE TABLE shop.intv (d DateTime DEFAULT now() - toIntervalDay(1), e Date DEFAULT toDate('2020-01-01'), c UInt8 DEFAULT CASE WHEN (d > now()) THEN (2) ELSE (3) END, f UInt8 DEFAULT (1 AND (0)) OR (1)) ENGINE = MergeTree ORDER BY d"},
+		{tbl("lam", "MergeTree"), "CREATE TABLE shop.lam (a Array(UInt8) DEFAULT arrayMap((x, y) -> x + y, [1], [2]), b UInt64 DEFAULT 2 * 3, s String DEFAULT replace('ab', 'a', 'b')) ENGINE = MergeTree ORDER BY tuple()"},
+		{tbl("cst", "MergeTree"), "CREATE TABLE shop.cst (x UInt64, y Decimal(18, 2) DEFAULT CAST(x AS Decimal(18, 2)), z String DEFAULT x::String, n Nullable(String) NOT NULL DEFAULT NULL CODEC(ZSTD(1), Delta) TTL toDateTime(x) + toIntervalDay(1) COMMENT 'c', CONSTRAINT k CHECK x > 0, INDEX i x TYPE minmax GRANULARITY 1) ENGINE = MergeTree PRIMARY KEY x ORDER BY x SAMPLE BY x TTL toDateTime(x) + toIntervalDay(1) DELETE WHERE x > 1, toDateTime(x) + toIntervalDay(2) TO DISK 'd'"},
+		{tbl("engq", "MergeTree"), "CREATE TABLE shop.engq (x UInt8) ENGINE = `MergeTree` ORDER BY x"},
 		{tbl("dec", "MergeTree"), "CREATE TABLE shop.dec (a Decimal(18, 4), d DateTime64(3, 'UTC'), f Float64 DEFAULT 1.5e-3, s SimpleAggregateFunction(sum, UInt64)) ENGINE = MergeTree ORDER BY tuple()"},
 	}
 	for _, c := range created {
@@ -224,7 +230,7 @@ func TestClassifyTables(t *testing.T) {
 		{tbl("sq", "MergeTree"), "CREATE TABLE shop.sq (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k", "query"},
 		{tbl("in", "MergeTree"), "CREATE TABLE shop.in (`k` UInt64 DEFAULT k IN (1, 2)) ENGINE = MergeTree ORDER BY k", "IN"},
 		{tbl("ni", "MergeTree"), "CREATE TABLE shop.ni (`k` UInt64 DEFAULT nullIn(k, secret.t)) ENGINE = MergeTree ORDER BY k", "nullIn()"},
-		{tbl("qf", "MergeTree"), "CREATE TABLE shop.qf (`k` UInt64 DEFAULT `file`('x')) ENGINE = MergeTree ORDER BY k", "file()"},
+		{tbl("qf", "MergeTree"), "CREATE TABLE shop.qf (`k` UInt64 DEFAULT `file`('x')) ENGINE = MergeTree ORDER BY k", "does not read"},
 		{tbl("pr", "MergeTree"), "CREATE TABLE shop.pr (`k` UInt64, PROJECTION p (SELECT k ORDER BY k)) ENGINE = MergeTree ORDER BY k", "query"},
 		{tbl("na", "MergeTree"), "CREATE TABLE shop.na (`k` UInt64 COMMENT 'é') ENGINE = MergeTree ORDER BY k", ""},
 		{tbl("nb", "MergeTree"), "CREATE TABLE shop.nb (`k` UInt64\u00a0DEFAULT 1) ENGINE = MergeTree ORDER BY k", "outside ASCII"},
@@ -321,6 +327,49 @@ func TestReviewProbes(t *testing.T) {
 		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree($$/a/b$$, 'r') ORDER BY x"},
 		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x"},
 		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x"},
+		// Round 4 (probe11): names that are not functions in an expression
+		// call a target UDF of that name; dotted calls; tuple elements in
+		// hex; column transformers; path traversal; Graphite sections.
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a String DEFAULT TODAY()) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a String DEFAULT Map(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a String DEFAULT text(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a String DEFAULT MergeTree(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, b String DEFAULT Memory('x')) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, c String DEFAULT ZSTD(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, d String DEFAULT Json(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, e String DEFAULT AND(1, 1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, f String DEFAULT TrIm('x')) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, g UInt8 DEFAULT Date_Diff('day', now(), now())) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, h UInt8 DEFAULT OR(1, 0)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a String DEFAULT key(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, b String DEFAULT check(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, c String DEFAULT when(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, c String DEFAULT set(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, c String DEFAULT none(1)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT simpleAggregateFunction(dictGetString('secret.d', 's', 1))) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt8 DEFAULT AggregateFunction(hasColumnInTable('secret', 'creds', 's'))) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT toString(AggregateFunction(file('secret.txt')))) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (d DateTime) ENGINE = MergeTree ORDER BY d TTL d + INTERVAL AggregateFunction(sleep(3)) SECOND"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT shop.toString(id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT toString(tuple(1, 'x').0x2.dead())) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m Float64 DEFAULT tuple(1).0x1.e()) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (p String, CONSTRAINT c CHECK length(tuple(* APPLY file).1) > 0) ENGINE = MergeTree ORDER BY p"},
+		{"MergeTree", "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(* APPLY file))) ENGINE = MergeTree ORDER BY p"},
+		{"MergeTree", "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(*))) ENGINE = MergeTree ORDER BY p"},
+		{"MergeTree", "CREATE TABLE shop.t (p String, m String DEFAULT toString(tuple(COLUMNS('p')))) ENGINE = MergeTree ORDER BY p"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m DEFAULT CAST(id, 'AggregateFunction(quantile(dictGetFloat64(''secret.d'',''v'',toUInt64(1))), Float64)')) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8, y UInt8 DEFAULT x<=>1) ENGINE = MergeTree ORDER BY x"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8 DEFAULT CURRENT_USER) ENGINE = MergeTree ORDER BY x"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8, y UInt8 DEFAULT INTERVAL (1) DAY) ENGINE = MergeTree ORDER BY x"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = MergeTree ORDER BY x TTL now() + toIntervalDay(1) GROUP BY x SET x = max(x)"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8 STATISTICS(tdigest)) ENGINE = MergeTree ORDER BY x"},
+		{"MergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = MergeTree(currentDatabase()) ORDER BY x"},
+		{"GraphiteMergeTree", "CREATE TABLE shop.t (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = GraphiteMergeTree('../../etc/x') ORDER BY Path"},
+		{"ReplicatedGraphiteMergeTree", "CREATE TABLE shop.t (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = ReplicatedGraphiteMergeTree('/p', 'r', 'a b') ORDER BY Path"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/../../clickhouse/tables/src', 'r2') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a//b', 'r2') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(, '/a/b', 'r') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(('/a/b'), 'r') ORDER BY x"},
 	}
 	for _, c := range tables {
 		o, err := classify("shop", Table{Name: "t", Kind: KindTable, Engine: c.engine}, c.ddl)

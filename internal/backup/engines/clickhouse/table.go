@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -286,18 +287,20 @@ var pureFunctions = words(`
 `)
 
 var ciFunctions = words(`
-	if and or not cast lower upper length concat substring substr coalesce ifnull nullif round floor ceil abs
-	sqrt exp ln log log2 log10 pow power greatest least now today trim replace reverse position left right lpad
-	rpad repeat date_trunc datediff date_diff mod sign hex unhex
+	if not cast lower upper length concat substring substr coalesce ifnull nullif round floor ceil abs
+	sqrt exp ln log log2 log10 pow power greatest least now replace reverse position left right lpad
+	rpad repeat date_trunc datediff mod sign hex unhex
 `)
 
 // typeNames, codecNames and indexTypes are written with parentheses in a
-// table's DDL (any case); they are not functions.
+// table's DDL (any case): they are accepted only where ClickHouse reads a
+// type, a codec or an index type, never as calls in an expression (a
+// target's user-defined function could have such a name).
 var (
 	typeNames = words(`
 		array nullable lowcardinality map tuple nested decimal decimal32 decimal64 decimal128 decimal256
 		datetime datetime64 fixedstring enum enum8 enum16 variant dynamic json object time time64`)
-	codecNames = words(`codec zstd lz4 lz4hc delta doubledelta gorilla t64 fpc gcd none aes_128_gcm_siv aes_256_gcm_siv`)
+	codecNames = words(`zstd lz4 lz4hc delta doubledelta gorilla t64 fpc gcd none aes_128_gcm_siv aes_256_gcm_siv`)
 	indexTypes = words(`minmax set bloom_filter tokenbf_v1 ngrambf_v1 full_text text vector_similarity`)
 )
 
@@ -313,39 +316,61 @@ func words(s string) map[string]bool {
 // as type arguments.
 var aggregateTypes = map[string]bool{"aggregatefunction": true, "simpleaggregatefunction": true}
 
-// keywordParens are words that may precede "(" without being a call.
-var keywordParens = words(`by key default materialized alias ephemeral ttl check assume and or not like ilike between
-	is then else when case delete where set to comment type granularity recompress statistics`)
-
-// callable is whether a call named t may appear in a restored table's DDL.
-func callable(t token) bool {
-	if t.kind != tokWord {
-		return false
-	}
-	n := strings.ToLower(t.val)
-	return pureFunctions[t.val] || ciFunctions[n] || typeNames[n] || codecNames[n] || indexTypes[n] ||
-		restorableEngine(t.val)
+// refusedWords never appear in a restored table's DDL: queries, IN,
+// projections, column transformers and functions written without
+// parentheses that read the session.
+var refusedWords = map[string]string{
+	"SELECT": "an expression of it holds a query", "WITH": "an expression of it holds a query",
+	"EXPLAIN": "an expression of it holds a query", "DESCRIBE": "an expression of it holds a query",
+	"IN": "an expression of it uses IN", "GLOBAL": "an expression of it uses IN",
+	"PROJECTION": "it has a projection (a query)",
+	"APPLY":      "an expression of it uses a column transformer", "EXCEPT": "an expression of it uses a column transformer",
+	"COLUMNS":      "an expression of it uses COLUMNS",
+	"CURRENT_USER": "an expression of it reads the session", "SESSION_USER": "an expression of it reads the session",
+	"CURRENT_DATABASE": "an expression of it reads the session", "CURRENT_ROLE": "an expression of it reads the session",
+	"CURRENT_SCHEMA": "an expression of it reads the session",
 }
 
-// tableProblem is why a checked CREATE TABLE is not created ("": it is):
-// no AS or EMPTY, a restorable engine with a literal Keeper path, only
-// storage settings, and expressions without queries, IN or calls outside
-// callable.
+// operatorWords are keywords that take an operand on their left: before
+// "(" after an operand they are operators, not calls.
+var operatorWords = words(`AND OR NOT LIKE ILIKE BETWEEN IS DIV MOD`)
+
+// nonOperands are words after which a "*" or "(" starts something new.
+var nonOperands = words(`AND OR NOT LIKE ILIKE BETWEEN IS DIV MOD CASE WHEN THEN ELSE DEFAULT MATERIALIZED ALIAS EPHEMERAL
+	BY KEY CHECK ASSUME TTL WHERE SET DELETE TO AS INTERVAL TYPE`)
+
+// operandEnd: the token ends an operand (so a following operator is infix).
+func operandEnd(t token) bool {
+	switch t.kind {
+	case tokNumber, tokString, tokQIdent:
+		return true
+	case tokWord:
+		return !nonOperands[strings.ToUpper(t.val)]
+	}
+	return t.punct(")") || t.punct("]")
+}
+
+// tableProblem is why a checked CREATE TABLE is not created ("": it is).
+// Every part is read by its role: the column list (types, DEFAULT,
+// MATERIALIZED, ALIAS and EPHEMERAL expressions, CODEC, TTL, COMMENT),
+// INDEX, CONSTRAINT and PRIMARY KEY elements, and the ENGINE, PARTITION
+// BY, ORDER BY, PRIMARY KEY, SAMPLE BY, TTL, SETTINGS and COMMENT clauses.
+// Types, codecs and index types are only accepted in their places;
+// expressions only call pureFunctions (and ciFunctions in any case).
 func (s *createStmt) tableProblem() string {
-	for i := s.body; i < len(s.toks); i++ {
+	n := len(s.toks)
+	for i := s.body; i < n; i++ {
 		t := s.toks[i]
 		if t.depth == 0 && (t.is("AS") || t.is("EMPTY")) {
 			return "it is defined AS another table, a query or a table function"
 		}
 		if t.kind == tokWord {
-			switch strings.ToUpper(t.val) {
-			case "SELECT", "WITH", "EXPLAIN", "DESCRIBE":
-				return "an expression of it holds a query"
-			case "IN", "GLOBAL":
-				return "an expression of it uses IN"
-			case "PROJECTION":
-				return "it has a projection (a query)"
+			if why := refusedWords[strings.ToUpper(t.val)]; why != "" {
+				return why
 			}
+		}
+		if t.kind == tokString && strings.Contains(strings.ToLower(t.val), "aggregatefunction") {
+			return "a string of it names an AggregateFunction type"
 		}
 	}
 	engine := s.engineName()
@@ -355,8 +380,8 @@ func (s *createStmt) tableProblem() string {
 	if !restorableEngine(engine) {
 		return engineSkipReason(engine)
 	}
-	end := len(s.toks)
-	for i := s.body; i < len(s.toks); i++ {
+	end := n
+	for i := s.body; i < n; i++ {
 		if t := s.toks[i]; t.depth == 0 && t.is("SETTINGS") {
 			if why := s.settingsProblem(i + 1); why != "" {
 				return why
@@ -365,27 +390,406 @@ func (s *createStmt) tableProblem() string {
 			break
 		}
 	}
-	for i := s.body; i < end; i++ {
+	i := s.body
+	if i < end && s.toks[i].punct("(") {
+		for _, el := range s.args(i) {
+			if why := s.elementProblem(el[0], el[1]); why != "" {
+				return why
+			}
+		}
+		i = s.close(i) + 1
+	}
+	return s.clausesProblem(i, end)
+}
+
+// clausesProblem reads the depth-0 clauses in [from, to).
+func (s *createStmt) clausesProblem(from, to int) string {
+	type clause struct{ at, body int }
+	var cs []clause
+	for i := from; i < to; i++ {
 		t := s.toks[i]
-		if !t.ident() || i+1 >= end || !s.toks[i+1].punct("(") {
+		if t.depth != 0 || t.kind != tokWord {
+			continue
+		}
+		next := func(w string) bool { return i+1 < to && s.toks[i+1].is(w) }
+		switch {
+		case t.is("ENGINE") || t.is("TTL") || t.is("COMMENT"):
+			cs = append(cs, clause{at: i, body: i + 1})
+		case (t.is("PARTITION") || t.is("ORDER") || t.is("SAMPLE")) && next("BY"), t.is("PRIMARY") && next("KEY"):
+			cs = append(cs, clause{at: i, body: i + 2})
+			i++
+		}
+	}
+	if len(cs) == 0 || cs[0].at != from {
+		return "it has a clause Olympos does not restore"
+	}
+	for k, c := range cs {
+		stop := to
+		if k+1 < len(cs) {
+			stop = cs[k+1].at
+		}
+		var why string
+		switch kw := s.toks[c.at]; {
+		case kw.is("ENGINE"):
+			why = s.engineClauseProblem(c.body, stop)
+		case kw.is("TTL"):
+			why = s.ttlProblem(c.body, stop)
+		case kw.is("COMMENT"):
+			if stop != c.body+1 || s.toks[c.body].kind != tokString {
+				why = "its COMMENT is not a string"
+			}
+		default:
+			why = s.exprProblem(c.body, stop)
+		}
+		if why != "" {
+			return why
+		}
+	}
+	return ""
+}
+
+// engineClauseProblem reads "= Engine[(literals and column names)]".
+func (s *createStmt) engineClauseProblem(from, to int) string {
+	if to-from < 2 || !s.toks[from].punct("=") || !s.toks[from+1].ident() {
+		return "its ENGINE clause cannot be read"
+	}
+	i := from + 2
+	if i == to {
+		return ""
+	}
+	if !s.toks[i].punct("(") || s.close(i) != to-1 {
+		return "its ENGINE clause cannot be read"
+	}
+	for _, t := range s.toks[i+1 : to-1] {
+		switch {
+		case t.ident() || t.kind == tokString || t.kind == tokNumber || t.punct(",") || t.punct("(") || t.punct(")"):
+		default:
+			return "its engine arguments are not literals or column names"
+		}
+	}
+	// No calls among the arguments.
+	for j := i + 1; j < to-1; j++ {
+		if s.toks[j].ident() && s.toks[j+1].punct("(") {
+			return "its engine arguments are not literals or column names"
+		}
+	}
+	if strings.HasSuffix(s.toks[from+1].val, "GraphiteMergeTree") {
+		// The rollup configuration section's name, last string argument.
+		args := s.args(i)
+		last := args[len(args)-1]
+		t := s.toks[last[0]]
+		if last[1]-last[0] != 1 || t.kind != tokString || !graphiteSection.MatchString(t.val) {
+			return "its GraphiteMergeTree configuration section is not a plain name"
+		}
+	}
+	return ""
+}
+
+var graphiteSection = regexp.MustCompile(`^[A-Za-z0-9_]{1,128}$`)
+
+// elementProblem reads one element of the column list.
+func (s *createStmt) elementProblem(from, to int) string {
+	if from >= to {
+		return "its column list cannot be read"
+	}
+	first := s.toks[from]
+	at := func(i int, w string) bool { return i < to && s.toks[i].is(w) }
+	switch {
+	case first.is("INDEX"):
+		// INDEX name expr TYPE type[(literals)] [GRANULARITY n]
+		if from+1 >= to || !s.toks[from+1].ident() {
+			return "an INDEX of it cannot be read"
+		}
+		ty := -1
+		for j := from + 2; j < to; j++ {
+			if s.toks[j].depth == first.depth && s.toks[j].is("TYPE") {
+				ty = j
+			}
+		}
+		if ty < 0 {
+			return "an INDEX of it cannot be read"
+		}
+		if why := s.exprProblem(from+2, ty); why != "" {
+			return why
+		}
+		j := ty + 1
+		if j >= to || s.toks[j].kind != tokWord || !indexTypes[strings.ToLower(s.toks[j].val)] {
+			return "an INDEX of it has a type Olympos does not restore"
+		}
+		j++
+		if j < to && s.toks[j].punct("(") {
+			c := s.close(j)
+			if !literalsOnly(s.toks[j+1 : c]) {
+				return "an INDEX type of it has parameters Olympos does not restore"
+			}
+			j = c + 1
+		}
+		if at(j, "GRANULARITY") && j+1 < to && s.toks[j+1].kind == tokNumber {
+			j += 2
+		}
+		if j != to {
+			return "an INDEX of it cannot be read"
+		}
+		return ""
+	case first.is("CONSTRAINT"):
+		if from+2 >= to || !s.toks[from+1].ident() || !(at(from+2, "CHECK") || at(from+2, "ASSUME")) {
+			return "a CONSTRAINT of it cannot be read"
+		}
+		return s.exprProblem(from+3, to)
+	case first.is("PRIMARY") && at(from+1, "KEY"):
+		return s.exprProblem(from+2, to)
+	case first.is("STATISTICS"):
+		return "it has statistics, which Olympos does not restore"
+	case !first.ident():
+		return "its column list cannot be read"
+	}
+	// A column: name [type] [NULL | NOT NULL] [DEFAULT|MATERIALIZED|ALIAS|EPHEMERAL [expr]]
+	// [CODEC(...)] [TTL expr] [COMMENT 'x'] [PRIMARY KEY].
+	d := first.depth
+	isMod := func(j int) bool {
+		t := s.toks[j]
+		if t.depth != d || t.kind != tokWord {
+			return false
+		}
+		switch strings.ToUpper(t.val) {
+		case "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL", "CODEC", "TTL", "COMMENT", "SETTINGS", "STATISTICS", "NULL", "NOT", "PRIMARY":
+			return true
+		}
+		return false
+	}
+	nextMod := func(j int) int {
+		for ; j < to && !isMod(j); j++ {
+		}
+		return j
+	}
+	j := nextMod(from + 1)
+	if why := s.typeProblem(from+1, j); why != "" {
+		return why
+	}
+	for j < to {
+		t := s.toks[j]
+		switch strings.ToUpper(t.val) {
+		case "NULL":
+			j++
+		case "NOT":
+			if !at(j+1, "NULL") {
+				return "a column of it cannot be read"
+			}
+			j += 2
+		case "DEFAULT", "MATERIALIZED", "ALIAS", "EPHEMERAL", "TTL":
+			k := nextMod(j + 1)
+			if why := s.exprProblem(j+1, k); why != "" {
+				return why
+			}
+			j = k
+		case "CODEC":
+			if j+1 >= to || !s.toks[j+1].punct("(") {
+				return "a CODEC of it cannot be read"
+			}
+			c := s.close(j + 1)
+			if why := s.codecProblem(j+2, c); why != "" {
+				return why
+			}
+			j = c + 1
+		case "COMMENT":
+			if j+1 >= to || s.toks[j+1].kind != tokString {
+				return "a column COMMENT of it is not a string"
+			}
+			j += 2
+		case "PRIMARY":
+			if !at(j+1, "KEY") {
+				return "a column of it cannot be read"
+			}
+			j += 2
+		default: // SETTINGS, STATISTICS
+			return "a column of it has " + strings.ToUpper(t.val) + ", which Olympos does not restore"
+		}
+	}
+	return ""
+}
+
+func literalsOnly(ts []token) bool {
+	for _, t := range ts {
+		if t.kind != tokNumber && t.kind != tokString && !t.punct(",") && !t.punct("-") {
+			return false
+		}
+	}
+	return true
+}
+
+// typeProblem reads a column type in [from, to): every call is a type
+// name, or AggregateFunction / SimpleAggregateFunction read by
+// aggregateTypeProblem.
+func (s *createStmt) typeProblem(from, to int) string {
+	for i := from; i < to; i++ {
+		t := s.toks[i]
+		if !t.ident() || i+1 >= to || !s.toks[i+1].punct("(") {
 			continue
 		}
 		n := strings.ToLower(t.val)
 		switch {
-		case t.kind == tokWord && keywordParens[n]:
-		case i > 0 && s.toks[i-1].is("INDEX"):
-			// INDEX name (expr) TYPE ...
-		case t.kind == tokWord && aggregateTypes[n]:
+		case t.kind != tokWord || (i > from && s.toks[i-1].punct(".")):
+			return "a column type of it cannot be read"
+		case aggregateTypes[n]:
 			if why := s.aggregateTypeProblem(i + 1); why != "" {
 				return why
 			}
 			i = s.close(i + 1)
-		case callable(t):
+		case typeNames[n]:
+		default:
+			return "a column type of it uses " + t.val + "(), which Olympos does not restore"
+		}
+	}
+	return ""
+}
+
+// codecProblem reads the codecs in [from, to): codec names, each with
+// literal parameters.
+func (s *createStmt) codecProblem(from, to int) string {
+	for i := from; i < to; i++ {
+		t := s.toks[i]
+		switch {
+		case t.punct(","):
+		case t.kind == tokWord && codecNames[strings.ToLower(t.val)]:
+			if i+1 < to && s.toks[i+1].punct("(") {
+				c := s.close(i + 1)
+				if !literalsOnly(s.toks[i+2 : c]) {
+					return "a CODEC of it has parameters Olympos does not restore"
+				}
+				i = c
+			}
+		default:
+			return "a CODEC of it is not one Olympos restores"
+		}
+	}
+	return ""
+}
+
+// ttlProblem reads TTL items in [from, to): expr [DELETE | RECOMPRESS
+// CODEC(...) | TO DISK|VOLUME 'name'] [WHERE expr], comma separated.
+func (s *createStmt) ttlProblem(from, to int) string {
+	if from >= to {
+		return "its TTL cannot be read"
+	}
+	d := s.toks[from].depth
+	start := from
+	for i := from; i <= to; i++ {
+		if i < to && !(s.toks[i].punct(",") && s.toks[i].depth == d) {
+			continue
+		}
+		// One item: [start, i).
+		kw := i
+		for j := start; j < i; j++ {
+			t := s.toks[j]
+			if t.depth == d && (t.is("DELETE") || t.is("RECOMPRESS") || t.is("TO") || t.is("WHERE") || t.is("GROUP")) {
+				kw = j
+				break
+			}
+		}
+		if why := s.exprProblem(start, kw); why != "" {
+			return why
+		}
+		for j := kw; j < i; {
+			t := s.toks[j]
+			switch {
+			case t.is("DELETE"):
+				j++
+			case t.is("RECOMPRESS") && j+2 < i && s.toks[j+1].is("CODEC") && s.toks[j+2].punct("("):
+				c := s.close(j + 2)
+				if why := s.codecProblem(j+3, c); why != "" {
+					return why
+				}
+				j = c + 1
+			case t.is("TO") && j+2 < i && (s.toks[j+1].is("DISK") || s.toks[j+1].is("VOLUME")) && s.toks[j+2].kind == tokString:
+				j += 3
+			case t.is("WHERE"):
+				return s.exprProblem(j+1, i)
+			default:
+				return "its TTL has a part Olympos does not restore"
+			}
+		}
+		start = i + 1
+	}
+	return ""
+}
+
+// exprProblem reads an expression in [from, to): calls are pureFunctions
+// (exact) or ciFunctions (any case), not preceded by "."; CAST(x AS T) and
+// x::T read T as a type; "*" is only multiplication.
+func (s *createStmt) exprProblem(from, to int) string {
+	caseDepth := 0
+	for i := from; i < to; i++ {
+		t := s.toks[i]
+		var prev token
+		if i > from {
+			prev = s.toks[i-1]
+		}
+		switch {
+		case t.is("CASE"):
+			caseDepth++
+		case t.is("END") && caseDepth > 0:
+			caseDepth--
+		case t.punct("*"):
+			if i == from || !operandEnd(prev) {
+				return "an expression of it uses *"
+			}
+		case t.punct("::"):
+			// x::Type or x::Type(...)
+			if i+1 >= to || s.toks[i+1].kind != tokWord {
+				return "an expression of it has a cast Olympos does not read"
+			}
+			k := i + 2
+			if k < to && s.toks[k].punct("(") {
+				k = s.close(k) + 1
+			}
+			if why := s.typeProblem(i+1, k); why != "" {
+				return why
+			}
+			i = k - 1
+			continue
+		case t.is("REPLACE") && i > from && operandEnd(prev):
+			return "an expression of it uses a column transformer"
+		}
+		if !t.ident() || i+1 >= to || !s.toks[i+1].punct("(") {
+			continue
+		}
+		up := strings.ToUpper(t.val)
+		switch {
+		case t.kind != tokWord || (i > from && prev.punct(".")):
+			return "an expression of it calls a function Olympos does not read"
+		case operatorWords[up] && i > from && operandEnd(prev):
+			// x AND (y): an operator.
+		case (up == "WHEN" || up == "THEN" || up == "ELSE") && caseDepth > 0:
+		case up == "CAST" || up == "ACCURATECAST" || up == "ACCURATECASTORNULL" || up == "ACCURATECASTORDEFAULT":
+			if !callableName(t.val) {
+				return "an expression of it calls " + t.val + "(), which Olympos does not restore in a table definition"
+			}
+			// CAST(expr AS Type): the type after the depth-level AS.
+			c := s.close(i + 1)
+			for j := i + 2; j < c; j++ {
+				if s.toks[j].depth == t.depth+1 && s.toks[j].is("AS") {
+					if why := s.exprProblem(i+2, j); why != "" {
+						return why
+					}
+					if why := s.typeProblem(j+1, c); why != "" {
+						return why
+					}
+					i = c
+					break
+				}
+			}
+		case callableName(t.val):
 		default:
 			return "an expression of it calls " + t.val + "(), which Olympos does not restore in a table definition"
 		}
 	}
 	return ""
+}
+
+// callableName: an exact pure function, or a case-insensitive one in any
+// case.
+func callableName(name string) bool {
+	return pureFunctions[name] || ciFunctions[strings.ToLower(name)]
 }
 
 // aggregateTypeProblem checks AggregateFunction(...) at open: inside, a
@@ -526,6 +930,20 @@ func restorePath(path, requestID string) string {
 	return aux + "/olympos-restore/" + requestID + path
 }
 
+// plainKeeperPath: no empty, "." or ".." component (after an auxiliary
+// Keeper's "name:" prefix).
+func plainKeeperPath(p string) bool {
+	if i := strings.Index(p, ":"); i > 0 && !strings.Contains(p[:i], "/") {
+		p = p[i+1:]
+	}
+	for _, c := range strings.Split(strings.TrimPrefix(p, "/"), "/") {
+		if c == "" || c == "." || c == ".." {
+			return false
+		}
+	}
+	return true
+}
+
 // rewriteKeeperPaths puts the Keeper path of a Replicated*MergeTree under
 // /olympos-restore/<request id>/, so the restored table never shares
 // Keeper state with the source's when Keeper is shared. Without a path in
@@ -554,6 +972,8 @@ func (s *createStmt) rewriteKeeperPaths(requestID string) (rewritten bool, why s
 		}
 	}
 	switch {
+	case len(args) >= 2 && str(args[0]) && str(args[1]) && !plainKeeperPath(s.toks[args[0][0]].val):
+		return true, "its Keeper path has empty, . or .. components"
 	case len(args) >= 2 && str(args[0]) && str(args[1]):
 		t := s.toks[args[0][0]]
 		s.edits = append(s.edits, edit{start: t.start, end: t.end, repl: quoteString(restorePath(t.val, requestID))})

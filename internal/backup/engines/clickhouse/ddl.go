@@ -101,6 +101,14 @@ next:
 			if err != nil {
 				return nil, err
 			}
+			// After ".", a tuple element: digits only (t.1), never 0x2 or 1e5.
+			if n := len(out); n > 0 && out[n-1].punct(".") {
+				for k := i; k < j; k++ {
+					if !isDigit(s[k]) {
+						return nil, lexErr("a tuple element Olympos does not read at byte %d", i)
+					}
+				}
+			}
 			add(tokNumber, s[i:j], i, j)
 			i = j
 			continue
@@ -115,7 +123,7 @@ next:
 		}
 		// Comments (which ClickHouse skips, quotes and all) and == are not
 		// read.
-		for _, no := range []string{"--", "/*", "=="} {
+		for _, no := range []string{"--", "/*", "==", "<=>"} {
 			if strings.HasPrefix(s[i:], no) {
 				return nil, lexErr("%q at byte %d", no, i)
 			}

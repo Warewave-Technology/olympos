@@ -756,6 +756,10 @@ func (r *restorer) do(ctx context.Context, st step) error {
 		return err
 	}
 	if err := r.s.exec(ctx, o.st.sql()); err != nil {
+		if strings.HasSuffix(o.t.Engine, "GraphiteMergeTree") {
+			// The server's message can quote its rollup configuration.
+			return errors.New("the target refused to create this GraphiteMergeTree table (check its rollup configuration section on the target)")
+		}
 		return err
 	}
 	item.Tables++

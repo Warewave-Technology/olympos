@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
@@ -509,8 +510,6 @@ const keeperXML = `<clickhouse>
   <macros><shard>s1</shard><replica>r1</replica></macros>
 </clickhouse>`
 
-const keeperContainer = "olympos-t8-keeper-ch"
-
 // TestRestoreReplicatedIntegration restores Replicated tables (SHOW
 // CREATE's default {uuid} path, and an explicit one) into a server whose
 // Keeper still holds the source tables: the restored tables live under
@@ -521,6 +520,9 @@ func TestRestoreReplicatedIntegration(t *testing.T) {
 	SetClientBin(bin)
 	t.Cleanup(func() { SetClientBin("") })
 
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	keeperContainer := "olympos-t8-keeper-" + hex.EncodeToString(rnd[:])
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "keeper.xml"), []byte(keeperXML), 0o644); err != nil {
 		t.Fatal(err)
