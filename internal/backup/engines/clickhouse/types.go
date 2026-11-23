@@ -76,7 +76,7 @@ func combinatorSuffix(s string) bool {
 }
 
 var (
-	timeZoneRe  = regexp.MustCompile(`^[A-Za-z0-9_+\-/]{1,64}$`)
+	timeZoneRe  = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_+\-/]{0,63}$`)
 	paramNumRe  = regexp.MustCompile(`^[0-9]{1,30}(\.[0-9]{1,30})?$`)
 	unsignedRe  = regexp.MustCompile(`^[0-9]{1,19}$`)
 	nullableKey = regexp.MustCompile(`^(LowCardinality\()?Nullable\(`)

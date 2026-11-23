@@ -54,7 +54,7 @@ func TestCanonicalTypeRefuses(t *testing.T) {
 		"UInt64 DEFAULT 1", "String CODEC(ZSTD(1))", "UInt8, x String", "String) ENGINE = File(TSV, '/etc/passwd') --", "String; DROP TABLE x",
 		"Decimal(18)", "Decimal(1e3, 2)", "Decimal(0x12, 2)", "Decimal(-1, 2)", "FixedString('a')", "FixedString(1.5)",
 		"FixedString(99999999999999999999)",
-		"DateTime(currentDatabase())", "DateTime('../../etc/passwd')", "DateTime('a b')", "DateTime(UTC)", "DateTime64(3, 4)",
+		"DateTime(currentDatabase())", "DateTime('../../etc/passwd')", "DateTime('a b')", "DateTime('/etc/passwd')", "DateTime('')", "DateTime('+3')", "DateTime(UTC)", "DateTime64(3, 4)",
 		"DateTime64('UTC')", "DateTime64(3, 'UTC', 1)",
 		"Enum8('a')", "Enum8('a' = 'b')", "Enum8(a = 1)", "Enum8('a' = 1 + 1)", "Enum8('a' = file('x'))", "Enum8()",
 		"Object('secret')", "Object(json)", "JSON(max_dynamic_paths = 10)", "JSON(a.b UInt32)", "Dynamic(max_types = file('x'))",

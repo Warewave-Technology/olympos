@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -426,5 +427,50 @@ func TestPlanDatabaseEngine(t *testing.T) {
 	}
 	if got := databaseSQL("we`ird\nname"); got != "CREATE DATABASE `we\\`ird\\x0aname` ENGINE = Atomic" {
 		t.Fatalf("databaseSQL: %s", got)
+	}
+}
+
+// A schema entry over maxSchemaEntry is not read (readSmall refuses it from
+// its size, before opening it), so the table that needs its engine
+// parameters is reported, not created; one of exactly the cap is read.
+func TestPlanOversizedSchemaEntry(t *testing.T) {
+	plan := func(entryBytes int) *dbPlan {
+		b := newFakeBackup()
+		shop := b.db("shop", "Atomic")
+		const head = "CREATE TABLE shop.t (`k` UInt8) "
+		const tail = "ENGINE = ReplacingMergeTree(k) ORDER BY k"
+		// obj appends ";\n" to the statement.
+		ddl := head + strings.Repeat(" ", entryBytes-len(head)-len(tail)-2) + tail
+		b.obj(shop, Table{Name: "t", Kind: KindTable, Engine: "ReplacingMergeTree", SortingKey: "k", PrimaryKey: "k",
+			Columns: []Column{{Name: "k", Type: "UInt8"}}}, ddl)
+		p, msg := planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID)
+		if msg != "" {
+			t.Fatal(msg)
+		}
+		return p
+	}
+	if p := plan(maxSchemaEntry); len(p.objs) != 1 || len(p.skipped) != 0 {
+		t.Errorf("entry of the cap: %d tables, skipped %q", len(p.objs), p.skipped)
+	}
+	p := plan(maxSchemaEntry + 1)
+	if len(p.objs) != 0 || len(p.skipped) != 1 || !strings.Contains(p.skipped[0], "its engine parameters could not be read from its schema entry; not created") {
+		t.Errorf("entry over the cap: %d tables, skipped %q", len(p.objs), p.skipped)
+	}
+}
+
+// The settings that keep a restore from losing columns or data silently.
+func TestRestoreSettings(t *testing.T) {
+	has := map[string]string{}
+	for _, s := range ddlSettings {
+		has[s.Key] = s.Value
+	}
+	if has["flatten_nested"] != "0" {
+		t.Errorf("ddlSettings must set flatten_nested = 0: %v", ddlSettings)
+	}
+	if _, ok := has["allow_suspicious_codecs"]; ok {
+		t.Errorf("ddlSettings sets allow_suspicious_codecs, and no codec is generated")
+	}
+	if !slices.Contains(insertSettings, "--input_format_skip_unknown_fields=0") {
+		t.Errorf("insertSettings must not skip unknown fields: %v", insertSettings)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // oracleCalls are the only names a generated CREATE TABLE writes before
@@ -494,4 +495,35 @@ func FuzzBuildTable(f *testing.F) {
 			assertGenerated(t, def.sql, def.keeperPath, replicaName)
 		}
 	})
+}
+
+// An engine name from the backup is quoted in a report at most
+// maxEngineNameInReason bytes long, cut at a character boundary, and the
+// report is printable.
+func TestEngineNameInReasons(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	multi := strings.Repeat("\u00e9", 100) // 2 bytes each
+	check := func(what, why string) {
+		t.Helper()
+		if !strings.Contains(why, "\u2026") || len(why) > 200 || !utf8.ValidString(why) {
+			t.Errorf("%s: %d bytes: %q", what, len(why), why)
+		}
+		if strings.ContainsAny(printable(why), "\n\r") {
+			t.Errorf("%s: not printable: %q", what, printable(why))
+		}
+	}
+	for _, name := range []string{long, multi, "x\ny" + long} {
+		check("engineSkipReason", engineSkipReason(name))
+	}
+	check("a long Graphite name", engineSkipReason(long+"GraphiteMergeTree"))
+	// The schema entry names a long engine; the backup recorded another.
+	tbl := Table{Name: "t", Engine: "ReplacingMergeTree", SortingKey: "k", Columns: cols("k UInt8")}
+	_, why := buildTable("shop", "t", tbl, "CREATE TABLE shop.t (k UInt8) ENGINE = "+long+" ORDER BY k", reqID)
+	check("schema entry names a long engine", why)
+	if !strings.Contains(why, "names engine") {
+		t.Errorf("reason: %q", why)
+	}
+	if got := engineSkipReason("Kafka"); got != "engine Kafka is not restored by Olympos (it restores MergeTree, Log and Memory tables)" {
+		t.Errorf("short name changed: %q", got)
+	}
 }

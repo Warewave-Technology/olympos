@@ -324,7 +324,9 @@ func splitArgs(toks []token, open, end int) [][]token {
 //
 //	CREATE TABLE [db.]name [UUID '…'] (columns) ENGINE = Name[(args)] …
 //
-// Nothing else of the statement is used.
+// Nothing else of the statement is used. An entry longer than
+// maxSchemaEntry is refused before it is lexed (the lexer's memory grows
+// with the number of tokens).
 func sourceEngine(ddl string) (string, [][]token, error) {
 	if len(ddl) > maxSchemaEntry {
 		return "", nil, errEngineClause

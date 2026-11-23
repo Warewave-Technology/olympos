@@ -211,10 +211,14 @@ func hasEntries(t Table) bool {
 	return false
 }
 
-// maxSchemaEntry bounds a schema entry and maxManifest the manifest, which
-// are read into memory.
+// maxSchemaEntry bounds the bytes of a schema entry that are read into
+// memory and lexed, and maxManifest those of the manifest. A schema entry is
+// only read for its ENGINE clause, and the lexer's cost grows with the
+// number of tokens (a 16 MiB run of commas takes about 3.6 GB of heap), so
+// the cap is small: a longer entry is not read, and the table whose engine
+// parameters it would have given is reported as not created.
 const (
-	maxSchemaEntry = 16 << 20
+	maxSchemaEntry = 1 << 20
 	maxManifest    = 256 << 20
 )
 
@@ -401,8 +405,9 @@ func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, 
 			return p, t.Name + ": a Keeper path needs the restore request's id, and there is none"
 		}
 		// The schema entry is only read for engine parameters; a missing or
-		// oversized one leaves "" (the engines that need it are then not
-		// created).
+		// oversized (more than maxSchemaEntry) one leaves "" (the engines
+		// that need it are then not created). readSmall reads no more than
+		// the cap.
 		ddl := ""
 		if f := entries[t.SchemaEntry]; f != nil && strings.HasPrefix(t.SchemaEntry, "schema/") {
 			if b, err := readSmall(f, maxSchemaEntry); err == nil {
@@ -626,7 +631,10 @@ func indexOf(list []string, s string) int {
 var ddlSettings = []ch.Setting{
 	{Key: "allow_suspicious_low_cardinality_types", Value: "1"},
 	{Key: "allow_suspicious_fixed_string_types", Value: "1"},
-	{Key: "allow_suspicious_codecs", Value: "1"},
+	// A Nested column is created as a Nested column, not flattened into
+	// n.a, n.b arrays (the source reports it as Nested only when it was
+	// created with flatten_nested = 0): the data is inserted by column name.
+	{Key: "flatten_nested", Value: "0"},
 	{Key: "allow_experimental_object_type", Value: "1"},
 	{Key: "allow_experimental_variant_type", Value: "1"},
 	{Key: "allow_experimental_dynamic_type", Value: "1"},
@@ -1005,8 +1013,10 @@ var processedRowsRe = regexp.MustCompile(`(?m)^Processed rows: (\d+)\s*$`)
 
 // insertSettings: the entry is inserted as it is (no deduplication of
 // identical blocks, no merge-on-insert of Replacing/Summing tables, not
-// asynchronously), so the rows written are the rows the backup streamed.
-var insertSettings = []string{"--insert_deduplicate=0", "--optimize_on_insert=0", "--async_insert=0"}
+// asynchronously), so the rows written are the rows the backup streamed. A
+// column the table lacks is an error, never skipped (the default skips it
+// silently, and the row count would still match).
+var insertSettings = []string{"--insert_deduplicate=0", "--optimize_on_insert=0", "--async_insert=0", "--input_format_skip_unknown_fields=0"}
 
 // insert runs one INSERT … FORMAT with in on the client's stdin and returns
 // the rows the client sent (print-num-processed-rows).

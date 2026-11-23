@@ -88,3 +88,19 @@ func TestSourceEngine(t *testing.T) {
 		}
 	}
 }
+
+// An entry over maxSchemaEntry is refused before it is lexed; one of exactly
+// that size is read.
+func TestSourceEngineSizeCap(t *testing.T) {
+	const stmt = "CREATE TABLE shop.t (x UInt8) ENGINE = Memory"
+	pad := func(n int) string { return stmt + strings.Repeat(" ", n-len(stmt)) }
+	if e, _, err := sourceEngine(pad(maxSchemaEntry)); err != nil || e != "Memory" {
+		t.Errorf("entry of the cap: %q %v", e, err)
+	}
+	if _, _, err := sourceEngine(pad(maxSchemaEntry + 1)); err == nil {
+		t.Error("entry over the cap was read")
+	}
+	if _, _, err := sourceEngine("CREATE TABLE shop.t (x UInt8) ENGINE = ReplacingMergeTree(" + strings.Repeat(",", maxSchemaEntry) + ")"); err == nil {
+		t.Error("a run of commas over the cap was read")
+	}
+}

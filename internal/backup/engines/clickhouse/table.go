@@ -1,6 +1,9 @@
 package clickhouse
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // The restore generates every CREATE TABLE from structured data and never
 // runs DDL text from the backup:
@@ -68,14 +71,32 @@ func splitEngine(engine string) (base string, replicated, ok bool) {
 	return engine, false, false
 }
 
+// maxEngineNameInReason bounds an engine name quoted in a report: the name
+// comes from the backup and can be any length.
+const maxEngineNameInReason = 64
+
+// shortName cuts a name taken from the backup to maxEngineNameInReason
+// bytes (at a character boundary, adding "…"). Control characters are
+// escaped later, when the report is made printable.
+func shortName(s string) string {
+	if len(s) <= maxEngineNameInReason {
+		return s
+	}
+	n := maxEngineNameInReason
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + "…"
+}
+
 func engineSkipReason(engine string) string {
 	switch {
 	case engine == "Distributed":
 		return "engine Distributed points at a cluster"
 	case strings.HasSuffix(engine, "GraphiteMergeTree"):
-		return "engine " + engine + " is not restored by Olympos (its rollup rules live in the server configuration); create it by hand"
+		return "engine " + shortName(engine) + " is not restored by Olympos (its rollup rules live in the server configuration); create it by hand"
 	}
-	return "engine " + engine + " is not restored by Olympos (it restores MergeTree, Log and Memory tables)"
+	return "engine " + shortName(engine) + " is not restored by Olympos (it restores MergeTree, Log and Memory tables)"
 }
 
 // ---------------------------------------------------------------- columns
@@ -326,7 +347,7 @@ func buildTable(db, target string, t Table, ddl, requestID string) (*tableDef, s
 			return nil, "its engine parameters could not be read from its schema entry"
 		}
 		if name != t.Engine {
-			return nil, "its schema entry names engine " + name + ", the backup recorded " + t.Engine
+			return nil, "its schema entry names engine " + shortName(name) + ", the backup recorded " + shortName(t.Engine)
 		}
 		if replicated {
 			switch {

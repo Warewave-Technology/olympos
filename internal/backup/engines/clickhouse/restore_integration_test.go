@@ -266,6 +266,12 @@ INSERT INTO rs.mem VALUES (1, (2, {'k': [1, NULL]}));
 CREATE TABLE rs.odd (` + "`we``ird col`" + ` UInt8, ` + "`tab\tcol`" + ` Enum8('it''s' = 1, 'b' = -2), dt DateTime64(3, 'Europe/Istanbul'), dec Decimal(18, 4))
 ENGINE = MergeTree ORDER BY ` + "`we``ird col`" + `;
 INSERT INTO rs.odd VALUES (1, 'it''s', '2024-01-01 00:00:00.123', 1.5), (2, 'b', '2024-01-02 00:00:00', -2.25);
+-- A Nested column kept as Nested (flatten_nested = 0): the target must
+-- create it the same way, or its data is dropped (n.a, n.b are other names).
+SET flatten_nested = 0;
+CREATE TABLE rs.nest (k UInt8, n Nested(a UInt8, b String)) ENGINE = MergeTree ORDER BY k;
+INSERT INTO rs.nest VALUES (1, [(1, 'x'), (2, 'y')]), (2, [(3, 'z')]), (3, []);
+SET flatten_nested = 1;
 
 CREATE DATABASE rs2;
 CREATE TABLE rs2.t (n UInt64, p Tuple(a UInt8, b String)) ENGINE = MergeTree ORDER BY n;
@@ -308,6 +314,7 @@ func TestRestoreIntegration(t *testing.T) {
 		"vcoll":  same("SELECT count(), sum(sign * ver) FROM rs.vcoll"),
 		"aggf": same("SELECT arrayStringConcat(groupArray(toString((k, finalizeAggregation(q), finalizeAggregation(si), s, m))), ';') " +
 			"FROM (SELECT * FROM rs.aggf ORDER BY k)"),
+		"nest":  same("SELECT count(), toString(groupArray((k, n))) FROM (SELECT * FROM rs.nest ORDER BY k)"),
 		"nkey":  same("SELECT count(), countIf(n IS NULL) FROM rs.nkey"),
 		"slog":  same("SELECT count(), sum(x) FROM rs.slog"),
 		"plog":  same("SELECT count(), sum(x) FROM rs.plog"),
@@ -324,6 +331,10 @@ func TestRestoreIntegration(t *testing.T) {
 	before := map[string]string{}
 	for k, q := range checks {
 		before[k] = chq(t, q.before)
+	}
+	if !strings.Contains(chq(t, "SELECT type FROM system.columns WHERE database = 'rs' AND table = 'nest' AND name = 'n'"), "Nested(") ||
+		!strings.Contains(before["nest"], `[(1,\'x\'),(2,\'y\')]`) {
+		t.Fatalf("fixture: rs.nest is not a Nested column: %s", before["nest"])
 	}
 	if before["mv_chain"] == "0\t0" || before["daily"] == "0\t0" || !strings.HasPrefix(before["rep"], "3\t") {
 		t.Fatalf("fixture: %v", before)
@@ -465,7 +476,7 @@ func TestRestoreIntegration(t *testing.T) {
 	}
 	// Only tables, each an ordinary one.
 	if got := chq(t, "SELECT arrayStringConcat(groupArray(name), ',') FROM (SELECT name FROM system.tables WHERE database = 'rs' ORDER BY name)"); got !=
-		"agg,aggf,audit,bad_expr,bad_set,coll,daily,events,mem,mv__restored_data,mv_chain__restored_data,nkey,odd,plog,rep,rich,slog,summ,vcoll" {
+		"agg,aggf,audit,bad_expr,bad_set,coll,daily,events,mem,mv__restored_data,mv_chain__restored_data,nest,nkey,odd,plog,rep,rich,slog,summ,vcoll" {
 		t.Errorf("restored objects: %s", got)
 	}
 	// The tables are what Olympos generated: engine, parameters and keys
@@ -491,6 +502,12 @@ func TestRestoreIntegration(t *testing.T) {
 		if strings.Contains(ddl, no) {
 			t.Errorf("a restored table holds %q:\n%s", no, ddl)
 		}
+	}
+	// The Nested column stays one column (not flattened into n.a and n.b),
+	// and the restored data equals the source's (the "nest" check above).
+	if got := chq(t, "SELECT arrayStringConcat(groupArray(name || ' ' || type), ',') FROM (SELECT name, type FROM system.columns WHERE database = 'rs' AND table = 'nest' ORDER BY position)"); got !=
+		"k UInt8,n Nested(a UInt8, b String)" {
+		t.Errorf("rs.nest columns on the target: %s", got)
 	}
 	var wantRows int64
 	for _, d := range m.Databases {
