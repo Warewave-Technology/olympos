@@ -357,6 +357,17 @@ func withoutIdentity() envOpt { return func(e *probeEnv) { e.cert = probeCert{} 
 
 func withSilence(d time.Duration) envOpt { return func(e *probeEnv) { e.client.silence = d } }
 
+func withConcurrency(n int) envOpt {
+	return func(e *probeEnv) {
+		e.client.cfg.MaxConcurrency = n
+		e.client.sem = make(chan struct{}, n)
+	}
+}
+
+func withRunFunc(f func(*Runner, context.Context, *spec.Scenario, []spec.RunCredential) *pb.RunResult) envOpt {
+	return func(e *probeEnv) { e.client.runFunc = f }
+}
+
 func newProbeEnv(t *testing.T, opts ...envOpt) *probeEnv {
 	t.Helper()
 	ca := newTestCA(t)
@@ -521,6 +532,11 @@ func TestClientResultArrives(t *testing.T) {
 func TestClientPingPong(t *testing.T) {
 	e := newProbeEnv(t)
 	gs := e.gw.next(t)
+	// Not ready until the server has spoken: the gateway checks the hello
+	// and the identity after Connect returned.
+	if e.client.Connected() {
+		t.Fatal("ready before the first server message")
+	}
 	gs.send(&pb.ServerProbeMessage{Msg: &pb.ServerProbeMessage_Ping{Ping: &pb.Ping{UnixNano: 42}}})
 	select {
 	case m := <-gs.in:
@@ -530,6 +546,65 @@ func TestClientPingPong(t *testing.T) {
 	case <-time.After(waitFor):
 		t.Fatal("no pong")
 	}
+	if !e.client.Connected() || !strings.Contains(e.logs.String(), "connected to olympos") {
+		t.Fatal("not ready after the first server message")
+	}
+	gs.end()
+	gs.waitDone(t)
+	deadline := time.Now().Add(waitFor)
+	for e.client.Connected() {
+		if time.Now().After(deadline) {
+			t.Fatal("still ready after the stream ended")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestClientRunnerPanicFailsOnlyTheRun(t *testing.T) {
+	const canary = "panic-canary-3c1f"
+	e := newProbeEnv(t, withConcurrency(1), withRunFunc(
+		func(r *Runner, ctx context.Context, s *spec.Scenario, creds []spec.RunCredential) *pb.RunResult {
+			if s.Name == "panic" {
+				panic(canary)
+			}
+			return r.Run(ctx, s, creds)
+		}))
+	gs := e.gw.next(t)
+	url := e.app(t, "app", ok200())
+
+	sc := scenario(httpStep(url, assertion(spec.SubjectStatusCode, spec.OpEquals, "200")))
+	sc.Name = "panic"
+	cred := bearer("tok-panic-secret", "suffix:example.test")
+	r := &pb.RunScenario{RunId: uuid.NewString(), ScenarioJson: scenarioJSON(t, sc), Allowlist: allowlist(1)}
+	r.Credentials = seal(t, gs.hello.HpkePublicKey, r.RunId, e.clusterID, cred)
+	gs.run(r)
+
+	res := gs.result(t)
+	if res.RunId != r.RunId || res.Status != StatusError || res.FailureReason != RunnerPanic || res.ProbeVersion != Version {
+		t.Fatalf("result = %v", res)
+	}
+	select {
+	case creds := <-e.zeroed:
+		if len(creds) != 1 || creds[0].Secret != nil || creds[0].Username != nil {
+			t.Fatal("credentials not zeroed after the panic")
+		}
+	case <-time.After(waitFor):
+		t.Fatal("run did not end")
+	}
+	logs := e.logs.String()
+	if !strings.Contains(logs, "runner panic") || strings.Contains(logs, canary) {
+		t.Fatalf("want the panic logged without its value:\n%s", logs)
+	}
+
+	// The process lives on, and the one slot is free again.
+	e.running(t)
+	next := okRun(t, url)
+	gs.run(next)
+	res = gs.result(t)
+	if res.RunId != next.RunId {
+		t.Fatalf("result for %s, want %s", res.RunId, next.RunId)
+	}
+	wantPassed(t, res)
 }
 
 func TestClientNewKeyPerStream(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -18,9 +19,12 @@ func TestNoKubernetesAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go command not found: %v", err)
 	}
-	out, err := exec.Command(goBin, "list", "-deps",
+	cmd := exec.Command(goBin, "list", "-deps",
 		"github.com/Warewave-Technology/olympos/cmd/olympos-probe",
-		"github.com/Warewave-Technology/olympos/internal/probe").CombinedOutput()
+		"github.com/Warewave-Technology/olympos/internal/probe")
+	// The target the image ships, whatever the host is.
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("go list: %v\n%s", err, out)
 	}

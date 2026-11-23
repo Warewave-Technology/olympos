@@ -78,6 +78,8 @@ type Client struct {
 	minBackoff time.Duration
 	// afterRun sees a run's credentials once they were zeroed.
 	afterRun func([]spec.RunCredential)
+	// runFunc replaces Runner.Run.
+	runFunc func(r *Runner, ctx context.Context, s *spec.Scenario, creds []spec.RunCredential) *pb.RunResult
 
 	sem chan struct{} // one token per run in progress, process-wide
 	// allowMax is the highest allowlist version seen by this process.
@@ -229,9 +231,10 @@ func (c *Client) stream(ctx context.Context, snap *identitySnapshot, changed <-c
 	}}}); err != nil {
 		return err
 	}
-	c.connected.Store(true)
+	// Ready only once the server has spoken: Connect returns before the
+	// gateway checked the hello and the identity.
 	defer c.connected.Store(false)
-	c.log.Info("connected to olympos", "server", c.cfg.Server, "cluster_id", snap.clusterID, "serial", snap.serial)
+	attached := false
 
 	msgs := make(chan *pb.ServerProbeMessage)
 	recvErr := make(chan error, 1)
@@ -263,6 +266,11 @@ func (c *Client) stream(ctx context.Context, snap *identitySnapshot, changed <-c
 			return errSilent
 		case m := <-msgs:
 			idle.Reset(c.silence)
+			if !attached {
+				attached = true
+				c.connected.Store(true)
+				c.log.Info("connected to olympos", "server", c.cfg.Server, "cluster_id", snap.clusterID, "serial", snap.serial)
+			}
 			switch v := m.Msg.(type) {
 			case *pb.ServerProbeMessage_Ping:
 				if v.Ping == nil {
@@ -417,11 +425,22 @@ func openCredentials(priv hpke.PrivateKey, runID, clusterID string, sc *pb.Seale
 
 // execute runs one scenario and sends its result on s, unless s ended
 // meanwhile. The credentials are zeroed when it returns, however the run
-// ended.
+// ended. A panic in the runner fails this run with runner_panic instead of
+// the whole probe: a target's response must not take every other run down.
 func (c *Client) execute(s *probeStream, id string, sc *spec.Scenario, allow hostallow.List, creds []spec.RunCredential, test bool) {
 	if c.afterRun != nil {
 		defer c.afterRun(creds)
 	}
+	start := time.Now()
+	// Registered before the zeroing, so the zeroing runs first.
+	defer func() {
+		if r := recover(); r != nil {
+			// The panic value may quote the response: it is not logged.
+			c.log.Error("runner panic", "run_id", id)
+			c.sendResult(s, &pb.RunResult{RunId: id, ProbeVersion: Version, Status: StatusError,
+				FailureReason: RunnerPanic, StartedUnixMs: start.UnixMilli(), FinishedUnixMs: time.Now().UnixMilli()}, test, start)
+		}
+	}()
 	defer spec.ZeroCredentials(creds)
 	// Runner.Run applies the same deadline; this one also holds if it did
 	// not.
@@ -431,19 +450,30 @@ func (c *Client) execute(s *probeStream, id string, sc *spec.Scenario, allow hos
 		Dialer:   &Dialer{Allow: allow, Resolver: c.resolver, APIServer: c.cfg.APIServer, Net: c.net},
 		Redactor: c.redactor,
 	}
-	start := time.Now()
-	res := r.Run(ctx, sc, creds)
+	run := (*Runner).Run
+	if c.runFunc != nil {
+		run = c.runFunc
+	}
+	res := run(r, ctx, sc, creds)
 	res.RunId = id
 	res.ProbeVersion = Version
+	c.sendResult(s, res, test, start)
+}
+
+// RunnerPanic is the failure_reason of a run whose runner panicked.
+const RunnerPanic = "runner_panic"
+
+// sendResult sends res on s, unless s ended.
+func (c *Client) sendResult(s *probeStream, res *pb.RunResult, test bool, start time.Time) {
 	if s.ctx.Err() != nil {
-		c.log.Info("run result dropped: its stream ended", "run_id", id)
+		c.log.Info("run result dropped: its stream ended", "run_id", res.RunId)
 		return
 	}
 	if err := s.send(&pb.ProbeMessage{Msg: &pb.ProbeMessage_Result{Result: res}}); err != nil {
-		c.log.Warn("cannot send run result", "run_id", id, "err", err)
+		c.log.Warn("cannot send run result", "run_id", res.RunId, "err", err)
 		return
 	}
-	c.log.Info("run finished", "run_id", id, "status", res.Status, "failed_step", res.FailedStep,
+	c.log.Info("run finished", "run_id", res.RunId, "status", res.Status, "failed_step", res.FailedStep,
 		"test", test, "duration_ms", time.Since(start).Milliseconds())
 }
 

@@ -55,10 +55,26 @@ func run(log *slog.Logger) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go func() { _ = probe.ServeHealth(ctx, cfg.HealthAddr, c.Connected, log) }()
+	healthErr := make(chan error, 1)
+	go func() { healthErr <- probe.ServeHealth(ctx, cfg.HealthAddr, c.Connected, log) }()
 	log.Info("olympos probe starting", "version", probe.Version, "server", cfg.Server,
 		"max_concurrency", cfg.MaxConcurrency, "identity_dir", cfg.IdentityDir)
-	return c.Run(ctx)
+	runErr := make(chan error, 1)
+	go func() { runErr <- c.Run(ctx) }()
+	select {
+	case err := <-healthErr:
+		if err == nil {
+			// Only when ctx ended.
+			return <-runErr
+		}
+		// The exec liveness probe needs the endpoint: without it the pod
+		// would be killed later, for a reason harder to see.
+		stop()
+		<-runErr
+		return fmt.Errorf("health endpoint %s: %w", cfg.HealthAddr, err)
+	case err := <-runErr:
+		return err
+	}
 }
 
 func healthAddr() string {
