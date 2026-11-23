@@ -1804,9 +1804,11 @@ components:
       properties:
         existing: {type: object, additionalProperties: {type: boolean}, description: "Selected databases that exist on the target: true when they hold user objects"}
         superuser: {type: boolean}
-        initialized: {type: boolean}
-        sealed: {type: boolean}
-        can_snapshot_force: {type: boolean}
+        initialized: {type: boolean, description: "Vault/OpenBao: the target is initialized"}
+        sealed: {type: boolean, description: "Vault/OpenBao: the target is sealed"}
+        can_snapshot_force: {type: boolean, description: "Vault/OpenBao: the token holds update and sudo (or root) on sys/storage/raft/snapshot-force"}
+        standby: {type: boolean, description: "Vault/OpenBao: the target is an HA node that is not the active node (sys/leader ha_enabled and not is_self); the request is refused until it points at the active node"}
+        capabilities_denied: {type: boolean, description: "Vault/OpenBao: sys/capabilities-self refused the token (HTTP 401/403), so its capabilities could not be read; the token needs the default policy (or access to sys/capabilities-self)"}
         server_version: {type: string}
     RestoreCheck:
       type: object

@@ -12,7 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	vaultapi "github.com/hashicorp/vault/api"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/restore"
@@ -40,6 +44,11 @@ type fakeVault struct {
 	standby bool
 	// redirectTo: non-empty: snapshot-force answers 307 to this URL.
 	redirectTo string
+	// bodyRead, when set, is closed once snapshot-force read the whole
+	// body; the handler then waits until the client goes away.
+	bodyRead chan struct{}
+	// unauthTokens: X-Vault-Token of seal-status and sys/leader reads.
+	unauthTokens []string
 
 	restored  bool
 	received  []byte
@@ -58,6 +67,7 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("/v1/sys/seal-status", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.unauthTokens = append(f.unauthTokens, r.Header.Get("X-Vault-Token"))
 		if f.restored && f.sealedAfter {
 			errBody(w, http.StatusServiceUnavailable)
 			return
@@ -68,6 +78,7 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("/v1/sys/leader", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		f.unauthTokens = append(f.unauthTokens, r.Header.Get("X-Vault-Token"))
 		_ = json.NewEncoder(w).Encode(map[string]any{"ha_enabled": true, "is_self": !f.standby, "active_time": "0001-01-01T00:00:00Z",
 			"leader_address": "http://127.0.0.1:8200", "leader_cluster_address": "https://127.0.0.1:8201", "raft_committed_index": 1})
 	})
@@ -88,6 +99,15 @@ func (f *fakeVault) handler(t *testing.T) http.Handler {
 			t.Errorf("snapshot-force: method %s", r.Method)
 		}
 		b, _ := io.ReadAll(r.Body)
+		if f.bodyRead != nil {
+			f.mu.Lock()
+			f.forced++
+			f.received = b
+			f.mu.Unlock()
+			close(f.bodyRead)
+			<-r.Context().Done()
+			return
+		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		f.forced++
@@ -227,6 +247,11 @@ func TestInspectRestoreTarget(t *testing.T) {
 			}
 			for _, b := range f.capBodies {
 				noSecrets(t, "capabilities-self body", b)
+			}
+			for _, tok := range f.unauthTokens {
+				if tok != "" {
+					t.Error("seal-status or sys/leader was read with the token")
+				}
 			}
 			for _, tok := range f.tokens {
 				if tok != testToken {
@@ -457,9 +482,9 @@ func TestRegistered(t *testing.T) {
 
 func TestRestoreDoesNotFollowRedirect(t *testing.T) {
 	// The active node the standby points at: it must never be contacted.
-	var other int
+	var other atomic.Int32
 	active := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		other++
+		other.Add(1)
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer active.Close()
@@ -471,8 +496,8 @@ func TestRestoreDoesNotFollowRedirect(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "HTTP 307") || !strings.Contains(err.Error(), "active node") {
 		t.Fatalf("err %v", err)
 	}
-	if f.forced != 1 || other != 0 {
-		t.Fatalf("snapshot-force called %d times, redirect target %d times", f.forced, other)
+	if f.forced != 1 || other.Load() != 0 {
+		t.Fatalf("snapshot-force called %d times, redirect target %d times", f.forced, other.Load())
 	}
 	if len(res.Items) != 1 || res.Items[0].Status != "failed" || !strings.Contains(res.Items[0].Error, "307") {
 		t.Fatalf("items %+v", res.Items)
@@ -500,6 +525,75 @@ func TestAllowsForce(t *testing.T) {
 	} {
 		if got := allowsForce(c.caps); got != c.ok {
 			t.Errorf("%v: %v", c.caps, got)
+		}
+	}
+}
+
+// The whole snapshot was uploaded, then the restore was cancelled while
+// the target was (as far as Olympos knows) installing it.
+func TestRestoreCancelledAfterFullUpload(t *testing.T) {
+	f := okVault()
+	f.bodyRead = make(chan struct{})
+	snap := bytes.Repeat([]byte("s"), 256<<10)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-f.bodyRead:
+		case <-time.After(30 * time.Second):
+		}
+		cancel()
+	}()
+	rc, _ := restoreContext(start(t, f), snap)
+	res, err := Engine{}.Restore(ctx, rc)
+	checkResult(t, res, err)
+	if err == nil || !strings.Contains(err.Error(), "the whole snapshot was sent before the restore was cancelled") ||
+		!strings.Contains(err.Error(), "check whether the target installed it") {
+		t.Fatalf("err %v", err)
+	}
+	if len(res.Items) != 1 || res.Items[0].Status != "failed" || res.Items[0].Bytes != int64(len(snap)) {
+		t.Fatalf("items %+v", res.Items)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.received) != len(snap) {
+		t.Fatalf("target read %d of %d bytes", len(f.received), len(snap))
+	}
+}
+
+func TestUploadFailure(t *testing.T) {
+	readErr := errors.New("storage read failed")
+	answered := &vaultapi.ResponseError{StatusCode: http.StatusInternalServerError}
+	cases := []struct {
+		name      string
+		werr      error
+		sent      bodyState
+		cancelled bool
+		want      string // "" : success
+	}{
+		{"2xx, whole snapshot", nil, bodyState{n: 10, eof: true}, false, ""},
+		{"2xx after a read error", nil, bodyState{n: 4, err: readErr}, false, "the backup could not be read to its end (4 bytes sent)"},
+		{"2xx before the end", nil, bodyState{n: 4}, false, "answered success before it read the whole snapshot (4 bytes sent)"},
+		{"error after the whole upload", answered, bodyState{n: 10, eof: true}, false, "HTTP 500"},
+		{"cancelled after the whole upload", context.Canceled, bodyState{n: 10, eof: true}, true,
+			"the whole snapshot was sent before the restore was cancelled"},
+		{"cancelled during the upload", context.Canceled, bodyState{n: 4}, true, "the snapshot was not fully sent"},
+		{"read error", errors.New("transport"), bodyState{n: 4, err: readErr}, false, "read the backup copy: storage read failed; the snapshot was not fully sent"},
+		{"redirect", &redirectError{code: 307}, bodyState{n: 10, eof: true}, false, "HTTP 307"},
+	}
+	for _, c := range cases {
+		got := uploadFailure(c.werr, c.sent, c.cancelled)
+		switch {
+		case c.want == "" && got != "":
+			t.Errorf("%s: %q", c.name, got)
+		case c.want != "" && !strings.Contains(got, c.want):
+			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+		if c.name == "error after the whole upload" && !strings.Contains(got, "received the whole snapshot") {
+			t.Errorf("%s: %q", c.name, got)
+		}
+		if c.name == "redirect" && strings.Contains(got, "whole snapshot") {
+			t.Errorf("%s: %q", c.name, got)
 		}
 	}
 }

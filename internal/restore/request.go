@@ -126,7 +126,7 @@ type TargetReport struct {
 	// node (sys/leader: ha_enabled and not is_self).
 	Standby bool `json:"standby"`
 	// CapabilitiesDenied (Vault): sys/capabilities-self refused the token
-	// (403), so its capabilities could not be read.
+	// (HTTP 401/403), so its capabilities could not be read.
 	CapabilitiesDenied bool   `json:"capabilities_denied"`
 	ServerVersion      string `json:"server_version"`
 }

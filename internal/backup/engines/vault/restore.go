@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	vaultapi "github.com/hashicorp/vault/api"
@@ -87,14 +88,17 @@ func allowsForce(caps []string) bool {
 	return slices.Contains(caps, "root") || (slices.Contains(caps, "update") && slices.Contains(caps, "sudo"))
 }
 
-// session is a client of the restore target with the request's token set.
+// session is a client of the restore target and the request's token. The
+// token is not set on the client: only the capabilities read and the
+// snapshot POST carry it; seal-status and sys/leader go without.
 type session struct {
-	c *vclient.Client
+	c     *vclient.Client
+	token string
 }
 
 // open builds the target's client (TLS, server name, CA bundle as for the
-// backup engine) and sets the request's token on it. The token is never
-// logged or put in an error.
+// backup engine) and keeps the request's token. The token is never logged
+// or put in an error.
 func (e Engine) open(ctx context.Context, ec backup.EngineContext, scrub *backup.SecretScrubber) (*session, error) {
 	if ec.Credential == nil {
 		return nil, errors.New("no Vault token for this restore")
@@ -113,17 +117,17 @@ func (e Engine) open(ctx context.Context, ec backup.EngineContext, scrub *backup
 	if err != nil {
 		return nil, err
 	}
-	// The caller zeroes cred.Secret; the client keeps its own string.
-	c.SetToken(string(cred.Secret))
-	return &session{c: c}, nil
+	// The caller zeroes cred.Secret; the session keeps its own string.
+	return &session{c: c, token: string(cred.Secret)}, nil
 }
 
 func (s *session) close() {
-	s.c.ClearToken()
+	s.token = ""
 	s.c.Close()
 }
 
-// check reads the seal status and sys/leader (no token) and, on an
+// check reads the seal status and sys/leader (unauthenticated endpoints,
+// read without the token) and, on an
 // initialized, unsealed, active node, the token's capabilities on
 // SnapshotForcePath. It writes nothing. A target without integrated storage is an error: it cannot take
 // a raft snapshot whatever the token may do.
@@ -179,6 +183,7 @@ func (s *session) sealStatus(ctx context.Context) (vclient.Health, error) {
 // in the body).
 func (s *session) capabilities(ctx context.Context) ([]string, error) {
 	r := s.c.NewRequest(http.MethodPost, "/v1/sys/capabilities-self")
+	r.ClientToken = s.token
 	if err := r.SetJSONBody(map[string]any{"paths": []string{SnapshotForcePath}}); err != nil {
 		return nil, err
 	}
@@ -278,46 +283,61 @@ func (e Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backu
 
 	progress(backup.Progress{Phase: "restore", Database: SnapshotItem})
 	start := time.Now()
-	body := &countReader{r: rc.Snapshot}
 	item := backup.RestoreItem{Name: SnapshotItem, Status: "failed"}
-	werr := s.snapshotForce(ctx, body)
-	item.Bytes, item.Duration = body.n, time.Since(start).Seconds()
-	var redirect *redirectError
-	if errors.As(werr, &redirect) {
-		item.Error = redirect.Error()
-		res.Items = append(res.Items, item)
-		return res, werr
-	}
-	if werr != nil {
-		msg := safeError("snapshot-force", werr).Error()
-		if body.err != nil {
-			// The backup copy could not be read (the transport reports it
-			// as its own failure).
-			msg = fmt.Sprintf("read the backup copy: %v", body.err)
-		}
-		if body.eof && ctx.Err() == nil {
-			msg += "; the target received the whole snapshot: check whether it was installed (the target may now be sealed)"
-		} else {
-			msg += "; the snapshot was not fully sent"
-		}
+	sent, werr := s.snapshotForce(ctx, rc.Snapshot)
+	item.Bytes, item.Duration = sent.n, time.Since(start).Seconds()
+	if msg := uploadFailure(werr, sent, ctx.Err() != nil); msg != "" {
 		item.Error = msg
 		res.Items = append(res.Items, item)
 		return res, errors.New(msg)
-	}
-	if body.err != nil {
-		// Vault answered 2xx although the backup copy could not be read
-		// to its end. Never report that as a restore.
-		item.Error = fmt.Sprintf("the backup could not be read to its end (%d bytes sent); check the target, it may have "+
-			"installed a partial upload or nothing", body.n)
-		res.Items = append(res.Items, item)
-		return res, errors.New(item.Error)
 	}
 	item.Status = "succeeded"
 	res.Items = append(res.Items, item)
 	res.Notes = append(res.Notes, RestoreNote)
 	res.Notes = append(res.Notes, s.afterRestore(ctx))
-	progress(backup.Progress{Phase: "restore", Bytes: body.n, Done: []string{SnapshotItem}})
+	progress(backup.Progress{Phase: "restore", Bytes: sent.n, Done: []string{SnapshotItem}})
 	return res, nil
+}
+
+// uploadFailure is why the snapshot POST did not restore ("": it did).
+// werr is snapshotForce's error, sent how the body was read, cancelled
+// whether the restore's context ended. A 2xx counts only when the whole
+// snapshot was read without error. Whether the target may have installed
+// the snapshot is decided on sent.eof alone: once the whole body was sent,
+// a later failure or cancellation can leave the target replaced (and
+// sealed).
+func uploadFailure(werr error, sent bodyState, cancelled bool) string {
+	var redirect *redirectError
+	if errors.As(werr, &redirect) {
+		return redirect.Error()
+	}
+	if werr == nil {
+		switch {
+		case sent.err != nil:
+			return fmt.Sprintf("the target answered success, but the backup could not be read to its end (%d bytes sent): "+
+				"check the target, it may have installed a partial upload or nothing", sent.n)
+		case !sent.eof:
+			return fmt.Sprintf("the target answered success before it read the whole snapshot (%d bytes sent): check the "+
+				"target, it may have installed a partial upload or nothing", sent.n)
+		}
+		return ""
+	}
+	msg := safeError("snapshot-force", werr).Error()
+	if sent.err != nil {
+		// The backup copy could not be read (the transport reports it as
+		// its own failure).
+		msg = fmt.Sprintf("read the backup copy: %v", sent.err)
+	}
+	switch {
+	case sent.eof && cancelled:
+		msg += "; the whole snapshot was sent before the restore was cancelled: check whether the target installed it " +
+			"(it may now be sealed)"
+	case sent.eof:
+		msg += "; the target received the whole snapshot: check whether it installed it (it may now be sealed)"
+	default:
+		msg += "; the snapshot was not fully sent"
+	}
+	return msg
 }
 
 // snapshotForce streams body to POST /v1/sys/storage/raft/snapshot-force
@@ -326,26 +346,114 @@ func (e Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backu
 // API client follows one redirect itself and would resend the consumed
 // body to another node. A 3xx is a *redirectError, another non-2xx a
 // *vaultapi.ResponseError with the status only (the body is discarded).
-func (s *session) snapshotForce(ctx context.Context, body io.Reader) error {
+//
+// It returns only after net/http let go of the body (closed it), or after
+// bodyReleaseTimeout; in either case the body reads nothing more, so the
+// returned bodyState is final.
+func (s *session) snapshotForce(ctx context.Context, snapshot io.Reader) (bodyState, error) {
+	body := newTrackedBody(snapshot)
+	defer body.release()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, s.c.Address()+"/v1/"+SnapshotForcePath, body)
 	if err != nil {
-		return err
+		return body.state(), err
 	}
-	req.Header.Set(vaultapi.AuthHeaderName, s.c.Token())
+	req.Header.Set(vaultapi.AuthHeaderName, s.token)
 	req.Header.Set(vaultapi.RequestHeaderName, "true")
 	resp, err := s.c.NoRedirectHTTP().Do(req)
 	if err != nil {
-		return err
+		body.release()
+		return body.state(), err
 	}
-	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	body.release()
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
-		return nil
+		return body.state(), nil
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
-		return &redirectError{code: resp.StatusCode}
+		return body.state(), &redirectError{code: resp.StatusCode}
 	}
-	return &vaultapi.ResponseError{HTTPMethod: http.MethodPost, StatusCode: resp.StatusCode}
+	return body.state(), &vaultapi.ResponseError{HTTPMethod: http.MethodPost, StatusCode: resp.StatusCode}
+}
+
+// bodyReleaseTimeout bounds the wait for net/http to close the request
+// body after the response (it may still be writing on an early answer).
+const bodyReleaseTimeout = 10 * time.Second
+
+// errBodyReleased ends a body net/http still reads after the response.
+var errBodyReleased = errors.New("the request was answered; the snapshot upload stopped")
+
+// bodyState is how the snapshot was read for the POST.
+type bodyState struct {
+	n   int64
+	eof bool  // read to its end
+	err error // the snapshot's own read error (not errBodyReleased)
+}
+
+// trackedBody is the POST's body. net/http reads and closes it from its
+// write goroutine, which can outlive Do on an early response; the state is
+// guarded by a mutex, and release stops further reads and waits for Close.
+type trackedBody struct {
+	r      io.Reader
+	mu     sync.Mutex
+	st     bodyState
+	done   bool // released: reads fail
+	closed chan struct{}
+	once   sync.Once
+}
+
+func newTrackedBody(r io.Reader) *trackedBody {
+	return &trackedBody{r: r, closed: make(chan struct{})}
+}
+
+func (b *trackedBody) Read(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.done {
+		return 0, errBodyReleased
+	}
+	if b.st.eof {
+		return 0, io.EOF
+	}
+	n, err := b.r.Read(p)
+	b.st.n += int64(n)
+	switch {
+	case errors.Is(err, io.EOF):
+		b.st.eof = true
+	case err != nil && b.st.err == nil:
+		b.st.err = err
+	}
+	return n, err
+}
+
+// Close is called by net/http when it no longer reads the body.
+func (b *trackedBody) Close() error {
+	b.once.Do(func() { close(b.closed) })
+	return nil
+}
+
+// release makes further reads fail and waits (bounded) for net/http to
+// close the body. Calls after the first return at once.
+func (b *trackedBody) release() {
+	b.mu.Lock()
+	again := b.done
+	b.done = true
+	b.mu.Unlock()
+	if again {
+		return
+	}
+	t := time.NewTimer(bodyReleaseTimeout)
+	defer t.Stop()
+	select {
+	case <-b.closed:
+	case <-t.C:
+	}
+}
+
+func (b *trackedBody) state() bodyState {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.st
 }
 
 // redirectError: the target redirected the snapshot (a standby pointing
@@ -360,7 +468,6 @@ func (e *redirectError) Error() string {
 // afterRestore reads the seal status once (no token) and describes it. A
 // sealed or unanswering target is expected right after snapshot-force.
 func (s *session) afterRestore(ctx context.Context) string {
-	s.c.ClearToken()
 	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), postRestoreTimeout)
 	defer cancel()
 	h, err := s.sealStatus(cctx)
@@ -378,26 +485,6 @@ func (s *session) afterRestore(ctx context.Context) string {
 	return "Right after the restore the target still reported unsealed. A Vault with Shamir keys seals itself shortly after " +
 		"a forced restore (one with the source's auto-unseal unseals again): check its status, and unseal it with the source's " +
 		"keys when it is sealed."
-}
-
-// countReader counts the bytes read and remembers how reading ended.
-type countReader struct {
-	r   io.Reader
-	n   int64
-	eof bool
-	err error
-}
-
-func (c *countReader) Read(p []byte) (int, error) {
-	n, err := c.r.Read(p)
-	c.n += int64(n)
-	switch {
-	case errors.Is(err, io.EOF):
-		c.eof = true
-	case err != nil && c.err == nil:
-		c.err = err
-	}
-	return n, err
 }
 
 // safeError maps a Vault or transport error to one without the server's
