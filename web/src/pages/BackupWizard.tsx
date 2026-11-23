@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { api } from '../api/client';
+import { ApiError, api } from '../api/client';
 import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, DestinationGroup, ItemList, SchedulePreview, Target, Vault } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, formatInZone, nextRuns, presetFor, timeZones, tzOffsetLabel, validateCron } from '../lib/cron';
@@ -202,8 +202,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
     }
   }, [f.cron, f.timezone, cronErr]);
 
+  // The stored password is kept when the job already has one, the user stays
+  // the same and no new password was typed: the credential is then not sent
+  // (the server needs a password with every stored credential it receives).
+  const keepStored = !!savedJob && savedJob.credential.source === 'stored' && f.source === 'stored' && !password && f.username.trim() === savedJob.credential.username;
   const credential = (): CredentialInput | undefined => {
-    if (isVault) return undefined;
+    if (isVault || keepStored) return undefined;
     if (f.source === 'keyvault_ref') return { source: 'keyvault_ref', ref: `kv://${f.kvName.trim()}/${f.secretName.trim()}`, username: f.username.trim() };
     return { source: 'stored', username: f.username.trim(), ...(password ? { password } : {}) };
   };
@@ -219,8 +223,11 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
       if (f.source === 'keyvault_ref') {
         if (!/^[a-zA-Z0-9-]{3,24}$/.test(f.kvName.trim())) e.kvName = 'Key Vault names are 3–24 letters, digits and dashes.';
         if (!/^[a-zA-Z0-9-]{1,127}$/.test(f.secretName.trim())) e.secretName = 'Secret names use letters, digits and dashes.';
-      } else if (!password && !(savedJob && savedJob.credential.source === 'stored')) {
-        e.password = 'Enter the password. It is encrypted with a Key Vault key and never shown again.';
+      } else if (!password && !keepStored) {
+        e.password =
+          savedJob?.credential.source === 'stored'
+            ? `Enter the password of ${f.username.trim()}: the stored one belongs to ${savedJob.credential.username}.`
+            : 'Enter the password. It is encrypted with a Key Vault key and never shown again.';
       }
     }
     if (s === 3) {
@@ -318,6 +325,14 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
       void navigate({ to: '/backups', search: { tab: 'jobs' } });
     }
   };
+  // A refused save names fields of earlier steps: show the first such step,
+  // where the field is highlighted, instead of an error with nothing marked.
+  useEffect(() => {
+    const fields = save.error instanceof ApiError ? Object.keys(save.error.fields) : [];
+    const at = (k: string): Step => (/^(credential\.|username$|password$|ref$|databases$|engine_options$)/.test(k) ? 2 : 3);
+    if (fields.length) setStep(Math.min(...fields.map(at)) as Step);
+  }, [save.error]);
+
   const saveChanges = async () => {
     const r = await saveJob();
     if (r) {
@@ -326,7 +341,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
     }
   };
 
-  const fe = (name: string) => errs[name] ?? fieldError(save.error, name) ?? fieldError(test.error, name);
+  const fe = (name: string) => errs[name] ?? fieldError(save.error, name) ?? fieldError(save.error, `credential.${name}`) ?? fieldError(test.error, name);
   const destErr = fe('destination_id') ?? fe('destination_group_id');
   const tlsHint = target.tls_ok ? 'TLS verified' : target.tls_ok === false ? 'no TLS' : 'TLS not probed';
   const stepHint = (n: Step) => (n === 1 ? `${target.service} · ${tlsHint}` : n === 2 && isVault ? 'Olympos AppRole, no password' : STEPS[n - 1].hint);
