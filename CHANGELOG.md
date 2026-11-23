@@ -10,6 +10,13 @@ All notable changes to this project are documented here. The format follows
 
 Restore from the UI, destination groups, a signed kube-bench image. Release candidate: v0.2.0-rc.1.
 
+### Since v0.2.0-rc.1
+
+#### Fixed
+- Editing a backup job whose password is stored in Olympos failed with "Invalid job" and no highlighted
+  field, unless the password was typed again (also in v0.1.0). The form now keeps the stored password as
+  it says, asks for a new one only when the user changes, and shows a refused field on its step.
+
 ### Added
 - **Restore from the UI into a new target, with approval** ([#22](https://github.com/Warewave-Technology/olympos/issues/22)):
   *Restore…* on a succeeded or partial run loads its copy into a new PostgreSQL, ClickHouse or
