@@ -277,6 +277,10 @@ CREATE UNIQUE INDEX synthetic_alerts_one_firing
   ON synthetic_alerts (scenario_id, COALESCE(cluster_id, '00000000-0000-0000-0000-000000000000'::uuid))
   WHERE state = 'firing';
 CREATE INDEX synthetic_alerts_cluster ON synthetic_alerts (cluster_id) WHERE cluster_id IS NOT NULL;
+-- The alerts whose opening or resolution has no message yet: what the
+-- notifier looks for every 15 s, while the table only grows.
+CREATE INDEX synthetic_alerts_unnotified ON synthetic_alerts (scenario_id)
+  WHERE notified_at IS NULL OR (state = 'resolved' AND resolved_notified_at IS NULL);
 CREATE TRIGGER synthetic_alerts_touch BEFORE UPDATE ON synthetic_alerts
   FOR EACH ROW EXECUTE FUNCTION olympos_touch_updated_at();
 

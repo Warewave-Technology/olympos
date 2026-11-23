@@ -12,6 +12,7 @@ package synthetic
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -151,7 +152,7 @@ type Service struct {
 	Now func() time.Time
 	// OnResult is called in the transaction that finishes a run, for every
 	// run that finishes (skipped ones included). An error rolls the
-	// transaction back.
+	// transaction back. In production it is ApplyOutcome.
 	OnResult func(ctx context.Context, tx pgx.Tx, r RunOutcome) error
 	// Started is when this server came up. Probes need up to
 	// gateway.OfflineAfter to reconnect after a restart, so the probe
@@ -230,12 +231,13 @@ func (s *Service) RunDispatcher(ctx context.Context) {
 }
 
 // RunAlerts is the leader loop of LockSyntheticAlerts, every
-// AlertsInterval: probe state now; the alert messages join it (one loop per
-// lock: two loops on one key would exclude each other).
+// AlertsInterval: probe state, then the alert messages (one loop per lock:
+// two loops on one key would exclude each other).
 func (s *Service) RunAlerts(ctx context.Context) {
 	schedule.RunLeader(ctx, s.DB, schedule.LockSyntheticAlerts, AlertsInterval, s.Log.With("loop", "alerts"), s.alertsTick)
 }
 
+// alertsTick runs both checks: one failing does not hold the other back.
 func (s *Service) alertsTick(ctx context.Context) error {
-	return s.CheckProbesOffline(ctx)
+	return errors.Join(s.CheckProbesOffline(ctx), s.Notify(ctx))
 }
