@@ -120,4 +120,54 @@ describe('Backup wizard · destination group', () => {
       window.fetch = orig;
     }
   }, 15_000);
+
+  it('edit keeps the stored password: the credential is left out, and a refused field is shown on its step', async () => {
+    const user = userEvent.setup();
+    const j = db.jobs.find((x) => x.target.service === 'billing-pg')!;
+    const saved = j.credential;
+    j.credential = { id: saved.id, source: 'stored', ref: '', username: 'backup' };
+    await renderApp(`/backups/new?target=${j.target.id}&job=${j.id}`);
+    const sent: { method: string; body: Record<string, unknown> }[] = [];
+    const orig = window.fetch;
+    let refuse = true; // the first save is refused on a field of step 2
+    window.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.method === 'PATCH') {
+        sent.push({ method: init.method, body: JSON.parse(String(init.body)) });
+        if (refuse) {
+          refuse = false;
+          const body = JSON.stringify({ error: 'invalid job', fields: { 'credential.username': 'not allowed here' } });
+          return Promise.resolve(new Response(body, { status: 422, headers: { 'content-type': 'application/json' } }));
+        }
+      }
+      return orig(input, init);
+    };
+    try {
+      await toStep2(user);
+      expect(screen.getByLabelText('Password')).toHaveValue('');
+      // a new user needs its own password
+      await user.clear(screen.getByLabelText('Username'));
+      await user.type(screen.getByLabelText('Username'), 'other');
+      await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+      expect(await screen.findByText(/Enter the password of other: the stored one belongs to backup/, {}, T)).toBeInTheDocument();
+      await user.clear(screen.getByLabelText('Username'));
+      await user.type(screen.getByLabelText('Username'), 'backup');
+      await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+      await screen.findByRole('heading', { name: 'Destination & schedule' }, T);
+      await user.click(screen.getByRole('button', { name: 'Next: review' }));
+      await user.click(await screen.findByRole('button', { name: 'Save changes' }, T));
+      await waitFor(() => expect(sent).toHaveLength(1), T);
+      expect(sent[0].body).not.toHaveProperty('credential');
+      // the refused field is shown where it can be fixed
+      await screen.findByRole('heading', { name: 'Credentials' }, T);
+      expect(screen.getByText('not allowed here')).toBeInTheDocument();
+      await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+      await user.click(await screen.findByRole('button', { name: 'Next: review' }, T));
+      await user.click(await screen.findByRole('button', { name: 'Save changes' }, T));
+      await waitFor(() => expect(sent).toHaveLength(2), T);
+      await screen.findByText('Backup job saved.', {}, T);
+    } finally {
+      window.fetch = orig;
+      j.credential = saved;
+    }
+  }, 15_000);
 });

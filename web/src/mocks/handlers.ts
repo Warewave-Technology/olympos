@@ -852,6 +852,9 @@ const routes: [string, string, Handler][] = [
       const j = db.jobs.find((x) => x.id === p.id);
       if (!j) return notFound();
       const b = r.body as BackupJobInput;
+      // As the server: a stored credential that is sent needs its password
+      // (the wizard leaves the credential out to keep the stored one).
+      if (b.credential?.source === 'stored' && !b.credential.password) return invalid('invalid job', { 'credential.password': 'required' });
       if (b.enabled !== undefined) {
         j.enabled = b.enabled;
         j.next_run_at = b.enabled ? (nextRuns(j.cron, 1, new Date(), j.timezone)[0] ?? null) : null;
