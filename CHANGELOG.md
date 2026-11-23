@@ -6,9 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.2.0] - unreleased
+## [0.2.0] - 2026-11-23
 
-Restore from the UI, destination groups, a signed kube-bench image. Release candidate: v0.2.0-rc.1.
+Restore from the UI, destination groups, a signed kube-bench image.
 
 ### Since v0.2.0-rc.1
 
