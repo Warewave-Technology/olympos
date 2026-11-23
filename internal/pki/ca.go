@@ -1,6 +1,8 @@
-// Package pki is Olympos's internal CA. It issues agent client certificates
-// (CN = cluster UUID) and, when no external certificate is configured, the
-// agent gateway's server certificate. The CA key is stored envelope-encrypted.
+// Package pki is Olympos's internal CA. It issues client certificates for the
+// two identities of a cluster, the agent (CN = cluster UUID) and the probe
+// (CN = cluster UUID + "/probe"), and, when no external certificate is
+// configured, the agent gateway's server certificate. The CA key is stored
+// envelope-encrypted.
 package pki
 
 import (
@@ -15,8 +17,10 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Warewave-Technology/olympos/internal/secrets"
@@ -25,6 +29,54 @@ import (
 
 // AgentCertValidity is the lifetime of agent client certificates (SPEC §4.4).
 const AgentCertValidity = 30 * 24 * time.Hour
+
+// ProbeCertValidity is the lifetime of probe client certificates. The agent
+// renews the probe's certificate the way it renews its own (synthetic
+// monitoring, decision 1), so both live as long.
+const ProbeCertValidity = AgentCertValidity
+
+// IdentityRole is what a client certificate may do on the gateway
+// (synthetic monitoring, decision 3): an agent identity uses AgentGateway
+// only, a probe identity ProbeGateway only.
+type IdentityRole int
+
+const (
+	// RoleAgent is the agent: CN = <cluster-uuid>.
+	RoleAgent IdentityRole = iota
+	// RoleProbe is olympos-probe: CN = <cluster-uuid>/probe.
+	RoleProbe
+)
+
+func (r IdentityRole) String() string {
+	switch r {
+	case RoleAgent:
+		return "agent"
+	case RoleProbe:
+		return "probe"
+	}
+	return fmt.Sprintf("IdentityRole(%d)", int(r))
+}
+
+const probeCNSuffix = "/probe"
+
+// ProbeCN is the certificate CN of the probe of clusterID.
+func ProbeCN(clusterID string) string { return clusterID + probeCNSuffix }
+
+// ParseIdentityCN maps a client certificate CN to its cluster and role. The
+// cluster UUID must be in the canonical form this CA writes, so that one
+// cluster has exactly one agent CN and one probe CN.
+func ParseIdentityCN(cn string) (uuid.UUID, IdentityRole, error) {
+	role := RoleAgent
+	idPart := cn
+	if s, ok := strings.CutSuffix(cn, probeCNSuffix); ok {
+		role, idPart = RoleProbe, s
+	}
+	id, err := uuid.Parse(idPart)
+	if err != nil || id.String() != idPart {
+		return uuid.Nil, 0, fmt.Errorf("pki: %q is not an agent or probe identity", cn)
+	}
+	return id, role, nil
+}
 
 // CA holds the parsed CA certificate and its signer in memory.
 type CA struct {
@@ -134,6 +186,17 @@ func (c *CA) Pool() *x509.CertPool {
 // SignAgentCSR signs a client certificate for clusterID. The CSR subject is
 // ignored: identity comes from the server, never from the agent.
 func (c *CA) SignAgentCSR(csrDER []byte, clusterID string, validity time.Duration) (*x509.Certificate, error) {
+	return c.signClientCSR(csrDER, pkix.Name{CommonName: clusterID, Organization: []string{"olympos-agent"}}, validity)
+}
+
+// SignProbeCSR signs the probe's client certificate for clusterID: CN =
+// ProbeCN(clusterID), O = olympos-probe. As for the agent, the CSR subject
+// is ignored and the key must be ECDSA P-256.
+func (c *CA) SignProbeCSR(csrDER []byte, clusterID string, validity time.Duration) (*x509.Certificate, error) {
+	return c.signClientCSR(csrDER, pkix.Name{CommonName: ProbeCN(clusterID), Organization: []string{"olympos-probe"}}, validity)
+}
+
+func (c *CA) signClientCSR(csrDER []byte, subject pkix.Name, validity time.Duration) (*x509.Certificate, error) {
 	csr, err := x509.ParseCertificateRequest(csrDER)
 	if err != nil {
 		return nil, fmt.Errorf("parse csr: %w", err)
@@ -147,7 +210,7 @@ func (c *CA) SignAgentCSR(csrDER []byte, clusterID string, validity time.Duratio
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber: randSerial(),
-		Subject:      pkix.Name{CommonName: clusterID, Organization: []string{"olympos-agent"}},
+		Subject:      subject,
 		NotBefore:    time.Now().Add(-5 * time.Minute),
 		NotAfter:     time.Now().Add(validity),
 		KeyUsage:     x509.KeyUsageDigitalSignature,

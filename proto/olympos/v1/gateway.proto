@@ -12,7 +12,9 @@ option go_package = "github.com/Warewave-Technology/olympos/internal/gen/olympos
 // enforced by internal/gateway/proto_test.go.
 service AgentGateway {
   // Enroll exchanges a one-time bootstrap token + CSR for a client
-  // certificate. Server-TLS only (no client cert yet).
+  // certificate. Server-TLS only (no client cert yet). The agent also
+  // enrolls the probe here (role ENROLL_ROLE_PROBE); a probe identity may
+  // then use ProbeGateway (probe.proto) only.
   rpc Enroll(EnrollRequest) returns (EnrollResponse);
   // Control is the long-lived control stream, one per agent (mTLS).
   rpc Control(stream AgentMessage) returns (stream ServerMessage);
@@ -24,10 +26,21 @@ service AgentGateway {
   rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
 }
 
+// EnrollRole is the identity an Enroll asks for. A bootstrap token enrolls
+// each role it lists at most once.
+enum EnrollRole {
+  // The agent: certificate CN = <cluster-uuid>.
+  ENROLL_ROLE_AGENT = 0;
+  // olympos-probe, enrolled by the agent on its behalf: CN =
+  // <cluster-uuid>/probe.
+  ENROLL_ROLE_PROBE = 1;
+}
+
 message EnrollRequest {
   string bootstrap_token = 1;
   bytes csr_der = 2;
   string agent_version = 3;
+  EnrollRole role = 4;
 }
 
 message EnrollResponse {

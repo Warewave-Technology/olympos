@@ -37,7 +37,9 @@ const (
 // enforced by internal/gateway/proto_test.go.
 type AgentGatewayClient interface {
 	// Enroll exchanges a one-time bootstrap token + CSR for a client
-	// certificate. Server-TLS only (no client cert yet).
+	// certificate. Server-TLS only (no client cert yet). The agent also
+	// enrolls the probe here (role ENROLL_ROLE_PROBE); a probe identity may
+	// then use ProbeGateway (probe.proto) only.
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
 	// Control is the long-lived control stream, one per agent (mTLS).
 	Control(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[AgentMessage, ServerMessage], error)
@@ -115,7 +117,9 @@ func (c *agentGatewayClient) RenewCert(ctx context.Context, in *RenewCertRequest
 // enforced by internal/gateway/proto_test.go.
 type AgentGatewayServer interface {
 	// Enroll exchanges a one-time bootstrap token + CSR for a client
-	// certificate. Server-TLS only (no client cert yet).
+	// certificate. Server-TLS only (no client cert yet). The agent also
+	// enrolls the probe here (role ENROLL_ROLE_PROBE); a probe identity may
+	// then use ProbeGateway (probe.proto) only.
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
 	// Control is the long-lived control stream, one per agent (mTLS).
 	Control(grpc.BidiStreamingServer[AgentMessage, ServerMessage]) error

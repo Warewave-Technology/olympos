@@ -1,5 +1,5 @@
 GO ?= go
-PROTO := proto/olympos/v1/gateway.proto
+PROTO := proto/olympos/v1/gateway.proto proto/olympos/v1/probe.proto
 
 .PHONY: proto build test test-release lint web images e2e
 

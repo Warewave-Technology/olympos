@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/pki"
 	"github.com/Warewave-Technology/olympos/internal/tunnel"
 )
 
@@ -74,7 +75,7 @@ func (s *session) release(id string) {
 
 // Control handles the agent's long-lived control stream.
 func (g *Gateway) Control(stream pb.AgentGateway_ControlServer) error {
-	clusterID, _, err := g.authenticate(stream.Context())
+	clusterID, _, err := g.authenticate(stream.Context(), pki.RoleAgent)
 	if err != nil {
 		return err
 	}
@@ -271,7 +272,7 @@ func (g *Gateway) inOrder(s *session, gen uint64) bool {
 
 // Tunnel attaches an agent-opened tunnel stream to a pending Dial.
 func (g *Gateway) Tunnel(stream pb.AgentGateway_TunnelServer) error {
-	clusterID, _, err := g.authenticate(stream.Context())
+	clusterID, _, err := g.authenticate(stream.Context(), pki.RoleAgent)
 	if err != nil {
 		return err
 	}

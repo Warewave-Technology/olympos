@@ -1,0 +1,146 @@
+syntax = "proto3";
+
+package olympos.v1;
+
+import "olympos/v1/gateway.proto";
+
+option go_package = "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1;olymposv1";
+
+// ProbeGateway is served next to AgentGateway on the same port and TLS
+// listener (docs/design/synthetic-monitoring.md §2.3). Only a probe identity
+// (certificate CN = <cluster-uuid>/probe) may call it, and a probe identity
+// may call nothing else. The agent enrolls the probe with
+// AgentGateway.Enroll (role ENROLL_ROLE_PROBE).
+//
+// SECURITY: a scenario's credentials are the one documented exception to
+// "no credential on the wire" (§1, principle 4). They travel only inside
+// SealedCredentials, sealed per run to the HPKE key the probe sent in its
+// ProbeHello. Every other field is checked by TestProbeProtoFields
+// (internal/gateway/proto_test.go).
+service ProbeGateway {
+  // Connect is the probe's long-lived stream (mTLS). The first message is
+  // ProbeHello. A probe with several replicas holds several streams.
+  rpc Connect(stream ProbeMessage) returns (stream ServerProbeMessage);
+  // RenewCert issues a fresh probe certificate for the same cluster
+  // (mTLS, probe identity). The agent calls it for the probe.
+  rpc RenewCert(RenewCertRequest) returns (RenewCertResponse);
+}
+
+message ProbeMessage {
+  oneof msg {
+    ProbeHello hello = 1;
+    RunResult result = 2;
+    RunRejected rejected = 3;
+    Pong pong = 4;
+  }
+}
+
+message ServerProbeMessage {
+  oneof msg {
+    RunScenario run = 1;
+    Ping ping = 2;
+  }
+}
+
+message ProbeHello {
+  string probe_version = 1;
+  // Must match the certificate's cluster when set.
+  string cluster_id = 2;
+  // The raw X25519 public key of the HPKE key pair (RFC 9180,
+  // DHKEM(X25519)) the probe made for this stream (decision 2). The private
+  // key stays in the probe's memory and dies with the stream.
+  bytes hpke_public_key = 3;
+  // How many runs this replica runs at once.
+  int32 max_concurrency = 4;
+  // The allowlist version the probe holds, 0 for none.
+  int64 allowlist_version = 5;
+}
+
+// One rule of the global host allowlist (§6.1).
+message AllowRule {
+  string pattern = 1;
+  // exact, wildcard or suffix.
+  string kind = 2;
+}
+
+message AllowlistSnapshot {
+  int64 version = 1;
+  repeated AllowRule rules = 2;
+}
+
+// The credentials one run uses, sealed with HPKE in base mode to the
+// stream's hpke_public_key, with the run id and cluster id as AAD
+// (internal/synthetic/spec.SealCredentials).
+message SealedCredentials {
+  // The HPKE encapsulated key.
+  bytes enc = 1;
+  bytes ciphertext = 2;
+}
+
+message RunScenario {
+  string run_id = 1;
+  // A spec.Scenario as JSON. It names credentials, never holds them.
+  bytes scenario_json = 2;
+  // The allowlist the run must keep to.
+  AllowlistSnapshot allowlist = 3;
+  // Unset when the scenario uses no credential.
+  SealedCredentials credentials = 4;
+  // A test run from the editor: it never alerts.
+  bool test = 5;
+}
+
+// The probe did not start the run.
+message RunRejected {
+  string run_id = 1;
+  // busy, allowlist_stale, credentials_unreadable or invalid_scenario.
+  string reason = 2;
+}
+
+// Durations of one step, in microseconds.
+message StepTimings {
+  int64 dns_us = 1;
+  int64 connect_us = 2;
+  int64 tls_us = 3;
+  int64 ttfb_us = 4;
+  int64 download_us = 5;
+  int64 total_us = 6;
+}
+
+message AssertionResult {
+  string subject = 1;
+  string operator = 2;
+  string expected = 3;
+  string actual = 4;
+  bool passed = 5;
+}
+
+message StepResult {
+  int32 position = 1;
+  // passed, failed, error or skipped.
+  string status = 2;
+  StepTimings timings = 3;
+  repeated AssertionResult assertions = 4;
+  // The names of the values the step extracted, never the values.
+  repeated string extracted_names = 5;
+  // At most 2 KiB, redacted by the probe; empty when the scenario does not
+  // store responses.
+  bytes response_excerpt = 6;
+  int32 status_code = 7;
+  string error = 8;
+  string remote_ip = 9;
+}
+
+message RunResult {
+  string run_id = 1;
+  // passed, failed or error.
+  string status = 2;
+  // The position of the step that failed. Meaningful only when status is
+  // failed or error: position 0 is a real step.
+  int32 failed_step = 3;
+  string failure_reason = 4;
+  repeated StepResult steps = 5;
+  string probe_version = 6;
+  int64 started_unix_ms = 7;
+  int64 finished_unix_ms = 8;
+  string probe_ip = 9;
+}

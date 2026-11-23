@@ -83,3 +83,73 @@ func TestSensitiveDataReportCarriesNoValues(t *testing.T) {
 		}
 	}
 }
+
+// probe.proto carries a run's credentials, sealed (synthetic monitoring
+// §6.2, decision 2): credential-like names are allowed only where the
+// sealed bytes and the key they are sealed to travel, and the messages that
+// carry them have exactly these fields (a new field must be reviewed here).
+func TestProbeProtoFields(t *testing.T) {
+	banned := []string{"password", "secret", "token", "sas", "credential", "key", "dsn", "auth"}
+	allowed := map[string]bool{
+		"olympos.v1.SealedCredentials.enc":        true,
+		"olympos.v1.SealedCredentials.ciphertext": true,
+		"olympos.v1.ProbeHello.hpke_public_key":   true,
+		"olympos.v1.RunScenario.credentials":      true,
+	}
+	// Bytes may only be the sealed credentials, the key, the scenario (which
+	// names credentials, never holds them) and the redacted excerpt.
+	bytesAllowed := map[string]bool{
+		"olympos.v1.SealedCredentials.enc":        true,
+		"olympos.v1.SealedCredentials.ciphertext": true,
+		"olympos.v1.ProbeHello.hpke_public_key":   true,
+		"olympos.v1.RunScenario.scenario_json":    true,
+		"olympos.v1.StepResult.response_excerpt":  true,
+	}
+	fd := pb.File_olympos_v1_probe_proto
+	var walk func(m protoreflect.MessageDescriptor)
+	walk = func(m protoreflect.MessageDescriptor) {
+		fs := m.Fields()
+		for i := 0; i < fs.Len(); i++ {
+			f := fs.Get(i)
+			full := string(f.FullName())
+			name := strings.ToLower(string(f.Name()))
+			for _, b := range banned {
+				if strings.Contains(name, b) && !allowed[full] {
+					t.Errorf("field %s looks like a credential (%q)", full, b)
+				}
+			}
+			if f.Kind() == protoreflect.BytesKind && !bytesAllowed[full] {
+				t.Errorf("field %s is bytes", full)
+			}
+		}
+		for i := 0; i < m.Messages().Len(); i++ {
+			walk(m.Messages().Get(i))
+		}
+	}
+	for i := 0; i < fd.Messages().Len(); i++ {
+		walk(fd.Messages().Get(i))
+	}
+
+	want := map[string][]string{
+		"RunScenario":       {"run_id", "scenario_json", "allowlist", "credentials", "test"},
+		"SealedCredentials": {"enc", "ciphertext"},
+	}
+	for name, fields := range want {
+		m := fd.Messages().ByName(protoreflect.Name(name))
+		if m == nil {
+			t.Fatalf("%s missing", name)
+		}
+		fs := m.Fields()
+		if fs.Len() != len(fields) {
+			t.Fatalf("%s has %d fields, want %v", name, fs.Len(), fields)
+		}
+		for i, f := range fields {
+			if got := string(fs.Get(i).Name()); got != f {
+				t.Fatalf("%s field %d is %s, want %s", name, i, got, f)
+			}
+		}
+	}
+	if c := fd.Messages().ByName("RunScenario").Fields().ByName("credentials"); c.Message().FullName() != "olympos.v1.SealedCredentials" {
+		t.Fatalf("RunScenario.credentials is %s, want SealedCredentials", c.Message().FullName())
+	}
+}
