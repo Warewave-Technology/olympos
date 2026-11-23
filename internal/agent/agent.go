@@ -110,6 +110,7 @@ func (a *Agent) tlsConfig(withClient bool) *tls.Config {
 func (a *Agent) Run(ctx context.Context) error {
 	a.life = ctx
 	go a.serveHealth(ctx)
+	a.startProbeIdentity(ctx, &grpcProbeEnroller{a: a})
 	if err := a.disc.start(ctx); err != nil {
 		return err
 	}

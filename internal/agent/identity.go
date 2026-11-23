@@ -112,12 +112,18 @@ func parseStored(data map[string][]byte) ([]byte, *ecdsa.PrivateKey, error) {
 }
 
 func newKeyAndCSR() (*ecdsa.PrivateKey, []byte, error) {
+	return newKeyAndCSRFor("olympos-agent")
+}
+
+// newKeyAndCSRFor makes a key and a CSR for cn. The server ignores the
+// subject and signs the identity it chose, so cn is only a label.
+func newKeyAndCSRFor(cn string) (*ecdsa.PrivateKey, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "olympos-agent"},
+		Subject: pkix.Name{CommonName: cn},
 	}, key)
 	return key, csr, err
 }
