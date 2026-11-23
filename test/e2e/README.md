@@ -12,6 +12,7 @@ It builds `olympos-server:e2e` / `olympos-agent:e2e`, deploys:
 | `olympos` | `olympos-postgresql`, `azurite`, `minio` | Olympos's database (the chart's bundled PostgreSQL), Blob and S3 fakes |
 | `olympos-system` | `olympos-agent` (installed by the tests from the local chart) | the agent |
 | `lab` | `orders-pg` (TLS, lab CA), `vault` and `openbao` (TLS, raft), `metrics-ch` | annotated targets |
+| `lab` | `restore-pg` (PostgreSQL 16, TLS), `restore-ch`, `restore-vault` (TLS, raft, not configured in Olympos) | new, empty servers that `TestM8Restores` and the docs tour restore backups into (emptied by every reset) |
 
 and runs `go test -tags e2e ./test/e2e/...`. Some tests run a gateway **in-process** on the host and
 point a second real agent at it through `host.docker.internal`, so they can ask the agent for arbitrary
@@ -24,6 +25,8 @@ where the legacy `ClusterPolicy` runs as well, so both agent code paths are exer
 
 ```bash
 SKIP_BUILD=1 ./test/e2e/run.sh   # reuse images
+# one milestone with the tests it builds on (M8 needs the enrolled agent, the M2 destination and M3's Vault job)
+E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM2BackupsPostgresAndClickHouse|TestM3VaultMakerChecker|TestM8Restores)$' ./test/e2e/run.sh
 E2E_CPUS=4 ./test/e2e/run.sh     # nodes limited to 4 CPUs, like a GitHub runner
 ./test/e2e/run.sh down           # delete the cluster
 ```

@@ -59,7 +59,15 @@ if [ ! -f "$WORK/lab-ca.crt" ]; then
   openssl x509 -req -in "$WORK/pg.csr" -CA "$WORK/lab-ca.crt" -CAkey "$WORK/lab-ca.key" -CAcreateserial \
     -days 30 -extfile "$WORK/pg.ext" -out "$WORK/pg.crt" 2>/dev/null
 fi
-for name in openbao; do
+# restore-pg: the PostgreSQL that backups are restored into (docs/restore.md).
+if [ ! -f "$WORK/restore-pg.crt" ]; then
+  openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=restore-pg.lab.svc" \
+    -keyout "$WORK/restore-pg.key" -out "$WORK/restore-pg.csr" 2>/dev/null
+  printf 'subjectAltName=DNS:restore-pg.lab.svc,DNS:restore-pg.lab.svc.cluster.local\n' > "$WORK/restore-pg.ext"
+  openssl x509 -req -in "$WORK/restore-pg.csr" -CA "$WORK/lab-ca.crt" -CAkey "$WORK/lab-ca.key" -CAcreateserial \
+    -days 30 -extfile "$WORK/restore-pg.ext" -out "$WORK/restore-pg.crt" 2>/dev/null
+fi
+for name in openbao restore-vault; do
   if [ ! -f "$WORK/$name.crt" ]; then
     openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$name.lab.svc" \
       -keyout "$WORK/$name.key" -out "$WORK/$name.csr" 2>/dev/null
@@ -81,6 +89,8 @@ kubectl apply -f test/e2e/manifests/olympos-deps.yaml >/dev/null
 kubectl create namespace lab --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab create secret tls pg-tls --cert "$WORK/pg.crt" --key "$WORK/pg.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab create secret tls openbao-tls --cert "$WORK/openbao.crt" --key "$WORK/openbao.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl -n lab create secret tls restore-pg-tls --cert "$WORK/restore-pg.crt" --key "$WORK/restore-pg.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl -n lab create secret tls restore-vault-tls --cert "$WORK/restore-vault.crt" --key "$WORK/restore-vault.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK/vault.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
@@ -129,6 +139,7 @@ kubectl -n lab rollout status statefulset/orders-pg --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/metrics-ch --timeout=240s >/dev/null
+for d in restore-pg restore-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
 kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
 
 # Vault and OpenBao run on raft storage with TLS (snapshots need raft):
@@ -136,6 +147,7 @@ kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
 init_vault vault vault
 init_vault openbao bao
+init_vault restore-vault vault
 
 if [ -n "${SETUP_ONLY:-}" ]; then
   log "lab ready (SETUP_ONLY: tests skipped)"

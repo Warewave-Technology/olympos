@@ -52,8 +52,11 @@ source test/e2e/lib.sh
 reset_olympos
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
+for d in restore-pg restore-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
 init_vault vault vault
 init_vault openbao bao
+init_vault restore-vault vault
+RESTORE_ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/restore-vault-init.json")
 ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/vault-init.json")
 BAO_ROOT=$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["root_token"])' "$WORK/openbao-init.json")
 for t in vault:vault:$ROOT openbao:bao:$BAO_ROOT; do
@@ -115,6 +118,15 @@ Vaults (TLS, raft) — root tokens for Vaults > Configure (used once, not stored
   lab/vault   (HashiCorp): $ROOT
   lab/openbao (OpenBao):   $BAO_ROOT
   (mounts: secret/ = KV v2 with shop/payments and shop/storefront, legacy/ = KV v1)
+
+Restore targets (new, empty servers in lab; Backups > a run > Restore…, docs/restore.md):
+- restore-pg    PostgreSQL 16, TLS (lab CA): postgres / CANARY-lab-restore-pg-password (superuser)
+- restore-ch    ClickHouse, no TLS (set the lab cluster's transfer mode to compressed): restore / CANARY-lab-restore-ch-password
+- restore-vault Vault, raft, TLS, initialized and unsealed, NOT configured in Olympos; token for the restore:
+  lab/restore-vault (HashiCorp, new Vault): $RESTORE_ROOT
+  After a restore it holds lab/vault's data: unseal it with lab/vault's key ($WORK/vault-init.json):
+    kubectl -n lab exec deploy/restore-vault -- vault operator unseal <unseal_keys_b64[0]>
+  ./test/e2e/env.sh empties all three again (and resets Olympos).
 EOF
 log "ready"
 cat "$WORK/ENV.md"
