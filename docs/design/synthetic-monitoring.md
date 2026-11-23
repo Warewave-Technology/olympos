@@ -78,8 +78,12 @@ they win. The user-visible ones:
 | P25 | The allowlist version is a time: every change, and every server start, sets it to `greatest(version + 1, now in milliseconds)`. A database restored from an older dump is then ahead of every version a probe has seen once a server starts on it; the probe's check that versions never go back is unchanged. A probe whose certificate was renewed after the dump needs *Install probe* (P6), and credentials rotated after it must be rotated again (`docs/restore-olympos.md`). | Versions are large numbers; runs after a restore wait for a server start. |
 
 Also settled while building, and documented for users: names must be fully qualified (no search list), a
-literal `${` cannot be written, `Accept-Encoding`, `Range`, `If-Range` and `Host` are reserved headers, test runs
-are limited to 6 a minute per person, and after a full outage late runs go out together.
+literal `${` cannot be written, `Accept-Encoding`, `Range`, `If-Range` and `Host` are reserved headers, a header
+credential cannot name those, `Cookie`, `Content-Type` or the transport's headers (one list,
+`spec.ReservedCredentialHeader`, checked at save and on the probe), test runs and *Run now* are each limited to
+6 a minute per person, a result the server could not store ends its run skipped (`ingest_failed`), a reissued
+add-cluster token enrolls no probe on a cluster that has one, and after a full outage late runs go out
+together.
 
 **Model additions** (beyond §3 below; migration `00024_synthetic_monitoring.sql`):
 
@@ -149,7 +153,7 @@ service ProbeGateway {
 // Heartbeat both ways (15 s), same offline rules as the agent.
 ```
 - Scheduling is done by the **server** (single leader, like backups): it sends `RunScenario` to every target cluster's probe at the scenario interval with jitter (±10 % of interval) so all clusters don't fire at the same second.
-- If a probe is offline, no run is created for that cluster; the cell shows **agent/probe offline**, never "failed" (same consistency rule as SPEC F18).
+- If a probe is offline, no new run is created for that cluster, and runs already planned there end `skipped` (`probe_offline`); the cell shows **agent/probe offline**, never "failed" (same consistency rule as SPEC F18).
 
 ---
 
