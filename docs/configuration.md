@@ -32,8 +32,8 @@ database authenticates the operating system user, so as root it fails with `role
 below. It then checks that these files exist: `listen.tlsCertFile`, `listen.tlsKeyFile`,
 `gateway.tlsCertFile`, `gateway.tlsKeyFile`, `database.passwordFile`, `targetTLS.caBundleFile`. It loads
 the `listen` key pair, and looks up `audit.kubescapeBin`, `audit.polarisBin` and `security.trivyBin`
-on `PATH`, parses the `targetTLS.caBundleFile` and `backup.storageCABundleFile` certificates and the
-`keyVault.references` rules. With
+on `PATH` (and `backup.clickhouseClient`, with a warning only), parses the `targetTLS.caBundleFile` and
+`backup.storageCABundleFile` certificates and the `keyVault.references` rules. With
 `-db` it also builds the Key Vault client, resolves `database.dsnRef`, connects to the database and checks
 that the `pgcrypto` extension is available, reads the
 HMAC secret and wraps and unwraps a test value with the KEK, as the server does at start. Purge protection
@@ -183,6 +183,7 @@ targets".
 | `backup.globalConcurrency` | int | `4` | no | Maximum concurrent backup runs on this server instance. `0` or less uses the default. |
 | `backup.perClusterConcurrency` | int | `2` | no | Maximum running backups per cluster. `0` or less uses the default. |
 | `backup.pgDumpDir` | string | `/usr/lib/postgresql` | no | Where to find `pg_dump`/`pg_dumpall`. A `:`-separated list. Each entry is either a directory holding `<major>/bin/` or a pattern with `{major}` (e.g. `/usr/pgsql-{major}/bin`). The closest major version at or above the target server's is used; `pg_dump` on `PATH` is the fallback. |
+| `backup.clickhouseClient` | string | `clickhouse` | no | The `clickhouse` binary restores of ClickHouse backups run as `clickhouse client`. Path or name on `PATH`; the image and the packages ship the pinned official binary (`/usr/lib/olympos/bin/clickhouse` on systemd). Missing: the server starts with a warning and ClickHouse restores fail with a clear message. |
 | `backup.nfsRoot` | path | `/var/lib/olympos/nfs` | no | Every first-level subdirectory is one volume NFS destinations may write to. |
 | `backup.storageCABundleFile` | path | — | no | PEM CAs added to the system roots for S3 endpoints (for example MinIO behind an internal CA). Separate from `targetTLS`. An unreadable file or one without certificates stops the server at start. |
 | `backup.s3PartSizeMiB` | int | `32` | no | Multipart part size for S3 uploads, in MiB. Must be 5–5120. Memory per running upload; the largest object is 10 000 parts. |
@@ -448,6 +449,7 @@ olympos:
   # database: default is the local PostgreSQL over the Unix socket (role and database "olympos")
   backup:
     pgDumpDir: /usr/lib/olympos/pg:/usr/lib/postgresql:/usr/pgsql-{major}/bin
+    clickhouseClient: /usr/lib/olympos/bin/clickhouse
   audit:
     kubescapeBin: /usr/lib/olympos/bin/kubescape
     polarisBin: /usr/lib/olympos/bin/polaris

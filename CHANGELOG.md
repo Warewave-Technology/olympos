@@ -7,6 +7,8 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- The server image and the packages ship the pinned official `clickhouse` binary (LTS) as the restore client;
+  new key `backup.clickhouseClient`. See `docs/configuration.md`.
 - **Signed kube-bench image** ([#26](https://github.com/Warewave-Technology/olympos/issues/26)): upstream
   kube-bench images are not signed, so each release copies the digest the agent pins to
   `ghcr.io/warewave-technology/kube-bench` and signs it with the release identity. New agent chart value

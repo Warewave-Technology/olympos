@@ -2,8 +2,10 @@ package app
 
 import (
 	"fmt"
+	"os/exec"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/backup/engines/clickhouse"
 	"github.com/Warewave-Technology/olympos/internal/backup/engines/postgres"
 	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/restore"
@@ -14,6 +16,15 @@ import (
 func init() {
 	Register(func(d *Deps) (Wiring, error) {
 		postgres.SetDumpDir(d.Cfg.Backup.PgDumpDir)
+		clickhouse.SetClientBin(d.Cfg.Backup.ClickHouseClient)
+		// Not fatal: without the client the server still runs, and restores
+		// of ClickHouse backups fail with a clear message.
+		if p, err := exec.LookPath(clickhouse.ClientBin()); err != nil {
+			d.Log.Warn("clickhouse client not found: restores of ClickHouse backups will fail",
+				"backup.clickhouseClient", clickhouse.ClientBin(), "err", err)
+		} else {
+			d.Log.Info("clickhouse client", "path", p)
+		}
 		storage, err := storageOptions(d.Cfg)
 		if err != nil {
 			return Wiring{}, err

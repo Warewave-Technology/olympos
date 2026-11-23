@@ -107,6 +107,10 @@ type Server struct {
 		GlobalConcurrency     int    `yaml:"globalConcurrency"`
 		PerClusterConcurrency int    `yaml:"perClusterConcurrency"`
 		PgDumpDir             string `yaml:"pgDumpDir"` // contains <major>/bin/pg_dump
+		// ClickHouseClient is the clickhouse binary restores run as
+		// `<bin> client` (default "clickhouse" on PATH). Missing: the server
+		// still starts and ClickHouse restores fail with a clear message.
+		ClickHouseClient string `yaml:"clickhouseClient"`
 		// NFSRoot holds the volumes NFS destinations may write to: every
 		// first-level subdirectory is one mount (Helm mounts nfsMounts[].name
 		// at <nfsRoot>/<name>). Default /var/lib/olympos/nfs.
@@ -220,6 +224,7 @@ func (c *Server) defaults() {
 	}
 	def(&c.Backup.PgDumpDir, "/usr/lib/postgresql")
 	def(&c.Backup.NFSRoot, "/var/lib/olympos/nfs")
+	def(&c.Backup.ClickHouseClient, "clickhouse")
 	if c.Backup.S3PartSizeMiB == 0 {
 		c.Backup.S3PartSizeMiB = 32
 	}

@@ -1,7 +1,8 @@
 # olympos-server: Go binary + pinned external tools on distroless (glibc).
 # pg_dump/pg_dumpall 13–17 come from PGDG; their shared libraries are copied
 # next to them. trivy, kubescape and polaris are static release binaries
-# verified against the upstream checksum files.
+# verified against the upstream checksum files. clickhouse is the official
+# static binary (restore client).
 
 ARG PG_VERSIONS="13 14 15 16 17"
 
@@ -31,6 +32,7 @@ ARG PG_VERSIONS TARGETARCH
 ARG TRIVY_VERSION=0.76.2
 ARG KUBESCAPE_VERSION=4.0.21
 ARG POLARIS_VERSION=10.2.6
+ARG CLICKHOUSE_VERSION=26.3.69.4
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
     install -d /usr/share/postgresql-common/pgdg && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc && \
@@ -66,6 +68,15 @@ RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64)
     curl -fsSLO https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/checksums.txt; \
     grep " polaris_${POLARIS_VERSION}_linux_${a}.tar.gz$" checksums.txt | sha256sum -c -; \
     tar -xzf polaris_${POLARIS_VERSION}_linux_${a}.tar.gz polaris && install -m 0755 polaris /out/usr/local/bin/polaris
+# The official static ClickHouse binary (LTS): `clickhouse client` restores ClickHouse backups.
+# clickhouse-client is the same binary under its other name.
+RUN set -eu; cd /tmp; a=$([ "$TARGETARCH" = arm64 ] && echo arm64 || echo amd64); \
+    f=clickhouse-common-static-${CLICKHOUSE_VERSION}-${a}.tgz; \
+    curl -fsSLO https://github.com/ClickHouse/ClickHouse/releases/download/v${CLICKHOUSE_VERSION}-lts/$f; \
+    curl -fsSLO https://github.com/ClickHouse/ClickHouse/releases/download/v${CLICKHOUSE_VERSION}-lts/$f.sha512; \
+    sha512sum -c $f.sha512; \
+    tar -xzf $f --strip-components=3 -C /out/usr/local/bin clickhouse-common-static-${CLICKHOUSE_VERSION}/usr/bin/clickhouse; \
+    chmod 0755 /out/usr/local/bin/clickhouse; ln -s clickhouse /out/usr/local/bin/clickhouse-client; rm -f $f $f.sha512
 # Every directory COPY lays over the base must stay readable for 65532.
 RUN bad=$(find /out -type d ! -perm -0555); test -z "$bad" || { echo "not world-readable: $bad"; exit 1; }
 
