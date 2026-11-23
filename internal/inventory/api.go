@@ -60,6 +60,8 @@ func (a *API) Routes(r chi.Router) {
 	r.Patch("/clusters/{id}", a.patchCluster)
 	r.Delete("/clusters/{id}", a.revokeCluster)
 	r.Post("/clusters/{id}/token", a.newToken)
+	r.Post("/clusters/{id}/probe-token", a.newProbeToken)
+	r.Delete("/clusters/{id}/probe", a.revokeProbe)
 	r.Get("/clusters/{id}/nodes", a.listNodes)
 	r.Get("/targets", a.listTargets)
 	r.Post("/targets/{id}/accept-tls-name", a.acceptTLSName)
@@ -89,20 +91,27 @@ type Cluster struct {
 	TransferMode     string            `json:"transfer_mode"`
 	EgressRatePerGB  *float64          `json:"egress_rate_per_gb"`
 	CertExpiresAt    *time.Time        `json:"cert_expires_at"`
-	Nodes            int               `json:"nodes"`
-	NodesReady       int               `json:"nodes_ready"`
-	CPUMilli         int64             `json:"cpu_milli"`
-	MemBytes         int64             `json:"mem_bytes"`
-	MinKubelet       string            `json:"min_kubelet"`
-	VersionSkew      bool              `json:"version_skew"`
-	EOL              bool              `json:"eol"`
-	InventoryAt      *time.Time        `json:"inventory_at"`
-	CreatedAt        time.Time         `json:"created_at"`
+	// The synthetic monitoring probe (docs/design/synthetic-monitoring.md
+	// §2): not_installed, pending (enrolled, not connected yet), online,
+	// offline or revoked.
+	ProbeStatus     string     `json:"probe_status"`
+	ProbeVersion    string     `json:"probe_version"`
+	ProbeLastSeenAt *time.Time `json:"probe_last_seen_at"`
+	Nodes           int        `json:"nodes"`
+	NodesReady      int        `json:"nodes_ready"`
+	CPUMilli        int64      `json:"cpu_milli"`
+	MemBytes        int64      `json:"mem_bytes"`
+	MinKubelet      string     `json:"min_kubelet"`
+	VersionSkew     bool       `json:"version_skew"`
+	EOL             bool       `json:"eol"`
+	InventoryAt     *time.Time `json:"inventory_at"`
+	CreatedAt       time.Time  `json:"created_at"`
 }
 
 const clusterSelect = `
 	SELECT c.id, c.name, c.labels, c.provider, c.provider_override, c.region, c.api_version, c.status, c.last_seen_at,
 	       c.agent_version, c.bench_enabled, c.transfer_mode, c.egress_rate_per_gb::float8, c.cert_expires_at, c.inventory_at, c.created_at,
+	       c.probe_status, c.probe_version, c.probe_last_seen_at,
 	       count(n.name), count(n.name) FILTER (WHERE n.ready), COALESCE(sum(n.cpu_capacity),0), COALESCE(sum(n.mem_capacity),0),
 	       COALESCE(array_agg(n.kubelet_version) FILTER (WHERE n.name IS NOT NULL), '{}')
 	FROM clusters c LEFT JOIN nodes n ON n.cluster_id = c.id`
@@ -116,7 +125,7 @@ func (a *API) scanClusters(rows pgx.Rows) ([]Cluster, error) {
 		var kubelets []string
 		if err := rows.Scan(&c.ID, &c.Name, &c.Labels, &c.Provider, &c.ProviderOverride, &c.Region, &c.APIVersion, &c.Status,
 			&c.LastSeenAt, &c.AgentVersion, &c.BenchEnabled, &c.TransferMode, &c.EgressRatePerGB, &c.CertExpiresAt, &c.InventoryAt,
-			&c.CreatedAt, &c.Nodes, &c.NodesReady, &c.CPUMilli, &c.MemBytes, &kubelets); err != nil {
+			&c.CreatedAt, &c.ProbeStatus, &c.ProbeVersion, &c.ProbeLastSeenAt, &c.Nodes, &c.NodesReady, &c.CPUMilli, &c.MemBytes, &kubelets); err != nil {
 			return nil, err
 		}
 		if c.ProviderOverride != "" {
@@ -289,7 +298,7 @@ func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		token, exp, err = a.issueToken(r.Context(), tx, id)
+		token, exp, err = a.issueToken(r.Context(), tx, id, []string{tokenRoleAgent, tokenRoleProbe})
 		if err != nil {
 			return err
 		}
@@ -339,11 +348,11 @@ func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 	var token string
 	var exp time.Time
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND (agent_used_at IS NULL OR probe_used_at IS NULL) AND expires_at > now()`, id); err != nil {
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND `+unusedTokenSQL+` AND expires_at > now()`, id); err != nil {
 			return err
 		}
 		var err error
-		if token, exp, err = a.issueToken(r.Context(), tx, id); err != nil {
+		if token, exp, err = a.issueToken(r.Context(), tx, id, []string{tokenRoleAgent, tokenRoleProbe}); err != nil {
 			return err
 		}
 		return httpx.Record(r, tx, "cluster.token_issued", "cluster", id.String(), &id, nil)
@@ -355,26 +364,172 @@ func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp})
 }
 
-func (a *API) issueToken(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID) (string, time.Time, error) {
+// Roles a bootstrap token may enroll (enroll_tokens.roles).
+const (
+	tokenRoleAgent = "agent"
+	tokenRoleProbe = "probe"
+)
+
+// unusedTokenSQL matches a token that can still enroll something: a role
+// it lists and has not used yet. A token is unused only for the roles it
+// has: a probe-only token never enrolls an agent, so its empty
+// agent_used_at means nothing.
+const unusedTokenSQL = `(('agent' = ANY(roles) AND agent_used_at IS NULL) OR ('probe' = ANY(roles) AND probe_used_at IS NULL))`
+
+// issueToken stores a new bootstrap token of the cluster for roles and
+// returns it with its expiry. Add cluster gives {agent, probe}: the agent
+// enrolls the probe with the same token (decisions after review, 1);
+// "Install probe" gives {probe}.
+func (a *API) issueToken(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, roles []string) (string, time.Time, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", time.Time{}, err
 	}
 	token := "olyb_" + base64.RawURLEncoding.EncodeToString(b)
 	exp := a.now().Add(EnrollTokenTTL)
-	_, err := tx.Exec(ctx, `INSERT INTO enroll_tokens (cluster_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-		clusterID, gateway.HashToken(token), exp)
+	_, err := tx.Exec(ctx, `INSERT INTO enroll_tokens (cluster_id, token_hash, expires_at, roles) VALUES ($1, $2, $3, $4)`,
+		clusterID, gateway.HashToken(token), exp, roles)
 	return token, exp, err
 }
 
+// withdrawProbeTokens ends what the cluster's live tokens may still do for
+// a probe: a token that has not enrolled its agent yet keeps that and loses
+// the probe role; any other token with an unused probe role expires. Only
+// the newest probe token (or none, after a revoke) can enroll a probe.
+func withdrawProbeTokens(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID) error {
+	if _, err := tx.Exec(ctx, `UPDATE enroll_tokens SET roles = array_remove(roles, 'probe')
+		WHERE cluster_id = $1 AND expires_at > now() AND 'probe' = ANY(roles) AND probe_used_at IS NULL
+		  AND 'agent' = ANY(roles) AND agent_used_at IS NULL`, clusterID); err != nil {
+		return err
+	}
+	_, err := tx.Exec(ctx, `UPDATE enroll_tokens SET expires_at = now()
+		WHERE cluster_id = $1 AND expires_at > now() AND 'probe' = ANY(roles) AND probe_used_at IS NULL`, clusterID)
+	return err
+}
+
+// newProbeToken is "Install probe" (Settings › Clusters & agents) for a
+// cluster whose agent was installed without the probe: a probe-only token
+// and the helm upgrade that hands it to the chart. Admin with scope all,
+// like the agent's token.
+func (a *API) newProbeToken(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	c, err := a.loadCluster(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !s.Can(authz.PermRead, c.Labels)) {
+		httpx.NotFound(w)
+		return
+	}
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !s.CanGlobal(authz.PermAdmin) {
+		httpx.Forbidden(w, "")
+		return
+	}
+	if c.Status == "revoked" {
+		httpx.Error(w, http.StatusConflict, "cluster is revoked; add it again as a new cluster")
+		return
+	}
+	var token string
+	var exp time.Time
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		if err := withdrawProbeTokens(r.Context(), tx, id); err != nil {
+			return err
+		}
+		var err error
+		if token, exp, err = a.issueToken(r.Context(), tx, id, []string{tokenRoleProbe}); err != nil {
+			return err
+		}
+		return httpx.Record(r, tx, "cluster.probe_token_issued", "cluster", id.String(), &id, nil)
+	})
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.probeInstallCommand(token), ExpiresAt: exp})
+}
+
+// probeInstallCommand adds the probe to an installed agent release: the
+// values it was installed with stay, the probe is enabled, and the chart
+// puts the token into olympos-probe-identity for the agent to enroll the
+// probe with.
+func (a *API) probeInstallCommand(token string) string {
+	return "helm upgrade olympos-agent " + a.chart() + " -n olympos-system --reuse-values --set probe.enabled=true --set probe.bootstrapToken=" + token
+}
+
+func (a *API) chart() string {
+	if a.AgentChart != "" {
+		return a.AgentChart
+	}
+	return "oci://ghcr.io/warewave-technology/charts/olympos-agent"
+}
+
+// revokeProbe revokes the cluster's probe alone (its certificates, and the
+// tokens that could enroll a new one); the agent is untouched. "Install
+// probe" enrolls a new one. Admin on the cluster, like revoking the
+// cluster.
+func (a *API) revokeProbe(w http.ResponseWriter, r *http.Request) {
+	s := httpx.Subject(r)
+	id, ok := httpx.UUIDParam(w, r, "id")
+	if !ok {
+		return
+	}
+	allowed, visible, err := httpx.CanCluster(r.Context(), a.DB, s, id, authz.PermAdmin)
+	if err != nil {
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	if !visible {
+		httpx.NotFound(w)
+		return
+	}
+	if !allowed {
+		httpx.Forbidden(w, "")
+		return
+	}
+	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
+		var status, probe string
+		if err := tx.QueryRow(r.Context(), `SELECT status, probe_status FROM clusters WHERE id = $1 FOR UPDATE`, id).Scan(&status, &probe); err != nil {
+			return store.NotFound(err)
+		}
+		if status == "revoked" {
+			return errRevoked
+		}
+		if err := a.Gateway.RevokeProbe(r.Context(), tx, id); err != nil {
+			return err
+		}
+		if err := withdrawProbeTokens(r.Context(), tx, id); err != nil {
+			return err
+		}
+		return httpx.Record(r, tx, "cluster.probe_revoked", "cluster", id.String(), &id, map[string]any{"probe_status": probe})
+	})
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpx.NotFound(w)
+		return
+	case errors.Is(err, errRevoked):
+		httpx.Error(w, http.StatusConflict, "cluster is revoked; its probe was revoked with it")
+		return
+	case err != nil:
+		httpx.Internal(w, r, a.Log, err)
+		return
+	}
+	// RevokeProbe dropped the streams inside the transaction; a probe that
+	// reconnected before the commit still saw the old state.
+	a.Gateway.DisconnectProbe(id)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+var errRevoked = errors.New("cluster revoked")
+
 func (a *API) installCommand(c *Cluster, token string) string {
 	ca := base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.CA.Cert.Raw}))
-	chart := a.AgentChart
-	if chart == "" {
-		chart = "oci://ghcr.io/warewave-technology/charts/olympos-agent"
-	}
 	lines := []string{
-		"helm upgrade --install olympos-agent " + chart,
+		"helm upgrade --install olympos-agent " + a.chart(),
 		"--namespace olympos-system --create-namespace",
 		"--set server=" + a.GatewayURL,
 		"--set clusterName=" + c.Name,
@@ -525,7 +680,7 @@ func (a *API) revokeCluster(w http.ResponseWriter, r *http.Request) {
 		if err := a.Gateway.Revoke(r.Context(), tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND (agent_used_at IS NULL OR probe_used_at IS NULL)`, id); err != nil {
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND `+unusedTokenSQL, id); err != nil {
 			return err
 		}
 		return httpx.Record(r, tx, "cluster.revoked", "cluster", id.String(), &id, nil)
