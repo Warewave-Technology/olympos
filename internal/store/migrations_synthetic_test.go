@@ -301,8 +301,9 @@ func TestSyntheticMonitoringMigration(t *testing.T) {
 }
 
 // Down and up again: the migration is reversible, a token used before it
-// reads as the agent's (roles = {agent}), and Down keeps refusing to drop
-// synthetic-editor grants.
+// reads as the agent's (roles = {agent}), Down keeps refusing to drop
+// synthetic-editor grants, and it removes the secrets of the synthetic
+// credentials with them.
 func TestSyntheticMonitoringMigrationDown(t *testing.T) {
 	db := testutil.DB(t)
 	ctx := context.Background()
@@ -363,8 +364,24 @@ func TestSyntheticMonitoringMigrationDown(t *testing.T) {
 	if _, err := db.Exec(ctx, `DELETE FROM grants`); err != nil {
 		t.Fatal(err)
 	}
+	// A synthetic credential's secret is a row of credentials: Down removes
+	// it with the synthetic credential, and leaves the other credentials.
+	var synSecret, otherSecret string
+	if err := db.QueryRow(ctx, `INSERT INTO credentials (kind, keyvault_name, secret_name) VALUES ('keyvault_ref', 'kv', 'synthetic') RETURNING id::text`).Scan(&synSecret); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(ctx, `INSERT INTO credentials (kind, keyvault_name, secret_name) VALUES ('keyvault_ref', 'kv', 'backup') RETURNING id::text`).Scan(&otherSecret); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `INSERT INTO synthetic_credentials (name, kind, bound_hosts, credential_id) VALUES ('c', 'bearer', '{exact:a.example.com}', $1)`, synSecret); err != nil {
+		t.Fatal(err)
+	}
 	if err := goose.DownToContext(ctx, sqlDB, "migrations", 23); err != nil {
 		t.Fatalf("down to 23 again: %v", err)
+	}
+	var left string
+	if err := db.QueryRow(ctx, `SELECT COALESCE(string_agg(secret_name, ',' ORDER BY secret_name), '') FROM credentials WHERE id IN ($1, $2)`, synSecret, otherSecret).Scan(&left); err != nil || left != "backup" {
+		t.Fatalf("credentials after down: %q, %v (want only the backup one)", left, err)
 	}
 	var used bool
 	if err := db.QueryRow(ctx, `SELECT used_at IS NOT NULL FROM enroll_tokens WHERE token_hash = 'used'`).Scan(&used); err != nil || !used {

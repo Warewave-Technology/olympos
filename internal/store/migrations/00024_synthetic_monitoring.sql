@@ -7,7 +7,8 @@
 
 -- ---------------------------------------------------------------- access
 
--- synthetic-editor edits scenarios, the allowlist and synthetic credentials.
+-- synthetic-editor creates and edits scenarios, which use the existing
+-- synthetic credentials. The allowlist and the credentials are admin only.
 ALTER TABLE grants DROP CONSTRAINT grants_role_check;
 ALTER TABLE grants ADD CONSTRAINT grants_role_check
   CHECK (role IN ('viewer','operator','vault-maker','vault-approver','admin','synthetic-editor'));
@@ -389,6 +390,10 @@ DROP TABLE scenario_extracts;
 DROP TABLE scenario_assertions;
 DROP TABLE scenario_steps;
 DROP TABLE scenarios;
+-- Each synthetic credential's secret is a row of credentials that nothing
+-- else refers to: it goes too, rather than stay behind unreferenced.
+ALTER TABLE synthetic_credentials DROP CONSTRAINT synthetic_credentials_credential_id_fkey;
+DELETE FROM credentials WHERE id IN (SELECT credential_id FROM synthetic_credentials);
 DROP TABLE synthetic_credentials;
 DROP TRIGGER synthetic_allowlist_version_bump ON synthetic_allowlist;
 DROP FUNCTION olympos_synthetic_allowlist_bump();
