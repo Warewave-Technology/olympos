@@ -174,6 +174,10 @@ type Progress struct {
 // its Options are the target's engine options (the CA bundle).
 type RestoreContext struct {
 	EngineContext
+	// RequestID is the restore request's id: it names what the restore
+	// creates outside the databases (ClickHouse Keeper paths of
+	// Replicated tables, /olympos-restore/<request id>/...).
+	RequestID string
 	// Archive is the backup copy for random reads (PostgreSQL, ClickHouse
 	// zip archives; each entry's CRC-32 is checked by archive/zip); nil for
 	// Vault. Its SHA-256 was verified before Restore is called. Small reads

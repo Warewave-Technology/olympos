@@ -34,6 +34,7 @@ type restoreCall struct {
 	secret    string
 	snapshot  []byte
 	options   restore.Options
+	requestID string
 }
 
 // fakeRestorer restores every selected database from a zip entry of the
@@ -70,7 +71,7 @@ func (f *fakeRestorer) Restore(ctx context.Context, rc backup.RestoreContext) (*
 	if err != nil {
 		return nil, err
 	}
-	call := restoreCall{databases: rc.Databases, superuser: rc.Superuser, secret: string(c.Secret)}
+	call := restoreCall{databases: rc.Databases, superuser: rc.Superuser, secret: string(c.Secret), requestID: rc.RequestID}
 	_ = json.Unmarshal(rc.Options, &call.options)
 	if rc.Snapshot != nil {
 		if call.snapshot, err = io.ReadAll(rc.Snapshot); err != nil {
@@ -287,7 +288,7 @@ func TestExecuteSucceeds(t *testing.T) {
 	}
 	c := pgRestorer.last()
 	if pgRestorer.callCount() != 1 || c.secret != canaryPassword || !c.superuser || strings.Join(c.databases, ",") != "shop,billing" ||
-		c.options.Globals == nil || !*c.options.Globals {
+		c.options.Globals == nil || !*c.options.Globals || c.requestID != id.String() {
 		t.Fatalf("restorer got: %+v", c)
 	}
 	x.wiped(id)

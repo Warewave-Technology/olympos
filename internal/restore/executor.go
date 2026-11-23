@@ -341,7 +341,7 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 	// 4. The engine.
 	pw.phase("restore")
 	window := newWindowObject(counted, readWindow)
-	rc := backup.RestoreContext{EngineContext: ec, Databases: j.databases, Options: raw, Superuser: superuser, Progress: pw.report}
+	rc := backup.RestoreContext{EngineContext: ec, RequestID: j.id.String(), Databases: j.databases, Options: raw, Superuser: superuser, Progress: pw.report}
 	if j.engine == "vault" {
 		rc.Snapshot = io.NewSectionReader(window, 0, window.Size())
 	} else {
