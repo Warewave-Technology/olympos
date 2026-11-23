@@ -39,12 +39,25 @@ const maxTokenResponse = 64 << 10
 // scrubbing them would garble every excerpt.
 const minExtractLiteral = 4
 
+// minLeakLiteral is the shortest credential form the leak checks look for
+// in requests and extracted values. Shorter forms (a one-letter user name)
+// would refuse ordinary requests; they are still scrubbed from reports.
+const minLeakLiteral = 6
+
+// minCapturedPart is the shortest extracted value that is refused for
+// being a piece of a credential.
+const minCapturedPart = 8
+
 // credential is one RunCredential prepared for the run.
 type credential struct {
 	c        *spec.RunCredential
 	bound    hostallow.List
 	boundErr error  // a bound host did not parse: the credential is refused
 	header   string // canonical name of the header it sets
+	// lits are this credential's own values in all their forms (the
+	// OAuth2 token too, once fetched): what must not reach a host outside
+	// its bound hosts.
+	lits *literals
 
 	mu       sync.Mutex
 	token    *spec.Secret // OAuth2 access token, for this run only
@@ -61,29 +74,147 @@ func newCredSet(creds []spec.RunCredential) *credSet {
 	cs := &credSet{byID: map[uuid.UUID]*credential{}, lits: &literals{}}
 	for i := range creds {
 		c := &creds[i]
-		cr := &credential{c: c, header: "Authorization"}
+		cr := &credential{c: c, header: "Authorization", lits: &literals{}}
 		cr.bound, cr.boundErr = boundList(c.BoundHosts)
 		if c.Kind == spec.CredHeader {
 			cr.header = textproto.CanonicalMIMEHeaderKey(c.HeaderName)
 		}
 		cs.byID[c.ID] = cr
-		cs.lits.addSecret(c.Username.Bytes())
-		cs.lits.addSecret(c.Secret.Bytes())
+		cs.addCredLiteral(cr, c.Username.Bytes())
+		cs.addCredLiteral(cr, c.Secret.Bytes())
 		switch c.Kind {
 		case spec.CredBasic:
 			pair := joinPair(c.Username.Bytes(), c.Secret.Bytes())
-			cs.lits.addSecret(pair)
+			cs.addCredLiteral(cr, pair)
 			clear(pair)
 		case spec.CredOAuth2:
 			id, sec := formEscape(c.Username.Bytes()), formEscape(c.Secret.Bytes())
 			pair := joinPair(id, sec)
-			cs.lits.addSecret(pair)
+			cs.addCredLiteral(cr, pair)
 			clear(pair)
 			clear(id)
 			clear(sec)
 		}
 	}
 	return cs
+}
+
+// addCredLiteral adds a value of credential cr, in all its forms, to the
+// credential's own literals and to the run's scrub literals.
+func (cs *credSet) addCredLiteral(cr *credential, b []byte) {
+	cr.lits.addSecret(b)
+	cs.lits.addSecret(b)
+}
+
+// holdsCredential reports whether an extracted value carries a credential
+// of the run: one of its forms, or a piece of its raw value. Such a value
+// is never kept as a variable (§6.2: credentials never go into extracted
+// variables), whatever host it would be sent to.
+func (cs *credSet) holdsCredential(v []byte) bool {
+	lv := bytes.ToLower(v)
+	defer clear(lv)
+	for _, c := range cs.byID {
+		for _, l := range c.lits.all() {
+			if len(l) >= minLeakLiteral && (bytes.Contains(v, l) || bytes.Contains(lv, l)) {
+				return true
+			}
+		}
+		if len(v) >= minCapturedPart {
+			for _, raw := range [][]byte{c.c.Secret.Bytes(), c.c.Username.Bytes(), c.tokenBytes()} {
+				if bytes.Contains(raw, v) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (c *credential) tokenBytes() []byte {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.token.Bytes()
+}
+
+// checkRequest refuses a request that would carry a credential of the run
+// (in its URL, its headers or its body) to a host outside that
+// credential's bound hosts. It runs before every request and redirect hop,
+// before the hop's host is resolved, and for the OAuth2 token request.
+func (cs *credSet) checkRequest(req *http.Request) error {
+	host, err := hostallow.Normalize(req.URL.Hostname())
+	if err != nil {
+		host = ""
+	}
+	var hay [][]byte
+	built := false
+	build := func() error {
+		u := req.URL.String()
+		hay = append(hay, []byte(u), bytes.ToLower([]byte(u)), []byte(req.URL.Path), []byte(req.Host))
+		if q, err := url.QueryUnescape(req.URL.RawQuery); err == nil {
+			hay = append(hay, []byte(q))
+		}
+		for name, vals := range req.Header {
+			for _, v := range vals {
+				hay = append(hay, []byte(name+": "+v))
+			}
+		}
+		if req.Body != nil && req.Body != http.NoBody {
+			if req.GetBody == nil {
+				return errorf(CodeCredentialError, "the request body cannot be checked for credentials")
+			}
+			rc, err := req.GetBody()
+			if err != nil {
+				return errorf(CodeCredentialError, "the request body cannot be checked for credentials")
+			}
+			b, err := io.ReadAll(io.LimitReader(rc, spec.MaxBody+1))
+			_ = rc.Close()
+			if err != nil {
+				return errorf(CodeCredentialError, "the request body cannot be checked for credentials")
+			}
+			hay = append(hay, b)
+		}
+		return nil
+	}
+	for _, c := range cs.byID {
+		if host != "" && c.boundErr == nil && c.allows(host) {
+			continue
+		}
+		lits := c.lits.all()
+		if len(lits) == 0 {
+			continue
+		}
+		if !built {
+			if err := build(); err != nil {
+				return err
+			}
+			built = true
+		}
+		for _, l := range lits {
+			if len(l) < minLeakLiteral {
+				continue
+			}
+			for _, h := range hay {
+				if bytes.Contains(h, l) {
+					return errorf(CodeCredentialError, "a request to a host outside the bound hosts of credential %s would carry it", c.c.ID)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkTransport runs checkRequest before every request it sends.
+type checkTransport struct {
+	base http.RoundTripper
+	cs   *credSet
+}
+
+func (t *checkTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := t.cs.checkRequest(req); err != nil {
+		closeBody(req)
+		return nil, err
+	}
+	return t.base.RoundTrip(req)
 }
 
 // close zeroes the OAuth2 tokens and every literal. The RunCredentials
@@ -94,6 +225,7 @@ func (cs *credSet) close() {
 		c.token.Zero()
 		c.token = nil
 		c.mu.Unlock()
+		c.lits.zero()
 	}
 	cs.lits.zero()
 }
@@ -140,7 +272,7 @@ func (c *credential) allows(host string) bool {
 // headerValue returns the header the credential sets. The value is a
 // string because http.Header holds strings; it lives as long as the
 // request. OAuth2 tokens are fetched on first use, through d.
-func (c *credential) headerValue(ctx context.Context, r *Runner, lits *literals) (string, string, error) {
+func (c *credential) headerValue(ctx context.Context, r *Runner, cs *credSet) (string, string, error) {
 	switch c.c.Kind {
 	case spec.CredBearer:
 		s := c.c.Secret.Bytes()
@@ -164,7 +296,7 @@ func (c *credential) headerValue(ctx context.Context, r *Runner, lits *literals)
 		}
 		return c.header, string(s), nil
 	case spec.CredOAuth2:
-		tok, err := c.oauthToken(ctx, r, lits)
+		tok, err := c.oauthToken(ctx, r, cs)
 		if err != nil {
 			return "", "", err
 		}
@@ -175,25 +307,26 @@ func (c *credential) headerValue(ctx context.Context, r *Runner, lits *literals)
 
 // oauthToken fetches the run's OAuth2 token once (client credentials grant,
 // RFC 6749 §4.4, with client_secret_basic) from TokenURL, which must be
-// within the bound hosts and is dialed through the run's Dialer. The token
-// is zeroed when the run ends.
-func (c *credential) oauthToken(ctx context.Context, r *Runner, lits *literals) (*spec.Secret, error) {
+// within the bound hosts, must be https, and is dialed through the run's
+// Dialer. The token is zeroed when the run ends.
+func (c *credential) oauthToken(ctx context.Context, r *Runner, cs *credSet) (*spec.Secret, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != nil || c.tokenErr != nil {
 		return c.token, c.tokenErr
 	}
-	c.token, c.tokenErr = c.fetchToken(ctx, r)
+	c.token, c.tokenErr = c.fetchToken(ctx, r, cs)
 	if c.token != nil {
-		lits.addSecret(c.token.Bytes())
+		cs.addCredLiteral(c, c.token.Bytes())
 	}
 	return c.token, c.tokenErr
 }
 
-func (c *credential) fetchToken(ctx context.Context, r *Runner) (*spec.Secret, error) {
+func (c *credential) fetchToken(ctx context.Context, r *Runner, cs *credSet) (*spec.Secret, error) {
 	u, err := url.Parse(c.c.TokenURL)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil || u.Opaque != "" {
-		return nil, errorf(CodeCredentialError, "the token URL is not a valid http(s) URL")
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Opaque != "" {
+		// The client secret is sent to it: plain http is refused.
+		return nil, errorf(CodeCredentialError, "the token URL is not a valid https URL")
 	}
 	if !c.allows(u.Hostname()) {
 		return nil, errorf(CodeCredentialError, "the token URL's host is not one of the credential's bound hosts")
@@ -222,7 +355,7 @@ func (c *credential) fetchToken(ctx context.Context, r *Runner) (*spec.Secret, e
 	tr := r.transport(sess)
 	defer tr.CloseIdleConnections()
 	client := &http.Client{
-		Transport: tr,
+		Transport: &checkTransport{base: tr, cs: cs},
 		// A token endpoint that redirects is refused: the client
 		// credentials would follow it.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -333,7 +466,7 @@ type credTransport struct {
 	base http.RoundTripper
 	r    *Runner
 	cred *credential // nil when the step has none
-	lits *literals
+	cs   *credSet
 	// ctx is the run's context, without the step's trace, for the OAuth2
 	// token request.
 	ctx context.Context
@@ -358,6 +491,10 @@ func (t *credTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// The previous URL may carry an extracted value in its query.
 		req.Header.Del("Referer")
 	}
+	if err := t.cs.checkRequest(req); err != nil {
+		closeBody(req)
+		return nil, err
+	}
 	switch {
 	case t.cred != nil:
 		downgrade := t.origScheme == "https" && req.URL.Scheme != "https"
@@ -365,7 +502,7 @@ func (t *credTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			strip()
 			break
 		}
-		name, value, err := t.cred.headerValue(t.ctx, t.r, t.lits)
+		name, value, err := t.cred.headerValue(t.ctx, t.r, t.cs)
 		if err != nil {
 			closeBody(req)
 			return nil, err
@@ -456,15 +593,37 @@ func (l *literals) zero() {
 	l.bufs = nil
 }
 
-// forms returns fresh copies of b: raw, base64 (standard and URL, with and
-// without padding), percent-encoded (query and path style) and
+// minShiftedBase64 is the fewest bytes of a value whose base64 inner
+// forms are scrubbed: shorter ones give strings of under 8 characters.
+const minShiftedBase64 = 6
+
+// forms returns fresh copies of b: raw and lower case (a host name is
+// lowered before it is shown), base64 (standard and URL, with and without
+// padding), the stable inner part of its base64 at each of the three
+// offsets it can have inside a longer encoded text (such as
+// base64("Bearer " + token)), percent-encoded (query and path style) and
 // JSON-escaped (with and without "\/" and HTML escapes).
 func forms(b []byte) [][]byte {
-	out := [][]byte{bytes.Clone(b)}
+	out := [][]byte{bytes.Clone(b), bytes.ToLower(b)}
 	for _, enc := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 		e := make([]byte, enc.EncodedLen(len(b)))
 		enc.Encode(e, b)
 		out = append(out, e)
+	}
+	// At offset k (mod 3) in the encoded text, b's bytes from the next
+	// 3-byte boundary on are encoded on their own, in whole groups; the
+	// first and last groups mix in the neighbouring bytes.
+	for _, enc := range []*base64.Encoding{base64.RawStdEncoding, base64.RawURLEncoding} {
+		for off := 0; off < 3; off++ {
+			start := (3 - off) % 3
+			n := (len(b) - start) / 3 * 3
+			if n < minShiftedBase64 {
+				continue
+			}
+			e := make([]byte, enc.EncodedLen(n))
+			enc.Encode(e, b[start:start+n])
+			out = append(out, e)
+		}
 	}
 	out = append(out, formEscape(b), pathEscape(b))
 	for _, slash := range []bool{false, true} {

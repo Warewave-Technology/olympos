@@ -20,6 +20,14 @@ import (
 // absent is the actual value of a header or JSON path that is not there.
 const absent = "(absent)"
 
+// notStored is the actual value of a header, body or JSON subject when the
+// scenario does not store responses.
+const notStored = "(not stored)"
+
+// encodedBody stands for a body that is still content-encoded: redaction
+// cannot see into it, so it is not shown.
+const encodedBody = "[body not shown: content-encoded]"
+
 // facts are what one step attempt observed, for its assertions and
 // extracts.
 type facts struct {
@@ -34,6 +42,8 @@ type facts struct {
 	tlsDaysLeft int64
 	redact      *sensitive.Redactor
 	credHeader  []string
+	stored      bool // the scenario stores responses
+	encoded     bool // the body is still content-encoded
 
 	jsonOnce sync.Once
 	jsonDoc  any
@@ -74,7 +84,13 @@ const redactedPrefix = 32 << 10
 // redactedBody returns the start of the body, redacted once (for the
 // excerpt and body assertions), and whether it is cut.
 func (f *facts) redactedBody() ([]byte, bool) {
-	f.redOnce.Do(func() { f.redBody, f.redCut = f.redact.RedactPrefix(f.body, redactedPrefix) })
+	f.redOnce.Do(func() {
+		if f.encoded {
+			f.redBody = []byte(encodedBody)
+			return
+		}
+		f.redBody, f.redCut = f.redact.RedactPrefix(f.body, redactedPrefix)
+	})
 	return f.redBody, f.redCut
 }
 
@@ -118,6 +134,20 @@ func (r *Runner) evaluate(st *spec.Step, f *facts) (out []*pb.AssertionResult, c
 }
 
 func (r *Runner) check(f *facts, a spec.Assertion) (string, bool) {
+	actual, passed := r.checkSubject(f, a)
+	if f.kind == spec.KindHTTP && !f.stored && responseSubject(a.Subject) {
+		actual = notStored
+	}
+	return actual, passed
+}
+
+// responseSubject reports subjects whose actual value shows the response's
+// headers or body.
+func responseSubject(s string) bool {
+	return s == spec.SubjectBody || strings.HasPrefix(s, spec.SubjectHeaderPrefix) || strings.HasPrefix(s, spec.SubjectJSONPrefix)
+}
+
+func (r *Runner) checkSubject(f *facts, a spec.Assertion) (string, bool) {
 	switch a.Subject {
 	case spec.SubjectLatencyMS:
 		return strconv.FormatInt(f.latencyMS, 10), compareInt(f.latencyMS, a)

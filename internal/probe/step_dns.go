@@ -28,7 +28,7 @@ func (r *Runner) dnsStep(ctx context.Context, rs *runState, st *spec.Step) *outc
 		if ctxCode(ctx, err) == CodeTimeout {
 			o.err = errorf(CodeTimeout, "resolving %s", name)
 		} else {
-			o.err = errorf(CodeDNSError, "resolving %s: %s", name, dnsMessage(err))
+			o.err = errorf(CodeDNSError, "%s could not be resolved (%s)", name, dnsMessage(err))
 		}
 		return o
 	}

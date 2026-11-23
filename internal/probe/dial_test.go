@@ -2,7 +2,6 @@ package probe
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -20,14 +19,6 @@ func ips(s ...string) []netip.Addr {
 		out[i] = netip.MustParseAddr(a)
 	}
 	return out
-}
-
-func codeOf(err error) string {
-	var e *Error
-	if errors.As(err, &e) {
-		return e.Code
-	}
-	return ""
 }
 
 // Review Focus 1: the resolver answers an allowed IP first and the

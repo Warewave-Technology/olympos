@@ -43,10 +43,13 @@ var recordTypes = map[string]bool{"A": true, "AAAA": true, "CNAME": true, "TXT":
 var tlsVersions = map[string]bool{"1.0": true, "1.1": true, "1.2": true, "1.3": true}
 
 // Headers a step may not set. Host would pick another virtual host behind
-// an allowed address; the others belong to the transport.
+// an allowed address; Accept-Encoding would stop the probe from
+// decompressing, and a compressed body cannot be redacted; the others
+// belong to the transport.
 var reservedHeaders = map[string]bool{
 	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
 	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
+	"Accept-Encoding": true,
 }
 
 // subject classes: which operators apply and what Value holds.

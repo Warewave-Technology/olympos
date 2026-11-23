@@ -9,6 +9,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"io"
+	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -317,6 +319,8 @@ func tlsServer(t *testing.T, cert tls.Certificate, maxVersion uint16, h http.Han
 	}
 	srv := httptest.NewUnstartedServer(h)
 	srv.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MaxVersion: maxVersion}
+	// Failed handshakes are what some tests are about.
+	srv.Config.ErrorLog = log.New(io.Discard, "", 0)
 	srv.StartTLS()
 	t.Cleanup(srv.Close)
 	return srv

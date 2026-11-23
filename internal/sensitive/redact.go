@@ -26,9 +26,11 @@ var alwaysRedacted = map[string]bool{
 
 // pairRE finds "name=value" and "name: value" pairs in text: query strings,
 // form bodies, YAML, header-like lines, and JSON that is not valid as a
-// whole (cut at the read limit). Groups: 1 name, 2 optional auth scheme
-// ("Bearer "), 3 value.
-var pairRE = regexp.MustCompile(`(?i)["']?([a-z0-9_.\-]{1,128})["']?\s*[:=]\s*["']?((?:bearer|basic|digest|token)\s+)?([^"'&\s,;<>(){}\[\]]+)`)
+// whole (cut at the read limit). Groups: 1 name, 2 the opening quote of a
+// quoted value, 3 optional auth scheme of an unquoted value ("Bearer "), 4
+// unquoted value. A quoted value runs to its closing quote, spaces
+// included.
+var pairRE = regexp.MustCompile(`(?i)["']?([a-z0-9_.\-]{1,128})["']?\s*[:=]\s*(?:(["'])|((?:bearer|basic|digest|token)\s+)?([^"'&\s,;<>(){}\[\]]+))`)
 
 // Redactor removes credentials from HTTP responses: header and JSON field
 // values whose names are sensitive, name/value pairs in text, and whatever
@@ -158,12 +160,35 @@ func redactPairs(b []byte) []byte {
 			pos += m[3]
 			continue
 		}
-		vs, ve := pos+m[6], pos+m[7]
+		var vs, ve int
+		if m[4] >= 0 {
+			vs = pos + m[5]
+			ve = closingQuote(b, vs, b[pos+m[4]])
+		} else {
+			vs, ve = pos+m[8], pos+m[9]
+		}
 		out = append(out, b[last:vs]...)
 		out = append(out, Redacted...)
 		last, pos = ve, ve
 	}
 	return append(out, b[last:]...)
+}
+
+// closingQuote returns the index of the quote q that closes a value
+// starting at from, skipping backslash escapes. Without one, the value
+// runs to the end of the line.
+func closingQuote(b []byte, from int, q byte) int {
+	for i := from; i < len(b); i++ {
+		switch b[i] {
+		case '\\':
+			i++
+		case q:
+			return i
+		case '\n', '\r':
+			return i
+		}
+	}
+	return len(b)
 }
 
 // Scrub returns a copy of b in which every occurrence of each literal is

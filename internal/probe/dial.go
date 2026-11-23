@@ -72,6 +72,15 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Code + ": " + e.Msg }
 
+// codeOf returns the code of err, or "" when err is not an *Error.
+func codeOf(err error) string {
+	var e *Error
+	if errors.As(err, &e) {
+		return e.Code
+	}
+	return ""
+}
+
 func errorf(code, format string, args ...any) *Error {
 	return &Error{Code: code, Msg: fmt.Sprintf(format, args...)}
 }
@@ -139,7 +148,7 @@ func (d *Dialer) resolve(ctx context.Context, host string) (string, []netip.Addr
 		if code := ctxCode(ctx, err); code == CodeTimeout {
 			return "", nil, errorf(CodeTimeout, "resolving %s", name)
 		}
-		return "", nil, errorf(CodeDNSError, "resolving %s: %s", name, dnsMessage(err))
+		return "", nil, errorf(CodeDNSError, "%s could not be resolved (%s)", name, dnsMessage(err))
 	}
 	if len(addrs) == 0 {
 		return "", nil, errorf(CodeDNSError, "%s has no addresses", name)

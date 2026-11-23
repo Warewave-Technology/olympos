@@ -323,7 +323,9 @@ func TestOAuth2Credential(t *testing.T) {
 	const token = "CANARY-oauth-access-token"
 	var fetches atomic.Int32
 	e := newEnv(t)
-	e.host("token.example.test", "203.0.113.40", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
+	tokenCert := e.ca.leaf(t, []string{"token.example.test"}, now.Add(-time.Hour), now.Add(24*time.Hour))
+	e.host("token.example.test", "203.0.113.40", tlsServer(t, tokenCert, 0, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fetches.Add(1)
 		id, sec, ok := r.BasicAuth()
 		_ = r.ParseForm()
@@ -340,7 +342,7 @@ func TestOAuth2Credential(t *testing.T) {
 	e.host("api.example.test", "203.0.113.10", server(t, api))
 	cred := spec.RunCredential{ID: uuid.New(), Kind: spec.CredOAuth2, BoundHosts: []string{"exact:api.example.test", "exact:token.example.test"},
 		Username: secret("client-1"), Secret: secret("CANARY-client-secret"),
-		TokenURL: "http://token.example.test/oauth/token", Scopes: "read write"}
+		TokenURL: "https://token.example.test/oauth/token", Scopes: "read write"}
 	s := scenario(
 		withCred(httpStep("http://api.example.test/a", assertion(spec.SubjectBody, spec.OpContains, token)), cred),
 		withCred(httpStep("http://api.example.test/b"), cred),
@@ -360,12 +362,18 @@ func TestOAuth2Credential(t *testing.T) {
 		t.Fatalf("result holds a canary: %s", text)
 	}
 
-	// A token URL outside the bound hosts is refused.
-	cred.BoundHosts = []string{"exact:api.example.test"}
-	res = e.run(scenario(withCred(httpStep("http://api.example.test/a"), cred)), cred)
+	// A token URL outside the bound hosts is refused, and so is one that
+	// is not https: the client secret would travel in clear.
+	unbound := cred
+	unbound.BoundHosts = []string{"exact:api.example.test"}
+	res = e.run(scenario(withCred(httpStep("http://api.example.test/a"), unbound)), unbound)
+	wantCode(t, res, 0, CodeCredentialError)
+	plain := cred
+	plain.TokenURL = "http://token.example.test/oauth/token"
+	res = e.run(scenario(withCred(httpStep("http://api.example.test/a"), plain)), plain)
 	wantCode(t, res, 0, CodeCredentialError)
 	if fetches.Load() != 1 {
-		t.Fatal("token fetched from an unbound host")
+		t.Fatal("token fetched from an unbound host or over http")
 	}
 }
 

@@ -127,6 +127,18 @@ func TestRedactBodyText(t *testing.T) {
 			t.Errorf("%s: nothing redacted in %q", name, got)
 		}
 	}
+	// A quoted value is redacted to its closing quote, spaces and escaped
+	// quotes included (NDJSON is not valid JSON as a whole).
+	for in, want := range map[string]string{
+		"{\"password\":\"correct horse battery staple\"}\n{\"a\":1}\n": "{\"password\":\"[redacted]\"}\n{\"a\":1}\n",
+		`token = 'two words' next=1`:                                   `token = '[redacted]' next=1`,
+		`"secret": "a \"quoted\" b", "x": "y"`:                         `"secret": "[redacted]", "x": "y"`,
+		"api_key=\"unterminated value\nnext line":                      "api_key=\"[redacted]\nnext line",
+	} {
+		if got := string((&Redactor{}).RedactBody([]byte(in))); got != want {
+			t.Errorf("quoted %q:\n got %q\nwant %q", in, got, want)
+		}
+	}
 	if got := string(r.RedactBody([]byte("scope=read&state=ok"))); got != "scope=read&state=ok" {
 		t.Errorf("plain text changed: %q", got)
 	}

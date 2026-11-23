@@ -21,11 +21,22 @@ import (
 )
 
 // Headers a step may not set (as spec.Validate refuses them). Host would
-// pick another virtual host behind an allowed address.
+// pick another virtual host behind an allowed address. Accept-Encoding
+// would make the transport hand back the body still compressed, where
+// redaction cannot see a credential.
 var reservedStepHeaders = map[string]bool{
 	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
 	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
+	"Accept-Encoding": true,
 }
+
+// Size limits once the variables are substituted: a template within the
+// limits of spec.Validate can still grow with each ${var}.
+const (
+	maxURLLen       = 8 << 10
+	maxHeaderLen    = 8 << 10
+	maxHeadersTotal = 32 << 10
+)
 
 // varRef matches a ${name} reference, as spec.Substitute reads it.
 var varRef = regexp.MustCompile(`\$\{[A-Za-z_][A-Za-z0-9_]{0,63}\}`)
@@ -38,7 +49,11 @@ func buildURL(tmpl string, vars map[string]string) (*url.URL, error) {
 	if err != nil || t.Host == "" || t.Opaque != "" {
 		return nil, errorf(CodeInvalidRequest, "the URL is not valid")
 	}
-	u, err := url.Parse(spec.Substitute(tmpl, vars))
+	raw := spec.Substitute(tmpl, vars)
+	if len(raw) > maxURLLen {
+		return nil, errorf(CodeInvalidRequest, "the URL is longer than %d bytes once its variables are substituted", maxURLLen)
+	}
+	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, errorf(CodeInvalidRequest, "the URL is not valid once its variables are substituted")
 	}
@@ -59,6 +74,7 @@ func buildURL(tmpl string, vars map[string]string) (*url.URL, error) {
 // refuses values that would split the request.
 func stepHeaders(h map[string]string, vars map[string]string) (http.Header, error) {
 	out := http.Header{}
+	total := 0
 	for name, v := range h {
 		canon := textproto.CanonicalMIMEHeaderKey(name)
 		if !httpguts.ValidHeaderFieldName(name) || reservedStepHeaders[canon] {
@@ -70,6 +86,12 @@ func stepHeaders(h map[string]string, vars map[string]string) (http.Header, erro
 		}
 		if !httpguts.ValidHeaderFieldValue(val) {
 			return nil, errorf(CodeInvalidRequest, "header %s: the value is not valid once its variables are substituted", canon)
+		}
+		if len(val) > maxHeaderLen {
+			return nil, errorf(CodeInvalidRequest, "header %s: the value is longer than %d bytes once its variables are substituted", canon, maxHeaderLen)
+		}
+		if total += len(canon) + len(val); total > maxHeadersTotal {
+			return nil, errorf(CodeInvalidRequest, "the headers are longer than %d bytes once their variables are substituted", maxHeadersTotal)
 		}
 		out.Set(canon, val)
 	}
@@ -106,7 +128,11 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	}
 	var body io.Reader
 	if h.Body != "" {
-		body = strings.NewReader(spec.Substitute(h.Body, rs.vars))
+		b := spec.Substitute(h.Body, rs.vars)
+		if len(b) > spec.MaxBody {
+			return failOutcome(errorf(CodeInvalidRequest, "the body is longer than %d bytes once its variables are substituted", spec.MaxBody))
+		}
+		body = strings.NewReader(b)
 	}
 
 	sess := newSession(r.Dialer)
@@ -153,11 +179,11 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	defer tr.CloseIdleConnections()
 	client := &http.Client{
 		Transport: &credTransport{
-			base: tr, r: r, cred: cred, lits: rs.creds.lits, ctx: ctx,
+			base: tr, r: r, cred: cred, cs: rs.creds, ctx: ctx,
 			origHost: origHost, origScheme: strings.ToLower(u.Scheme),
 		},
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
-			return checkRedirect(sess, h.FollowRedirects, next, via)
+			return checkRedirect(sess, rs.creds, h.FollowRedirects, next, via)
 		},
 	}
 
@@ -197,12 +223,24 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 		body:       data,
 		redact:     r.Redactor,
 		credHeader: credHeaders,
+		stored:     rs.s.StoreResponses,
+		encoded:    contentEncoded(resp.Header),
 	}
 	if resp.TLS != nil && len(resp.TLS.PeerCertificates) > 0 {
 		f.hasTLS = true
 		f.tlsDaysLeft = daysLeft(resp.TLS.PeerCertificates[0].NotAfter, r.now())
 	}
 	o.names, o.extracted, err = extract(st.Extracts, f)
+	// §6.2: a credential never goes into an extracted variable, from a
+	// bound host that echoes it or otherwise.
+	for _, n := range o.names {
+		if v, ok := o.extracted[n]; ok && rs.creds.holdsCredential([]byte(v)) {
+			delete(o.extracted, n)
+			if err == nil || codeOf(err) != CodeCredentialError {
+				err = errorf(CodeCredentialError, "extract %s captured a credential; it is not kept", n)
+			}
+		}
+	}
 	if rs.s.StoreResponses {
 		var red []byte
 		red, o.excerptCut = f.redactedBody()
@@ -210,17 +248,20 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	}
 	o.assertions, o.actualCut = r.evaluate(st, f)
 	o.finish()
-	if err != nil && o.status == StatusPassed {
+	switch {
+	case codeOf(err) == CodeCredentialError:
+		o.status, o.err = StatusError, classify(ctx, err)
+	case err != nil && o.status == StatusPassed:
 		o.status, o.err = StatusFailed, classify(ctx, err)
 	}
 	return o
 }
 
 // checkRedirect runs every redirect hop through the same checks as the
-// first request: the host must normalize and match the allowlist, and it
-// is resolved once (the session pins the answer for the dial) with every
+// first request: it must not carry a credential outside its bound hosts,
+// the host must normalize and match the allowlist, and it is resolved once (the session pins the answer for the dial) with every
 // answer checked. At most spec.MaxRedirects redirects are followed.
-func checkRedirect(sess *session, follow bool, next *http.Request, via []*http.Request) error {
+func checkRedirect(sess *session, cs *credSet, follow bool, next *http.Request, via []*http.Request) error {
 	if !follow {
 		return http.ErrUseLastResponse
 	}
@@ -233,6 +274,11 @@ func checkRedirect(sess *session, follow bool, next *http.Request, via []*http.R
 	if next.URL.User != nil {
 		return errorf(CodeRedirectBlocked, "redirect to a URL with a user name or password")
 	}
+	// Before the hop's host is resolved: the host name itself may carry a
+	// credential to the resolver.
+	if err := cs.checkRequest(next); err != nil {
+		return err
+	}
 	if _, _, err := sess.resolve(next.Context(), next.URL.Hostname()); err != nil {
 		if e, ok := err.(*Error); ok && e.Code == CodeHostNotAllowed {
 			return errorf(CodeRedirectBlocked, "redirect to a host that is not allowed: %s", e.Msg)
@@ -240,6 +286,20 @@ func checkRedirect(sess *session, follow bool, next *http.Request, via []*http.R
 		return err
 	}
 	return nil
+}
+
+// contentEncoded reports a response body the transport did not decode
+// (Content-Encoding other than identity): redaction cannot see into it, so
+// it is never shown.
+func contentEncoded(h http.Header) bool {
+	for _, v := range h.Values("Content-Encoding") {
+		for _, e := range strings.Split(v, ",") {
+			if e = strings.TrimSpace(e); e != "" && !strings.EqualFold(e, "identity") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // daysLeft is the number of whole days from now until notAfter, negative
