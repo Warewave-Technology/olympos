@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -75,11 +76,13 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 		run(t, "kubectl", "-n", "lab", "exec", "deploy/synth-web", "--", "/synth-web", "toggle", mode)
 	}
 	toggle("ok")
-	t.Cleanup(func() { _, _ = runOK(t, "kubectl", "-n", "lab", "exec", "deploy/synth-web", "--", "/synth-web", "toggle", "ok") })
+	t.Cleanup(func() {
+		_, _ = runOK(t, "kubectl", "-n", "lab", "exec", "deploy/synth-web", "--", "/synth-web", "toggle", "ok")
+	})
 
 	// Settings › Synthetic monitoring: the allowlist rule and a bearer
 	// credential bound to the lab domain. The canary must never come back.
-	ruleID := ensureRule(t, admin, labSuffix, "suffix")
+	ensureRule(t, admin, labSuffix, "suffix")
 	canary := "CANARY-synthetic-bearer-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
 	var cred struct {
 		ID string `json:"id"`
@@ -89,6 +92,7 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 		"bound_hosts": []map[string]string{{"kind": "suffix", "pattern": labSuffix}},
 		"secret":      map[string]any{"source": "stored", "password": canary},
 	}, &cred, 201)
+	t.Cleanup(func() { admin.do("DELETE", "/synthetic/credentials/"+cred.ID, nil, nil) })
 
 	// The always-denied addresses are refused when saving, whatever the
 	// allowlist says.
@@ -138,11 +142,7 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 	}
 	admin.must("POST", "/synthetic/scenarios", sc, &created, 201)
 	scenarioID := created.ID
-	t.Cleanup(func() {
-		admin.do("DELETE", "/synthetic/scenarios/"+scenarioID, nil, nil)
-		admin.do("DELETE", "/synthetic/credentials/"+cred.ID, nil, nil)
-		admin.do("DELETE", "/synthetic/allowlist/"+ruleID, nil, nil)
-	})
+	t.Cleanup(func() { admin.do("DELETE", "/synthetic/scenarios/"+scenarioID, nil, nil) })
 	pair := []string{labClusterID, labB}
 
 	waitCells(t, admin, scenarioID, pair, 4*time.Minute, "passing")
@@ -194,43 +194,32 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 		t.Errorf("synthetic.critical messages: %s (want 1)", n)
 	}
 
-	// No canary anywhere: database (outbox included), server, probe and
-	// agent logs.
-	dump := run(t, "kubectl", "-n", "olympos", "exec", "statefulset/olympos-postgresql", "--", "pg_dump", "-U", "olympos", "--data-only", "olympos")
-	places := map[string]string{
-		"database":    dump,
-		"server logs": run(t, "kubectl", "-n", "olympos", "logs", "deploy/olympos", "--tail=-1"),
-		"outbox":      olymposSQL(t, `SELECT coalesce(string_agg(payload::text, E'\n'), '') FROM outbox WHERE event_type LIKE 'synthetic.%'`),
-	}
-	for _, ns := range []string{"olympos-system", labBNS} {
-		places["probe logs "+ns] = run(t, "kubectl", "-n", ns, "logs", "deploy/olympos-probe", "--tail=-1")
-		places["agent logs "+ns] = run(t, "kubectl", "-n", ns, "logs", "deploy/olympos-agent", "--tail=-1")
-	}
-	for where, text := range places {
-		if strings.Contains(text, canary) || strings.Contains(strings.ToLower(text), strings.ToLower(canary)) {
-			t.Errorf("canary credential found in %s", where)
-		}
-	}
-	if !strings.Contains(dump, scenarioID) {
-		t.Error("database dump does not hold the scenario: the canary check looked at the wrong database")
-	}
+	checkNoCanary(t, canary, scenarioID)
 
 	// lab-b's probe stops: its cells read "probe offline", and no run on
 	// lab-b fails or errors meanwhile (an offline probe is not a failure).
+	// A run the probe was running when it stopped ends skipped
+	// (probe_disconnected); waiting for none to be running makes that rare.
+	eventually(t, time.Minute, "no lab-b run in flight", func() (bool, string) {
+		n := olymposSQL(t, fmt.Sprintf(`SELECT count(*) FROM synthetic_runs WHERE cluster_id = '%s' AND status = 'running'`, labB))
+		return n == "0", n
+	})
 	since := olymposSQL(t, "SELECT now()")
-	run(t, "kubectl", "-n", labBNS, "scale", "deploy/olympos-probe", "--replicas=0")
 	t.Cleanup(func() { _, _ = runOK(t, "kubectl", "-n", labBNS, "scale", "deploy/olympos-probe", "--replicas=1") })
+	run(t, "kubectl", "-n", labBNS, "scale", "deploy/olympos-probe", "--replicas=0")
 	waitCells(t, admin, scenarioID, []string{labB}, 3*time.Minute, "probe_offline")
 	time.Sleep(70 * time.Second) // two more intervals with the probe offline
 	if s := cellStates(t, admin, scenarioID); s[labB] != "probe_offline" || s[labClusterID] != "passing" {
 		t.Errorf("cells after the probe stopped: %v", s)
 	}
-	out := olymposSQL(t, fmt.Sprintf(`SELECT count(*) FILTER (WHERE status IN ('failed','error')) || ' ' ||
+	// Every lab-b run that ended since is skipped (probe_offline,
+	// probe_disconnected, not_dispatched), never failed or error.
+	out := olymposSQL(t, fmt.Sprintf(`SELECT count(*) FILTER (WHERE status <> 'skipped') || ' ' ||
 		coalesce(string_agg(DISTINCT status || ':' || failure_reason, ','), '')
 		FROM synthetic_runs WHERE cluster_id = '%s' AND scenario_id = '%s' AND finished_at > '%s'`, labB, scenarioID, since))
 	t.Logf("lab-b runs after the probe stopped: %s", out)
 	if !strings.HasPrefix(out, "0 ") && out != "0" {
-		t.Errorf("lab-b runs failed while its probe was offline: %s", out)
+		t.Errorf("lab-b runs that were not skipped while its probe was offline: %s", out)
 	}
 	if n := olymposSQL(t, fmt.Sprintf(`SELECT count(*) FROM synthetic_alerts WHERE scenario_id = '%s' AND state = 'firing'`, scenarioID)); n != "0" {
 		t.Errorf("firing alerts with the probe offline: %s", n)
@@ -301,7 +290,8 @@ func checkProbeIsolation(t *testing.T, ns string) {
 	}
 }
 
-// ensureRule returns the id of an allowlist rule, adding it if needed.
+// ensureRule returns the id of an allowlist rule, adding it (and its
+// removal at the end of the test) if needed.
 func ensureRule(t *testing.T, admin *client, pattern, kind string) string {
 	t.Helper()
 	var list struct {
@@ -321,6 +311,7 @@ func ensureRule(t *testing.T, admin *client, pattern, kind string) string {
 		ID string `json:"id"`
 	}
 	admin.must("POST", "/synthetic/allowlist", map[string]any{"pattern": pattern, "kind": kind, "note": "e2e lab (synth-web)"}, &r, 201)
+	t.Cleanup(func() { admin.do("DELETE", "/synthetic/allowlist/"+r.ID, nil, nil) })
 	return r.ID
 }
 
@@ -421,6 +412,66 @@ func checkAlertMessages(t *testing.T, scenarioID string, resolved bool) {
 		}
 		if len(seen) != len(alerts) {
 			t.Errorf("%v name %d alerts, the scenario has %d", ts, len(seen), len(alerts))
+		}
+	}
+}
+
+// checkNoCanary looks for the credential everywhere it could leak to: the
+// database (a full dump, where pg_dump writes the bytea excerpts as hex,
+// and SQL over the step results, the run reasons and the outbox), and the
+// logs of every server, probe and agent pod. Matches ignore case.
+func checkNoCanary(t *testing.T, canary, scenarioID string) {
+	t.Helper()
+	low := strings.ToLower(canary)
+	dump := strings.ToLower(run(t, "kubectl", "-n", "olympos", "exec", "statefulset/olympos-postgresql", "--",
+		"pg_dump", "-U", "olympos", "--data-only", "olympos"))
+	if !strings.Contains(dump, scenarioID) {
+		t.Fatal("database dump does not hold the scenario: the canary check would look at the wrong database")
+	}
+	if strings.Contains(dump, low) {
+		t.Error("canary credential found in the database dump")
+	}
+	// Control: the redacted excerpts are in the dump, as hex.
+	if !strings.Contains(dump, hex.EncodeToString([]byte(`"echo":"[redacted]"`))) {
+		t.Error("no excerpt found in the dump as hex: the hex search would prove nothing")
+	}
+	for _, form := range []string{canary, low} {
+		if strings.Contains(dump, hex.EncodeToString([]byte(form))) {
+			t.Error("canary credential found in the database dump as hex (a bytea column)")
+		}
+	}
+
+	// The canary is ours (letters, digits, dashes): safe as an SQL literal.
+	if n := olymposSQL(t, `SELECT count(*) FROM synthetic_step_results WHERE excerpt IS NOT NULL`); n == "0" {
+		t.Error("no stored excerpt: the excerpt check would prove nothing")
+	}
+	raw, lit := "'"+canary+"'", "'"+low+"'"
+	for what, sql := range map[string]string{
+		"excerpts":   `SELECT count(*) FROM synthetic_step_results WHERE position(convert_to(` + raw + `, 'UTF8') in excerpt) > 0 OR position(convert_to(` + lit + `, 'UTF8') in excerpt) > 0`,
+		"errors":     `SELECT count(*) FROM synthetic_step_results WHERE position(` + lit + ` in lower(error)) > 0`,
+		"assertions": `SELECT count(*) FROM synthetic_step_results WHERE position(` + lit + ` in lower(assertions::text)) > 0`,
+		"reasons":    `SELECT count(*) FROM synthetic_runs WHERE position(` + lit + ` in lower(failure_reason)) > 0`,
+		"outbox":     `SELECT count(*) FROM outbox WHERE position(` + lit + ` in lower(payload::text)) > 0`,
+	} {
+		if n := olymposSQL(t, sql); n != "0" {
+			t.Errorf("canary credential found in %s: %s rows", what, n)
+		}
+	}
+
+	for _, p := range []struct{ ns, app string }{
+		{"olympos", "olympos-server"}, {"olympos-system", "olympos-probe"}, {"olympos-system", "olympos-agent"},
+		{labBNS, "olympos-probe"}, {labBNS, "olympos-agent"},
+	} {
+		pods := strings.Fields(run(t, "kubectl", "-n", p.ns, "get", "pods", "-l", "app.kubernetes.io/name="+p.app,
+			"-o", "jsonpath={.items[*].metadata.name}"))
+		if len(pods) == 0 {
+			t.Errorf("no %s pod in %s to check", p.app, p.ns)
+		}
+		for _, pod := range pods {
+			logs := run(t, "kubectl", "-n", p.ns, "logs", pod, "--all-containers", "--tail=-1")
+			if strings.Contains(strings.ToLower(logs), low) {
+				t.Errorf("canary credential found in the logs of %s/%s", p.ns, pod)
+			}
 		}
 	}
 }
