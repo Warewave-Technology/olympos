@@ -1,0 +1,59 @@
+# Synthetic monitoring target (test/e2e/cmd/synth-web), applied to every lab
+# cluster. CoreDNS sends every *.olympos-lab.test name here (run.sh and
+# env.sh patch it, lib.sh patch_coredns), so scenarios use names such as
+# http://shop.olympos-lab.test/api/items. Only the probes may call it.
+apiVersion: v1
+kind: Namespace
+metadata: {name: lab}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: synth-web, namespace: lab}
+spec:
+  # One replica: the toggle (ok / 500 / slow) lives in its memory.
+  replicas: 1
+  selector: {matchLabels: {app: synth-web}}
+  template:
+    metadata: {labels: {app: synth-web}}
+    spec:
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65532, seccompProfile: {type: RuntimeDefault}}
+      containers:
+      - name: web
+        image: olympos-synth-web:e2e
+        imagePullPolicy: Never
+        ports: [{containerPort: 8080, name: http}]
+        # Not /health: in 500 mode the pod must stay behind the Service, so
+        # that probes see the 500 instead of a refused connection.
+        readinessProbe: {tcpSocket: {port: http}, periodSeconds: 5}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+          limits: {memory: 64Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: synth-web, namespace: lab}
+spec:
+  selector: {app: synth-web}
+  ports: [{name: http, port: 80, targetPort: http}]
+---
+# Probes only: olympos-system (the agent release of each lab cluster) and
+# olympos-b (TestM9's second Olympos cluster in the same kind cluster).
+# The readiness probe comes from the kubelet, which policies do not filter.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: synth-web-from-probes, namespace: lab}
+spec:
+  podSelector: {matchLabels: {app: synth-web}}
+  policyTypes: [Ingress]
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchExpressions:
+        - {key: kubernetes.io/metadata.name, operator: In, values: [olympos-system, olympos-b]}
+      podSelector: {matchLabels: {app.kubernetes.io/name: olympos-probe}}
+    ports: [{protocol: TCP, port: 8080}]

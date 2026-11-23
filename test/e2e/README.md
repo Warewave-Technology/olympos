@@ -4,7 +4,7 @@
 (OrbStack works), with its own kubeconfig at `test/e2e/.work/kubeconfig`. Your current kube context
 is never used or changed.
 
-It builds `olympos-server:e2e` / `olympos-agent:e2e` / `olympos-probe:e2e`, deploys:
+It builds `olympos-server:e2e` / `olympos-agent:e2e` / `olympos-probe:e2e` / `olympos-synth-web:e2e`, deploys:
 
 | Namespace | Workload | Purpose |
 |---|---|---|
@@ -13,6 +13,8 @@ It builds `olympos-server:e2e` / `olympos-agent:e2e` / `olympos-probe:e2e`, depl
 | `olympos-system` | `olympos-agent`, `olympos-probe` (installed by the tests from the local chart) | the agent and the synthetic monitoring probe |
 | `lab` | `orders-pg` (TLS, lab CA), `vault` and `openbao` (TLS, raft), `metrics-ch` | annotated targets |
 | `lab` | `restore-pg` (PostgreSQL 16, TLS), `restore-ch`, `restore-vault` (TLS, raft, not configured in Olympos) | new, empty servers that `TestM8Restores` and the docs tour restore backups into (emptied by every reset) |
+| `lab` | `synth-web` ([cmd/synth-web](cmd/synth-web), [manifests/synthetic.yaml](manifests/synthetic.yaml)), reachable from the probes only | the synthetic monitoring target: CoreDNS answers every `*.olympos-lab.test` name with it and `metadata.olympos-lab.test` with `169.254.169.254` (`lib.sh` `patch_coredns`); `/synth-web toggle ok\|500\|slow` switches it (reset to `ok` by every reset) |
+| `olympos-b` | a second agent and probe release (`TestM9SyntheticMonitoring`) | Olympos cluster `lab-b`, so a scenario runs on two clusters and can go critical |
 
 and runs `go test -tags e2e ./test/e2e/...`. Some tests run a gateway **in-process** on the host and
 point a second real agent at it through `host.docker.internal`, so they can ask the agent for arbitrary
@@ -27,6 +29,8 @@ where the legacy `ClusterPolicy` runs as well, so both agent code paths are exer
 SKIP_BUILD=1 ./test/e2e/run.sh   # reuse images
 # one milestone with the tests it builds on (M8 needs the enrolled agent, the M2 destination and M3's Vault job)
 E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM2BackupsPostgresAndClickHouse|TestM3VaultMakerChecker|TestM8Restores)$' ./test/e2e/run.sh
+# synthetic monitoring (M9 needs the enrolled lab cluster and its probe)
+E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM9SyntheticMonitoring)$' ./test/e2e/run.sh
 E2E_CPUS=4 ./test/e2e/run.sh     # nodes limited to 4 CPUs, like a GitHub runner
 ./test/e2e/run.sh down           # delete the cluster
 ```
