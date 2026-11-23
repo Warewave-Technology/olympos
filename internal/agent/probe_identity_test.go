@@ -11,6 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"reflect"
@@ -665,5 +666,93 @@ func TestProbeIdentityUnreachableServerKeepsToken(t *testing.T) {
 
 	if len(e.enrollToks) != 2 || h.updates() != 0 {
 		t.Fatalf("enroll tries %d, writes %d: the token must stay for the next try", len(e.enrollToks), h.updates())
+	}
+}
+
+// P20: the probe identity loop makes no call until the agent holds its own
+// identity. A server from before the probe ignores EnrollRequest.role, so a
+// probe enrollment first would spend the add-cluster token on an agent
+// certificate and lock the agent out.
+func TestProbeIdentityWaitsForTheAgentsOwnIdentity(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1")})
+	h.a.log = slog.New(slog.NewTextHandler(io.Discard, nil)) // the loop logs from its goroutine
+	e := &fakeEnroller{enrollCert: func() ([]byte, error) { return nil, status.Error(codes.Unavailable, "down") }}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if !h.a.startProbeIdentity(ctx, e) {
+		t.Fatal("not started")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := e.calls(); n != 0 {
+		t.Fatalf("%d gateway calls before the agent's own identity", n)
+	}
+	h.a.own.set()
+	h.a.own.set() // idempotent
+	deadline := time.Now().Add(5 * time.Second)
+	for e.calls() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the probe was not enrolled after the agent's identity arrived")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	e.mu.Lock()
+	toks := append([]string(nil), e.enrollToks...)
+	e.mu.Unlock()
+	if len(toks) != 1 || toks[0] != "tok-1" {
+		t.Fatalf("enrollments: %v", toks)
+	}
+}
+
+// A loop still waiting stops with its context.
+func TestProbeIdentityWaitEndsWithContext(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1")})
+	h.a.log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := &fakeEnroller{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { h.a.runProbeIdentity(ctx, e); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runProbeIdentity did not return after cancel")
+	}
+	if e.calls() != 0 {
+		t.Fatal("calls after cancel without an identity")
+	}
+}
+
+// A stored, valid agent identity releases the probe loop; an expired one
+// without a token does not.
+func TestEnsureIdentityReleasesTheProbeLoop(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		notAfter time.Time
+		want     bool
+	}{
+		{"valid", time.Now().Add(time.Hour), true},
+		{"expired", time.Now().Add(-time.Minute), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newProbeHarness(t, nil)
+			der, key := probeCert(t, 7, time.Now().Add(-time.Hour), tc.notAfter)
+			sec := h.secret(t, testAgentSecret)
+			sec.Data = certData(t, der, key)
+			if _, err := h.kube.CoreV1().Secrets(testNS).Update(context.Background(), sec, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			h.a.ids = &identityStore{kube: h.kube, namespace: testNS, name: testAgentSecret}
+			err := h.a.ensureIdentity(context.Background())
+			select {
+			case <-h.a.own.ready():
+				if !tc.want {
+					t.Fatal("released without a usable identity")
+				}
+			default:
+				if tc.want {
+					t.Fatalf("not released: %v", err)
+				}
+			}
+		})
 	}
 }

@@ -46,6 +46,9 @@ type Agent struct {
 
 	ids *identityStore
 	id  identity
+	// own is closed once the agent holds its own identity; the probe
+	// identity loop waits for it (see runProbeIdentity).
+	own ownIdentity
 
 	caPool *x509.CertPool
 

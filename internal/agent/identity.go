@@ -185,6 +185,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		_, leaf := a.id.get()
 		if time.Now().Before(leaf.NotAfter) {
 			a.log.Info("loaded stored identity", "cluster_id", leaf.Subject.CommonName, "expires", leaf.NotAfter)
+			a.own.set()
 			return nil
 		}
 		a.log.Warn("stored certificate expired; re-enrollment needed")
@@ -215,7 +216,25 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		return fmt.Errorf("persist identity: %w", err)
 	}
 	a.log.Info("enrolled", "cluster_id", resp.ClusterId)
+	a.own.set()
 	return nil
+}
+
+// ownIdentity is a one-shot signal: the agent has its own identity (loaded
+// or enrolled). Its zero value is ready to use.
+type ownIdentity struct {
+	init, done sync.Once
+	ch         chan struct{}
+}
+
+func (o *ownIdentity) ready() <-chan struct{} {
+	o.init.Do(func() { o.ch = make(chan struct{}) })
+	return o.ch
+}
+
+func (o *ownIdentity) set() {
+	o.ready()
+	o.done.Do(func() { close(o.ch) })
 }
 
 // renewLoop renews the certificate at 2/3 of its lifetime.

@@ -131,7 +131,23 @@ func (a *Agent) startProbeIdentity(ctx context.Context, e probeEnroller) bool {
 }
 
 // runProbeIdentity keeps the probe's identity in its Secret until ctx ends.
+//
+// It starts only once the agent holds its own identity (P20). A server from
+// before the probe ignores EnrollRequest.role: a probe enrollment that came
+// first would spend the add-cluster token on an agent certificate, and the
+// agent could no longer enroll itself. A new server accepts either order;
+// waiting costs the probe nothing, it needs the agent's gateway anyway.
 func (a *Agent) runProbeIdentity(ctx context.Context, e probeEnroller) {
+	select {
+	case <-a.own.ready():
+	default:
+		a.log.Info("probe identity: waiting for the agent's own identity first")
+		select {
+		case <-ctx.Done():
+			return
+		case <-a.own.ready():
+		}
+	}
 	a.probeIdentityLoop(ctx, e, systemProbeClock)
 }
 

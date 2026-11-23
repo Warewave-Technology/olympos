@@ -174,17 +174,13 @@ func helmSets(cmd string) map[string]string {
 }
 
 // installAgent installs the agent chart, and with it the probe, with values
-// from an install command. OLYMPOS_E2E_PROBE=off disables the probe
-// (upgrade.sh, against a server from before the probe).
+// from an install command.
 func installAgent(t *testing.T, release, namespace string, sets map[string]string) {
 	t.Helper()
 	args := []string{"upgrade", "--install", release, "deploy/helm/olympos-agent", "--namespace", namespace, "--create-namespace",
 		"--set", "image.repository=olympos-agent", "--set", "image.tag=e2e", "--set", "image.pullPolicy=Never",
 		"--set", "probe.image.repository=olympos-probe", "--set", "probe.image.tag=e2e", "--set", "probe.image.pullPolicy=Never",
 		"--wait", "--timeout", "3m"}
-	if os.Getenv("OLYMPOS_E2E_PROBE") == "off" {
-		args = append(args, "--set", "probe.enabled=false")
-	}
 	for k, v := range sets {
 		args = append(args, "--set", fmt.Sprintf("%s=%s", k, v))
 	}
