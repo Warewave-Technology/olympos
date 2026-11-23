@@ -235,8 +235,11 @@ func TestRevokeProbeAlone(t *testing.T) {
 	if _, err := connectProbe(t, ctx, e.dialProbe(t, fresh), id.String(), 1); err != nil {
 		t.Fatal(err)
 	}
-	waitProbes(t, e.gw, id, n, 2)
+	waitProbes(t, e.gw, id, n, 2) // the fresh certificate is accepted
 	wantCode(t, "old probe certificate after reinstall", refusedProbe(t, pc, id.String()), codes.PermissionDenied)
+	// probe_status is no longer 'revoked', and this serial was never put in
+	// revoked_certs: only "current serial only" refuses it.
+	wantCode(t, "pre-renewal probe certificate after reinstall", refusedProbe(t, e.dialProbe(t, beforeRenew), id.String()), codes.PermissionDenied)
 
 	if err := e.gw.RevokeProbe(ctx, e.gw.DB, uuid.New()); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("unknown cluster: %v", err)
@@ -310,10 +313,15 @@ func TestProbeRenewCert(t *testing.T) {
 		t.Fatalf("probe serial %q (want %q), agent serial %q (want %q)", probeSerial, pki.SerialHex(leaf.SerialNumber), agentSerial, agentSerialBefore)
 	}
 	renewed := &tls.Certificate{Certificate: [][]byte{resp.CertDer}, PrivateKey: key}
+	// Only the current certificate is accepted: the one it replaced is
+	// refused at once, for Connect and for another renewal.
+	wantCode(t, "superseded probe certificate", refusedProbe(t, e.dialProbe(t, probe), id.String()), codes.PermissionDenied)
+	_, err = e.dialProbe(t, probe).RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
+	wantCode(t, "renewal with a superseded certificate", err, codes.PermissionDenied)
 	if _, err := connectProbe(t, ctx, e.dialProbe(t, renewed), id.String(), 1); err != nil {
 		t.Fatal(err)
 	}
-	waitProbes(t, e.gw, id, n, 1)
+	waitProbes(t, e.gw, id, n, 1) // the current certificate is accepted
 	// The renewed certificate is still a probe identity only.
 	_, err = e.dial(t, renewed).RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
 	wantCode(t, "renewed probe on AgentGateway", err, codes.PermissionDenied)

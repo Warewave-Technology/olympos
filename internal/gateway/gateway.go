@@ -122,7 +122,18 @@ func (g *Gateway) GRPCServer(tlsCfg *tls.Config) *grpc.Server {
 // whose role is want. An identity of another role is refused with
 // PermissionDenied: an agent certificate never reaches ProbeGateway, a
 // probe certificate never reaches AgentGateway. A probe is also refused once
-// it was revoked alone (clusters.probe_status = 'revoked').
+// it was revoked alone (clusters.probe_status = 'revoked'), and unless it
+// presents the current probe certificate (clusters.probe_cert_serial).
+//
+// Only the current probe certificate is accepted, because RevokeProbe can
+// revoke only the current serial, and a reinstall clears probe_status: an
+// older unexpired certificate, from before a renewal or before the
+// reinstall, must not come back. The cost is a short gap after each
+// renewal: the new serial is issued, but the probe has not yet reloaded the
+// Secret the agent writes, so a reconnect in that gap is refused until it
+// reloads. Streams that are already open are not affected, and the
+// probe's offline state is debounced well past that gap. The agent keeps
+// the old rule: any unrevoked certificate of the cluster.
 func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid.UUID, *x509.Certificate, error) {
 	p, ok := peer.FromContext(ctx)
 	if !ok {
@@ -142,10 +153,12 @@ func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid
 		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "this identity may not use this service")
 	}
 	var revoked bool
-	var st, probeSt string
+	var st, probeSt, probeSerial string
+	serial := pki.SerialHex(cert.SerialNumber)
 	err = g.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM revoked_certs WHERE serial = $1),
-		COALESCE((SELECT status FROM clusters WHERE id = $2), ''), COALESCE((SELECT probe_status FROM clusters WHERE id = $2), '')`,
-		pki.SerialHex(cert.SerialNumber), id).Scan(&revoked, &st, &probeSt)
+		COALESCE((SELECT status FROM clusters WHERE id = $2), ''), COALESCE((SELECT probe_status FROM clusters WHERE id = $2), ''),
+		COALESCE((SELECT probe_cert_serial FROM clusters WHERE id = $2), '')`,
+		serial, id).Scan(&revoked, &st, &probeSt, &probeSerial)
 	if err != nil {
 		return uuid.Nil, nil, status.Error(codes.Unavailable, "identity check failed")
 	}
@@ -154,6 +167,10 @@ func (g *Gateway) authenticate(ctx context.Context, want pki.IdentityRole) (uuid
 	}
 	if role == pki.RoleProbe && probeSt == "revoked" {
 		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "probe revoked")
+	}
+	if role == pki.RoleProbe && serial != probeSerial {
+		g.Log.Warn("probe certificate is not the current one", "cluster_id", id, "serial", serial, "peer", peerAddr(ctx))
+		return uuid.Nil, nil, status.Error(codes.PermissionDenied, "probe certificate superseded")
 	}
 	return id, cert, nil
 }

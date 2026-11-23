@@ -100,10 +100,13 @@ func (p *probeServer) Connect(stream pb.ProbeGateway_ConnectServer) error {
 }
 
 // RenewCert issues a new probe certificate for the authenticated probe. The
-// agent calls it with the probe's identity (decision 1).
+// agent calls it with the probe's identity (decision 1). From then on only
+// the new certificate is accepted (see authenticate): the agent must write
+// it to the probe's Secret at once, and the probe reconnects with it as
+// soon as the files change.
 func (p *probeServer) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (*pb.RenewCertResponse, error) {
 	g := p.g
-	clusterID, _, err := g.authenticate(ctx, pki.RoleProbe)
+	clusterID, current, err := g.authenticate(ctx, pki.RoleProbe)
 	if err != nil {
 		return nil, err
 	}
@@ -111,15 +114,17 @@ func (p *probeServer) RenewCert(ctx context.Context, req *pb.RenewCertRequest) (
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	// A probe revoked since it authenticated gets nothing.
+	// A probe revoked since it authenticated gets nothing, and so does a
+	// second renewal made with the same certificate: the first one already
+	// replaced the current serial, which authenticate requires.
 	tag, err := g.DB.Exec(ctx, `UPDATE clusters SET probe_cert_serial = $2, probe_cert_expires_at = $3
-		WHERE id = $1 AND status <> 'revoked' AND probe_status <> 'revoked'`,
-		clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter)
+		WHERE id = $1 AND status <> 'revoked' AND probe_status <> 'revoked' AND probe_cert_serial = $4`,
+		clusterID, pki.SerialHex(cert.SerialNumber), cert.NotAfter, pki.SerialHex(current.SerialNumber))
 	if err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
 	if tag.RowsAffected() == 0 {
-		return nil, status.Error(codes.PermissionDenied, "probe revoked")
+		return nil, status.Error(codes.PermissionDenied, "probe revoked or certificate superseded")
 	}
 	g.Log.Info("probe certificate renewed", "cluster_id", clusterID, "serial", pki.SerialHex(cert.SerialNumber))
 	return &pb.RenewCertResponse{CertDer: cert.Raw}, nil
