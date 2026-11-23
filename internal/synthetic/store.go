@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -198,14 +199,34 @@ func CredentialIDs(sc *spec.Scenario) []uuid.UUID {
 
 // credentialRow is a synthetic_credentials row, its bound hosts parsed.
 type credentialRow struct {
+	expiresAt                  *time.Time
 	id, credentialID           uuid.UUID
 	kind, headerName, tokenURL string
 	scopes                     string
 	bound                      []hostallow.Rule
 }
 
-// errCredential means a credential is missing or its row is unusable.
-var errCredential = errors.New("synthetic credential unusable")
+// How a credential can fail a run (ruling P14). Invalid and expired are
+// the credential's fault and end the run as an error; anything else (Key
+// Vault, the envelope, the database) is the server's and must not count
+// as a failure of the scenario.
+var (
+	// errCredential means a credential is missing or its row is unusable.
+	errCredential = errors.New("synthetic credential unusable")
+	// errCredentialExpired means a credential's expires_at has passed.
+	errCredentialExpired = errors.New("synthetic credential expired")
+)
+
+// credentialReason maps a credential error to how the run ends.
+func credentialReason(err error) (status, reason string) {
+	switch {
+	case errors.Is(err, errCredentialExpired):
+		return StatusError, ReasonCredentialExpired
+	case errors.Is(err, errCredential):
+		return StatusError, ReasonCredentialError
+	}
+	return StatusSkipped, ReasonCredentialUnavailable
+}
 
 // loadCredentials reads the rows of ids, in the order of ids. A missing row
 // or a bound host that does not parse fails: a credential is never sent
@@ -214,7 +235,7 @@ func loadCredentials(ctx context.Context, q store.Querier, ids []uuid.UUID) ([]c
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	rows, err := q.Query(ctx, `SELECT id, credential_id, kind, bound_hosts, COALESCE(header_name, ''), COALESCE(oauth_token_url, ''), oauth_scopes
+	rows, err := q.Query(ctx, `SELECT id, credential_id, kind, bound_hosts, COALESCE(header_name, ''), COALESCE(oauth_token_url, ''), oauth_scopes, expires_at
 		FROM synthetic_credentials WHERE id = ANY($1)`, ids)
 	if err != nil {
 		return nil, err
@@ -223,7 +244,7 @@ func loadCredentials(ctx context.Context, q store.Querier, ids []uuid.UUID) ([]c
 	for rows.Next() {
 		var c credentialRow
 		var hosts []string
-		if err := rows.Scan(&c.id, &c.credentialID, &c.kind, &hosts, &c.headerName, &c.tokenURL, &c.scopes); err != nil {
+		if err := rows.Scan(&c.id, &c.credentialID, &c.kind, &hosts, &c.headerName, &c.tokenURL, &c.scopes, &c.expiresAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -270,20 +291,26 @@ func CredentialBounds(ctx context.Context, q store.Querier, ids []uuid.UUID) (ma
 	return out, nil
 }
 
-// runCredentials resolves the credentials of ids for one run. The caller
+// runCredentials resolves the credentials of ids for one run at now. A
+// credential whose expires_at has passed is refused. The caller
 // zeroes the result with spec.ZeroCredentials, whatever happens; on an
 // error, nothing is left to zero.
 //
 // Only basic and OAuth2 credentials carry a user name (the client id for
 // OAuth2): for the other kinds the stored user name is a label, and the
 // probe would scrub it from every result as if it were secret.
-func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID) (out []spec.RunCredential, err error) {
+func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID, now time.Time) (out []spec.RunCredential, err error) {
 	rows, err := loadCredentials(ctx, q, ids)
 	if err != nil {
 		return nil, err
 	}
+	for _, c := range rows {
+		if c.expiresAt != nil && !now.Before(*c.expiresAt) {
+			return nil, fmt.Errorf("%w: credential %s expired at %s", errCredentialExpired, c.id, c.expiresAt.UTC().Format(time.RFC3339))
+		}
+	}
 	if len(rows) > 0 && creds == nil {
-		return nil, fmt.Errorf("%w: no credential store", errCredential)
+		return nil, errors.New("no credential store")
 	}
 	defer func() {
 		if err != nil {
@@ -298,7 +325,8 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		login, err := creds.Resolve(ctx, q, c.credentialID)
 		if err != nil {
-			return out, fmt.Errorf("%w: credential %s: %v", errCredential, c.id, err)
+			// Key Vault or the envelope: the server's side (P14).
+			return out, fmt.Errorf("resolve credential %s: %w", c.id, err)
 		}
 		// NewSecret takes the resolved buffer: ZeroCredentials reaches it.
 		rc.Secret = spec.NewSecret(login.Secret)

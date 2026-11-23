@@ -68,6 +68,19 @@ const (
 	// resolved or its bound hosts do not parse (error). The probe uses the
 	// same code.
 	ReasonCredentialError = "credential_error"
+	// ReasonCredentialExpired: a credential of the scenario is past its
+	// expires_at (error, ruling P13).
+	ReasonCredentialExpired = "credential_expired"
+	// ReasonCredentialUnavailable: the server could not resolve a
+	// credential (Key Vault, the envelope, the database): skipped, the
+	// fault is not the scenario's (ruling P14).
+	ReasonCredentialUnavailable = "credential_unavailable"
+	// ReasonScenarioDisabled: the run was due after its scenario was
+	// disabled (skipped, ruling P13).
+	ReasonScenarioDisabled = "scenario_disabled"
+	// ReasonDispatchError: the server could not read the run to send it
+	// (error).
+	ReasonDispatchError = "dispatch_error"
 	// ReasonRejected: the probe refused the run for a reason this server
 	// does not know (error).
 	ReasonRejected = "rejected"
@@ -99,6 +112,9 @@ const (
 	// defaultTestInterval stands in for the interval of a test run (it has
 	// no schedule) when deciding that it was never dispatched.
 	defaultTestInterval = 60 * time.Second
+	// MaxClaim is the most runs one pass claims for one stream, whatever
+	// concurrency the probe advertises.
+	MaxClaim = 20
 )
 
 // ProbeSender is the part of the gateway that reaches probe streams on this

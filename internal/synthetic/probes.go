@@ -35,8 +35,11 @@ var errProbeRevoked = errors.New("probe revoked")
 func (s *Service) probeConnected(ctx context.Context, clusterID uuid.UUID, h *pb.ProbeHello) error {
 	now := s.now()
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
-		var prev string
-		err := tx.QueryRow(ctx, `SELECT probe_status FROM clusters WHERE id = $1 AND status <> 'revoked' FOR UPDATE`, clusterID).Scan(&prev)
+		var prev, name string
+		var alerted bool
+		var since *time.Time
+		err := tx.QueryRow(ctx, `SELECT probe_status, name, probe_offline_alerted, probe_offline_since FROM clusters
+			WHERE id = $1 AND status <> 'revoked' FOR UPDATE`, clusterID).Scan(&prev, &name, &alerted, &since)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return errProbeRevoked
 		}
@@ -46,8 +49,9 @@ func (s *Service) probeConnected(ctx context.Context, clusterID uuid.UUID, h *pb
 		if prev == ProbeRevoked {
 			return errProbeRevoked
 		}
+		version := clean(h.GetProbeVersion(), maxVersion)
 		if _, err := tx.Exec(ctx, `UPDATE clusters SET probe_version = $2, probe_last_seen_at = $3 WHERE id = $1`,
-			clusterID, h.GetProbeVersion(), now); err != nil {
+			clusterID, version, now); err != nil {
 			return err
 		}
 		if prev == ProbePending || prev == ProbeNotInstalled {
@@ -55,8 +59,15 @@ func (s *Service) probeConnected(ctx context.Context, clusterID uuid.UUID, h *pb
 				WHERE id = $1`, clusterID); err != nil {
 				return err
 			}
+			// A probe re-enrolled while it was alerted offline: its
+			// outage ends here, and the alert gets its probe.online.
+			if alerted {
+				if err := emitProbeOnline(ctx, tx, clusterID, name, since); err != nil {
+					return err
+				}
+			}
 			return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "probe.connected", ObjectType: "cluster",
-				ObjectID: clusterID.String(), ClusterID: &clusterID, Details: map[string]any{"probe_version": h.GetProbeVersion()}})
+				ObjectID: clusterID.String(), ClusterID: &clusterID, Details: map[string]any{"probe_version": version}})
 		}
 		return s.markProbeOnline(ctx, tx, clusterID, now)
 	})
@@ -84,19 +95,24 @@ func (s *Service) markProbeOnline(ctx context.Context, tx pgx.Tx, clusterID uuid
 		details["offline_for_s"] = int(now.Sub(*since).Seconds())
 	}
 	if alerted {
-		key := "probe.online:" + clusterID.String()
-		if since != nil {
-			key += fmt.Sprintf(":%d", since.Unix())
-		}
-		if err := notify.Emit(ctx, tx, notify.Event{
-			Type: notify.ProbeOnline, Key: key, Title: "Probe back online: " + name, Link: "/settings/clusters",
-			Fields: map[string]string{"cluster": name},
-		}); err != nil {
+		if err := emitProbeOnline(ctx, tx, clusterID, name, since); err != nil {
 			return err
 		}
 	}
 	return activity.Record(ctx, tx, activity.Entry{ActorKind: "agent", Action: "probe.online", ObjectType: "cluster",
 		ObjectID: clusterID.String(), ClusterID: &clusterID, Details: details})
+}
+
+// emitProbeOnline sends the probe.online that follows a probe.offline.
+func emitProbeOnline(ctx context.Context, tx pgx.Tx, clusterID uuid.UUID, name string, since *time.Time) error {
+	key := "probe.online:" + clusterID.String()
+	if since != nil {
+		key += fmt.Sprintf(":%d", since.Unix())
+	}
+	return notify.Emit(ctx, tx, notify.Event{
+		Type: notify.ProbeOnline, Key: key, Title: "Probe back online: " + name, Link: "/settings/clusters",
+		Fields: map[string]string{"cluster": name},
+	})
 }
 
 // probeSeen is the gateway's Seen hook (throttled by the gateway): it

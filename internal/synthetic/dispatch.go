@@ -17,11 +17,13 @@ import (
 )
 
 // runTimeoutSQL is a run's timeout in seconds: the test spec's for a test
-// run, else the scenario's, at most spec.MaxRunTimeout. r is
+// run, else the scenario's, from 1 to spec.MaxRunTimeout. r is
 // synthetic_runs, s the scenario (LEFT JOIN).
-const runTimeoutSQL = `LEAST(COALESCE(
-	CASE WHEN jsonb_typeof(r.test_spec->'timeout_seconds') = 'number' THEN (r.test_spec->>'timeout_seconds')::numeric::int END,
-	s.timeout_seconds, 60), 60)`
+// The clamp is done in numeric, so that no value of the JSON can overflow
+// the cast, and matches the Go side (send): from 1 to MaxRunTimeout.
+var runTimeoutSQL = fmt.Sprintf(`GREATEST(LEAST(COALESCE(
+	CASE WHEN jsonb_typeof(r.test_spec->'timeout_seconds') = 'number' THEN (r.test_spec->>'timeout_seconds')::numeric END,
+	s.timeout_seconds::numeric, %[1]d), %[1]d), 1)::int`, int(spec.MaxRunTimeout/time.Second))
 
 // Dispatch is one pass of this replica's dispatcher:
 //
@@ -29,6 +31,7 @@ const runTimeoutSQL = `LEAST(COALESCE(
 //     (probe_offline): no failure for an offline probe;
 //  2. scheduled runs that no replica sent within the scenario's interval
 //     end skipped (not_dispatched), so that the scheduler plans the next;
+//     due runs of disabled scenarios end skipped (scenario_disabled);
 //  3. runs this replica sent end skipped (probe_disconnected) when their
 //     stream is gone, or error (no_result) when the stream is open but the
 //     result is ResultGrace past the run's timeout; running runs that no
@@ -37,7 +40,8 @@ const runTimeoutSQL = `LEAST(COALESCE(
 //  4. due runs of the probes connected here are claimed (FOR UPDATE SKIP
 //     LOCKED, up to the stream's free room), marked running, and sent once
 //     each, with the allowlist and the scenario's credentials sealed to the
-//     stream's key.
+//     stream's key. An expired or invalid credential ends the run as an
+//     error; one the server cannot resolve skips it (credential_unavailable).
 //
 // It returns how many runs it sent.
 func (s *Service) Dispatch(ctx context.Context) (int, error) {
@@ -56,6 +60,12 @@ func (s *Service) Dispatch(ctx context.Context) (int, error) {
 		FOR UPDATE OF r SKIP LOCKED`, now, int(defaultTestInterval.Seconds())); err != nil {
 		errs = append(errs, fmt.Errorf("skip undispatched runs: %w", err))
 	}
+	if err := s.finishWhere(ctx, StatusSkipped, ReasonScenarioDisabled, `SELECT r.id, r.cluster_id FROM synthetic_runs r
+		JOIN scenarios s ON s.id = r.scenario_id
+		WHERE r.status = 'scheduled' AND r.scheduled_for <= $1 AND NOT r.test AND NOT s.enabled
+		FOR UPDATE OF r SKIP LOCKED`, now); err != nil {
+		errs = append(errs, fmt.Errorf("skip runs of disabled scenarios: %w", err))
+	}
 	if err := s.reap(ctx, now); err != nil {
 		errs = append(errs, err)
 	}
@@ -71,7 +81,7 @@ func (s *Service) Dispatch(ctx context.Context) (int, error) {
 		if !ok {
 			continue
 		}
-		room := info.MaxConcurrency - info.InFlight
+		room := min(info.MaxConcurrency, MaxClaim) - info.InFlight
 		if room <= 0 {
 			continue
 		}
@@ -118,7 +128,9 @@ func (s *Service) claim(ctx context.Context, clusterID uuid.UUID, n int, now tim
 	var ids []uuid.UUID
 	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT r.id FROM synthetic_runs r JOIN clusters c ON c.id = r.cluster_id
+			LEFT JOIN scenarios s ON s.id = r.scenario_id
 			WHERE r.cluster_id = $1 AND r.status = 'scheduled' AND r.scheduled_for <= $2 AND c.probe_status = 'online'
+			  AND (r.test OR s.enabled IS NOT false)
 			ORDER BY r.scheduled_for, r.id LIMIT $3 FOR UPDATE OF r SKIP LOCKED`, clusterID, now, n)
 		if err != nil {
 			return err
@@ -142,7 +154,9 @@ func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb
 	var test bool
 	if err := s.DB.QueryRow(ctx, `SELECT scenario_id, test_spec, test FROM synthetic_runs WHERE id = $1`, runID).
 		Scan(&scenarioID, &testSpec, &test); err != nil {
-		return false, err
+		// The run was claimed: end it now rather than leave it to the
+		// orphan rule.
+		return false, errors.Join(err, s.finishOne(ctx, runID, clusterID, StatusError, ReasonDispatchError))
 	}
 	sc, err := runScenario(ctx, s.DB, scenarioID, testSpec)
 	if err != nil {
@@ -179,8 +193,9 @@ func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb
 		s.Log.Debug("synthetic run sent", "run_id", runID, "cluster_id", clusterID, "session", info.SessionID)
 		return true, nil
 	case credErr != nil:
-		s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "err", credErr)
-		return false, s.finishOne(ctx, runID, clusterID, StatusError, ReasonCredentialError)
+		status, reason := credentialReason(credErr)
+		s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason, "err", credErr)
+		return false, s.finishOne(ctx, runID, clusterID, status, reason)
 	case !built:
 		// No stream was free (ErrProbeBusy, or the stream went away): the
 		// run never left.
@@ -197,7 +212,7 @@ func (s *Service) send(ctx context.Context, clusterID, runID uuid.UUID, snap *pb
 // seal resolves the credentials and seals them to the stream's key for this
 // run on this cluster. Every plaintext copy is zeroed before it returns.
 func (s *Service) seal(ctx context.Context, pub []byte, runID, clusterID uuid.UUID, ids []uuid.UUID) (*pb.SealedCredentials, error) {
-	creds, err := runCredentials(ctx, s.DB, s.Creds, ids)
+	creds, err := runCredentials(ctx, s.DB, s.Creds, ids, s.now())
 	defer spec.ZeroCredentials(creds)
 	if err != nil {
 		return nil, err
@@ -269,7 +284,10 @@ func (s *Service) reap(ctx context.Context, now time.Time) error {
 	for _, it := range due {
 		status, reason := "", ""
 		switch {
-		case !s.Probes.ProbeSessionAlive(it.r.cluster, it.r.session):
+		// A run whose result already came is not skipped because its
+		// stream ended: the result is being stored. Only the deadline
+		// applies to it.
+		case !it.r.released && !s.Probes.ProbeSessionAlive(it.r.cluster, it.r.session):
 			// The probe sends a result only on the stream the run came
 			// on: none will come.
 			status, reason = StatusSkipped, ReasonProbeDisconnected
