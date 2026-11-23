@@ -19,6 +19,7 @@ import { SettingsNotificationsPage } from './pages/settings/Notifications';
 import { DestinationsPage } from './pages/settings/Destinations';
 import { RegistriesPage } from './pages/settings/Registries';
 import { ClustersSettingsPage } from './pages/settings/Clusters';
+import { SyntheticSettingsPage } from './pages/settings/Synthetic';
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : typeof v === 'number' ? String(v) : undefined);
 /** Search params are always optional, so links never need to pass them. */
@@ -153,6 +154,8 @@ export const clustersSettingsRoute = createRoute({
   component: ClustersSettingsPage,
 });
 
+export const syntheticSettingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings/synthetic', component: SyntheticSettingsPage });
+
 export const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
@@ -173,6 +176,7 @@ export const routeTree = rootRoute.addChildren([
     destinationsRoute,
     registriesRoute,
     clustersSettingsRoute,
+    syntheticSettingsRoute,
   ]),
 ]);
 

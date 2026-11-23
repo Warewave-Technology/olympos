@@ -36,9 +36,19 @@ function minor(v: string) {
   return m ? Number(m[1]) : 0;
 }
 
+/** Clusters whose probe got an "Install probe" token, and when: the probe connects 9 s later. */
+const probeEnrolling = new Map<string, number>();
+/** The server's OLYMPOS_AGENT_INSTALL_SETS in this mock (an image mirror). */
+const AGENT_SETS = ['probe.image.repository=registry.contoso.internal/mirror/olympos-probe'];
+
 function liveClusters(): Cluster[] {
   const now = Date.now();
   for (const c of db.clusters) {
+    const pt = probeEnrolling.get(c.id);
+    if (pt && c.status !== 'revoked' && now - pt > 9000) {
+      probeEnrolling.delete(c.id);
+      Object.assign(c, { probe_status: 'online', probe_version: '0.3.0', probe_last_seen_at: new Date().toISOString() });
+    }
     const t = db.enrolling.get(c.id);
     if (t && c.status === 'pending' && now - t > 9000) {
       Object.assign(c, {
@@ -482,6 +492,39 @@ const routes: [string, string, Handler][] = [
         command: `helm upgrade --install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${c.name} \\\n  --set bootstrapToken=obt_${Math.random().toString(36).slice(2, 12)}`,
         expires_at: new Date(Date.now() + 3600_000).toISOString(),
       });
+    },
+  ],
+  [
+    'POST',
+    '/clusters/:id/probe-token',
+    (_r, p) => {
+      const c = db.clusters.find((x) => x.id === p.id);
+      if (!c) return notFound();
+      if (!perms().admin_global) return forbidden();
+      if (c.status === 'revoked') return { status: 409, body: { error: 'cluster is revoked; add it again as a new cluster' } };
+      probeEnrolling.set(c.id, Date.now());
+      db.record('cluster.probe_token_issued', 'cluster', c.name, 'probe install command issued');
+      const sets = AGENT_SETS.map((kv) => ` --set ${kv}`).join('');
+      return ok({
+        cluster: c,
+        command: `helm upgrade olympos-agent oci://olympos.contoso.internal/charts/olympos-agent -n olympos-system --reuse-values${sets} --set probe.enabled=true --set probe.bootstrapToken=olyb_${Math.random().toString(36).slice(2, 12)}`,
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      });
+    },
+  ],
+  [
+    'DELETE',
+    '/clusters/:id/probe',
+    (_r, p) => {
+      const c = db.clusters.find((x) => x.id === p.id);
+      if (!c) return notFound();
+      if (!perms().admin) return forbidden();
+      if (c.status === 'revoked') return { status: 409, body: { error: 'cluster is revoked' } };
+      if (c.probe_status === 'not_installed') return { status: 409, body: { error: 'no probe installed' } };
+      probeEnrolling.delete(c.id);
+      db.record('cluster.probe_revoked', 'cluster', c.name, `probe was ${c.probe_status}`);
+      c.probe_status = 'revoked';
+      return { status: 204 };
     },
   ],
   ['GET', '/clusters/:id/nodes', () => items([])],

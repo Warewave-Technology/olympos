@@ -1410,6 +1410,29 @@ export interface SyntheticCredential {
   updated_at: string;
 }
 
+/** POST /synthetic/allowlist. */
+export interface AllowRuleInput {
+  pattern: string;
+  kind: AllowKind;
+  note: string;
+}
+
+/**
+ * POST and PUT /synthetic/credentials. `secret` is write-only: required on create, on update it rotates the
+ * secret. password is the token, password, header value or client secret; username is the login (basic) or the
+ * client id (oauth2_client_credentials), none for bearer and header.
+ */
+export interface SyntheticCredentialInput {
+  name: string;
+  kind: CredentialKind;
+  bound_hosts: { pattern: string; kind: AllowKind }[];
+  secret?: { source: SecretSource; ref?: string; username?: string; password?: string };
+  header_name: string;
+  oauth_token_url: string;
+  oauth_scopes: string;
+  expires_at: string | null;
+}
+
 /** A 409 that names what still needs the object. */
 export interface InUse {
   error: string;

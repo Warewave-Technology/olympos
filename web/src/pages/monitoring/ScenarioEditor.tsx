@@ -31,7 +31,6 @@ import { plural } from '../../lib/format';
 import { monitoringEditorRoute } from '../../router';
 import { CheckIcon, IconArrowDown, IconArrowUp, IconClose } from '../../ui/icons';
 import { ErrorState, ForbiddenState, Loading, Spinner, aria, sentence, useAction, useNow, useToast } from '../../ui/kit';
-import { SpaLink } from '../../ui/SpaLink';
 import { PageHead } from '../../ui/status';
 import { TagInput } from '../../ui/TagInput';
 import { HiddenNote, OPERATOR_LABEL, SUBJECT_LABEL, TYPE_LABEL, actualText, assertionText, reasonText, stepTitle, urlHost, withCredentialNames } from '../../ui/synthetic';
@@ -226,7 +225,7 @@ function AllowlistFollowUp({ admin, withText }: { admin: boolean; withText: bool
     return (
       <>
         {withText ? ' Add a rule in ' : ' '}
-        <SpaLink href="/settings/synthetic">Settings › Synthetic monitoring</SpaLink>
+        <Link to="/settings/synthetic">Settings › Synthetic monitoring</Link>
         {withText ? '.' : ''}
       </>
     );
@@ -241,7 +240,7 @@ function ApiMessage({ text, admin }: { text: string; admin: boolean }) {
       {link ? text.replace(/Add a rule in Settings › Synthetic monitoring\.?$/, 'Add a rule in ') : text}
       {link && (
         <>
-          <SpaLink href="/settings/synthetic">Settings › Synthetic monitoring</SpaLink>.
+          <Link to="/settings/synthetic">Settings › Synthetic monitoring</Link>.
         </>
       )}
     </>
@@ -991,7 +990,7 @@ function StepEditor({
                 {admin ? (
                   <>
                     {' '}
-                    Credentials are managed in <SpaLink href="/settings/synthetic">Settings › Synthetic monitoring</SpaLink>.
+                    Credentials are managed in <Link to="/settings/synthetic">Settings › Synthetic monitoring</Link>.
                   </>
                 ) : (
                   ' Only admins add credentials.'

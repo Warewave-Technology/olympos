@@ -3,21 +3,16 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { Cluster, InstallResponse } from '../api/types';
 import { CheckIcon } from '../ui/icons';
+import { tokenCountdown } from '../ui/InstallProbeDialog';
 import { Badge, CopyButton, Field, FormError, Modal, Spinner, aria, fieldError, useNow } from '../ui/kit';
 import { TagInput } from '../ui/TagInput';
 
 const NAME_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 
-function countdown(expiresAt: string, now: number): { text: string; expired: boolean } {
-  const s = Math.round((new Date(expiresAt).getTime() - now) / 1000);
-  if (s <= 0) return { text: 'Token expired', expired: true };
-  const m = Math.floor(s / 60);
-  return { text: m >= 1 ? `Token expires in ${m} min · single use` : `Token expires in ${s} s · single use`, expired: false };
-}
-
 /**
- * Add cluster (SPEC §2.2, §4.4): name + labels + bench opt-in → one-time Helm command,
- * then wait for the agent by polling /clusters/{id} until it is online.
+ * Add cluster (SPEC §2.2, §4.4; docs/design/dialog-add-cluster.html): name + labels + bench opt-in → one-time
+ * Helm command, then wait for the agent by polling /clusters/{id} until it is online. The chart installs the
+ * synthetic probe with the agent (probe.enabled=true by default) and the agent enrolls it with the same token.
  * `existing` re-issues a fresh command for a pending cluster (Settings › Clusters).
  */
 export function AddClusterDialog({ open, onClose, existing }: { open: boolean; onClose: () => void; existing?: Cluster }) {
@@ -95,7 +90,7 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
   const err = create.error ?? reissue.error;
   const nameErr = localErr.name ?? fieldError(err, 'name');
   const labelsErr = localErr.labels ?? fieldError(err, 'labels');
-  const cd = install ? countdown(install.expires_at, now) : null;
+  const cd = install ? tokenCountdown(install.expires_at, now) : null;
   const locked = !!install || !!existing;
 
   return (
@@ -105,7 +100,7 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
       size="wide"
       eyebrow="Add cluster"
       title={existing ? `Install command for ${existing.name}` : 'Connect a cluster to Olympos'}
-      description="The agent dials out to Olympos. No inbound port is needed on the cluster."
+      description="Installs the agent and the synthetic probe. Both dial out to Olympos; no inbound port is needed on the cluster."
       initialFocus={locked ? undefined : nameRef}
     >
       <form onSubmit={submit} className="stack-sm" style={{ gap: 18 }} noValidate>
@@ -154,6 +149,9 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
               <pre className="code scroll" aria-label="Helm install command" tabIndex={0}>
                 {install.command}
               </pre>
+              <div className="field-hint">
+                <span className="mono">probe.enabled=true</span> by default (synthetic monitoring). Add <span className="mono">--set probe.enabled=false</span> to install the agent alone; the cluster then shows “Probe: not installed”.
+              </div>
             </div>
             {online ? (
               <div className="panel" role="status">

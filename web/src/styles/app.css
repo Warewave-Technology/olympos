@@ -3641,3 +3641,77 @@ button.cell:focus-visible {
     grid-template-columns: 110px minmax(0, 1fr) 64px;
   }
 }
+
+/* ------------------------------------------------------------ Settings › Synthetic monitoring, probe state */
+.allow-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+.allow-foot.single {
+  grid-template-columns: minmax(0, 1fr);
+}
+.card-note {
+  margin: 0;
+  border-radius: 0 0 var(--radius-lg) var(--radius-lg);
+  border-left: 0;
+  border-right: 0;
+  border-bottom: 0;
+}
+.bound-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 130px 40px;
+  gap: 8px;
+  align-items: center;
+}
+.secret-state {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px 16px;
+  font-size: 13px;
+  color: var(--fg-muted);
+  margin-bottom: 8px;
+}
+.probe-note {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px 16px;
+}
+@media (max-width: 900px) {
+  .allow-foot {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 640px) {
+  .bound-row {
+    grid-template-columns: minmax(0, 1fr) 40px;
+  }
+  .bound-row select {
+    grid-column: 1 / 2;
+  }
+}
+.card-head .head-text {
+  flex: 1 1 320px;
+  min-width: 0;
+}
+.cred-warn {
+  margin-top: 4px;
+  min-width: 200px;
+  max-width: 240px;
+  white-space: normal;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+}
+.probe-ver {
+  margin-top: 3px;
+}
+.probe-note > span:first-child {
+  flex: 1 1 360px;
+  min-width: 0;
+}

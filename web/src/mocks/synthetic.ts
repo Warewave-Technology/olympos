@@ -2,6 +2,7 @@
 // /synthetic routes of docs/openapi.yaml. Credential values never exist here: credentials are names and kinds.
 import type {
   AllowRule,
+  AllowRuleInput,
   Cluster,
   HostCheck,
   Scenario,
@@ -14,6 +15,7 @@ import type {
   SyntheticCell,
   SyntheticCellState,
   SyntheticCredential,
+  SyntheticCredentialInput,
   SyntheticOverview,
   SyntheticRunDetail,
   SyntheticStepResult,
@@ -44,27 +46,32 @@ for (const name of ['#payments-alerts', '#platform-oncall']) {
 }
 const chan = (name: string) => db.channels.find((c) => c.name === name)!;
 
-function rule(pattern: string, kind: AllowRule['kind'], note: string, scenarios: number): AllowRule {
-  return { id: db.stableId(`rule:${pattern}`), pattern, kind, note, scenarios, created_by: db.people.yigit.id, created_by_name: db.people.yigit.upn, created_at: db.iso(30 * D) };
+// synthetic.allowlist_changed gets the routes of grant.changed (decision 4)
+for (const c of db.channels) if (c.routes.includes('grant.changed') && !c.routes.includes('synthetic.allowlist_changed')) c.routes.push('synthetic.allowlist_changed');
+
+function rule(pattern: string, kind: AllowRule['kind'], note: string, by = db.people.yigit, ago = 2 * D): AllowRule {
+  return { id: db.stableId(`rule:${pattern}`), pattern, kind, note, scenarios: 0, created_by: by.id, created_by_name: by.upn, created_at: db.iso(ago) };
 }
 export const allowlist: AllowRule[] = [
-  rule('*.prod.wrw.com', 'wildcard', 'Production APIs', 3),
-  rule('wrw.com', 'suffix', 'Everything under wrw.com', 6),
-  rule('partner-sftp.acme.net', 'exact', 'Partner SFTP', 1),
-  rule('*.data.svc.cluster.local', 'wildcard', 'In-cluster data services', 1),
+  rule('*.prod.wrw.com', 'wildcard', 'Production APIs'),
+  rule('wrw.com', 'suffix', 'Everything under wrw.com'),
+  rule('*.dev.wrw.com', 'wildcard', 'Development APIs'),
+  rule('partner-sftp.acme.net', 'exact', 'Partner SFTP', db.people.selin, D),
+  rule('login.acme.net', 'exact', 'Partner OAuth2 token endpoint', db.people.selin, D),
+  rule('*.data.svc.cluster.local', 'wildcard', 'In-cluster data services'),
 ];
 
-function cred(name: string, kind: SyntheticCredential['kind'], bound: string, header_name = ''): SyntheticCredential {
+function cred(name: string, kind: SyntheticCredential['kind'], bound: string[], p: Partial<SyntheticCredential> = {}): SyntheticCredential {
   return {
     id: db.stableId(`cred:${name}`),
     name,
     kind,
-    bound_hosts: [{ pattern: bound, kind: bound.startsWith('*.') ? 'wildcard' : 'exact' }],
-    header_name,
+    bound_hosts: bound.map((b) => ({ pattern: b, kind: b.startsWith('*.') ? 'wildcard' : 'exact' })),
+    header_name: '',
     oauth_token_url: '',
     oauth_scopes: '',
     source: 'stored',
-    expires_at: db.isoIn(80 * D),
+    expires_at: db.isoIn(88 * D + H),
     expired: false,
     rotated_at: null,
     scenarios: [],
@@ -74,9 +81,16 @@ function cred(name: string, kind: SyntheticCredential['kind'], bound: string, he
     created_by_name: db.people.yigit.upn,
     created_at: db.iso(25 * D),
     updated_at: db.iso(25 * D),
+    ...p,
   };
 }
-export const credentials: SyntheticCredential[] = [cred('catalog-monitor', 'bearer', '*.prod.wrw.com'), cred('search-api-key', 'header', 'search.wrw.com', 'X-Api-Key'), cred('reports-login', 'basic', 'reports.wrw.com')];
+export const credentials: SyntheticCredential[] = [
+  cred('catalog-monitor', 'bearer', ['*.prod.wrw.com'], { rotated_at: db.iso(2 * D), updated_at: db.iso(2 * D) }),
+  // a Key Vault reference the server could not read lately (resolve_failures_24h)
+  cred('search-api-key', 'header', ['search.wrw.com'], { header_name: 'X-Api-Key', source: 'keyvault_ref', expires_at: null, resolve_failures_24h: 3, last_resolve_failed_at: db.iso(40 * MIN) }),
+  cred('reports-login', 'basic', ['reports.wrw.com'], { expires_at: db.isoIn(9 * D + H) }),
+  cred('partner-oauth', 'oauth2_client_credentials', ['partner-sftp.acme.net', 'login.acme.net'], { oauth_token_url: 'https://login.acme.net/oauth2/token', oauth_scopes: 'sftp.read', expires_at: null, created_by: db.people.selin.id, created_by_name: db.people.selin.upn, created_at: db.iso(D), updated_at: db.iso(D) }),
+];
 const credRef = (name: string) => {
   const c = credentials.find((x) => x.name === name)!;
   return { credential_id: c.id, credential: { id: c.id, name: c.name, kind: c.kind, header_name: c.header_name } };
@@ -757,6 +771,228 @@ const byId = (id: string) => scenarios.find((s) => s.id === id);
 /** The body of the last PUT /synthetic/scenarios/{id} (tests check what the editor sends). */
 export const lastPut: { body: unknown } = { body: undefined };
 
+// ------------------------------------------------------------ settings: allowlist and credential writes (admin, scope all)
+
+let allowlistVersion = 7;
+
+/** The hosts a scenario reaches now, normalized (variables left out). */
+function hostsOf(s: Scenario): string[] {
+  return s.steps.flatMap((st, i) => stepHosts(st, i).map(([, raw]) => checkHost(raw).host)).filter((h) => !!h && !h.includes('${'));
+}
+
+/** The list column: scenarios with a host the rule matches, disabled ones too. */
+function ruleView(r: AllowRule): AllowRule {
+  return { ...r, scenarios: scenarios.filter((s) => hostsOf(s).some((h) => ruleMatches(r, h))).length };
+}
+
+function credView(c: SyntheticCredential): SyntheticCredential {
+  return { ...c, expired: !!c.expires_at && new Date(c.expires_at).getTime() <= Date.now(), scenarios: scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id)).map((s) => ({ id: s.id, name: s.name })) };
+}
+
+/** hostallow.Covers: every host the bound matches is allowed by the rules. */
+function covered(rules: AllowRule[], b: { pattern: string; kind: string }): boolean {
+  const below = (base: string) => rules.some((r) => r.kind !== 'exact' && (() => { const rb = r.kind === 'wildcard' ? r.pattern.slice(2) : r.pattern; return base === rb || base.endsWith('.' + rb); })());
+  if (b.kind === 'exact') return rules.some((r) => ruleMatches(r, b.pattern));
+  if (b.kind === 'wildcard') return below(b.pattern.slice(2));
+  return rules.some((r) => ruleMatches(r, b.pattern)) && below(b.pattern);
+}
+
+/** hostallow.ValidateRule, roughly: the normalized rule or what is wrong with it (field key and message). */
+function validateRule(pattern: string, kind: string): { rule?: { pattern: string; kind: AllowRule['kind'] }; key?: string; error?: string } {
+  if (kind !== 'exact' && kind !== 'wildcard' && kind !== 'suffix') return { key: 'kind', error: 'must be exact, wildcard or suffix' };
+  const p = pattern.trim().toLowerCase().replace(/\.$/, '');
+  if (!p) return { key: 'pattern', error: 'required' };
+  if (kind === 'wildcard' && !p.startsWith('*.')) return { key: 'pattern', error: `${p}: a wildcard rule starts with *.` };
+  const base = kind === 'wildcard' ? p.slice(2) : p;
+  if (base.includes('*')) return { key: 'pattern', error: `${p}: only a wildcard rule has a *, and only as its first label` };
+  const h = checkHost(base);
+  if (h.denied_reason === 'ip_literal') return { key: 'pattern', error: 'IP addresses are never allowed; use a host name' };
+  if (h.denied_reason === 'always_denied') return { key: 'pattern', error: 'localhost and the Kubernetes API are always denied' };
+  if (h.denied_reason === 'invalid_host') return { key: 'pattern', error: `${p}: not a valid host name` };
+  if (kind !== 'exact' && base.split('.').length < 2) return { key: 'pattern', error: `${p}: a ${kind} rule needs at least two labels` };
+  return { rule: { pattern: kind === 'wildcard' ? '*.' + base : base, kind } };
+}
+
+/** The 409 of a rule or credential still in use (InUse). */
+function inUse(what: string, scen: string[], creds: string[]): MockRes {
+  const parts = [scen.length ? `by scenarios ${scen.join(', ')}` : '', creds.length ? `by credentials ${creds.join(', ')}` : ''].filter(Boolean);
+  return { status: 409, body: { error: `${what} ${parts.join(' and ')}. Change them first.`, scenarios: scen, credentials: creds } };
+}
+
+const CRED_KINDS = ['bearer', 'basic', 'header', 'oauth2_client_credentials'];
+
+/** validateCredential and validateSecret of the API. The secret is checked and dropped: the mock never keeps it. */
+function validateCredential(b: SyntheticCredentialInput, prev: SyntheticCredential | undefined): Record<string, string> {
+  const f: Record<string, string> = {};
+  const name = (b.name ?? '').trim();
+  if (!name) f.name = 'required';
+  else if (credentials.some((c) => c.name === name && c.id !== prev?.id)) f.name = 'A credential with this name exists already.';
+  if (!CRED_KINDS.includes(b.kind)) f.kind = 'must be bearer, basic, header or oauth2_client_credentials';
+  else if (prev && b.kind !== prev.kind) f.kind = 'the kind of a credential cannot change';
+  const bound = b.bound_hosts ?? [];
+  if (!bound.length) f.bound_hosts = 'at least one host the credential may be sent to';
+  const seen = new Set<string>();
+  bound.forEach((h, i) => {
+    const v = validateRule(h.pattern ?? '', h.kind);
+    if (!v.rule) f[`bound_hosts.${i}`] = v.error!;
+    else if (!covered(allowlist, v.rule)) f[`bound_hosts.${i}`] = `${v.rule.pattern} is not inside the allowlist: every host it matches must be allowed. Add a rule first.`;
+    else if (seen.has(`${v.rule.kind}:${v.rule.pattern}`)) f[`bound_hosts.${i}`] = 'listed twice';
+    else seen.add(`${v.rule.kind}:${v.rule.pattern}`);
+  });
+  const header = (b.header_name ?? '').trim();
+  if (b.kind === 'header') {
+    if (!header) f.header_name = 'required for a header credential';
+    else if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(header)) f.header_name = 'not a valid header name';
+    else if (['host', 'content-length', 'transfer-encoding', 'connection', 'cookie'].includes(header.toLowerCase())) f.header_name = `${header} cannot carry a credential`;
+  } else if (header) f.header_name = 'only a header credential names its header';
+  if (b.kind === 'oauth2_client_credentials') {
+    const raw = (b.oauth_token_url ?? '').trim();
+    let u: URL | null = null;
+    try {
+      u = new URL(raw);
+    } catch {
+      u = null;
+    }
+    if (!raw) f.oauth_token_url = 'required for an OAuth2 credential';
+    else if (!u || u.protocol !== 'https:') f.oauth_token_url = 'must be an https:// URL';
+    else if (u.username || u.password) f.oauth_token_url = 'must not contain a user name or password';
+    else {
+      const host = checkHost(raw).host;
+      if (!allowlist.some((r) => ruleMatches(r, host))) f.oauth_token_url = notAllowedMessage(host);
+      else if (!bound.some((h) => validateRule(h.pattern ?? '', h.kind).rule && ruleMatches(validateRule(h.pattern, h.kind).rule!, host))) f.oauth_token_url = `${host} must be inside the credential's bound hosts: the client secret is sent to it`;
+    }
+  } else if ((b.oauth_token_url ?? '').trim()) f.oauth_token_url = 'only an OAuth2 credential has a token URL';
+  if (b.expires_at && !prev && new Date(b.expires_at).getTime() <= Date.now()) f.expires_at = 'must be in the future';
+  const sec = b.secret;
+  if (!sec && !prev) f.secret = 'required';
+  if (sec) {
+    if (sec.source !== 'stored' && sec.source !== 'keyvault_ref') f['secret.source'] = 'must be stored or keyvault_ref';
+    if ((b.kind === 'bearer' || b.kind === 'header') && sec.username?.trim()) f['secret.username'] = `a ${b.kind} credential has no user name`;
+    if ((b.kind === 'basic' || b.kind === 'oauth2_client_credentials') && !sec.username?.trim()) f['secret.username'] = b.kind === 'basic' ? 'required' : 'the client id is required';
+    if (sec.source === 'stored' && !sec.password) f['secret.password'] = 'required';
+    if (sec.source === 'keyvault_ref' && !/^kv:\/\/[a-zA-Z0-9-]{3,24}\/[a-zA-Z0-9-]{1,127}$/.test(sec.ref ?? '')) f['secret.ref'] = 'use kv://<vault>/<secret>';
+  }
+  return f;
+}
+
+function settingsRoutes(): [string, string, Handler][] {
+  const admin = () => perms().admin_global;
+  return [
+    [
+      'POST',
+      '/synthetic/allowlist',
+      (r) => {
+        if (!admin()) return forbidden();
+        const b = (r.body ?? {}) as AllowRuleInput;
+        const v = validateRule(String(b.pattern ?? ''), String(b.kind ?? ''));
+        const fields: Record<string, string> = {};
+        if (!v.rule) fields[v.key!] = v.error!;
+        if ((b.note ?? '').length > 500) fields.note = 'at most 500 characters';
+        if (Object.keys(fields).length) return invalid('invalid rule', fields);
+        if (allowlist.some((x) => x.pattern === v.rule!.pattern && x.kind === v.rule!.kind)) return invalid('invalid rule', { pattern: 'This rule exists already.' });
+        const me = db.me().principal;
+        const row: AllowRule = { id: db.uuid(), ...v.rule!, note: (b.note ?? '').trim(), scenarios: 0, created_by: me.id, created_by_name: me.upn, created_at: new Date().toISOString() };
+        allowlist.push(row);
+        allowlistVersion++;
+        db.record('synthetic.allowlist_rule_added', 'synthetic_allowlist', row.pattern, `+ ${row.kind} ${row.pattern}`);
+        return ok(ruleView(row), 201);
+      },
+    ],
+    [
+      'DELETE',
+      '/synthetic/allowlist/:id',
+      (_r, p) => {
+        if (!admin()) return forbidden();
+        const i = allowlist.findIndex((x) => x.id === p.id);
+        if (i < 0) return notFound();
+        const r = allowlist[i];
+        const rest = allowlist.filter((x) => x.id !== r.id);
+        const needed = (h: string) => ruleMatches(r, h) && !rest.some((x) => ruleMatches(x, h));
+        const scen = scenarios.filter((s) => hostsOf(s).some(needed)).map((s) => s.name);
+        const creds = credentials
+          .filter((c) => c.bound_hosts.some((b) => !covered(rest, b)) || (c.oauth_token_url && needed(checkHost(c.oauth_token_url).host)))
+          .map((c) => c.name);
+        if (scen.length || creds.length) return inUse('This rule is still needed', scen, creds);
+        allowlist.splice(i, 1);
+        allowlistVersion++;
+        db.record('synthetic.allowlist_rule_removed', 'synthetic_allowlist', r.pattern, `− ${r.kind} ${r.pattern}`);
+        return { status: 204 };
+      },
+    ],
+    [
+      'POST',
+      '/synthetic/credentials',
+      (r) => {
+        if (!admin()) return forbidden();
+        const b = (r.body ?? {}) as SyntheticCredentialInput;
+        const fields = validateCredential(b, undefined);
+        if (Object.keys(fields).length) return invalid('invalid credential', fields);
+        const me = db.me().principal;
+        const now = new Date().toISOString();
+        const c: SyntheticCredential = {
+          ...cred(b.name.trim(), b.kind, []),
+          id: db.uuid(),
+          bound_hosts: b.bound_hosts.map((h) => validateRule(h.pattern, h.kind).rule!),
+          header_name: (b.header_name ?? '').trim(),
+          oauth_token_url: (b.oauth_token_url ?? '').trim(),
+          oauth_scopes: (b.oauth_scopes ?? '').trim(),
+          source: b.secret!.source,
+          expires_at: b.expires_at ?? null,
+          created_by: me.id,
+          created_by_name: me.upn,
+          created_at: now,
+          updated_at: now,
+        };
+        credentials.push(c);
+        db.record('synthetic.credential_created', 'synthetic_credential', c.name, `${c.kind} · ${c.bound_hosts.map((h) => `${h.kind}:${h.pattern}`).join(', ')}`);
+        return ok(credView(c), 201);
+      },
+    ],
+    [
+      'PUT',
+      '/synthetic/credentials/:id',
+      (r, p) => {
+        if (!admin()) return forbidden();
+        const c = credentials.find((x) => x.id === p.id);
+        if (!c) return notFound();
+        const b = (r.body ?? {}) as SyntheticCredentialInput;
+        const fields = validateCredential(b, c);
+        if (Object.keys(fields).length) return invalid('invalid credential', fields);
+        const bound = b.bound_hosts.map((h) => validateRule(h.pattern, h.kind).rule!);
+        const broken = scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id && st.kind === 'http' && !bound.some((x) => ruleMatches(x, checkHost(st.http?.url ?? '').host)))).map((s) => s.name);
+        if (broken.length) return { status: 409, body: { error: `These bound hosts would break scenarios that use this credential: ${broken.join(', ')}. Change them first.`, scenarios: broken, credentials: [] } };
+        const now = new Date().toISOString();
+        Object.assign(c, {
+          name: b.name.trim(),
+          bound_hosts: bound,
+          header_name: (b.header_name ?? '').trim(),
+          oauth_token_url: (b.oauth_token_url ?? '').trim(),
+          oauth_scopes: (b.oauth_scopes ?? '').trim(),
+          expires_at: b.expires_at ?? null,
+          updated_at: now,
+          ...(b.secret ? { source: b.secret.source, rotated_at: now, resolve_failures_24h: 0, last_resolve_failed_at: null } : {}),
+        });
+        db.record(b.secret ? 'synthetic.credential_rotated' : 'synthetic.credential_updated', 'synthetic_credential', c.name, b.secret ? 'secret rotated' : 'metadata saved');
+        return ok(credView(c));
+      },
+    ],
+    [
+      'DELETE',
+      '/synthetic/credentials/:id',
+      (_r, p) => {
+        if (!admin()) return forbidden();
+        const i = credentials.findIndex((x) => x.id === p.id);
+        if (i < 0) return notFound();
+        const users = scenarios.filter((s) => s.steps.some((st) => st.credential_id === credentials[i].id)).map((s) => s.name);
+        if (users.length) return inUse('This credential is still used', users, []);
+        const [c] = credentials.splice(i, 1);
+        db.record('synthetic.credential_deleted', 'synthetic_credential', c.name, 'deleted with its secret');
+        return { status: 204 };
+      },
+    ],
+  ];
+}
+
 export const syntheticRoutes: [string, string, Handler][] = [
   ['GET', '/synthetic/overview', () => ok(overview())],
   [
@@ -911,7 +1147,8 @@ export const syntheticRoutes: [string, string, Handler][] = [
       return d ? ok(d) : notFound();
     },
   ],
-  ['GET', '/synthetic/allowlist', () => (perms().synthetic_edit || perms().read ? ok({ items: allowlist, version: 7 }) : forbidden())],
+  ['GET', '/synthetic/allowlist', () => (perms().synthetic_edit || perms().read ? ok({ items: allowlist.map(ruleView), version: allowlistVersion }) : forbidden())],
   ['POST', '/synthetic/allowlist/check', (r) => (perms().synthetic_edit ? ok(checkHost(String(r.body?.host ?? ''))) : forbidden())],
-  ['GET', '/synthetic/credentials', () => localStorage.getItem('olympos.mock.credentials') === 'fail' ? { status: 500, body: { error: 'database unavailable' } } : items(credentials.map((c) => ({ ...c, scenarios: scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id)).map((s) => ({ id: s.id, name: s.name })) })))],
+  ['GET', '/synthetic/credentials', () => localStorage.getItem('olympos.mock.credentials') === 'fail' ? { status: 500, body: { error: 'database unavailable' } } : items(credentials.map(credView))],
+  ...settingsRoutes(),
 ];
