@@ -23,6 +23,11 @@ export function useMe(): Me {
   return me;
 }
 
+/** The signed-in user, or null outside the app layout (components also rendered on their own in tests). */
+export function useMaybeMe(): Me | null {
+  return useContext(MeCtx);
+}
+
 export function useCan(perm: Permission): boolean {
   return can(useContext(MeCtx), perm);
 }

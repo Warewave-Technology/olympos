@@ -34,6 +34,14 @@ a{color:#83a598}a:hover{color:#8ec07c}
 .note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
 .note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
 .grp{display:inline-flex;align-items:center;gap:6px}
+.note.crit{border-color:#cc241d;background:#2c1a19;color:#ebdbb2}
+.note.ok{border-color:#98971a;background:#22261a;color:#ebdbb2}
+.note-title{font-weight:600;color:#ebdbb2;margin-bottom:4px;font-size:13px}
+.btn.danger{background:#351a19;border-color:#cc241d;color:#fc7f6f}
+.chk{display:flex;gap:10px;align-items:flex-start;font-size:13px;padding:4px 0}
+.ico-ok{color:#b8bb26}.ico-crit{color:#fc7f6f}.ico-warn{color:#fabd2f}
+.hint{font-size:12px;color:#a89984;margin-top:6px}
+.err{font-size:12px;color:#fc7f6f;margin-top:6px}
 .btn.ic{padding:0;min-width:32px;width:32px}
 </style>
 </head>
@@ -138,7 +146,11 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div class="note">Missing copy completed by repair run <a href="#" class="mono">Today 02:20</a> at <span class="mono">02:27</span>. The run itself stays <span class="badge warn" style="margin: 0 2px">Partial</span> as the record of what happened.</div>
 </div>
 <div>
-<h3 style="margin: 0 0 8px; font-size: 14px; font-weight: 600">Restore</h3>
+<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; margin: 0 0 8px">
+<h3 style="margin: 0; font-size: 14px; font-weight: 600">Restore</h3>
+<a href="#restore-dialog" class="btn pri" style="display: inline-flex; align-items: center; text-decoration: none; box-sizing: border-box">Restore&hellip;</a>
+</div>
+<p class="muted" style="margin: 0 0 10px; font-size: 12.5px"><b style="font-weight: 500; color: #ebdbb2">Restore&hellip;</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.</p>
 <fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
 <legend class="lbl">Restore from copy</legend>
 <label class="opt on"><input type="radio" name="copy" checked style="margin-top: 2px"><span><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span><br><span class="muted" style="font-size: 12px">First successful copy in member order &middot; taken 02:00</span></span></label>
@@ -180,6 +192,90 @@ sha256sum backup.dump   # must match the sha256 of this copy: 9f2c4a1e&hellip;7b
 <div class="note warn">Not every copy was written. Repair queued: next attempt at <span class="mono">11:12</span>. It writes only to <span class="mono">s3-fra-offsite</span>.</div>
 </div>
 <div style="display: flex; justify-content: flex-end"><button class="btn">Close</button></div>
+</section>
+
+<section class="card" role="dialog" id="restore-dialog" aria-labelledby="d3-t" style="flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore &middot; billing-pg</div>
+<h2 id="d3-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Restore billing-pg into a new target</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">PostgreSQL &middot; run of today 02:00 &middot; prod-aks-weu-02</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div class="note">The backup is loaded into a new target that Olympos discovered, in any cluster, never the backup's own. Nothing on the target is dropped or replaced: a database that exists there with data in it stops the request. A second person with operate on both clusters approves it before anything is written.</div>
+
+<fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
+<legend class="lbl">Copy</legend>
+<label class="opt on"><input type="radio" name="rcopy" checked style="margin-top: 2px"><span><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span><br><span class="muted" style="font-size: 12px">Taken today 02:00</span></span></label>
+<label class="opt"><input type="radio" name="rcopy" style="margin-top: 2px"><span><span class="mono">s3-fra-offsite</span> <span class="badge mute">S3</span> <span class="badge mute">Repair</span><br><span class="muted" style="font-size: 12px">Written by a repair today 02:21 (a later dump)</span></span></label>
+<label class="opt" style="opacity: 0.7; cursor: not-allowed"><input type="radio" name="rcopy" disabled style="margin-top: 2px"><span><span class="mono">minio-factory</span> <span class="badge mute">S3</span> <span class="badge crit">Failed</span><br><span class="muted" style="font-size: 12px">This run has no copy here.</span></span></label>
+</fieldset>
+
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px">
+<div><label class="lbl" for="r-target">Target (PostgreSQL)</label><select id="r-target" class="in mono"><option>aks-neu-dr / billing / billing-pg-dr &middot; PostgreSQL 16.4</option></select><div class="hint">Discovered targets of the same engine, in any cluster.</div></div>
+</div>
+
+<fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
+<legend class="lbl">Target credential (an admin login of the new database)</legend>
+<label class="opt on"><input type="radio" name="rsrc" checked style="margin-top: 2px"><span><span>Azure Key Vault reference</span> <span class="badge ok">Recommended</span><br><span class="muted" style="font-size: 12px">Read when the restore runs, with the server's managed identity. Nothing stored in Olympos.</span></span></label>
+<label class="opt"><input type="radio" name="rsrc" style="margin-top: 2px"><span><span>Store in Olympos</span><br><span class="muted" style="font-size: 12px">Envelope-encrypted while the request is open, deleted when it ends.</span></span></label>
+</fieldset>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px">
+<div><label class="lbl" for="r-user">Username</label><input id="r-user" class="in mono" value="postgres"></div>
+<div><label class="lbl" for="r-kv">Key Vault</label><input id="r-kv" class="in mono" value="kv-dr-neu"></div>
+<div><label class="lbl" for="r-sec">Secret name (holds the password)</label><input id="r-sec" class="in mono" value="billing-pg-dr-admin"></div>
+</div>
+<div><label class="lbl" for="r-ca">CA certificate of the target (PEM, optional)</label><textarea id="r-ca" class="in mono" rows="2" placeholder="-----BEGIN CERTIFICATE-----"></textarea><div class="hint">Verifies the new target's certificate: a new target has no job that carries one. The checker sees it.</div></div>
+<label class="chk"><input type="checkbox" checked style="margin-top: 2px"><span>Restore roles (<span class="mono">globals.sql</span>)<br><span class="muted" style="font-size: 12px">Only with a superuser. Roles that already exist on the target are left alone and listed in the result.</span></span></label>
+<div style="display: flex; justify-content: flex-end"><button class="btn pri">Check again</button></div>
+
+<div style="border: 1px solid #3c3836; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px"><b style="font-weight: 600; font-size: 13px">Target check</b><span class="muted mono" style="font-size: 12px">PostgreSQL 16.4 &middot; nothing was written</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-crit" aria-label="Failed" role="img"><path d="M6 6l12 12M18 6 6 18"/></svg><span>The target cannot take this restore. Check the highlighted fields.</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The credential works &middot; superuser: owners, privileges and roles are kept</span></div>
+<fieldset style="border: 0; padding: 0; margin: 0">
+<legend class="lbl">Databases (2 of 3 in the backup selected)</legend>
+<label class="chk"><input type="checkbox" checked><span class="mono">billing</span> <span class="badge ok">New</span></label>
+<label class="chk"><input type="checkbox"><span class="mono">billing_audit</span> <span class="badge crit">Exists with data</span> <span class="muted" style="font-size: 12px">deselect it: nothing on the target is overwritten</span></label>
+<label class="chk"><input type="checkbox" checked><span class="mono">postgres</span> <span class="badge mute">Exists, empty</span> <span class="muted" style="font-size: 12px">restored into, without CREATE DATABASE</span></label>
+</fieldset>
+<div class="err">Already exist on the target with data in them (nothing is overwritten): billing_audit. Change the selection and check again.</div>
+</div>
+<div class="note"><div class="note-title">Found by the check</div><ul style="margin: 4px 0 0; padding-left: 18px"><li>Exist on the target without user objects and are restored into: postgres</li></ul><span style="font-size: 12px">The checker sees these notes with the request.</span></div>
+<div class="note warn"><div class="note-title">Not a superuser: owners, privileges and roles are not restored</div><span class="muted" style="font-size: 12px">(shown instead when the credential is not a superuser, CloudNativePG's default)</span><ul style="margin: 4px 0 0; padding-left: 18px"><li>The credential is not a superuser: owners, privileges and globals (roles) are not restored (pg_restore --no-owner --no-privileges)</li></ul></div>
+
+<div><label class="lbl" for="r-why">Justification</label><textarea id="r-why" class="in" rows="2">billing-pg in prod-aks-weu-02 lost its volume (INC-4411). Restore last night's backup into the DR server.</textarea><div class="hint">10 to 2000 characters. The checker and the audit log see it.</div></div>
+
+<label class="opt" style="border-color: #cc241d"><input type="checkbox" style="margin-top: 2px"><span><span style="color: #fc7f6f; font-weight: 500">Break-glass: start now, without a checker</span><br><span class="muted" style="font-size: 12px">Admins on both clusters only. Recorded in the audit log and sent as a critical notification (<span class="mono">restore.break_glass</span>). Use it when no second person can approve in time.</span></span></label>
+
+<div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; align-items: center">
+<span class="muted" style="font-size: 12px">Restoring <span class="mono">billing-pg</span> &rarr; <span class="mono">aks-neu-dr / billing / billing-pg-dr</span></span>
+<button class="btn">Cancel</button>
+<button class="btn pri" disabled style="opacity: .55">Submit for approval</button>
+</div>
+</section>
+
+<section class="card" role="dialog" aria-labelledby="d4-t" style="flex: 1 1 100%; min-width: 0; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore &middot; openbao</div>
+<h2 id="d4-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Restore openbao into a new target</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Vault/OpenBao &middot; run of today 08:00 &middot; prod-aks-weu-01</div>
+</div>
+<div class="note">A snapshot replaces all of the target's data: there is no database selection. The target must be a new Vault or OpenBao that is not configured in Olympos, initialized, unsealed and the active node.</div>
+<div><label class="lbl" for="v-target">Target (Vault/OpenBao)</label><select id="v-target" class="in mono"><option>aks-neu-dr / security / openbao-dr &middot; OpenBao 2.1</option></select></div>
+<div><label class="lbl" for="v-token">Token of the new Vault</label><input id="v-token" type="password" class="in mono" value="hvs.xxxxxxxxxxxxxxxx"><div class="hint">Needs the <span class="mono">default</span> policy plus <b>update</b> and <b>sudo</b> on <span class="mono">sys/storage/raft/snapshot-force</span>. Sealed until the request ends, then wiped; never shown again.</div></div>
+<div style="display: flex; justify-content: flex-end"><button class="btn pri">Check again</button></div>
+<div style="border: 1px solid #3c3836; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 6px">
+<b style="font-weight: 600; font-size: 13px; margin-bottom: 4px">Target check</b>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Initialized</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Unsealed</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>Active node (not an HA standby)</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-crit" aria-label="Failed" role="img"><path d="M6 6l12 12M18 6 6 18"/></svg><span>Token holds update and sudo on <span class="mono">sys/storage/raft/snapshot-force</span></span></div>
+<div class="err">This token needs both update and sudo on sys/storage/raft/snapshot-force on the target.</div>
+</div>
+<div class="note warn"><div class="note-title">After the restore</div><ul style="margin: 4px 0 0; padding-left: 18px"><li>The snapshot replaces all of the target's data. Unseal it with the <b>source</b> Vault's unseal keys, or by the source's auto-unseal (the same seal key). Its own unseal keys no longer apply.</li><li>Its root token, policies, auth methods and secrets become the source's.</li><li>The token given for this request most likely stops working.</li></ul></div>
+<div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end"><button class="btn">Cancel</button><button class="btn pri" disabled style="opacity: .55">Submit for approval</button></div>
 </section>
 
 

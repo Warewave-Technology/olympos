@@ -1,23 +1,28 @@
 // Details of one backup run and, for a restorable run, the ready-to-copy
 // restore commands for exactly that run (F19). A run of a destination group has
 // one copy per member: the copies table shows each, and the restore guide can be
-// built from any succeeded copy. Restore through the UI (to a new target,
-// maker/checker) is planned for v0.2.
+// built from any succeeded copy. *Restore…* opens the restore dialog: the copy
+// is loaded into a new, discovered target after a second person approves it
+// (docs/design/ui-restore.md).
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { BackupRun, BackupRunCopy, BackupRunDetail, RestoreCopy, RestoreGuide } from '../api/types';
+import { useCan } from '../auth/me';
 import { between, bytes, dateTime, duration, relDateTime } from '../lib/format';
-import { Badge, CopyButton, FormError, Modal, QueryView } from './kit';
+import { Badge, ClampedError, CopyButton, FormError, Modal, QueryView } from './kit';
 import { DocLink, WithDocLinks } from './DocLinks';
 import { GroupName, KindBadge } from './destinations';
+import { RestoreDialog } from './RestoreDialog';
 import { RunBadge } from './status';
+
+export { ClampedError };
 
 export function RestoreSteps({ guide }: { guide: RestoreGuide }) {
   return (
     <div className="stack-sm restore-steps">
       <p className="muted small">
-        Restore is manual in v0.1: these commands are filled in for this run. Placeholders in <span className="mono">&lt;angle brackets&gt;</span> are yours to fill. Full procedure: <DocLink path={guide.doc} />.
+        To restore by hand, these commands are filled in for this run. Placeholders in <span className="mono">&lt;angle brackets&gt;</span> are yours to fill. Full procedure: <DocLink path={guide.doc} />.
       </p>
       <ol className="restore-cmds">
         {guide.steps.map((s, i) => (
@@ -154,27 +159,6 @@ export function RestoreWithCopies({
 
 const shortHash = (h: string) => (h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h);
 
-/** Errors longer than this are clamped to three lines with a toggle for the rest. */
-const LONG_ERROR = 120;
-
-/** An error that wraps anywhere; a long one is clamped to three lines, the full text one click away (and in the tooltip). */
-export function ClampedError({ text }: { text: string }) {
-  const [open, setOpen] = useState(false);
-  const long = text.length > LONG_ERROR;
-  return (
-    <span className="clamp-wrap">
-      <span className={`clamp ico-crit${long && !open ? ' clamp-3' : ''}`} title={long ? text : undefined}>
-        {text}
-      </span>
-      {long && (
-        <button type="button" className="link-btn small" aria-expanded={open} onClick={() => setOpen(!open)}>
-          {open ? 'Show less' : 'Show the full error'}
-        </button>
-      )}
-    </span>
-  );
-}
-
 /** One row per destination of a run (the run dialog, and the last olympos-self run on its card). */
 export function CopiesTable({ copies, isRepair, title = 'Copies', id = 'run-copies' }: { copies: BackupRunCopy[]; isRepair: boolean; title?: string; id?: string }) {
   return (
@@ -285,9 +269,22 @@ function RepairNote({ run, onOpen }: { run: BackupRunDetail; onOpen: (id: string
 
 const isGroupRun = (r: Pick<BackupRun, 'copies'>) => (r.copies?.length ?? 0) > 1;
 
+/** Engines the UI restores into a new target (docs/design/ui-restore.md "Engines"). */
+const RESTORABLE_ENGINES = ['postgresql', 'clickhouse', 'vault'];
+
+/**
+ * A run can be restored from the UI when it has a restore guide (a succeeded or partial run that is
+ * not a dry run, with at least one succeeded copy) of an engine the server restores. Olympos' own
+ * database is restored with the server stopped (docs/restore-olympos.md).
+ */
+export const uiRestorable = (run: BackupRunDetail) => !!run.restore && (run.restore.copies?.length ?? 1) > 0 && RESTORABLE_ENGINES.includes(run.engine) && run.target_service !== 'olympos-self';
+
 export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const [runId, setRunId] = useState(id);
   const [copy, setCopy] = useState('');
+  const [restoring, setRestoring] = useState(false);
+  // Opening a restore needs operate on the target's cluster (and read here): hidden without operate anywhere.
+  const mayRestore = useCan('operate');
   const q = useQuery({
     queryKey: ['backup-run', runId, copy],
     queryFn: () => api.get<BackupRunDetail>(`/backup/runs/${runId}`, { copy: copy || undefined }),
@@ -299,6 +296,8 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
     setCopy('');
     setRunId(other);
   };
+  // The restore dialog replaces the run dialog while it is open (one modal at a time); closing it comes back here.
+  if (restoring && r && !q.isPlaceholderData) return <RestoreDialog run={r} onClose={() => setRestoring(false)} />;
   return (
     <Modal
       open
@@ -349,6 +348,16 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             </dl>
             {(isGroupRun(run) || !!run.repair_of) && run.copies && run.copies.length > 0 && <CopiesTable copies={run.copies} isRepair={!!run.repair_of} />}
             <RepairNote run={run} onOpen={open} />
+            {run.restore && mayRestore && uiRestorable(run) && (
+              <div className="spread" style={{ alignItems: 'center' }}>
+                <p className="small" style={{ margin: 0 }}>
+                  <b>Restore…</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.
+                </p>
+                <button type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
+                  Restore…
+                </button>
+              </div>
+            )}
             {run.restore ? (
               <RestoreWithCopies guide={run.restore} runId={run.id} runCopies={run.copies} onSelect={setCopy} onOpenRepair={open} pending={q.isPlaceholderData} />
             ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (

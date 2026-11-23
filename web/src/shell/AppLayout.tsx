@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Link, Outlet, useRouterState } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { ApiError, api, errorMessage, logout } from '../api/client';
-import type { ChangeRequest, ItemList } from '../api/types';
+import type { ChangeRequest, ItemList, RestoreRequest } from '../api/types';
 import { MeProvider, useMeQuery } from '../auth/me';
 import { can, primaryRole } from '../auth/permissions';
 import { personName } from '../lib/format';
@@ -40,6 +40,14 @@ export function AppLayout() {
     queryKey: ['change-requests', { waiting_for_me: true, status: 'pending' }],
     queryFn: () => api.get<ItemList<ChangeRequest>>('/change-requests', { waiting_for_me: true, status: 'pending' }),
     enabled: !!me && can(me, 'vault_approve'),
+    refetchInterval: 60_000,
+    retry: false,
+  });
+  // Restore requests wait for a checker with operate on both clusters (docs/design/ui-restore.md).
+  const waitingRestoresQ = useQuery({
+    queryKey: ['restores', { waiting_for_me: true, status: 'pending' }],
+    queryFn: () => api.get<ItemList<RestoreRequest>>('/restores', { waiting_for_me: true, status: 'pending' }),
+    enabled: !!me && can(me, 'operate'),
     refetchInterval: 60_000,
     retry: false,
   });
@@ -82,7 +90,8 @@ export function AppLayout() {
     );
   }
 
-  const waiting = waitingQ.data?.items.length ?? 0;
+  // The badge counts both kinds: vault changes and restores waiting for this user.
+  const waiting = (waitingQ.data?.items.length ?? 0) + (waitingRestoresQ.data?.items.length ?? 0);
   return (
     <MeProvider me={me}>
       <a href="#main" className="skip-link">

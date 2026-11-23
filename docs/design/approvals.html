@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Olympos — Approvals — change request</title>
+<title>Olympos — Approvals — change and restore requests</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
 <style>
 body{margin:0;background:#1d2021}
@@ -31,6 +31,13 @@ a{color:#83a598}a:hover{color:#8ec07c}
 .dl dt{color:#a89984}.dl dd{margin:0}
 .tl{display:flex;gap:12px;font-size:13px}
 .dot{flex:0 0 10px;height:10px;border-radius:50%;margin-top:4px}
+.note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
+.note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
+.note.crit{border-color:#cc241d;background:#2c1a19;color:#ebdbb2}
+.note-title{font-weight:600;color:#ebdbb2;margin-bottom:4px;font-size:13px}
+.bar{height:8px;border-radius:4px;background:#3c3836;overflow:hidden}.bar>span{display:block;height:100%;background:#d79921;border-radius:4px}
+.kind{display:inline-flex;gap:8px;align-items:center}
+ul.plain{margin:6px 0 0;padding-left:18px;font-size:12.5px;line-height:1.6}
 </style>
 </head>
 <body>
@@ -43,7 +50,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <a href="dashboard.html">Dashboard</a>
 <a href="backups.html">Backups</a>
 <a href="vaults.html">Vaults</a>
-<a href="approvals.html" class="on">Approvals <span class="badge warn">2</span></a>
+<a href="approvals.html" class="on">Approvals <span class="badge warn">3</span></a>
 <a href="audit.html">Audit</a>
 <a href="security.html">Security</a>
 <a href="settings.html">Settings</a>
@@ -55,17 +62,20 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
 <header>
 <h1 style="margin: 0; font-size: 24px; font-weight: 600">Approvals</h1>
-<p class="muted" style="margin: 4px 0 0; font-size: 13px">Vault changes wait here for a second person. You cannot approve a request you opened.</p>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">Vault changes and restores wait here for a second person. You cannot approve a request you opened.</p>
 </header>
 
 <div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
 <aside class="card" aria-label="Pending requests" style="flex: 1 1 280px; min-width: 0; max-width: 340px; padding: 12px; display: flex; flex-direction: column; gap: 4px">
-<div class="muted" style="font-size: 12px; padding: 6px 8px 8px; text-transform: uppercase; letter-spacing: .05em">Waiting for you · 2</div>
-<a href="#" class="q on"><div style="display: flex; justify-content: space-between"><span class="mono">CR-0142</span><span class="muted" style="font-size: 12px">68 h left</span></div><div style="font-size: 13px; margin-top: 6px">Replace PSP_API_KEY</div><div class="muted" style="font-size: 12px; margin-top: 4px">selin@contoso.com · vault / kv/erp</div></a>
-<a href="#" class="q"><div style="display: flex; justify-content: space-between"><span class="mono">CR-0141</span><span class="muted" style="font-size: 12px">51 h left</span></div><div style="font-size: 13px; margin-top: 6px">Add 2 keys, delete 1</div><div class="muted" style="font-size: 12px; margin-top: 4px">mert@contoso.com · openbao / kv/platform</div></a>
+<div class="muted" style="font-size: 12px; padding: 6px 8px 8px; text-transform: uppercase; letter-spacing: .05em">Waiting for you · 3</div>
+<a href="#restore-detail" class="q"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge info">Restore</span><span class="mono">PostgreSQL</span></span><span class="muted" style="font-size: 12px">70 h left</span></div><div style="font-size: 13px; margin-top: 6px"><span class="mono">billing-pg</span> &rarr; <span class="mono">billing-pg-dr</span></div><div class="muted mono" style="font-size: 12px; margin-top: 4px">prod-aks-weu-02 &rarr; aks-neu-dr</div><div class="muted" style="font-size: 12px; margin-top: 4px">selin@contoso.com · billing, postgres</div></a>
+<a href="#" class="q on"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge mute">Vault</span><span class="mono">CR-0142</span></span><span class="muted" style="font-size: 12px">68 h left</span></div><div style="font-size: 13px; margin-top: 6px">Replace PSP_API_KEY</div><div class="muted" style="font-size: 12px; margin-top: 4px">selin@contoso.com · vault / kv/erp</div></a>
+<a href="#" class="q"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge mute">Vault</span><span class="mono">CR-0141</span></span><span class="muted" style="font-size: 12px">51 h left</span></div><div style="font-size: 13px; margin-top: 6px">Add 2 keys, delete 1</div><div class="muted" style="font-size: 12px; margin-top: 4px">mert@contoso.com · openbao / kv/platform</div></a>
 <div style="border-top: 1px solid #3c3836; margin: 10px 4px 6px"></div>
 <div class="muted" style="font-size: 12px; padding: 0 8px 6px; text-transform: uppercase; letter-spacing: .05em">Opened by you</div>
-<a href="#" class="q"><div style="display: flex; justify-content: space-between"><span class="mono">CR-0140</span><span class="badge mute">Awaiting other</span></div><div style="font-size: 13px; margin-top: 6px">Replace DB_PASSWORD</div><div class="muted" style="font-size: 12px; margin-top: 4px">Approve disabled: you are the maker</div></a>
+<a href="#" class="q"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge mute">Vault</span><span class="mono">CR-0140</span></span><span class="badge mute">Awaiting other</span></div><div style="font-size: 13px; margin-top: 6px">Replace DB_PASSWORD</div><div class="muted" style="font-size: 12px; margin-top: 4px">Approve disabled: you are the maker</div></a>
+<a href="#restore-running" class="q"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge info">Restore</span><span class="mono">ClickHouse</span></span><span class="badge info">Running</span></div><div style="font-size: 13px; margin-top: 6px"><span class="mono">metrics-ch</span> &rarr; <span class="mono">metrics-ch-dr</span></div><div class="muted" style="font-size: 12px; margin-top: 4px">yigit@contoso.com · metrics</div></a>
+<a href="#restore-vault" class="q"><div style="display: flex; justify-content: space-between"><span class="kind"><span class="badge info">Restore</span><span class="mono">Vault</span></span><span class="badge ok">Succeeded</span></div><div style="font-size: 13px; margin-top: 6px"><span class="mono">openbao</span> &rarr; <span class="mono">openbao-dr</span></div><div class="muted" style="font-size: 12px; margin-top: 4px">yigit@contoso.com · whole snapshot<span style="color: #fc7f6f"> · break-glass</span></div></a>
 </aside>
 
 <div style="flex: 999 1 560px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
@@ -107,6 +117,96 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div class="tl"><span class="dot" style="background: #fabd2f"></span><div><div>Slack notice sent to <b style="font-weight: 500">#vault-approvals</b></div><div class="muted mono" style="font-size: 12px; margin-top: 2px">Nov 18 10:22 · link only, no approve button</div></div></div>
 <div class="tl"><span class="dot" style="background: #fe8019"></span><div><div>Waiting for an approver other than the maker</div><div class="muted mono" style="font-size: 12px; margin-top: 2px">eligible: 3 people with vault-approver</div></div></div>
 </div>
+</section>
+
+<section class="card" id="restore-detail" style="padding: 22px; display: flex; flex-direction: column; gap: 20px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore request</div>
+<div style="display: flex; gap: 10px; align-items: center; margin-top: 4px"><h2 style="margin: 0; font-size: 18px; font-weight: 600">PostgreSQL restore</h2><span class="badge warn">Pending approval</span></div>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Opened by selin@contoso.com · today 10:44 · expires Nov 26, 10:44</div>
+</div>
+<dl class="dl">
+<dt>Backup</dt><dd><span class="mono">prod-aks-weu-02 / billing / billing-pg</span><div class="muted" style="font-size: 12px">copy <span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span> · run <span class="mono">c34d…12e7</span></div></dd>
+<dt>Target</dt><dd><span class="mono">aks-neu-dr / billing / billing-pg-dr</span> :5432 · PostgreSQL 16.4</dd>
+<dt>Databases</dt><dd><span class="mono">billing</span>, <span class="mono">postgres</span></dd>
+<dt>Roles</dt><dd>Restored from <span class="mono">globals.sql</span> (superuser credential)</dd>
+<dt>Credential</dt><dd><span class="mono">postgres</span> · Key Vault reference <span class="mono">kv://kv-dr-neu/billing-pg-dr-admin</span> <span class="muted" style="font-size: 12px">· deleted when the request ends</span></dd>
+<dt>Maker</dt><dd>selin@contoso.com <span class="mono muted">oid 4c1e…a07f</span></dd>
+<dt>Justification</dt><dd>billing-pg in prod-aks-weu-02 lost its volume (INC-4411). Restore last night's backup into the DR server.</dd>
+</dl>
+<div class="note"><div class="note-title">Found by the open-time check</div><ul class="plain"><li>Exist on the target without user objects and are restored into: postgres</li></ul></div>
+<div class="note">Approving lets the server restore this backup into the target as soon as its agent is connected; it must start within 24 hours. The backup's checksum is verified before anything is written, and the target is checked again when the restore starts.</div>
+<div><label class="lbl" for="rcm">Comment (required to reject)</label><textarea id="rcm" class="in" rows="2" style="resize: vertical" placeholder="Optional note for the audit trail"></textarea></div>
+<div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end">
+<button class="btn rej">Reject</button>
+<button class="btn pri">Approve restore</button>
+</div>
+<div class="muted" style="font-size: 12px; border-top: 1px solid #3c3836; padding-top: 12px">The maker sees no Approve or Reject here: <i>You opened this request. Another person with operate on both clusters must decide.</i> and <b style="font-weight: 500">Withdraw request</b>.</div>
+</section>
+
+<section class="card" id="restore-running" style="padding: 22px; display: flex; flex-direction: column; gap: 16px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore request</div>
+<div style="display: flex; gap: 10px; align-items: center; margin-top: 4px"><h2 style="margin: 0; font-size: 18px; font-weight: 600">ClickHouse restore</h2><span class="badge info">Running</span></div>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Opened by yigit@contoso.com · approved by mert@contoso.com · started 10:58</div>
+</div>
+<h3 style="margin: 0; font-size: 15px; font-weight: 600">Progress</h3>
+<div>
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; font-size: 13px; margin-bottom: 8px"><span>Restoring <span class="mono">metrics.http_requests</span></span><span class="mono muted">7.4 GB of 18 GB read</span></div>
+<div class="bar" role="progressbar" aria-valuenow="41" aria-valuemin="0" aria-valuemax="100" aria-label="Backup read"><span style="width: 41%"></span></div>
+<div class="muted" style="font-size: 12px; margin-top: 8px">Done: <span class="mono">default</span> · Created on the target: <span class="mono">metrics</span></div>
+</div>
+<div class="muted" style="font-size: 12px">Verify the backup's checksum, check the target again, then restore. This page updates every few seconds.</div>
+</section>
+
+<section class="card" style="padding: 22px; display: flex; flex-direction: column; gap: 16px">
+<div style="display: flex; gap: 10px; align-items: center"><h2 style="margin: 0; font-size: 18px; font-weight: 600">ClickHouse restore</h2><span class="badge ok">Succeeded</span></div>
+<h3 style="margin: 0; font-size: 15px; font-weight: 600">Result</h3>
+<div style="overflow-x: auto; border: 1px solid #3c3836; border-radius: 8px">
+<table class="t">
+<thead><tr><th>Database</th><th>Status</th><th style="text-align: right">Size</th><th style="text-align: right">Duration</th><th style="text-align: right">Tables</th><th style="text-align: right">Rows</th><th>Error</th></tr></thead>
+<tbody>
+<tr><td class="mono">metrics</td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">17.9 GB</td><td style="text-align: right">9 m 12 s</td><td style="text-align: right">6</td><td style="text-align: right">1,284,000,112</td><td class="muted">&mdash;</td></tr>
+<tr><td class="mono">default</td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">4 MB</td><td style="text-align: right">2 s</td><td style="text-align: right">1</td><td style="text-align: right">12,400</td><td class="muted">&mdash;</td></tr>
+</tbody>
+</table>
+</div>
+<div class="note warn"><div class="note-title">Not restored in metrics (3) · recreate or re-apply from your schema</div>
+<ul class="plain">
+<li><span class="mono">metrics.requests_by_minute</span> (materialized view): not created: recreate it from your schema (Olympos restores tables and data)</li>
+<li><span class="mono">metrics.top_paths</span> (view): not created: recreate it from your schema (Olympos restores tables and data)</li>
+<li><span class="mono">metrics.geo</span> (dictionary): not created: recreate it from your schema (Olympos restores tables and data)</li>
+</ul></div>
+<div class="note"><div class="note-title">Notes</div>
+<ul class="plain">
+<li>the data of materialized view metrics.requests_by_minute was restored into table metrics.requests_by_minute__restored_data; recreate the view with TO `metrics`.`requests_by_minute__restored_data`</li>
+<li>metrics.http_requests: created from its columns, types, engine and keys; not restored: TTL; codecs; 2 indexes; settings; re-apply them from your schema</li>
+<li>Data was loaded with clickhouse-client 26.3.</li>
+</ul></div>
+<div style="font-size: 13px">Created on the target: <span class="mono">metrics</span></div>
+<div class="muted" style="font-size: 12px">ClickHouse restores databases and tables with their data. Views, materialized views, dictionaries, other engines and secondary table features are listed above, never dropped silently.</div>
+</section>
+
+<section class="card" id="restore-vault" style="padding: 22px; display: flex; flex-direction: column; gap: 16px">
+<div>
+<div style="display: flex; gap: 10px; align-items: center"><h2 style="margin: 0; font-size: 18px; font-weight: 600">Vault restore</h2><span class="badge ok">Succeeded</span><span class="badge crit">Break-glass</span></div>
+<div class="muted" style="font-size: 13px; margin-top: 6px">Opened by yigit@contoso.com · yesterday 05:19</div>
+</div>
+<div class="note crit">Started without a checker (break-glass) by yigit@contoso.com at Nov 22 05:19. It is recorded in the audit log and a critical notification (<span class="mono">restore.break_glass</span>) was sent.</div>
+<h3 style="margin: 0; font-size: 15px; font-weight: 600">Result</h3>
+<div class="note warn" role="note"><div class="note-title">Next: unseal the new Vault with the source's keys</div>
+<ul class="plain">
+<li>The snapshot replaces all of the target's data. Unseal it with the <b>source</b> Vault's unseal keys, or by the source's auto-unseal (the same seal key). Its own unseal keys no longer apply.</li>
+<li>Its root token, policies, auth methods and secrets become the source's.</li>
+<li>The token given for this request most likely stops working.</li>
+</ul></div>
+<div style="overflow-x: auto; border: 1px solid #3c3836; border-radius: 8px">
+<table class="t">
+<thead><tr><th>Item</th><th>Status</th><th style="text-align: right">Size</th><th style="text-align: right">Duration</th><th>Error</th></tr></thead>
+<tbody><tr><td class="mono">snapshot</td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">42 MB</td><td style="text-align: right">4 s</td><td class="muted">&mdash;</td></tr></tbody>
+</table>
+</div>
+<div class="note"><div class="note-title">Notes</div><ul class="plain"><li>The snapshot replaced all of the target's data. The target must now be unsealed with the SOURCE Vault's unseal keys (or by the source's auto-unseal, with access to the same seal key); its own unseal keys no longer apply. Its root token, policies, auth methods and secrets are now the source's. The token given for this request most likely no longer works.</li><li>After the restore the target reports sealed, as expected: unseal it with the source's unseal keys.</li></ul></div>
 </section>
 </div>
 </div>

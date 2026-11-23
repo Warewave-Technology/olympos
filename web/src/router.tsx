@@ -77,7 +77,7 @@ export const APPROVAL_VIEWS = ['waiting', 'mine', 'all'] as const;
 export const approvalsRoute = createRoute({
   getParentRoute: () => appRoute,
   path: '/approvals',
-  validateSearch: opt((s) => ({ view: pick(s.view, APPROVAL_VIEWS), cr: str(s.cr) })),
+  validateSearch: opt((s) => ({ view: pick(s.view, APPROVAL_VIEWS), cr: str(s.cr), restore: str(s.restore) })),
   component: ApprovalsPage,
 });
 
