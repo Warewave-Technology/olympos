@@ -17,7 +17,8 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
-> **Status:** v0.1.0, the first public release: one server instance, Microsoft Entra ID and Azure Key Vault.
+> **Status:** v0.1.0 is the latest release (one server instance, Microsoft Entra ID and Azure Key Vault);
+> v0.2.0-rc.1 is the release candidate for v0.2 (restore from the UI, destination groups, signed kube-bench).
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
@@ -96,7 +97,7 @@ scans, with a screenshot for every step. `./test/e2e/env.sh down` removes the la
 
 ## Roadmap
 
-Planned for v0.2 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+In v0.2, now a release candidate ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
 
 - Restore from the UI into a new target, with approval ([#22](https://github.com/Warewave-Technology/olympos/issues/22))
 - More than one destination per backup job, one dump stored in each ([#32](https://github.com/Warewave-Technology/olympos/issues/32))

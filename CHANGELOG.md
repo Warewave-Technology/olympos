@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - unreleased
+
+Restore from the UI, destination groups, a signed kube-bench image. Release candidate: v0.2.0-rc.1.
+
 ### Added
 - **Restore from the UI into a new target, with approval** ([#22](https://github.com/Warewave-Technology/olympos/issues/22)):
   *Restore…* on a succeeded or partial run loads its copy into a new PostgreSQL, ClickHouse or
@@ -88,6 +92,9 @@ All notable changes to this project are documented here. The format follows
   storage. Runs from before this release still use the job's destination.
 
 ### Upgrade notes
+From v0.1.0 nothing needs action; the migrations run at start.
+- The server image grows from about 0.8 to 1.8 GB and the packages by about 200-230 MB per architecture
+  (the `clickhouse` restore client). Plan node disk and registry space for it.
 - Migration `00023` adds restore requests. The new events `restore.failed` and `restore.break_glass` are
   routed to every Slack channel that receives `backup.failed` (the migration adds those routes). The other
   `restore.*` events get no route: add them, or move these two, under *Settings › Notifications › Routing*.
