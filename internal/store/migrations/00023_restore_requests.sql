@@ -63,7 +63,23 @@ $$ LANGUAGE plpgsql;
 CREATE TRIGGER restore_requests_scrub BEFORE INSERT OR UPDATE ON restore_requests
   FOR EACH ROW EXECUTE FUNCTION olympos_restore_scrub();
 
+-- restore.failed and restore.break_glass (new events, not opt-in) go
+-- wherever backup.failed goes today, as backup.partial did in 00022: routes
+-- are explicit rows with no default, and the dispatcher drops an event with
+-- no route. backup.failed is the channel an install watches for what went
+-- wrong with its data; a break-glass restore is critical in the same way
+-- (cr.opened is the approval queue, and an install without Vault change
+-- requests has no route for it). The other restore events are left to the
+-- operator.
+INSERT INTO notification_routes (event_type, channel_id)
+  SELECT e.event_type, r.channel_id FROM notification_routes r
+  CROSS JOIN (VALUES ('restore.failed'), ('restore.break_glass')) AS e(event_type)
+  WHERE r.event_type = 'backup.failed'
+  ON CONFLICT (event_type, channel_id) DO NOTHING;
+
 -- +goose Down
+-- The old schema knows no restore events.
+DELETE FROM notification_routes WHERE event_type LIKE 'restore.%';
 DROP TRIGGER restore_requests_scrub ON restore_requests;
 DROP FUNCTION olympos_restore_scrub();
 DROP TABLE restore_requests;

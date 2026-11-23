@@ -88,8 +88,9 @@ All notable changes to this project are documented here. The format follows
   storage. Runs from before this release still use the job's destination.
 
 ### Upgrade notes
-- Migration `00023` adds restore requests. No route is added for the `restore.*` events: route at least
-  `restore.failed` and `restore.break_glass` under *Settings › Notifications › Routing*.
+- Migration `00023` adds restore requests. The new events `restore.failed` and `restore.break_glass` are
+  routed to every Slack channel that receives `backup.failed` (the migration adds those routes). The other
+  `restore.*` events get no route: add them, or move these two, under *Settings › Notifications › Routing*.
 - Migration `00022` runs at start. Existing jobs, runs and single-destination backups are unchanged.
 - The new event `backup.partial` is routed to every Slack channel that receives `backup.failed` (the
   migration adds those routes). Review *Settings › Notifications › Routing* if you want it elsewhere.

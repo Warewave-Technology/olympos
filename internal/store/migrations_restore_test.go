@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/stdlib"
@@ -186,6 +187,75 @@ func TestRestoreRequestsMigrationDown(t *testing.T) {
 	}
 	if _, err := db.Exec(ctx, `SELECT 1 FROM restore_requests`); err == nil {
 		t.Fatal("restore_requests still exists after down")
+	}
+	if err := store.Migrate(ctx, db); err != nil {
+		t.Fatalf("migrate back up: %v", err)
+	}
+}
+
+// Migration 00023 routes restore.failed and restore.break_glass to every
+// channel that gets backup.failed (they are not opt-in, and an event with
+// no route is dropped), and no other restore event. Down removes the
+// restore routes again.
+func TestRestoreRequestsMigrationRoutes(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	goose.SetBaseFS(store.MigrationsFS)
+	goose.SetLogger(goose.NopLogger())
+	if err := goose.SetDialect("postgres"); err != nil {
+		t.Fatal(err)
+	}
+	sqlDB := stdlib.OpenDBFromPool(db)
+	defer sqlDB.Close()
+	if err := goose.DownToContext(ctx, sqlDB, "migrations", 22); err != nil {
+		t.Fatalf("down to 22: %v", err)
+	}
+
+	channel := func(name string) string {
+		var id string
+		if err := db.QueryRow(ctx, `INSERT INTO notification_channels (slack_channel_id, name) VALUES ($1, $1) RETURNING id::text`, name).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	ops, sec, approvers := channel("ops"), channel("sec"), channel("approvers")
+	for _, r := range [][2]string{{"backup.failed", ops}, {"backup.failed", sec}, {"backup.partial", sec}, {"cr.opened", approvers}} {
+		if _, err := db.Exec(ctx, `INSERT INTO notification_routes (event_type, channel_id) VALUES ($1, $2)`, r[0], r[1]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := goose.UpToContext(ctx, sqlDB, "migrations", 23); err != nil {
+		t.Fatalf("up to 23: %v", err)
+	}
+	routes := func() string {
+		rows, err := db.Query(ctx, `SELECT r.event_type || ':' || c.name FROM notification_routes r JOIN notification_channels c ON c.id = r.channel_id
+			WHERE r.event_type LIKE 'restore.%' ORDER BY 1`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var out []string
+		for rows.Next() {
+			var n string
+			if err := rows.Scan(&n); err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, n)
+		}
+		return strings.Join(out, ",")
+	}
+	if got, want := routes(), "restore.break_glass:ops,restore.break_glass:sec,restore.failed:ops,restore.failed:sec"; got != want {
+		t.Fatalf("restore routes after up = %q, want %q", got, want)
+	}
+	if err := goose.DownToContext(ctx, sqlDB, "migrations", 22); err != nil {
+		t.Fatalf("down to 22 again: %v", err)
+	}
+	if got := routes(); got != "" {
+		t.Fatalf("restore routes after down = %q, want none", got)
+	}
+	var n int
+	if err := db.QueryRow(ctx, `SELECT count(*) FROM notification_routes WHERE event_type IN ('backup.failed', 'backup.partial', 'cr.opened')`).Scan(&n); err != nil || n != 4 {
+		t.Fatalf("other routes after down: %d, %v", n, err)
 	}
 	if err := store.Migrate(ctx, db); err != nil {
 		t.Fatalf("migrate back up: %v", err)

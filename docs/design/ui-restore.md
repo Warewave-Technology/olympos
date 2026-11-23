@@ -284,7 +284,10 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   kind column; a restore detail view shows the request, the decision, progress and the result (with the Vault
   unseal note).
 - Events as listed in Goals, routed like other events; `restore.break_glass` and `restore.failed` are not
-  opt-in.
+  opt-in. Migration 00023 routes both to every channel that gets `backup.failed`, as 00022 did for
+  `backup.partial`, because the dispatcher drops an event with no route. `backup.failed` is the channel
+  watched for what goes wrong with the data, which fits a critical break-glass notification; `cr.opened` is
+  an approval queue, and an install without Vault change requests routes it nowhere.
 
 ## Left to the builder
 

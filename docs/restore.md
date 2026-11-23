@@ -216,7 +216,8 @@ database selection, and it replaces all of the target's data.
 - Events (none is opt-in; nothing is routed until you route it): `restore.requested`, `restore.approved`,
   `restore.rejected`, `restore.started`, `restore.succeeded`, `restore.failed` and `restore.break_glass`
   ([Findings and events](findings-and-events.md#events-and-notifications)). Route at least
-  `restore.failed` and `restore.break_glass`.
+  `restore.failed` and `restore.break_glass`. An upgrade routes these two to every channel that gets
+  `backup.failed`.
 - **Who sees a request:** people with `read` on the **backup's** cluster. Its audit rows and events are
   recorded on that cluster too, because they name the backup's run and databases; `read` on the target's
   cluster alone shows nothing.

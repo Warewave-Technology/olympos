@@ -232,8 +232,8 @@ activity log still gets one row per item.
 | `restore.rejected` | A checker rejected a restore request (the credential is deleted). | *Restore request rejected* · Backup, Target, Databases, Checker. | No |
 | `restore.started` | An approved restore started: the server verifies the backup, checks the target again, then writes to it. | *Restore started: ns/svc* · Backup, Target, Databases. | No |
 | `restore.succeeded` | A restore finished. | *Restore succeeded: ns/svc* · Backup, Target, Databases, Created. | No |
-| `restore.failed` | A restore failed. The databases it created stay on the target and are listed. Route it: a failed restore in a disaster must not go unnoticed. | *Restore failed: ns/svc* · Backup, Target, Databases, Error, Created. | No |
-| `restore.break_glass` | An admin started a restore without a checker (break-glass), with a justification. Critical: route it to a channel someone watches. | *Break-glass restore started without approval* · Backup, Target, Databases, Maker, Justification. | No |
+| `restore.failed` | A restore failed. The databases it created stay on the target and are listed. Route it: a failed restore in a disaster must not go unnoticed (on an upgrade to v0.2, every channel that gets `backup.failed` is routed `restore.failed` too). | *Restore failed: ns/svc* · Backup, Target, Databases, Error, Created. | No |
+| `restore.break_glass` | An admin started a restore without a checker (break-glass), with a justification. Critical: route it to a channel someone watches (on an upgrade to v0.2, every channel that gets `backup.failed` is routed `restore.break_glass` too). | *Break-glass restore started without approval* · Backup, Target, Databases, Maker, Justification. | No |
 | `vault.unmanaged_write` | The drift check found a Vault secret version that Olympos did not write. | *Unmanaged change to a vault secret* · Vault, Cluster, Secret, Version. | No: one per unmanaged version |
 | `audit.new_findings` | A successful Kubescape, Polaris or kube-bench run opened new findings. | *N new \<tool\> findings on \<cluster\>* · cluster, tool, new, resolved, score, top (5 most severe). | Yes: per cluster and run |
 | `vuln.critical` | At the end of an image scan run, for critical CVEs new to an image that is running (digest scans only). | *N new critical CVEs in M running images on \<cluster\>* · cluster, new, images, top (5, fixable first). | Yes: per cluster and scan run |
@@ -309,8 +309,9 @@ be told when a destination keeps failing, alert on
 ### Routing
 
 Nothing is routed by default. An event with no route and no channel override is dropped (outcome
-`no_route`). The one exception is an upgrade that adds an event type: the upgrade to v0.2 routes the new
-`backup.partial` to every channel that already gets `backup.failed`. To receive events:
+`no_route`). The one exception is an upgrade that adds an event type that must not go unnoticed: the
+upgrade to v0.2 routes the new `backup.partial`, `restore.failed` and `restore.break_glass` to every
+channel that already gets `backup.failed`. To receive events:
 
 1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
    (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.
@@ -325,8 +326,10 @@ Overrides and opt-in:
   used.
 - **`backup.succeeded` is opt-in twice.** The job needs *Also notify on success*, **and** the event type
   needs at least one route. A job's own channel does not turn it on by itself.
-- **Restore events are not opt-in.** Like every event they need a route, and no route is added for them
-  on upgrade. Route at least `restore.failed` and `restore.break_glass`. Restore events carry the
+- **Restore events are not opt-in.** Like every event they need a route. On upgrade, `restore.failed` and
+  `restore.break_glass` are routed wherever `backup.failed` goes (a break-glass restore is critical like a
+  failed backup, and `cr.opened` is an approval queue that an install without Vault change requests does
+  not route); on a new install, route at least these two. Restore events carry the
   **backup's** cluster (`cluster_id`), like the restore's audit rows, because they name its run and
   databases. A request that expires sends no event.
 
