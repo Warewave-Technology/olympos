@@ -9,12 +9,11 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/Warewave-Technology/olympos/internal/notify"
-	"github.com/Warewave-Technology/olympos/internal/schedule"
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
 
 // ExpiryInterval is how often the leader of LockSyntheticMaintenance checks
-// credential expiry.
+// credential expiry (RunMaintenance, retention.go).
 const ExpiryInterval = 24 * time.Hour
 
 // ExpiryThresholds are the days before a credential's expires_at at which
@@ -22,12 +21,6 @@ const ExpiryInterval = 24 * time.Hour
 // message of its own: its runs end in error (credential_expired) and alert
 // like any failure.
 var ExpiryThresholds = []int{14, 3}
-
-// RunMaintenance is the leader loop of LockSyntheticMaintenance: the
-// credential expiry check, daily.
-func (s *Service) RunMaintenance(ctx context.Context) {
-	schedule.RunLeader(ctx, s.DB, schedule.LockSyntheticMaintenance, ExpiryInterval, s.Log.With("loop", "maintenance"), s.CheckCredentialExpiry)
-}
 
 // expiryThreshold is the smallest threshold that remaining is within, or -1
 // when none is (yet, or any more: expired).

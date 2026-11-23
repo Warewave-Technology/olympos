@@ -164,6 +164,12 @@ func (s *Subject) permAllowed(p Permission) bool {
 	if p == PermVaultApprove && s.Principal.IsGuest() {
 		return false
 	}
+	// Nor may a guest edit synthetic scenarios (ruling P18). Granting the role
+	// to a guest is refused (store.go); this covers a member who was
+	// reclassified as a guest later, and an admin guest.
+	if p == PermSyntheticEdit && s.Principal.IsGuest() {
+		return false
+	}
 	return true
 }
 

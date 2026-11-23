@@ -51,6 +51,23 @@ func TestGuestNeverApproves(t *testing.T) {
 	}
 }
 
+func TestGuestNeverEditsSynthetic(t *testing.T) {
+	const guestUPN = "bob_contoso.com#EXT#@tenant.onmicrosoft.com"
+	for _, role := range []Role{RoleSyntheticEditor, RoleAdmin} {
+		g := &Subject{Principal: Principal{AccountEnabled: true, UPN: guestUPN}, Grants: []Grant{{Role: role, Scope: mustScope(t, "all")}}}
+		if g.CanAny(PermSyntheticEdit) {
+			t.Fatalf("guest with %s can edit synthetic scenarios", role)
+		}
+		if !g.CanAny(PermRead) {
+			t.Fatalf("guest with %s lost read", role)
+		}
+		m := &Subject{Principal: Principal{AccountEnabled: true, UPN: "alice@tenant.onmicrosoft.com"}, Grants: []Grant{{Role: role, Scope: mustScope(t, "all")}}}
+		if !m.CanAny(PermSyntheticEdit) {
+			t.Fatalf("member with %s cannot edit synthetic scenarios", role)
+		}
+	}
+}
+
 func TestParseScope(t *testing.T) {
 	if _, err := ParseScope("env in (prod,staging),team=payments"); err != nil {
 		t.Fatal(err)
