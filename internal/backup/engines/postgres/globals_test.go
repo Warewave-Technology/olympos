@@ -59,10 +59,11 @@ func TestFilterGlobalsPgDumpAll16(t *testing.T) {
 		"CREATE ROLE reporting;",
 		"ALTER ROLE reporting WITH NOSUPERUSER INHERIT NOCREATEROLE NOCRE",
 		"ALTER ROLE reporting SET search_path TO 'reporting', 'public';",
-		`GRANT readers TO "Mixed Case" WITH ADMIN OPTION, INHERIT TRUE GR`,
-		"GRANT readers TO reporting WITH INHERIT TRUE GRANTED BY postgres",
+		// GRANTED BY postgres goes: postgres is not created by the restore.
+		`GRANT readers TO "Mixed Case" WITH ADMIN OPTION, INHERIT TRUE;`,
+		"GRANT readers TO reporting WITH INHERIT TRUE;",
 	}
-	if !prefixes(stmts, want) {
+	if !prefixes(stmts, want) || stmts[len(stmts)-1] != want[len(want)-1] {
 		t.Fatalf("statements:\n%s\nwant:\n%s", strings.Join(firstLines(stmts), "\n"), strings.Join(want, "\n"))
 	}
 	for _, s := range stmts {
@@ -113,6 +114,15 @@ func TestFilterGlobalsExistingRoles(t *testing.T) {
 	}
 }
 
+func TestFilterGlobalsKeepsGrantorItCreates(t *testing.T) {
+	// On a target without postgres, the restore creates it, so the grantor
+	// stays.
+	stmts, _ := filterGlobals(readFixture(t, "globals-pg16.sql"), map[string]bool{})
+	if last := stmts[len(stmts)-1]; last != "GRANT readers TO reporting WITH INHERIT TRUE GRANTED BY postgres;" {
+		t.Fatalf("last %q", last)
+	}
+}
+
 func TestFilterGlobalsEdgeCases(t *testing.T) {
 	sql := `\connect postgres
 -- a comment; with a semicolon
@@ -123,6 +133,7 @@ COMMENT ON ROLE "semi;colon" IS E'line\'s; end';
 /* block ; comment */ CREATE ROLE newbie;
 GRANT pg_read_all_data TO newbie WITH INHERIT TRUE GRANTED BY postgres;
 GRANT pg_monitor TO postgres GRANTED BY postgres;
+GRANT "semi;colon" TO newbie GRANTED BY newbie;
 GRANT SET ON PARAMETER work_mem TO newbie;
 GRANT SET ON PARAMETER work_mem TO postgres;
 GRANT ALL ON TABLESPACE fast TO newbie;
@@ -130,9 +141,15 @@ ALTER TABLESPACE fast OWNER TO newbie;
 COMMENT ON TABLESPACE fast IS 'x';
 ALTER ROLE newbie IN DATABASE shop SET work_mem TO '1MB';
 ALTER ROLE ALL SET statement_timeout TO '1s';
+ALTER ROLE CURRENT_USER SET work_mem TO '1MB';
 DROP ROLE IF EXISTS gone;
 SECURITY LABEL FOR selinux ON ROLE postgres IS 'x';
 DO $body$ BEGIN PERFORM 1; END $body$;
+SET ROLE newbie;
+SET SESSION AUTHORIZATION newbie;
+CREATE USER MAPPING FOR newbie SERVER s;
+ALTER ROLE newbie RENAME TO other;
+COMMENT ON ROLE newbie IS 'x' || 'y';
 CREATE ROLE "Upper"
 `
 	stmts, skipped := filterGlobals(sql, map[string]bool{"postgres": true, "pg_read_all_data": true, "pg_monitor": true})
@@ -142,23 +159,36 @@ CREATE ROLE "Upper"
 		`ALTER ROLE "semi;colon" WITH LOGIN PASSWORD 'md5abc;def''ghi';`,
 		`COMMENT ON ROLE "semi;colon" IS E'line\'s; end';`,
 		"CREATE ROLE newbie;",
-		"GRANT pg_read_all_data TO newbie WITH INHERIT TRUE GRANTED BY postgres;",
-		"GRANT SET ON PARAMETER work_mem TO newbie;",
-		"DO $body$ BEGIN PERFORM 1; END $body$;",
+		"GRANT pg_read_all_data TO newbie WITH INHERIT TRUE;",
+		`GRANT "semi;colon" TO newbie GRANTED BY newbie;`,
 		`CREATE ROLE "Upper"`,
 	}
 	if !reflect.DeepEqual(stmts, want) {
 		t.Fatalf("statements:\n%s", strings.Join(stmts, "\n"))
 	}
 	wantSkipped := []string{
-		"role postgres: exists on the target, not changed (3 statements skipped)",
+		"role postgres: exists on the target, not changed (2 statements skipped)",
+		"statement not run (GRANT SET ON): not a role statement pg_dumpall writes",
 		"tablespace fast: not created, tablespaces are not restored (3 statements skipped)",
 		"role newbie: per-database setting not applied (ALTER ROLE … IN DATABASE shop)",
 		"ALTER ROLE ALL: not applied, it would change the target's existing roles",
+		"ALTER ROLE CURRENT_USER: not applied, it would change the target's existing roles",
 		"DROP ROLE: not executed, a restore drops nothing",
+		"statement not run (DO): not a role statement pg_dumpall writes",
+		"statement not run (SET ROLE newbie): not a role statement pg_dumpall writes",
+		"statement not run (SET SESSION AUTHORIZATION): not a role statement pg_dumpall writes",
+		"statement not run (CREATE USER MAPPING): not a role statement pg_dumpall writes",
+		"statement not run (ALTER ROLE newbie): not a role statement pg_dumpall writes",
+		"statement not run (COMMENT ON ROLE): not a role statement pg_dumpall writes",
 	}
 	if !reflect.DeepEqual(skipped, wantSkipped) {
 		t.Fatalf("skipped:\n%s", strings.Join(skipped, "\n"))
+	}
+	if turnsOffStandardStrings(stmts) {
+		t.Fatal("standard_conforming_strings = on taken for off")
+	}
+	if !turnsOffStandardStrings([]string{"SET standard_conforming_strings = off;"}) {
+		t.Fatal("standard_conforming_strings = off not seen")
 	}
 }
 

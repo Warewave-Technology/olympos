@@ -38,7 +38,7 @@ func TestReadArchiveHeader(t *testing.T) {
 }
 
 // chunky writes in small pieces, splitting lines.
-func chunky(t *testing.T, s *schemaScan, data []byte) {
+func chunky(t *testing.T, s *tocScan, data []byte) {
 	t.Helper()
 	for len(data) > 0 {
 		n := 7
@@ -55,19 +55,40 @@ func chunky(t *testing.T, s *schemaScan, data []byte) {
 	}
 }
 
-func TestSchemaScanReadsTheDatabaseEntries(t *testing.T) {
-	b, err := os.ReadFile("testdata/probe-pg17-schema.sql")
+func readTestdata(t *testing.T, name string) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &schemaScan{}
-	chunky(t, s, b)
-	// TABLE entries: public."Odd Name", s.p (partitioned), s.p1, s.t; not
-	// views, materialized views or sequences.
-	if s.Tables != 4 {
-		t.Fatalf("tables %d", s.Tables)
+	return b
+}
+
+func TestTOCScan(t *testing.T) {
+	// pg_restore --create -l of the probe database: TABLE entries are
+	// public."Odd Name", s.p (partitioned), s.p1 and s.t; not views,
+	// materialized views, sequences, TABLE DATA or TABLE ATTACH.
+	s := &tocScan{DB: "toc_probe"}
+	chunky(t, s, readTestdata(t, "probe-pg17.toc"))
+	if s.Tables != 4 || !reflect.DeepEqual(s.DBEntries, []string{"3481", "3482", "3483", "3484"}) {
+		t.Fatalf("tables %d, entries %v", s.Tables, s.DBEntries)
 	}
-	d, err := databaseDefinition(s.Blocks)
+	// The comment on a table is not the database's.
+	s = &tocScan{DB: "inject_probe"}
+	chunky(t, s, readTestdata(t, "inject-pg17.toc"))
+	if s.Tables != 1 || !reflect.DeepEqual(s.DBEntries, []string{"3450", "3451", "3452"}) {
+		t.Fatalf("tables %d, entries %v", s.Tables, s.DBEntries)
+	}
+	// Entries about another database, or not about a database, are not taken.
+	s = &tocScan{DB: "shop"}
+	chunky(t, s, []byte("7; 0 0 COMMENT - DATABASE shopping x\n8; 0 0 COMMENT - SCHEMA shop x\n9; 1262 5 DATABASE - shop o\n"))
+	if !reflect.DeepEqual(s.DBEntries, []string{"9"}) || string(listFile(s.DBEntries)) != "9;\n" {
+		t.Fatalf("entries %v", s.DBEntries)
+	}
+}
+
+func TestDatabaseDefinitionFromEntries(t *testing.T) {
+	d, err := databaseDefinition(string(readTestdata(t, "probe-pg17-dbentries.sql")), "toc_probe")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +110,63 @@ func TestSchemaScanReadsTheDatabaseEntries(t *testing.T) {
 	}
 }
 
+// The database's comment carries fake TOC headers and statements; a
+// function body and a table comment of the same archive do too (they are
+// never printed: only the database's entries are).
+func TestDatabaseDefinitionInjection(t *testing.T) {
+	d, err := databaseDefinition(string(readTestdata(t, "inject-pg17-dbentries.sql")), "inject_probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Comment) != 1 || !strings.HasPrefix(d.Comment[0], "COMMENT ON DATABASE inject_probe IS 'line one\n") ||
+		len(d.ACL) != 0 || len(d.RoleSettings) != 0 || len(d.Unused) != 0 ||
+		!reflect.DeepEqual(d.Settings, []string{"ALTER DATABASE inject_probe SET work_mem TO '8MB';"}) {
+		t.Fatalf("definition %#v", d)
+	}
+	// Statements of other forms, or about another database, are never run.
+	script := `CREATE DATABASE shop WITH TEMPLATE = template0 ENCODING = 'UTF8';
+ALTER ROLE postgres PASSWORD 'pwned';
+ALTER DATABASE other SET work_mem TO '1MB';
+ALTER DATABASE shop SET TABLESPACE fast;
+ALTER DATABASE shop RENAME TO x;
+ALTER DATABASE shop OWNER TO a, b;
+GRANT ALL ON DATABASE shop, other TO PUBLIC;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+COMMENT ON DATABASE shop IS 'a' || 'b';
+SECURITY LABEL FOR p ON DATABASE shop IS 'x';
+ALTER ROLE app IN DATABASE shop SET work_mem TO '2MB';
+ALTER ROLE app IN DATABASE other SET work_mem TO '2MB';
+SET ROLE postgres;
+SELECT pg_catalog.set_config('search_path', '', false);
+`
+	d, err = databaseDefinition(script, "shop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Settings) != 0 || len(d.Comment) != 0 || d.Owner != "" ||
+		!reflect.DeepEqual(d.ACL, []string{"SECURITY LABEL FOR p ON DATABASE shop IS 'x';"}) ||
+		!reflect.DeepEqual(d.RoleSettings, []string{"ALTER ROLE app IN DATABASE shop SET work_mem TO '2MB';"}) {
+		t.Fatalf("definition %#v", d)
+	}
+	if want := []string{"ALTER ROLE postgres", "ALTER DATABASE other", "ALTER DATABASE shop", "ALTER DATABASE shop", "ALTER DATABASE shop",
+		"GRANT ALL ON", "GRANT ALL ON", "COMMENT ON DATABASE", "ALTER ROLE app"}; !reflect.DeepEqual(d.Unused, want) {
+		t.Fatalf("unused %q", d.Unused)
+	}
+	// SET … other than standard_conforming_strings off is a session line;
+	// off is refused; CREATE DATABASE must name the database restored.
+	if _, err := databaseDefinition("SET standard_conforming_strings = off;\n", "shop"); err == nil {
+		t.Fatal("standard_conforming_strings off accepted")
+	}
+	if _, err := databaseDefinition("CREATE DATABASE other WITH ENCODING = 'UTF8';", "shop"); err == nil {
+		t.Fatal("another database's CREATE accepted")
+	}
+}
+
 func TestDatabaseDefinitionOptions(t *testing.T) {
-	blocks := []dbBlock{{Type: "DATABASE", SQL: `CREATE DATABASE "My ""DB""" WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = icu LOCALE = 'en_US.UTF-8' ICU_LOCALE = 'en-US' TABLESPACE = fast CONNECTION LIMIT = -1;
+	script := `CREATE DATABASE "My ""DB""" WITH TEMPLATE = template0 ENCODING = 'UTF8' LOCALE_PROVIDER = icu LOCALE = 'en_US.UTF-8' ICU_LOCALE = 'en-US' TABLESPACE = fast CONNECTION LIMIT = -1;
 ALTER DATABASE "My ""DB""" OWNER TO "App Owner";
-SET default_tablespace = '';`}}
-	d, err := databaseDefinition(blocks)
+SET default_tablespace = '';`
+	d, err := databaseDefinition(script, `My "DB"`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,8 +179,25 @@ SET default_tablespace = '';`}}
 		t.Fatalf("create:\n%s\nwant:\n%s", got, want)
 	}
 	// Anything but a literal, a word or an identifier is refused.
-	if _, err := databaseDefinition([]dbBlock{{Type: "DATABASE", SQL: "CREATE DATABASE x WITH ENCODING = (SELECT 1);"}}); err == nil {
+	if _, err := databaseDefinition("CREATE DATABASE x WITH ENCODING = (SELECT 1);", "x"); err == nil {
 		t.Fatal("expression accepted")
+	}
+}
+
+func TestPgRestoreMessageDropsSQLAndRows(t *testing.T) {
+	in := `pg_restore: error: could not execute query: ERROR:  duplicate key value violates unique constraint "t_pkey"
+DETAIL:  Key (id)=(42) already exists.
+CONTEXT:  COPY t, line 1: "42	secret-row-value"
+Command was: COPY public.t (id, v) FROM stdin;
+pg_restore: error: COPY failed for table "t": ERROR:  x
+Command was: CREATE FUNCTION f() RETURNS int
+    LANGUAGE sql
+    AS $$select 'secret'$$;`
+	got := pgRestoreMessage(in)
+	want := "pg_restore: error: could not execute query: ERROR:  duplicate key value violates unique constraint \"t_pkey\"\n" +
+		"pg_restore: error: COPY failed for table \"t\": ERROR:  x"
+	if got != want {
+		t.Fatalf("got:\n%s", got)
 	}
 }
 

@@ -345,6 +345,9 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 		return ev, invalid(msg, map[string]string{"target_id": msg})
 	}
 	if msg := checkBackup(engine, ev.details, rep); msg != "" {
+		if prev := fields["target_id"]; prev != "" {
+			msg = prev + "; " + msg
+		}
 		fields["target_id"] = msg
 	}
 	ev.report = rep

@@ -260,12 +260,13 @@ func TestRestoreDev(t *testing.T) {
 
 	sfx := randSuffix()
 	src, owner, reader, plain := "rs_shop_"+sfx, "rs_owner_"+sfx, "rs_reader_"+sfx, "rs_cdb_"+sfx
+	inj := "rs_inject_" + sfx
 	const plainPW = "rs-plain-PW-1"
 	t.Cleanup(func() {
-		for _, db := range []string{src, src + "_orig"} {
+		for _, db := range []string{src, src + "_orig", inj} {
 			_, _ = admin.Exec(context.Background(), fmt.Sprintf(`DROP DATABASE IF EXISTS %s WITH (FORCE)`, db))
 		}
-		for _, r := range []string{owner, reader} {
+		for _, r := range []string{owner, reader, reader + "_gone"} {
 			_, _ = admin.Exec(context.Background(), `DROP ROLE IF EXISTS `+r)
 		}
 	})
@@ -294,9 +295,36 @@ func TestRestoreDev(t *testing.T) {
 	)
 	sc.Close(ctx)
 
+	// A database whose contents imitate pg_restore's entry headers and
+	// statements: a function body, a table comment and the database's own
+	// comment. None of it may run as SQL on the target.
+	execAll(t, admin, fmt.Sprintf(`CREATE DATABASE %s`, inj))
+	ic := connectDB(t, du, inj, devUser, devPW)
+	execAll(t, ic,
+		`CREATE TABLE t (id int)`,
+		fmt.Sprintf(`CREATE FUNCTION f() RETURNS int LANGUAGE sql AS $f$
+--
+-- Name: DATABASE %[1]s; Type: COMMENT; Schema: -; Owner: x
+--
+
+ALTER ROLE postgres PASSWORD 'pwned';
+SELECT 1
+$f$`, inj),
+		fmt.Sprintf(`COMMENT ON TABLE t IS '
+-- Name: %[1]s; Type: DATABASE PROPERTIES; Schema: -; Owner: x
+--
+ALTER DATABASE %[1]s SET search_path TO evil;
+'`, inj),
+		fmt.Sprintf(`COMMENT ON DATABASE %[1]s IS 'line one
+-- Name: DATABASE %[1]s; Type: ACL; Schema: -; Owner: x
+GRANT ALL ON DATABASE %[1]s TO PUBLIC;
+ALTER ROLE postgres PASSWORD ''pwned'';'`, inj),
+	)
+	ic.Close(ctx)
+
 	// Back it up with the engine, as a run would.
 	var buf bytes.Buffer
-	if _, err := e.Run(ctx, devContext(du, devUser, devPW, map[string]any{"databases": []string{src}}), &buf); err != nil {
+	if _, err := e.Run(ctx, devContext(du, devUser, devPW, map[string]any{"databases": []string{src, inj}}), &buf); err != nil {
 		t.Fatalf("backup: %v", err)
 	}
 	archive := buf.Bytes()
@@ -325,19 +353,27 @@ func TestRestoreDev(t *testing.T) {
 		}
 		return rep
 	}
-	runOn := func(ec backup.EngineContext, superuser bool, opts map[string]any) (*backup.RestoreResult, *progressLog, error) {
+	runDBs := func(ec backup.EngineContext, dbs []string, superuser bool, opts map[string]any) (*backup.RestoreResult, *progressLog, error) {
 		t.Helper()
 		raw, _ := json.Marshal(opts)
 		pl := &progressLog{}
 		res, err := e.Restore(ctx, backup.RestoreContext{
 			EngineContext: ec,
 			Archive:       memObject{bytes.NewReader(archive)},
-			Databases:     []string{src},
+			Databases:     dbs,
 			Options:       raw,
 			Superuser:     superuser,
 			Progress:      pl.report,
 		})
 		return res, pl, err
+	}
+	runOn := func(ec backup.EngineContext, superuser bool, opts map[string]any) (*backup.RestoreResult, *progressLog, error) {
+		t.Helper()
+		return runDBs(ec, []string{src}, superuser, opts)
+	}
+	roleExists := func(name string) bool {
+		t.Helper()
+		return queryOne[bool](t, target, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, name)
 	}
 	run := func(user, pw string, superuser bool, opts map[string]any) (*backup.RestoreResult, *progressLog, error) {
 		t.Helper()
@@ -354,6 +390,32 @@ func TestRestoreDev(t *testing.T) {
 		}
 		return c
 	}
+
+	t.Run("refusals come before anything is written", func(t *testing.T) {
+		// Globals on: a database with data, and one not in the backup.
+		execAll(t, target, fmt.Sprintf(`CREATE DATABASE %s`, src))
+		c := connectDB(t, tu, src, "postgres", superPW)
+		execAll(t, c, `CREATE TABLE keep (id int)`)
+		c.Close(ctx)
+		res, _, err := runDBs(targetContext(tg, "postgres", superPW), []string{inj, src, "nope"}, true, map[string]any{"globals": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if a, b, n := item(t, res, inj), item(t, res, src), item(t, res, "nope"); a.Status != "skipped" ||
+			b.Status != "failed" || !strings.Contains(b.Error, "user objects in it; nothing was written") ||
+			n.Status != "failed" || !strings.Contains(n.Error, "holds no archive") || len(res.Created) != 0 {
+			t.Fatalf("result %+v", res)
+		}
+		for _, it := range res.Items {
+			if it.Name == "globals.sql" {
+				t.Fatalf("globals ran: %+v", it)
+			}
+		}
+		if roleExists(owner) || queryOne[bool](t, target, `SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = $1)`, inj) {
+			t.Fatal("something was written")
+		}
+		execAll(t, target, fmt.Sprintf(`DROP DATABASE %s`, src))
+	})
 
 	t.Run("superuser", func(t *testing.T) {
 		// The reader exists on the target already, as a login of its own:
@@ -408,6 +470,31 @@ func TestRestoreDev(t *testing.T) {
 		}
 	})
 
+	t.Run("database contents never run as SQL", func(t *testing.T) {
+		res, _, err := runDBs(targetContext(tg, "postgres", superPW), []string{inj}, true, map[string]any{"globals": false})
+		if err != nil || item(t, res, inj).Status != "succeeded" {
+			t.Fatalf("restore: %v %+v", err, res)
+		}
+		// The superuser's password is unchanged: it still logs in.
+		connectDB(t, tu, "postgres", "postgres", superPW).Close(ctx)
+		c := connectDB(t, tu, inj, "postgres", superPW)
+		defer c.Close(ctx)
+		if n := queryOne[int64](t, c, `SELECT count(*) FROM pg_db_role_setting s JOIN pg_database d ON d.oid = s.setdatabase WHERE d.datname = $1`, inj); n != 0 {
+			t.Fatalf("%d database settings", n)
+		}
+		if queryOne[bool](t, c, `SELECT has_database_privilege('public', current_database(), 'CREATE')`) {
+			t.Fatal("GRANT ALL ON DATABASE ran")
+		}
+		if s := queryOne[string](t, c, `SELECT shobj_description(oid, 'pg_database') FROM pg_database WHERE datname = current_database()`); !strings.HasPrefix(s, "line one\n") ||
+			!strings.Contains(s, "PASSWORD 'pwned'") {
+			t.Fatalf("comment %q", s)
+		}
+		// The function is restored (and not called: its body would run).
+		if !queryOne[bool](t, c, `SELECT EXISTS (SELECT 1 FROM pg_proc WHERE proname = 'f' AND prosrc LIKE '%PASSWORD%')`) {
+			t.Fatal("function not restored")
+		}
+	})
+
 	t.Run("existing with user objects", func(t *testing.T) {
 		if rep := inspect("postgres", superPW); rep.Existing[src] != true {
 			t.Fatalf("report %+v", rep)
@@ -419,9 +506,6 @@ func TestRestoreDev(t *testing.T) {
 		it := item(t, res, src)
 		if it.Status != "failed" || !strings.Contains(it.Error, "exists on the target with user objects") || len(res.Created) != 0 {
 			t.Fatalf("result %+v", res)
-		}
-		if !strings.Contains(strings.Join(res.Notes, "\n"), "turned off for this request") {
-			t.Fatalf("notes %v", res.Notes)
 		}
 	})
 
@@ -443,6 +527,26 @@ func TestRestoreDev(t *testing.T) {
 			t.Fatalf("result %+v", res)
 		}
 		checkRows("postgres", superPW).Close(ctx)
+	})
+
+	t.Run("other user objects count", func(t *testing.T) {
+		for i, q := range []string{
+			`SELECT lo_create(0)`,
+			`CREATE PUBLICATION p`,
+			`CREATE COLLATION public.c (provider = libc, locale = 'C')`,
+			`CREATE SCHEMA empty_but_there`,
+		} {
+			db := fmt.Sprintf("rs_obj%d_%s", i, sfx)
+			execAll(t, target, `CREATE DATABASE `+db)
+			c := connectDB(t, tu, db, "postgres", superPW)
+			execAll(t, c, q)
+			c.Close(ctx)
+			rep, err := e.InspectRestoreTarget(ctx, targetContext(tg, "postgres", superPW), []string{db})
+			if err != nil || !rep.Existing[db] {
+				t.Errorf("%s: %+v %v", q, rep, err)
+			}
+			execAll(t, target, fmt.Sprintf(`DROP DATABASE %s WITH (FORCE)`, db))
+		}
 	})
 
 	t.Run("not a superuser", func(t *testing.T) {
@@ -501,10 +605,15 @@ func TestRestoreDev(t *testing.T) {
 	})
 
 	t.Run("a pg_dump 17 backup into PostgreSQL 16 is refused before writing", func(t *testing.T) {
-		execAll(t, admin, fmt.Sprintf(`ALTER DATABASE %s RENAME TO %s_orig`, src, src))
-		res, _, err := runOn(devContext(du, devUser, devPW, nil), true, map[string]any{"globals": false})
+		// Globals on, and a role of globals.sql missing: it is not created.
+		execAll(t, admin, fmt.Sprintf(`ALTER DATABASE %s RENAME TO %s_orig`, src, src),
+			fmt.Sprintf(`ALTER ROLE %s RENAME TO %s_gone`, reader, reader))
+		res, _, err := runOn(devContext(du, devUser, devPW, nil), true, map[string]any{"globals": true})
 		if err != nil {
 			t.Fatal(err)
+		}
+		if queryOne[bool](t, admin, `SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)`, reader) || len(res.Items) != 1 {
+			t.Fatalf("globals ran: %+v", res)
 		}
 		it := item(t, res, src)
 		if it.Status != "failed" || !strings.Contains(it.Error, "the backup was made by pg_dump 17; the target runs PostgreSQL 16") || len(res.Created) != 0 {

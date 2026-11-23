@@ -2,13 +2,14 @@ package postgres
 
 import (
 	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"regexp"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -31,26 +32,46 @@ func init() {
 	restore.RegisterInspector("postgresql", e)
 }
 
+// userNamespace excludes the system schemas.
+const userNamespace = `n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'`
+
+// notExtension: the object (catalog cat, row alias a) is not an
+// extension's member.
+func notExtension(cat, a string) string {
+	return `NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = '` + cat + `'::regclass AND d.objid = ` + a + `.oid AND d.deptype = 'e')`
+}
+
+// inUserSchema: catalog cat (alias a, schema column nsp) rows in a user
+// schema that no extension owns.
+func inUserSchema(cat, a, nsp, extra string) string {
+	return `SELECT 1 FROM ` + cat + ` ` + a + ` JOIN pg_namespace n ON n.oid = ` + a + `.` + nsp +
+		` WHERE ` + userNamespace + extra + ` AND ` + notExtension(cat, a)
+}
+
 // userObjectsSQL is true when the connected database holds user objects:
-// a relation, function, type or schema outside the system schemas that no
-// extension owns. The public schema itself does not count.
-const userObjectsSQL = `SELECT EXISTS (
-	SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-	 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
-	   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
-	UNION ALL
-	SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-	 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
-	   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
-	UNION ALL
-	SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-	 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
-	   AND t.typrelid = 0 AND NOT EXISTS (SELECT 1 FROM pg_type e WHERE e.typarray = t.oid)
-	   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_type'::regclass AND d.objid = t.oid AND d.deptype = 'e')
-	UNION ALL
-	SELECT 1 FROM pg_namespace n
-	 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'public') AND n.nspname NOT LIKE 'pg_toast%' AND n.nspname NOT LIKE 'pg_temp%'
-	   AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass AND d.objid = n.oid AND d.deptype = 'e'))`
+// relations, functions, types, operators, collations, conversions and text
+// search objects in a user schema, non-public schemas, casts, foreign data
+// wrappers and servers, user mappings, publications, subscriptions, event
+// triggers and large objects; none of them owned by an extension.
+var userObjectsSQL = `SELECT EXISTS (` + strings.Join([]string{
+	inUserSchema("pg_class", "c", "relnamespace", ""),
+	inUserSchema("pg_proc", "p", "pronamespace", ""),
+	inUserSchema("pg_type", "t", "typnamespace", ` AND t.typrelid = 0 AND NOT EXISTS (SELECT 1 FROM pg_type e WHERE e.typarray = t.oid)`),
+	inUserSchema("pg_operator", "o", "oprnamespace", ""),
+	inUserSchema("pg_collation", "co", "collnamespace", ""),
+	inUserSchema("pg_conversion", "cv", "connamespace", ""),
+	inUserSchema("pg_ts_config", "tc", "cfgnamespace", ""),
+	inUserSchema("pg_ts_dict", "td", "dictnamespace", ""),
+	`SELECT 1 FROM pg_namespace n WHERE ` + userNamespace + ` AND n.nspname <> 'public' AND ` + notExtension("pg_namespace", "n"),
+	`SELECT 1 FROM pg_cast ca WHERE ca.oid >= 16384 AND ` + notExtension("pg_cast", "ca"),
+	`SELECT 1 FROM pg_foreign_data_wrapper w WHERE ` + notExtension("pg_foreign_data_wrapper", "w"),
+	`SELECT 1 FROM pg_foreign_server fs WHERE ` + notExtension("pg_foreign_server", "fs"),
+	`SELECT 1 FROM pg_user_mappings`,
+	`SELECT 1 FROM pg_publication pb WHERE ` + notExtension("pg_publication", "pb"),
+	`SELECT 1 FROM pg_subscription su WHERE su.subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+	`SELECT 1 FROM pg_event_trigger et WHERE ` + notExtension("pg_event_trigger", "et"),
+	`SELECT 1 FROM pg_largeobject_metadata`,
+}, "\n\tUNION ALL\n\t") + `)`
 
 // targetState is what a restore needs to know about its target.
 type targetState struct {
@@ -190,7 +211,7 @@ func (e *Engine) CheckBackup(details map[string]any, r *restore.TargetReport) st
 		n, _ := v.Int64()
 		dump = int(n)
 	}
-	m := regexp.MustCompile(`^(\d+)`).FindStringSubmatch(r.ServerVersion)
+	m := leadingNumber.FindStringSubmatch(r.ServerVersion)
 	if dump <= 0 || m == nil {
 		return ""
 	}
@@ -208,10 +229,13 @@ type restoreOptions struct {
 const maxGlobals = 64 << 20
 
 // Restore implements backup.Restorer (docs/design/ui-restore.md
-// "Engines"): globals.sql first (superuser only), then per database CREATE
-// DATABASE from template0 (unless it exists without user objects) and
-// pg_restore with the archive entry on its stdin. Nothing is dropped. The
-// first failed database ends the restore; the rest are reported skipped.
+// "Engines"). Nothing is written before every selected database passed its
+// preflight (in the archive, not on the target with data, archive header
+// and table of contents readable, a usable pg_restore). Then globals.sql
+// (superuser only), then per database CREATE DATABASE from template0
+// (unless it exists without user objects) and pg_restore with the archive
+// entry on its stdin. Nothing is dropped. The first failed database ends
+// the restore; the rest are reported skipped.
 func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.RestoreResult, err error) {
 	res := &backup.RestoreResult{Items: []backup.RestoreItem{}, Notes: []string{}, Created: []string{}}
 	// Errors and items are scrubbed of the credential (the executor scrubs
@@ -220,6 +244,12 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 	defer func() {
 		if err != nil {
 			err = errors.New(scrub.Scrub(err.Error()))
+		}
+		for i := range res.Items {
+			res.Items[i].Error = scrub.Scrub(res.Items[i].Error)
+			for k := range res.Items[i].Skipped {
+				res.Items[i].Skipped[k] = scrub.Scrub(res.Items[i].Skipped[k])
+			}
 		}
 	}()
 	var ro restoreOptions
@@ -270,25 +300,6 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 		return res, err
 	}
 
-	// Globals: roles, superuser only.
-	switch {
-	case !rc.Superuser:
-		res.Notes = append(res.Notes, "The credential is not a superuser: roles (globals.sql) were not restored, and the databases were "+
-			"restored with --no-owner --no-privileges, so their objects belong to "+cred.Username+" and carry no grants.")
-	case ro.Globals != nil && !*ro.Globals:
-		res.Notes = append(res.Notes, "Roles (globals.sql) were not restored: turned off for this request.")
-	case entries["globals.sql"] == nil:
-		res.Notes = append(res.Notes, "The backup holds no globals.sql (taken without globals): no roles were restored.")
-	default:
-		progress(backup.Progress{Phase: "globals"})
-		item, err := s.restoreGlobals(ctx, conn, entries["globals.sql"])
-		item.Error = scrub.Scrub(item.Error)
-		res.Items = append(res.Items, item)
-		if err != nil {
-			return res, err
-		}
-	}
-
 	tmp, err := os.MkdirTemp("", "olympos-pgr-")
 	if err != nil {
 		return res, err
@@ -302,24 +313,61 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 		return res, err
 	}
 
-	var done []string
+	// Preflight: every database, before anything is written.
+	plans := make([]*dbPlan, len(rc.Databases))
+	var refused []string
 	for i, db := range rc.Databases {
+		plan, msg := s.prepareDatabase(ctx, st, entries[entryName(db)], db, tmp, env)
+		if msg != "" {
+			res.Items = append(res.Items, backup.RestoreItem{Name: db, Status: "failed", Bytes: plan.bytes(), Error: msg + "; nothing was written"})
+			refused = append(refused, db)
+			continue
+		}
+		plans[i] = plan
+	}
+	if len(refused) > 0 {
+		for i, db := range rc.Databases {
+			if plans[i] != nil {
+				res.Items = append(res.Items, backup.RestoreItem{Name: db, Status: "skipped", Bytes: plans[i].bytes(),
+					Error: "not restored: nothing was written because " + strings.Join(refused, ", ") + " cannot be restored"})
+			}
+		}
+		return res, nil
+	}
+
+	// Globals: roles, superuser only.
+	switch {
+	case !rc.Superuser:
+		res.Notes = append(res.Notes, "The credential is not a superuser: roles (globals.sql) were not restored, and the databases were "+
+			"restored with --no-owner --no-privileges, so their objects belong to "+cred.Username+" and carry no grants.")
+	case ro.Globals != nil && !*ro.Globals:
+		res.Notes = append(res.Notes, "Roles (globals.sql) were not restored: turned off for this request.")
+	case entries["globals.sql"] == nil:
+		res.Notes = append(res.Notes, "The backup holds no globals.sql (taken without globals): no roles were restored.")
+	default:
+		progress(backup.Progress{Phase: "globals"})
+		item, err := s.restoreGlobals(ctx, conn, entries["globals.sql"])
+		res.Items = append(res.Items, item)
+		if err != nil {
+			return res, err
+		}
+	}
+
+	var done []string
+	for i, plan := range plans {
+		db := plan.db
 		if err := ctx.Err(); err != nil {
 			return res, err
 		}
 		progress(backup.Progress{Phase: "restore", Database: db, Done: done, Created: res.Created})
-		item := s.restoreDatabase(ctx, conn, rc, st, entries[entryName(db)], db, tmp, env, func(created string) {
+		item := s.restoreDatabase(ctx, conn, rc, plan, tmp, env, func(created string) {
 			res.Created = append(res.Created, created)
 			progress(backup.Progress{Phase: "restore", Database: db, Done: done, Created: res.Created})
 		})
-		item.Error = scrub.Scrub(item.Error)
-		for k := range item.Skipped {
-			item.Skipped[k] = scrub.Scrub(item.Skipped[k])
-		}
 		res.Items = append(res.Items, item)
 		if item.Status != "succeeded" {
-			for _, rest := range rc.Databases[i+1:] {
-				res.Items = append(res.Items, backup.RestoreItem{Name: rest, Status: "skipped",
+			for _, rest := range plans[i+1:] {
+				res.Items = append(res.Items, backup.RestoreItem{Name: rest.db, Status: "skipped", Bytes: rest.bytes(),
 					Error: "not restored: the restore stopped after " + db + " failed"})
 			}
 			break
@@ -331,7 +379,9 @@ func (e *Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *back
 }
 
 // restoreGlobals runs the filtered globals.sql in one transaction over the
-// tunnel connection (simple protocol), so a failure creates no role.
+// tunnel connection, so a failure creates no role. Each statement is sent
+// alone with the extended protocol, which runs exactly one statement: text
+// the splitter misread can never smuggle in a second one.
 func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.File) (backup.RestoreItem, error) {
 	start := time.Now()
 	item := backup.RestoreItem{Name: "globals.sql", Status: "failed", Bytes: int64(f.UncompressedSize64)}
@@ -375,20 +425,28 @@ func (s *session) restoreGlobals(ctx context.Context, conn *pgx.Conn, f *zip.Fil
 	}
 	stmts, skipped := filterGlobals(string(b), existing)
 	item.Skipped = skipped
-	pc := conn.PgConn()
-	if _, err := pc.Exec(ctx, "BEGIN").ReadAll(); err != nil {
+	if turnsOffStandardStrings(stmts) {
+		return finish(errors.New("it turns standard_conforming_strings off; no role was created"))
+	}
+	if err := execOne(ctx, conn, "BEGIN"); err != nil {
 		return finish(err)
 	}
 	for i, st := range stmts {
-		if _, err := pc.Exec(ctx, st).ReadAll(); err != nil {
-			_, _ = pc.Exec(context.WithoutCancel(ctx), "ROLLBACK").ReadAll()
+		if err := execOne(ctx, conn, st); err != nil {
+			_ = execOne(context.WithoutCancel(ctx), conn, "ROLLBACK")
 			return finish(fmt.Errorf("statement %d (%s): %w; no role was created", i+1, describeStmt(st), err))
 		}
 	}
-	if _, err := pc.Exec(ctx, "COMMIT").ReadAll(); err != nil {
+	if err := execOne(ctx, conn, "COMMIT"); err != nil {
 		return finish(err)
 	}
 	return finish(nil)
+}
+
+// execOne runs one statement with the extended protocol (a single
+// statement, no parameters).
+func execOne(ctx context.Context, conn *pgx.Conn, st string) error {
+	return conn.PgConn().ExecParams(ctx, st, nil, nil, nil, nil).Read().Err
 }
 
 // describeStmt names a statement without its text (which may carry a
@@ -408,70 +466,135 @@ func describeStmt(st string) string {
 	return strings.Join(parts, " ")
 }
 
-// restoreDatabase restores one database; onCreated is called right after
-// CREATE DATABASE succeeded.
-func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup.RestoreContext, st *targetState, f *zip.File,
-	db, tmp string, env []string, onCreated func(string)) backup.RestoreItem {
+// dbPlan is a database that passed its preflight.
+type dbPlan struct {
+	db     string
+	f      *zip.File
+	exists bool // exists on the target without user objects
+	hdr    archiveHeader
+	tool   *Tool
+	tables int
+	def    dbDefinition
+}
+
+func (p *dbPlan) bytes() int64 {
+	if p == nil || p.f == nil {
+		return 0
+	}
+	return int64(p.f.UncompressedSize64)
+}
+
+// prepareDatabase checks one database without writing anything: it is in
+// the archive and not on the target with data, the archive entry's header
+// names it and picks a usable pg_restore (restoreTool), and its table of
+// contents gives the tables and the database's own statements. msg is why
+// it cannot be restored ("" when it can); plan is filled as far as it got.
+func (s *session) prepareDatabase(ctx context.Context, st *targetState, f *zip.File, db, tmp string, env []string) (*dbPlan, string) {
+	plan := &dbPlan{db: db, f: f}
+	if f == nil {
+		return plan, "the backup holds no archive for this database"
+	}
+	has, exists := st.existing[db]
+	if exists && has {
+		return plan, "the database exists on the target with user objects in it"
+	}
+	plan.exists = exists
+	r, err := f.Open()
+	if err != nil {
+		return plan, fmt.Sprintf("open the archive entry: %v", err)
+	}
+	plan.hdr, err = readArchiveHeader(r)
+	r.Close()
+	if err != nil {
+		return plan, err.Error()
+	}
+	if plan.hdr.DBName != db {
+		return plan, fmt.Sprintf("the archive entry holds database %q, not %q", plan.hdr.DBName, db)
+	}
+	if plan.tool, err = restoreTool(ctx, s.toolDir, plan.hdr.DumpMajor, st.si.major()); err != nil {
+		return plan, err.Error()
+	}
+
+	// The table of contents: one sanitized line per entry.
+	toc := &tocScan{DB: db}
+	if err := s.feedTool(ctx, plan.tool.PgRestore, []string{"--create", "--list"}, nil, env, f, toc, false); err != nil {
+		return plan, fmt.Sprintf("read the archive's table of contents: %v", err)
+	}
+	if err := toc.Close(); err != nil {
+		return plan, fmt.Sprintf("read the archive's table of contents: %v", err)
+	}
+	plan.tables = toc.Tables
+	if len(toc.DBEntries) == 0 {
+		return plan, "the archive has no entry for the database itself (not a pg_dump -Fc archive of one database)"
+	}
+	// Only the database's own entries are printed, so nothing of its
+	// contents (function bodies, comments of other objects) is read as
+	// SQL to run.
+	list := filepath.Join(tmp, "entries.list")
+	if err := os.WriteFile(list, listFile(toc.DBEntries), 0o600); err != nil {
+		return plan, err.Error()
+	}
+	out := &limitBuffer{max: maxDBScript}
+	if err := s.feedTool(ctx, plan.tool.PgRestore, []string{"--create", "--schema-only", "--use-list=" + list, "--file=-"}, nil, env, f, out, false); err != nil {
+		return plan, fmt.Sprintf("read the database's entries in the archive: %v", err)
+	}
+	if out.over {
+		return plan, "the database's own entries in the archive are too large"
+	}
+	if plan.def, err = databaseDefinition(out.String(), db); err != nil {
+		return plan, err.Error()
+	}
+	return plan, ""
+}
+
+// maxDBScript bounds the script of the database's own entries.
+const maxDBScript = 1 << 20
+
+// limitBuffer keeps up to max bytes and records an overflow.
+type limitBuffer struct {
+	bytes.Buffer
+	max  int
+	over bool
+}
+
+func (b *limitBuffer) Write(p []byte) (int, error) {
+	if b.Len()+len(p) > b.max {
+		b.over = true
+		return len(p), nil
+	}
+	return b.Buffer.Write(p)
+}
+
+// restoreDatabase restores one prepared database; onCreated is called
+// right after CREATE DATABASE succeeded.
+func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup.RestoreContext, plan *dbPlan,
+	tmp string, env []string, onCreated func(string)) backup.RestoreItem {
 	start := time.Now()
-	item := backup.RestoreItem{Name: db, Status: "failed"}
+	db := plan.db
+	item := backup.RestoreItem{Name: db, Status: "failed", Bytes: plan.bytes(), Tables: plan.tables}
 	fail := func(format string, a ...any) backup.RestoreItem {
 		item.Duration = time.Since(start).Seconds()
 		item.Error = fmt.Sprintf(format, a...)
 		return item
 	}
-	if f == nil {
-		return fail("the backup holds no archive for this database")
+	def := plan.def
+	if len(def.Unused) > 0 {
+		item.Skipped = append(item.Skipped, "statements about the database not applied: "+strings.Join(def.Unused, "; "))
 	}
-	item.Bytes = int64(f.UncompressedSize64)
-	has, exists := st.existing[db]
-	if exists && has {
-		return fail("the database exists on the target with user objects in it; nothing was written")
-	}
-
-	// The archive's header tells the dump's major before any pg_restore
-	// runs (see restoreTool).
-	r, err := f.Open()
-	if err != nil {
-		return fail("open the archive entry: %v", err)
-	}
-	hdr, err := readArchiveHeader(r)
-	r.Close()
-	if err != nil {
-		return fail("%v", err)
-	}
-	tool, err := restoreTool(ctx, s.toolDir, hdr.DumpMajor, st.si.major())
-	if err != nil {
-		return fail("%v; nothing was written", err)
-	}
-
-	// The schema pass: the TOC's tables and the database's own entries.
-	scan := &schemaScan{}
-	if err := s.feedTool(ctx, tool.PgRestore, []string{"--create", "--schema-only", "--file=-"}, nil, env, f, scan, false); err != nil {
-		return fail("read the archive's table of contents: %v", err)
-	}
-	if err := scan.Close(); err != nil {
-		return fail("read the archive's table of contents: %v", err)
-	}
-	item.Tables = scan.Tables
-	def, err := databaseDefinition(scan.Blocks)
-	if err != nil {
-		return fail("%v", err)
-	}
-
-	if exists {
+	if plan.exists {
 		item.Skipped = append(item.Skipped, "the database existed on the target without user objects: restored into it; "+
 			"its settings, comment and privileges from the backup were not applied")
 	} else {
 		if len(def.Ignored) > 0 {
 			item.Skipped = append(item.Skipped, "CREATE DATABASE options not used: "+strings.Join(def.Ignored, ", "))
 		}
-		if _, err := conn.PgConn().Exec(ctx, def.createSQL(db, rc.Superuser)).ReadAll(); err != nil {
+		if err := execOne(ctx, conn, def.createSQL(db, rc.Superuser)); err != nil {
 			return fail("create the database: %v", err)
 		}
 		onCreated(db)
 	}
 
-	sslArgs, err := s.sslParams(tmp, tool.Major)
+	sslArgs, err := s.sslParams(tmp, plan.tool.Major)
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -480,12 +603,12 @@ func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup
 		args = append(args, "--no-owner", "--no-privileges")
 	}
 	kv := s.conninfoFor(db, sslArgs, "olympos-restore")
-	if err := s.feedTool(ctx, tool.PgRestore, args, kv, env, f, &tailBuffer{max: 8 << 10}, true); err != nil {
+	if err := s.feedTool(ctx, plan.tool.PgRestore, args, kv, env, plan.f, io.Discard, true); err != nil {
 		return fail("%v", err)
 	}
 
-	if !exists {
-		skipped, err := s.applyDatabaseEntries(ctx, conn, def, rc.Superuser)
+	if !plan.exists {
+		skipped, err := applyDatabaseEntries(ctx, conn, def, rc.Superuser)
 		item.Skipped = append(item.Skipped, skipped...)
 		if err != nil {
 			return fail("%v", err)
@@ -498,7 +621,8 @@ func (s *session) restoreDatabase(ctx context.Context, conn *pgx.Conn, rc backup
 
 // feedTool runs pg_restore with the zip entry on its stdin. With whole, the
 // entry is read to its end (archive/zip checks its CRC-32 there) even when
-// pg_restore stopped reading before.
+// pg_restore stopped reading before. pg_restore's messages are trimmed of
+// the SQL and rows they quote (pgRestoreMessage).
 func (s *session) feedTool(ctx context.Context, bin string, args []string, kv [][2]string, env []string, f *zip.File, out io.Writer, whole bool) error {
 	r, err := f.Open()
 	if err != nil {
@@ -506,7 +630,9 @@ func (s *session) feedTool(ctx context.Context, bin string, args []string, kv []
 	}
 	defer r.Close()
 	in := &readErr{r: r}
-	runErr := s.runToolStdin(ctx, bin, args, kv, env, in, out)
+	// runToolStdin returns only after its stdin copy ended, so in and r
+	// are no longer used by it here.
+	runErr := s.runToolStdin(ctx, bin, args, kv, env, in, out, pgRestoreMessage)
 	if in.err != nil && !errors.Is(in.err, io.EOF) {
 		return fmt.Errorf("read the backup: %w", in.err)
 	}
@@ -519,6 +645,19 @@ func (s *session) feedTool(ctx context.Context, bin string, args []string, kv []
 		}
 	}
 	return nil
+}
+
+// pgRestoreMessage keeps pg_restore's own message lines ("pg_restore: …")
+// and drops the lines quoting SQL or data: "Command was:" with the
+// statement after it, CONTEXT (COPY … line N: <row>), DETAIL, HINT.
+func pgRestoreMessage(stderr string) string {
+	var keep []string
+	for _, l := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(l, "pg_restore: ") {
+			keep = append(keep, l)
+		}
+	}
+	return strings.Join(keep, "\n")
 }
 
 // readErr remembers the first read error (the zip CRC check).
@@ -536,41 +675,36 @@ func (r *readErr) Read(p []byte) (int, error) {
 }
 
 // applyDatabaseEntries runs the archive's statements about the database
-// itself (pg_restore applies them only with --create): settings, comment
-// and, with a superuser, privileges. Without a superuser only ALTER
-// DATABASE … SET and the comment are run.
-func (s *session) applyDatabaseEntries(ctx context.Context, conn *pgx.Conn, def dbDefinition, superuser bool) ([]string, error) {
+// itself (pg_restore applies them only with --create), each alone: its
+// settings and comment, and with a superuser the per-role settings in it
+// and its privileges.
+func applyDatabaseEntries(ctx context.Context, conn *pgx.Conn, def dbDefinition, superuser bool) ([]string, error) {
 	var skipped []string
-	run := func(st string) error {
-		if _, err := conn.PgConn().Exec(ctx, st).ReadAll(); err != nil {
-			return fmt.Errorf("apply the database's %s: %w", describeStmt(st), err)
+	run := func(sts []string) error {
+		for _, st := range sts {
+			if err := execOne(ctx, conn, st); err != nil {
+				return fmt.Errorf("apply the database's %s: %w", describeStmt(st), err)
+			}
 		}
 		return nil
 	}
-	for _, st := range def.Settings {
-		if !superuser && !isWords(lexSQL(st), "ALTER", "DATABASE") {
-			skipped = append(skipped, "a per-role database setting ("+describeStmt(st)+"): needs a superuser")
-			continue
-		}
-		if err := run(st); err != nil {
-			return skipped, err
-		}
+	if err := run(def.Settings); err != nil {
+		return skipped, err
 	}
-	for _, st := range def.Comment {
-		if err := run(st); err != nil {
-			return skipped, err
-		}
+	if err := run(def.Comment); err != nil {
+		return skipped, err
 	}
 	if !superuser {
+		if len(def.RoleSettings) > 0 {
+			skipped = append(skipped, "per-role settings in the database: not restored without a superuser")
+		}
 		if len(def.ACL) > 0 {
 			skipped = append(skipped, "the database's privileges: not restored without a superuser")
 		}
 		return skipped, nil
 	}
-	for _, st := range def.ACL {
-		if err := run(st); err != nil {
-			return skipped, err
-		}
+	if err := run(def.RoleSettings); err != nil {
+		return skipped, err
 	}
-	return skipped, nil
+	return skipped, run(def.ACL)
 }

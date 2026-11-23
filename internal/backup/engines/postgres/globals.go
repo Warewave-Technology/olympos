@@ -6,21 +6,32 @@ import (
 )
 
 // filterGlobals picks the statements of a pg_dumpall --globals-only script
-// that a restore may run on a target (docs/design/ui-restore.md "Engines"):
+// that a restore may run on a target (docs/design/ui-restore.md "Engines").
+// Only the statement forms pg_dumpall writes for roles are run (an
+// allowlist); anything else is skipped and reported:
+//
+//   - session lines: SET default_transaction_read_only, client_encoding,
+//     standard_conforming_strings, and SELECT pg_catalog.set_config(
+//     'search_path', ”, false);
+//   - CREATE ROLE r; ALTER ROLE r WITH …; ALTER ROLE r SET/RESET …;
+//     GRANT role, … TO role, … [WITH …] [GRANTED BY r]; COMMENT ON ROLE r
+//     IS '…'; SECURITY LABEL [FOR p] ON ROLE r IS '…'.
+//
+// Of those:
 //
 //   - roles that do not exist on the target are created with all their
-//     statements (CREATE ROLE, ALTER ROLE … WITH / SET, comments,
-//     memberships);
+//     statements;
 //   - every statement about a role in existingRoles is skipped: CREATE ROLE,
-//     ALTER ROLE, COMMENT / SECURITY LABEL ON ROLE, and memberships or
-//     grants where it is the member or grantee, or the granted role. A
-//     predefined role (pg_*) granted to a new role is kept: such roles
-//     cannot be created or changed by a restore, and the membership only
-//     concerns the new role;
+//     ALTER ROLE, COMMENT / SECURITY LABEL ON ROLE, and memberships where it
+//     is the member or the granted role. A predefined role (pg_*) granted
+//     to a new role is kept: such roles cannot be created or changed by a
+//     restore, and the membership only concerns the new role;
+//   - GRANTED BY is dropped unless the grantor is a role this restore
+//     creates (a grantor missing on the target would fail the step);
 //   - tablespaces are not restored (their paths do not exist on a new
 //     server): CREATE / ALTER / COMMENT ON TABLESPACE and grants on them;
-//   - ALTER ROLE … IN DATABASE (the database does not exist yet; its own
-//     settings come with it), ALTER ROLE ALL and DROP are not run;
+//   - ALTER ROLE … IN DATABASE (the database does not exist yet), ALTER ROLE
+//     ALL / CURRENT_USER / SESSION_USER / CURRENT_ROLE and DROP are not run;
 //   - psql meta-commands (\restrict, \unrestrict, any line starting with
 //     a backslash) and comments are dropped.
 //
@@ -56,20 +67,33 @@ func filterGlobals(sql string, existingRoles map[string]bool) (stmts []string, s
 		})
 	}
 
-	for _, st := range splitSQL(sql) {
-		c := classify(st)
+	all := splitSQL(sql)
+	classes := make([]globalsStmt, len(all))
+	created := map[string]bool{}
+	for i, st := range all {
+		classes[i] = classify(st)
+		if c := classes[i]; c.create && !existingRoles[c.roles[0]] {
+			created[c.roles[0]] = true
+		}
+	}
+	for i, st := range all {
+		c := classes[i]
 		switch {
+		case c.session:
 		case c.drop != "":
 			note("drop:"+st, c.drop+": not executed, a restore drops nothing")
 			continue
 		case c.tablespace != "":
 			tablespace(c.tablespace)
 			continue
-		case c.allRoles:
-			note("all:"+st, "ALTER ROLE ALL: not applied, it would change the target's existing roles")
+		case c.allRoles != "":
+			note("all:"+st, "ALTER ROLE "+c.allRoles+": not applied, it would change the target's existing roles")
 			continue
 		case c.inDatabase != "":
 			note("indb:"+st, fmt.Sprintf("role %s: per-database setting not applied (ALTER ROLE … IN DATABASE %s)", c.roles[0], c.inDatabase))
+			continue
+		case !c.allowed:
+			note("other:"+describeStmt(st), "statement not run ("+describeStmt(st)+"): not a role statement pg_dumpall writes")
 			continue
 		}
 		var hit []string
@@ -89,6 +113,9 @@ func filterGlobals(sql string, existingRoles map[string]bool) (stmts []string, s
 			}
 			continue
 		}
+		if c.grantedBy != "" && !created[c.grantedBy] {
+			st = strings.TrimRight(st[:c.grantedByStart], " \t\n") + st[c.grantedByEnd:]
+		}
 		stmts = append(stmts, st)
 	}
 	for _, k := range order {
@@ -96,6 +123,22 @@ func filterGlobals(sql string, existingRoles map[string]bool) (stmts []string, s
 		skipped = append(skipped, c.msg(c.n))
 	}
 	return stmts, skipped
+}
+
+// turnsOffStandardStrings: a kept statement sets standard_conforming_strings
+// off, under which the splitter would read literals differently from the
+// server.
+func turnsOffStandardStrings(stmts []string) bool {
+	for _, st := range stmts {
+		t := lexSQL(st)
+		if len(t) >= 4 && isWords(t, "SET") && strings.EqualFold(t[1].text, "standard_conforming_strings") {
+			v := strings.ToLower(strings.Trim(t[3].text, "'"))
+			if v != "on" && v != "true" && v != "1" && v != "yes" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func plural(n int, word string) string {
@@ -116,88 +159,124 @@ func contains(ss []string, s string) bool {
 
 // globalsStmt is what a globals statement is about.
 type globalsStmt struct {
+	// allowed: one of the forms pg_dumpall writes for roles.
+	allowed bool
+	// session: an allowed session line (SET, set_config).
+	session bool
+	// create: CREATE ROLE roles[0].
+	create bool
 	// roles the statement changes or grants to (CREATE/ALTER/COMMENT ON
-	// ROLE, membership members, grantees).
+	// ROLE, membership members).
 	roles []string
 	// granted: roles granted (memberships).
-	granted    []string
-	tablespace string
-	inDatabase string
-	allRoles   bool
-	drop       string // "DROP ROLE", ... when the statement drops something
+	granted []string
+	// grantedBy: the GRANTED BY role of a membership, and the byte range of
+	// the clause in the statement.
+	grantedBy                    string
+	grantedByStart, grantedByEnd int
+	tablespace                   string
+	inDatabase                   string
+	allRoles                     string // ALL, CURRENT_USER, ...
+	drop                         string // "DROP ROLE", ... when the statement drops something
 }
+
+// sessionParams are the settings pg_dumpall writes at the top of the script.
+var sessionParams = map[string]bool{"default_transaction_read_only": true, "client_encoding": true, "standard_conforming_strings": true}
+
+const setConfigLine = "SELECT pg_catalog.set_config('search_path', '', false);"
 
 func classify(st string) globalsStmt {
 	var c globalsStmt
 	toks := lexSQL(st)
+	if n := len(toks); n > 0 && toks[n-1].kind == tokPunct && toks[n-1].text == ";" {
+		toks = toks[:n-1]
+	}
 	kw := func(i int) string {
 		if i < len(toks) && toks[i].kind == tokWord {
 			return strings.ToUpper(toks[i].text)
 		}
 		return ""
 	}
+	isName := func(i int) bool { return i < len(toks) && (toks[i].kind == tokWord || toks[i].kind == tokIdent) }
 	name := func(i int) string {
 		if i < len(toks) {
 			return toks[i].name()
 		}
 		return ""
 	}
-	isRoleKw := func(k string) bool { return k == "ROLE" || k == "USER" || k == "GROUP" }
+	// IS '…' | IS NULL ending the statement at i.
+	isLiteral := func(i int) bool {
+		return kw(i) == "IS" && i+2 == len(toks) && (toks[i+1].kind == tokString || kw(i+1) == "NULL")
+	}
 	switch kw(0) {
+	case "SET":
+		c.session = len(toks) == 4 && sessionParams[strings.ToLower(toks[1].text)] && (kw(2) == "TO" || toks[2].text == "=")
+		c.allowed = c.session
+	case "SELECT":
+		c.session = strings.Join(strings.Fields(st), " ") == setConfigLine
+		c.allowed = c.session
 	case "DROP":
 		c.drop = strings.TrimSpace("DROP " + kw(1))
 	case "CREATE":
 		switch {
-		case isRoleKw(kw(1)):
-			c.roles = []string{name(2)}
+		case kw(1) == "ROLE" && isName(2) && len(toks) == 3:
+			c.allowed, c.create, c.roles = true, true, []string{name(2)}
 		case kw(1) == "TABLESPACE":
 			c.tablespace = name(2)
 		}
 	case "ALTER":
 		switch {
-		case isRoleKw(kw(1)) && kw(2) == "ALL" && toks[2].kind == tokWord:
-			c.allRoles = true
-		case isRoleKw(kw(1)):
-			c.roles = []string{name(2)}
-			if kw(3) == "IN" && kw(4) == "DATABASE" {
-				c.inDatabase = name(5)
-			}
+		case kw(1) == "ROLE" && isName(2) && toks[2].kind == tokWord && (kw(2) == "ALL" || kw(2) == "CURRENT_USER" || kw(2) == "SESSION_USER" || kw(2) == "CURRENT_ROLE"):
+			c.allRoles = kw(2)
+		case kw(1) == "ROLE" && isName(2) && kw(3) == "IN" && kw(4) == "DATABASE":
+			c.roles, c.inDatabase = []string{name(2)}, name(5)
+		case kw(1) == "ROLE" && isName(2) && (kw(3) == "WITH" || kw(3) == "SET" || kw(3) == "RESET"):
+			c.allowed, c.roles = true, []string{name(2)}
 		case kw(1) == "TABLESPACE":
 			c.tablespace = name(2)
 		}
-	case "COMMENT", "SECURITY":
-		// COMMENT ON <type> <name> / SECURITY LABEL [FOR p] ON <type> <name>
-		for i := 1; i < len(toks); i++ {
-			if kw(i) == "ON" {
-				switch {
-				case isRoleKw(kw(i + 1)):
-					c.roles = []string{name(i + 2)}
-				case kw(i+1) == "TABLESPACE":
-					c.tablespace = name(i + 2)
-				}
-				break
-			}
+	case "COMMENT":
+		switch {
+		case kw(1) == "ON" && kw(2) == "ROLE" && isName(3) && isLiteral(4):
+			c.allowed, c.roles = true, []string{name(3)}
+		case kw(1) == "ON" && kw(2) == "TABLESPACE":
+			c.tablespace = name(3)
 		}
-	case "GRANT", "REVOKE":
+	case "SECURITY":
+		i := 2 // SECURITY LABEL [FOR provider] ON …
+		if kw(i) == "FOR" {
+			i += 2
+		}
+		switch {
+		case kw(1) == "LABEL" && kw(i) == "ON" && kw(i+1) == "ROLE" && isName(i+2) && isLiteral(i+3):
+			c.allowed, c.roles = true, []string{name(i + 2)}
+		case kw(1) == "LABEL" && kw(i) == "ON" && kw(i+1) == "TABLESPACE":
+			c.tablespace = name(i + 2)
+		}
+	case "GRANT":
 		classifyGrant(toks, &c)
 	}
 	return c
 }
 
-// classifyGrant handles GRANT/REVOKE: memberships (no ON) and privileges
-// on objects (ON TABLESPACE, ON PARAMETER, ...).
+// classifyGrant handles GRANT: memberships (GRANT role, … TO role, …
+// [WITH …] [GRANTED BY role]) are allowed; a grant ON TABLESPACE is a
+// tablespace statement; other grants (ON PARAMETER, …) are not allowed.
 func classifyGrant(toks []token, c *globalsStmt) {
-	on, to := -1, -1
+	to := -1
 	for i, t := range toks {
 		if t.kind != tokWord {
 			continue
 		}
 		switch strings.ToUpper(t.text) {
 		case "ON":
-			if on < 0 && to < 0 {
-				on = i
+			if to < 0 {
+				if i+2 < len(toks) && toks[i+1].kind == tokWord && strings.EqualFold(toks[i+1].text, "TABLESPACE") {
+					c.tablespace = toks[i+2].name()
+				}
+				return
 			}
-		case "TO", "FROM":
+		case "TO":
 			if to < 0 {
 				to = i
 			}
@@ -206,42 +285,59 @@ func classifyGrant(toks []token, c *globalsStmt) {
 	if to < 0 {
 		return
 	}
-	// Grantees / members: after TO/FROM until WITH, GRANTED, CASCADE,
-	// RESTRICT or the end.
-	for i := to + 1; i < len(toks); i++ {
-		t := toks[i]
-		if t.kind == tokWord {
-			switch strings.ToUpper(t.text) {
-			case "WITH", "GRANTED", "CASCADE", "RESTRICT":
-				i = len(toks)
-				continue
-			case "PUBLIC", "CURRENT_USER", "SESSION_USER", "CURRENT_ROLE", "GROUP":
+	// role, role, … : names separated by commas.
+	names := func(from, to int) ([]string, bool) {
+		var out []string
+		for i := from; i < to; i++ {
+			t := toks[i]
+			if (i-from)%2 == 1 {
+				if t.kind != tokPunct || t.text != "," {
+					return nil, false
+				}
 				continue
 			}
+			if t.kind != tokWord && t.kind != tokIdent {
+				return nil, false
+			}
+			out = append(out, t.name())
 		}
-		if t.kind == tokWord || t.kind == tokIdent {
-			c.roles = append(c.roles, t.name())
-		}
+		return out, len(out) > 0 && (to-from)%2 == 1
 	}
-	if on >= 0 {
-		if on+1 < len(toks) && toks[on+1].kind == tokWord && strings.EqualFold(toks[on+1].text, "TABLESPACE") && on+2 < len(toks) {
-			c.tablespace = toks[on+2].name()
-		}
+	granted, ok := names(1, to)
+	if !ok {
 		return
 	}
-	// Membership: the granted roles between GRANT/REVOKE [… OPTION FOR]
-	// and TO/FROM.
-	start := 1
-	for i := 1; i < to; i++ {
-		if toks[i].kind == tokWord && strings.EqualFold(toks[i].text, "FOR") {
-			start = i + 1
+	end := len(toks)
+	for i := to + 1; i < len(toks); i++ {
+		if toks[i].kind == tokWord && (strings.EqualFold(toks[i].text, "WITH") || strings.EqualFold(toks[i].text, "GRANTED")) {
+			end = i
+			break
 		}
 	}
-	for i := start; i < to; i++ {
-		if t := toks[i]; t.kind == tokWord || t.kind == tokIdent {
-			c.granted = append(c.granted, t.name())
+	members, ok := names(to+1, end)
+	if !ok {
+		return
+	}
+	for _, m := range members {
+		if m == "public" {
+			return
 		}
 	}
+	// The tail: [WITH option [TRUE|FALSE], …] [GRANTED BY role].
+	for i := end; i < len(toks); i++ {
+		t := toks[i]
+		if t.kind == tokWord && strings.EqualFold(t.text, "GRANTED") {
+			if i+3 != len(toks) || !strings.EqualFold(toks[i+1].text, "BY") || (toks[i+2].kind != tokWord && toks[i+2].kind != tokIdent) {
+				return
+			}
+			c.grantedBy, c.grantedByStart, c.grantedByEnd = toks[i+2].name(), t.pos, toks[i+2].end
+			break
+		}
+		if t.kind != tokWord && !(t.kind == tokPunct && t.text == ",") {
+			return
+		}
+	}
+	c.allowed, c.roles, c.granted = true, members, granted
 }
 
 // ---------------------------------------------------------------- SQL text
@@ -384,8 +480,9 @@ const (
 )
 
 type token struct {
-	kind tokKind
-	text string
+	kind     tokKind
+	text     string
+	pos, end int // byte range in the statement
 }
 
 // name is the identifier a token names: a bare word folds to lower case,
@@ -414,15 +511,15 @@ func lexSQL(s string) []token {
 			i++
 		case (c == 'E' || c == 'e') && i+1 < len(s) && s[i+1] == '\'':
 			j := quotedEnd(s, i+1, '\'', true)
-			toks = append(toks, token{tokString, s[i:j]})
+			toks = append(toks, token{tokString, s[i:j], i, j})
 			i = j
 		case c == '\'':
 			j := quotedEnd(s, i, '\'', false)
-			toks = append(toks, token{tokString, s[i:j]})
+			toks = append(toks, token{tokString, s[i:j], i, j})
 			i = j
 		case c == '"':
 			j := quotedEnd(s, i, '"', false)
-			toks = append(toks, token{tokIdent, s[i:j]})
+			toks = append(toks, token{tokIdent, s[i:j], i, j})
 			i = j
 		case c == '$':
 			if tag, ok := dollarTag(s, i); ok {
@@ -430,21 +527,21 @@ func lexSQL(s string) []token {
 				if j := strings.Index(s[i+len(tag):], tag); j >= 0 {
 					end = i + len(tag) + j + len(tag)
 				}
-				toks = append(toks, token{tokString, s[i:end]})
+				toks = append(toks, token{tokString, s[i:end], i, end})
 				i = end
 				continue
 			}
-			toks = append(toks, token{tokPunct, "$"})
+			toks = append(toks, token{tokPunct, "$", i, i + 1})
 			i++
 		case isIdentByte(c):
 			j := i
 			for j < len(s) && isIdentByte(s[j]) {
 				j++
 			}
-			toks = append(toks, token{tokWord, s[i:j]})
+			toks = append(toks, token{tokWord, s[i:j], i, j})
 			i = j
 		default:
-			toks = append(toks, token{tokPunct, string(c)})
+			toks = append(toks, token{tokPunct, string(c), i, i + 1})
 			i++
 		}
 	}

@@ -13,6 +13,8 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+var leadingNumber = regexp.MustCompile(`^(\d+)`)
+
 // archiveHeader is the start of a pg_dump custom-format archive.
 type archiveHeader struct {
 	DBName        string
@@ -94,7 +96,7 @@ func readArchiveHeader(r io.Reader) (archiveHeader, error) {
 	if err != nil {
 		return h, fmt.Errorf("read the archive header: %w", err)
 	}
-	m := regexp.MustCompile(`^(\d+)`).FindStringSubmatch(h.DumpVersion)
+	m := leadingNumber.FindStringSubmatch(h.DumpVersion)
 	if m == nil {
 		return h, fmt.Errorf("archive made by an unrecognized pg_dump version %q", h.DumpVersion)
 	}
@@ -106,35 +108,34 @@ func readArchiveHeader(r io.Reader) (archiveHeader, error) {
 	return h, nil
 }
 
-// ---------------------------------------------------------------- schema pass
+// ---------------------------------------------------------------- TOC
 
-// dbBlock is one TOC entry about the database itself in the output of
-// pg_restore --create --schema-only.
-type dbBlock struct {
-	Type string // DATABASE, DATABASE PROPERTIES, COMMENT, ACL, SECURITY LABEL
-	SQL  string
-}
-
-// schemaScan reads the SQL script pg_restore --create --schema-only -f -
-// writes (an io.Writer, line by line, without keeping it): it counts the
-// TABLE entries and keeps the entries about the database itself (its
-// CREATE DATABASE and owner, settings, comment and privileges).
-type schemaScan struct {
+// tocScan reads the TOC listing pg_restore --create -l writes (an
+// io.Writer, line by line, without keeping it). pg_restore writes one line
+// per entry with names sanitized (no newlines), so nothing from the
+// database's contents can start a line: it counts the TABLE entries and
+// keeps the dump IDs of the entries about the database itself (DATABASE,
+// DATABASE PROPERTIES, and its COMMENT, ACL and SECURITY LABEL).
+type tocScan struct {
+	DB     string // the database the entries must name
 	Tables int
-	Blocks []dbBlock
+	// DBEntries are the dump IDs of the database's own entries.
+	DBEntries []string
 
 	partial []byte
-	cur     *dbBlock
-	size    int
 	err     error
 }
 
-// maxDBBlocks bounds what is kept of the database's own entries.
-const maxDBBlocks = 1 << 20
+// maxTOCLine bounds one line of the listing.
+const maxTOCLine = 1 << 20
 
-var tocHeader = regexp.MustCompile(`^-- (?:Data for )?Name: (.*); Type: ([A-Z ]+); Schema: `)
+// maxDBEntries bounds the database's own entries (pg_dump writes at most 5).
+const maxDBEntries = 16
 
-func (s *schemaScan) Write(p []byte) (int, error) {
+// tocLine is "<dump id>; <catalog oid> <oid> <desc> <schema> <tag> <owner>".
+var tocLine = regexp.MustCompile(`^(\d+); (\d+) (\d+) (.*)$`)
+
+func (s *tocScan) Write(p []byte) (int, error) {
 	if s.err != nil {
 		return 0, s.err
 	}
@@ -143,10 +144,8 @@ func (s *schemaScan) Write(p []byte) (int, error) {
 		i := bytes.IndexByte(p, '\n')
 		if i < 0 {
 			s.partial = append(s.partial, p...)
-			if len(s.partial) > maxDBBlocks {
-				// A single line this long is inside an entry we do not keep
-				// (a function body); only its start matters.
-				s.partial = s.partial[:256]
+			if len(s.partial) > maxTOCLine {
+				s.err = errors.New("a line of the archive's table of contents is too long")
 			}
 			break
 		}
@@ -162,56 +161,46 @@ func (s *schemaScan) Write(p []byte) (int, error) {
 }
 
 // Close handles a last line without a newline.
-func (s *schemaScan) Close() error {
+func (s *tocScan) Close() error {
 	if len(s.partial) > 0 {
 		s.line(string(s.partial))
 		s.partial = nil
 	}
-	s.end()
 	return s.err
 }
 
-func (s *schemaScan) end() {
-	if s.cur != nil {
-		s.cur.SQL = strings.TrimSpace(s.cur.SQL)
-		if s.cur.SQL != "" {
-			s.Blocks = append(s.Blocks, *s.cur)
-		}
-		s.cur = nil
+func (s *tocScan) line(l string) {
+	m := tocLine.FindStringSubmatch(l)
+	if m == nil || s.err != nil {
+		return
 	}
+	id, catalog, rest := m[1], m[2], m[4]
+	switch {
+	case catalog == "1259" && strings.HasPrefix(rest, "TABLE "): // pg_class: not TABLE DATA / ATTACH (catalog 0)
+		s.Tables++
+		return
+	case catalog == "1262" && strings.HasPrefix(rest, "DATABASE - "+s.DB+" "): // pg_database
+	case catalog == "0" && (strings.HasPrefix(rest, "DATABASE PROPERTIES - "+s.DB+" ") ||
+		strings.HasPrefix(rest, "COMMENT - DATABASE "+s.DB+" ") ||
+		strings.HasPrefix(rest, "ACL - DATABASE "+s.DB+" ") ||
+		strings.HasPrefix(rest, "SECURITY LABEL - DATABASE "+s.DB+" ")):
+	default:
+		return
+	}
+	if len(s.DBEntries) == maxDBEntries {
+		s.err = errors.New("the archive has too many entries about the database itself")
+		return
+	}
+	s.DBEntries = append(s.DBEntries, id)
 }
 
-func (s *schemaScan) line(l string) {
-	if m := tocHeader.FindStringSubmatch(l); m != nil {
-		s.end()
-		name, typ := m[1], strings.TrimSpace(m[2])
-		switch {
-		case typ == "TABLE" && !strings.HasPrefix(l, "-- Data for"):
-			s.Tables++
-		case typ == "DATABASE" || typ == "DATABASE PROPERTIES":
-			s.cur = &dbBlock{Type: typ}
-		case (typ == "COMMENT" || typ == "ACL" || typ == "SECURITY LABEL") && strings.HasPrefix(name, "DATABASE "):
-			s.cur = &dbBlock{Type: typ}
-		}
-		return
+// listFile is the pg_restore -L list selecting the given dump IDs.
+func listFile(ids []string) []byte {
+	var b strings.Builder
+	for _, id := range ids {
+		b.WriteString(id + ";\n")
 	}
-	if s.cur == nil {
-		return
-	}
-	if strings.HasPrefix(l, `\`) {
-		// \connect: the entry ends; what follows are session settings.
-		s.end()
-		return
-	}
-	if strings.HasPrefix(l, "--") && strings.TrimSpace(s.cur.SQL) == "" {
-		return
-	}
-	s.size += len(l) + 1
-	if s.size > maxDBBlocks {
-		s.err = errors.New("the database's own entries in the archive are too large")
-		return
-	}
-	s.cur.SQL += l + "\n"
+	return []byte(b.String())
 }
 
 // ---------------------------------------------------------------- CREATE DATABASE
@@ -223,6 +212,8 @@ var createOptions = map[string]bool{
 	"ICU_LOCALE": true, "ICU_RULES": true, "BUILTIN_LOCALE": true,
 }
 
+var optionWord = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
 // dbDefinition is what the archive says about the database itself.
 type dbDefinition struct {
 	// Options: KEY = value pairs of the archive's CREATE DATABASE, values as
@@ -232,46 +223,102 @@ type dbDefinition struct {
 	Owner string
 	// Ignored lists CREATE DATABASE options not used.
 	Ignored []string
-	// Settings, Comment and ACL are the statements of the DATABASE
-	// PROPERTIES, COMMENT and ACL / SECURITY LABEL entries.
-	Settings, Comment, ACL []string
+	// Settings: ALTER DATABASE <db> SET / RESET / CONNECTION LIMIT.
+	Settings []string
+	// RoleSettings: ALTER ROLE r IN DATABASE <db> SET / RESET.
+	RoleSettings []string
+	// Comment: COMMENT ON DATABASE <db> IS '…'.
+	Comment []string
+	// ACL: GRANT / REVOKE … ON DATABASE <db>, SECURITY LABEL … ON DATABASE.
+	ACL []string
+	// Unused names the statements of those entries that are none of the
+	// forms above (not run).
+	Unused []string
 }
 
-// databaseDefinition interprets the database entries of a schema scan.
-func databaseDefinition(blocks []dbBlock) (dbDefinition, error) {
+// databaseDefinition reads the script pg_restore --create --schema-only -L
+// writes for the database's own entries. Only these statement forms, each
+// naming db, are kept (they run with the restore's credential):
+// CREATE DATABASE db …; ALTER DATABASE db OWNER TO r | SET … | RESET … |
+// CONNECTION LIMIT …; ALTER ROLE r IN DATABASE db SET|RESET …; COMMENT ON
+// DATABASE db IS '…'; GRANT|REVOKE … ON DATABASE db TO|FROM …; SECURITY
+// LABEL [FOR p] ON DATABASE db IS '…'. Session settings and \connect are
+// dropped; anything else is listed in Unused. A script that turns
+// standard_conforming_strings off is refused (its literals would be read
+// differently).
+func databaseDefinition(script, db string) (dbDefinition, error) {
 	var d dbDefinition
-	for _, b := range blocks {
-		// pg_restore writes the session settings of the next entry (SET
-		// default_tablespace, set_config('search_path', ...)) before its
-		// header: they are not the database's.
-		var stmts []string
-		for _, st := range splitSQL(b.SQL) {
-			if t := lexSQL(st); len(t) > 0 && !isWords(t, "SET") && !isWords(t, "RESET") && !isWords(t, "SELECT") {
-				stmts = append(stmts, st)
-			}
+	for _, st := range splitSQL(script) {
+		toks := lexSQL(st)
+		if n := len(toks); n > 0 && toks[n-1].kind == tokPunct && toks[n-1].text == ";" {
+			toks = toks[:n-1]
 		}
-		switch b.Type {
-		case "DATABASE":
-			for _, st := range stmts {
-				toks := lexSQL(st)
-				switch {
-				case isWords(toks, "CREATE", "DATABASE"):
-					if err := d.parseCreate(toks); err != nil {
-						return d, err
-					}
-				case isWords(toks, "ALTER", "DATABASE") && len(toks) > 5 && isWords(toks[3:], "OWNER", "TO"):
-					d.Owner = toks[5].name()
-				}
+		kw := func(i int) string {
+			if i < len(toks) && toks[i].kind == tokWord {
+				return strings.ToUpper(toks[i].text)
 			}
-		case "DATABASE PROPERTIES":
-			d.Settings = append(d.Settings, stmts...)
-		case "COMMENT":
-			d.Comment = append(d.Comment, stmts...)
-		default: // ACL, SECURITY LABEL
-			d.ACL = append(d.ACL, stmts...)
+			return ""
+		}
+		named := func(i int) bool {
+			return i < len(toks) && (toks[i].kind == tokWord || toks[i].kind == tokIdent) && toks[i].name() == db
+		}
+		isName := func(i int) bool { return i < len(toks) && (toks[i].kind == tokWord || toks[i].kind == tokIdent) }
+		literalEnd := func(i int) bool { // IS '…' | IS NULL, ending the statement
+			return kw(i) == "IS" && i+2 == len(toks) && (toks[i+1].kind == tokString || kw(i+1) == "NULL")
+		}
+		switch {
+		case len(toks) == 0:
+		case kw(0) == "SET":
+			if turnsOffStandardStrings([]string{st}) {
+				return d, errors.New("the archive turns standard_conforming_strings off; it is not restored")
+			}
+		case kw(0) == "SELECT" || kw(0) == "RESET":
+		case isWords(toks, "CREATE", "DATABASE"):
+			if !named(2) {
+				return d, fmt.Errorf("the archive creates database %s, not %s", toks[2].name(), db)
+			}
+			if err := d.parseCreate(toks); err != nil {
+				return d, err
+			}
+		case isWords(toks, "ALTER", "DATABASE") && named(2) && kw(3) == "OWNER" && kw(4) == "TO" && isName(5) && len(toks) == 6:
+			d.Owner = toks[5].name()
+		case isWords(toks, "ALTER", "DATABASE") && named(2) && (kw(3) == "SET" && kw(4) != "TABLESPACE" || kw(3) == "RESET" ||
+			kw(3) == "CONNECTION" && kw(4) == "LIMIT"):
+			d.Settings = append(d.Settings, st)
+		case isWords(toks, "ALTER", "ROLE") && isName(2) && kw(3) == "IN" && kw(4) == "DATABASE" && named(5) && (kw(6) == "SET" || kw(6) == "RESET"):
+			d.RoleSettings = append(d.RoleSettings, st)
+		case isWords(toks, "COMMENT", "ON", "DATABASE") && named(3) && literalEnd(4):
+			d.Comment = append(d.Comment, st)
+		case (kw(0) == "GRANT" || kw(0) == "REVOKE") && onDatabase(toks, db):
+			d.ACL = append(d.ACL, st)
+		case isWords(toks, "SECURITY", "LABEL"):
+			i := 2
+			if kw(i) == "FOR" && isName(i+1) {
+				i += 2
+			}
+			if kw(i) == "ON" && kw(i+1) == "DATABASE" && named(i+2) && literalEnd(i+3) {
+				d.ACL = append(d.ACL, st)
+			} else {
+				d.Unused = append(d.Unused, describeStmt(st))
+			}
+		default:
+			d.Unused = append(d.Unused, describeStmt(st))
 		}
 	}
 	return d, nil
+}
+
+// onDatabase: a GRANT/REVOKE whose object is exactly ON DATABASE db,
+// followed by TO/FROM and role names.
+func onDatabase(toks []token, db string) bool {
+	for i, t := range toks {
+		if t.kind == tokWord && strings.EqualFold(t.text, "ON") {
+			return i+4 < len(toks) && isWords(toks[i+1:], "DATABASE") &&
+				(toks[i+2].kind == tokWord || toks[i+2].kind == tokIdent) && toks[i+2].name() == db &&
+				toks[i+3].kind == tokWord && (strings.EqualFold(toks[i+3].text, "TO") || strings.EqualFold(toks[i+3].text, "FROM"))
+		}
+	}
+	return false
 }
 
 func isWords(toks []token, words ...string) bool {
@@ -330,7 +377,7 @@ func (d *dbDefinition) parseCreate(toks []token) error {
 			continue
 		}
 		val := v.text
-		if v.kind == tokWord && !regexp.MustCompile(`^[A-Za-z0-9_.-]+$`).MatchString(val) {
+		if v.kind == tokWord && !optionWord.MatchString(val) {
 			return fmt.Errorf("CREATE DATABASE option %s has an unexpected value in the archive", key)
 		}
 		d.Options = append(d.Options, [2]string{key, val})

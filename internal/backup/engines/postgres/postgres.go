@@ -510,13 +510,16 @@ func render(kv [][2]string) string {
 // runTool runs one pg_dump/pg_dumpall process against a fresh local bridge
 // and streams its stdout to out.
 func (s *session) runTool(ctx context.Context, bin string, args []string, kv [][2]string, env []string, out io.Writer) error {
-	return s.runToolStdin(ctx, bin, args, kv, env, nil, out)
+	return s.runToolStdin(ctx, bin, args, kv, env, nil, out, nil)
 }
 
 // runToolStdin is runTool with the process's stdin read from in (nil: no
 // stdin). With kv nil the tool does not connect (pg_restore -l): no bridge
-// and no --dbname.
-func (s *session) runToolStdin(ctx context.Context, bin string, args []string, kv [][2]string, env []string, in io.Reader, out io.Writer) error {
+// and no --dbname. trim, when set, filters the tool's stderr before it goes
+// into the error. It returns only after the copy into stdin has ended, so
+// the caller may close in's source afterwards.
+func (s *session) runToolStdin(ctx context.Context, bin string, args []string, kv [][2]string, env []string, in io.Reader, out io.Writer,
+	trim func(string) string) error {
 	var br *tunnelbridge.Bridge
 	if kv != nil {
 		var err error
@@ -533,20 +536,25 @@ func (s *session) runToolStdin(ctx context.Context, bin string, args []string, k
 	cmd := exec.CommandContext(cctx, bin, args...)
 	cmd.Env = env
 	cmd.Dir = filepath.Dir(bin)
-	if in != nil {
-		cmd.Stdin = in
-	}
 	sw := &cancelOnErr{w: out, cancel: cancel}
 	cmd.Stdout = sw
 	stderr := &tailBuffer{max: 8 << 10}
 	cmd.Stderr = stderr
 	cmd.WaitDelay = 10 * time.Second
-	err := cmd.Run()
+	var err error
+	if in == nil {
+		err = cmd.Run()
+	} else {
+		err = runWithStdin(cmd, in)
+	}
 	if sw.err != nil {
 		return fmt.Errorf("%s: write output: %w", filepath.Base(bin), sw.err)
 	}
 	if err != nil {
 		msg := stderr.String()
+		if trim != nil {
+			msg = trim(msg)
+		}
 		if br != nil {
 			br.Close() // waits for the pipes, so a guard refusal is recorded
 			if bErr := br.Err(); errors.Is(bErr, ErrPlaintextPassword) {
@@ -558,6 +566,34 @@ func (s *session) runToolStdin(ctx context.Context, bin string, args []string, k
 		return fmt.Errorf("%s failed: %v: %s", filepath.Base(bin), err, msg)
 	}
 	return nil
+}
+
+// runWithStdin runs cmd with in copied to its stdin through an os.Pipe by
+// a goroutine of ours, and waits for that goroutine: exec's own copy may be
+// abandoned after WaitDelay while still reading in. A tool that exits
+// before reading everything (pg_restore -l) is not an error.
+func runWithStdin(cmd *exec.Cmd, in io.Reader) error {
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	cmd.Stdin = pr
+	if err := cmd.Start(); err != nil {
+		pr.Close()
+		pw.Close()
+		return err
+	}
+	pr.Close() // the child has its copy
+	copied := make(chan struct{})
+	go func() {
+		defer close(copied)
+		_, _ = io.Copy(pw, in) // EPIPE / closed when the child stops reading
+		_ = pw.Close()
+	}()
+	err = cmd.Wait()
+	_ = pw.Close() // unblocks a copy into a child that has exited
+	<-copied
+	return err
 }
 
 // cancelOnErr stops the child when the downstream writer fails (otherwise
