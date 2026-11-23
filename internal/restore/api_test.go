@@ -49,6 +49,9 @@ type fakeInspector struct {
 	// checkMsg is what CheckBackup returns; checked the details it saw.
 	checkMsg string
 	checked  []map[string]any
+	// hold, when set, runs after the target was reached (the credential
+	// resolved), before the report is returned.
+	hold func(ctx context.Context)
 }
 
 func (f *fakeInspector) CheckBackup(details map[string]any, r *restore.TargetReport) string {
@@ -62,6 +65,12 @@ func (f *fakeInspector) InspectRestoreTarget(ctx context.Context, ec backup.Engi
 	c, err := ec.Credential(ctx)
 	if err != nil {
 		return nil, err
+	}
+	f.mu.Lock()
+	hold := f.hold
+	f.mu.Unlock()
+	if hold != nil {
+		hold(ctx)
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -1054,4 +1063,56 @@ func TestListLimit(t *testing.T) {
 		t.Fatalf("waiting_for_me behind own requests: %+v", list.Items)
 	}
 	e.noCanary()
+}
+
+// The target was reached with the request's credential, so restore.checked
+// is recorded even when the client goes away before the answer.
+func TestCheckRecordedAfterDisconnect(t *testing.T) {
+	e := newEnv(t)
+	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
+	in := e.pgInput(e.pgTarget)
+	delete(in, "justification")
+	reached := make(chan struct{})
+	pgInspector.mu.Lock()
+	pgInspector.hold = func(ctx context.Context) {
+		close(reached)
+		<-ctx.Done() // the client is gone
+	}
+	pgInspector.mu.Unlock()
+	t.Cleanup(func() {
+		pgInspector.mu.Lock()
+		pgInspector.hold = nil
+		pgInspector.mu.Unlock()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	b, _ := json.Marshal(in)
+	req, _ := http.NewRequestWithContext(ctx, "POST", e.Srv.URL+"/api/v1/restores/check", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", maker.CSRF)
+	sent := make(chan error, 1)
+	go func() {
+		resp, err := maker.HTTP.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		sent <- err
+	}()
+	<-reached
+	cancel()
+	if err := <-sent; err == nil {
+		t.Fatal("the request was answered")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var n int
+		e.scan(&n, `SELECT count(*) FROM activity_log WHERE action = 'restore.checked'`)
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restore.checked rows after the client went away: %d", n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }

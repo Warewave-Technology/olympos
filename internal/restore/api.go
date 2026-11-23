@@ -476,8 +476,11 @@ func inspectTarget(ctx context.Context, engine string, ec backup.EngineContext, 
 
 // recordCheck writes restore.checked: the request's credential reached the
 // target (it was tested), whatever the outcome. problem is the scrubbed
-// reason the check failed ("" when it passed).
+// reason the check failed ("" when it passed). The row is written even when
+// the client went away meanwhile: the target was contacted all the same.
 func (a *API) recordCheck(ctx context.Context, sub *authz.Subject, in *Input, ev *evaluation, open bool, problem string) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
 	d := map[string]any{"run_id": in.RunID, "ok": problem == "", "opening": open}
 	if problem != "" {
 		d["error"] = problem
