@@ -224,7 +224,7 @@ spec:
         - {name: POSTGRES_USER, value: postgres}
         - {name: POSTGRES_PASSWORD, value: CANARY-lab-restore-pg-password}
         ports: [{containerPort: 5432, name: pg}]
-        readinessProbe: {exec: {command: [pg_isready, -U, postgres]}, periodSeconds: 3}
+        readinessProbe: {exec: {command: [pg_isready, -h, 127.0.0.1, -U, postgres]}, periodSeconds: 3}
         volumeMounts: [{name: certs, mountPath: /certs}, {name: data, mountPath: /var/lib/postgresql/data}]
       volumes:
       - {name: tls, secret: {secretName: restore-pg-tls}}

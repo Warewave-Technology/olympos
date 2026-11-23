@@ -244,7 +244,11 @@ func TestM8Restores(t *testing.T) {
 		if own.OK || !strings.Contains(own.Fields["target_id"], "own target") {
 			t.Fatalf("restore into the backup's own target: %+v", own)
 		}
-		ck := checkRestore(t, maker, in)
+		var ck restoreCheck
+		eventually(t, time.Minute, "restore-pg answers the check", func() (bool, string) {
+			ck = checkRestore(t, maker, in)
+			return ck.OK, ck.Error
+		})
 		if !ck.OK || ck.Report == nil || !ck.Report.Superuser || !strings.HasPrefix(ck.Report.ServerVersion, "16") ||
 			strings.Join(ck.Databases, ",") != "orders" {
 			t.Fatalf("check: %+v", ck)
@@ -268,11 +272,15 @@ func TestM8Restores(t *testing.T) {
 		approveRestore(t, maker, checker, rq.ID)
 		done := waitRestore(t, admin, rq.ID)
 		// One item for the roles (globals.sql), one per database.
+		// Other tables in orders-pg (the browsable lab's) may be restored too.
 		items := map[string]string{}
+		tables := map[string]int{}
 		for _, it := range done.Result.Items {
-			items[it.Name] = fmt.Sprintf("%s/%d", it.Status, it.Tables)
+			items[it.Name] = it.Status
+			tables[it.Name] = it.Tables
 		}
-		if items["globals.sql"] != "succeeded/0" || items["orders"] != "succeeded/1" || strings.Join(done.Result.Created, ",") != "orders" {
+		if items["globals.sql"] != "succeeded" || items["orders"] != "succeeded" || tables["orders"] < 1 ||
+			strings.Join(done.Result.Created, ",") != "orders" {
 			t.Fatalf("result: %+v", done.Result)
 		}
 		got, err := dstSQL("orders", "SELECT count(*) || ' ' || min(marker) || ' ' || max(marker) FROM restore_check")
@@ -345,19 +353,24 @@ func TestM8Restores(t *testing.T) {
 			return n
 		}
 		// What the conservative scope restores (tables and their rows) and
-		// what it reports instead (a view, a column default, a TTL).
-		runSQL(t, "metrics-ch", "CREATE DATABASE IF NOT EXISTS metrics")
-		runSQL(t, "metrics-ch", "CREATE TABLE IF NOT EXISTS metrics.events (d Date, v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY d")
-		runSQL(t, "metrics-ch", "INSERT INTO metrics.events SELECT toDate('2026-10-01') + number % 60, number FROM numbers(5000)")
-		t.Cleanup(func() {
+		// what it reports instead (a view, a column default, a TTL). M8 owns
+		// these objects in M2's metrics database (the job backs up metrics)
+		// and drops them again: metrics-ch keeps its data across lab resets.
+		dropOwn := func() {
 			runSQL(t, "metrics-ch", "DROP VIEW IF EXISTS metrics.events_by_day")
 			runSQL(t, "metrics-ch", "DROP TABLE IF EXISTS metrics.sessions")
-		})
-		runSQL(t, "metrics-ch", "CREATE TABLE IF NOT EXISTS metrics.sessions (d Date, user String, hits UInt32 DEFAULT 1) "+
+			runSQL(t, "metrics-ch", "DROP TABLE IF EXISTS metrics.m8_events")
+		}
+		runSQL(t, "metrics-ch", "CREATE DATABASE IF NOT EXISTS metrics")
+		dropOwn()
+		t.Cleanup(dropOwn)
+		runSQL(t, "metrics-ch", "CREATE TABLE metrics.m8_events (d Date, v UInt64) ENGINE = MergeTree PARTITION BY toYYYYMM(d) ORDER BY d")
+		runSQL(t, "metrics-ch", "INSERT INTO metrics.m8_events SELECT toDate('2026-10-01') + number % 60, number FROM numbers(5000)")
+		runSQL(t, "metrics-ch", "CREATE TABLE metrics.sessions (d Date, user String, hits UInt32 DEFAULT 1) "+
 			"ENGINE = ReplacingMergeTree ORDER BY (d, user) TTL d + INTERVAL 20 YEAR")
 		runSQL(t, "metrics-ch", "INSERT INTO metrics.sessions SELECT toDate('2026-10-01') + number % 30, concat('u', toString(number)), number FROM numbers(700)")
-		runSQL(t, "metrics-ch", "CREATE VIEW IF NOT EXISTS metrics.events_by_day AS SELECT d, count() AS n FROM metrics.events GROUP BY d")
-		events := count("metrics-ch", "backup", "CANARY-lab-ch-password", "SELECT count() FROM metrics.events")
+		runSQL(t, "metrics-ch", "CREATE VIEW metrics.events_by_day AS SELECT d, count() AS n FROM metrics.m8_events GROUP BY d")
+		events := count("metrics-ch", "backup", "CANARY-lab-ch-password", "SELECT count() FROM metrics.m8_events")
 		sessions := count("metrics-ch", "backup", "CANARY-lab-ch-password", "SELECT count() FROM metrics.sessions FINAL")
 
 		ch := labTarget(t, admin, "metrics-ch")
@@ -380,8 +393,8 @@ func TestM8Restores(t *testing.T) {
 		b, _ := json.Marshal(done.Result)
 		t.Logf("clickhouse result: %s", b)
 
-		if got := count("restore-ch", "restore", restoreCHPassword, "SELECT count() FROM metrics.events"); got != events {
-			t.Errorf("metrics.events: %d rows restored, %d in the source", got, events)
+		if got := count("restore-ch", "restore", restoreCHPassword, "SELECT count() FROM metrics.m8_events"); got != events {
+			t.Errorf("metrics.m8_events: %d rows restored, %d in the source", got, events)
 		}
 		if got := count("restore-ch", "restore", restoreCHPassword, "SELECT count() FROM metrics.sessions FINAL"); got != sessions {
 			t.Errorf("metrics.sessions: %d rows restored, %d in the source", got, sessions)
@@ -479,22 +492,37 @@ func TestM8Restores(t *testing.T) {
 			t.Errorf("result has no unseal note: %s", b)
 		}
 
-		// The new Vault now holds the source's data, sealed with the source's
-		// keys: unseal it with them and read the key with the source's token.
-		eventually(t, 2*time.Minute, "restore-vault sealed with the source's keys", func() (bool, string) {
-			out, _ := rv("", "status", "-format=json")
-			if strings.Contains(out, `"sealed": true`) {
-				return true, ""
-			}
-			// Still unsealed: the old keyring is in memory until Vault reloads.
-			got, _ := rv(source.RootToken, "kv", "get", "-field=marker", "secret/restore-e2e")
-			return strings.TrimSpace(got) == marker, out
-		})
+		// The new Vault now holds the source's data, encrypted with the source's
+		// keys. Right after snapshot-force it may still answer unsealed (the
+		// restore note says so): restart its container (the raft data on the
+		// emptyDir survives) so it comes up sealed, then unseal it with the
+		// SOURCE's key and read the key with the source's token.
 		if out, _ := rv("", "status", "-format=json"); strings.Contains(out, `"sealed": true`) {
-			if out, err := rv("", "operator", "unseal", source.Keys[0]); err != nil {
-				t.Fatalf("unseal with the source's key: %v %s", err, out)
+			t.Log("restore-vault sealed itself after the restore")
+		} else {
+			t.Log("restore-vault still unsealed after the restore: restarting its container")
+			restarts := func() string {
+				return strings.TrimSpace(run(t, "kubectl", "-n", "lab", "get", "pods", "-l", "app=restore-vault",
+					"-o", "jsonpath={.items[0].status.containerStatuses[0].restartCount}"))
 			}
+			before := restarts()
+			_, _ = runOK(t, "kubectl", "-n", "lab", "exec", "deploy/restore-vault", "--", "kill", "1")
+			eventually(t, 2*time.Minute, "restore-vault container restarted", func() (bool, string) {
+				n := restarts()
+				return n != before, n
+			})
 		}
+		eventually(t, 2*time.Minute, "restore-vault sealed", func() (bool, string) {
+			out, _ := rv("", "status", "-format=json")
+			return strings.Contains(out, `"sealed": true`), out
+		})
+		if out, err := rv("", "operator", "unseal", source.Keys[0]); err != nil {
+			t.Fatalf("unseal with the source's key: %v %s", err, out)
+		}
+		if out, _ := rv("", "status", "-format=json"); !strings.Contains(out, `"sealed": false`) {
+			t.Fatalf("restore-vault still sealed after the source's key: %s", out)
+		}
+		t.Log("restore-vault unsealed with the source's key from vault-init.json")
 		eventually(t, time.Minute, "key read from the restored Vault", func() (bool, string) {
 			got, _ := rv(source.RootToken, "kv", "get", "-field=marker", "secret/restore-e2e")
 			return strings.TrimSpace(got) == marker, got
