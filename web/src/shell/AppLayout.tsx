@@ -17,6 +17,7 @@ const NAV = [
   { to: '/approvals', label: 'Approvals', badge: true },
   { to: '/audit', label: 'Audit', also: '/activity' },
   { to: '/security', label: 'Security' },
+  { to: '/monitoring', label: 'Monitoring' },
   { to: '/settings', label: 'Settings' },
 ] as const;
 

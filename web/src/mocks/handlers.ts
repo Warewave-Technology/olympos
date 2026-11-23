@@ -4,6 +4,7 @@ import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
 import { fleetRoutes } from './fleet';
+import { syntheticRoutes } from './synthetic';
 
 export interface MockReq {
   method: string;
@@ -52,6 +53,9 @@ function liveClusters(): Cluster[] {
         region: 'eu-frankfurt-1',
         agent_version: '0.4.2',
         inventory_at: new Date().toISOString(),
+        probe_status: 'online',
+        probe_version: '0.3.0',
+        probe_last_seen_at: new Date().toISOString(),
       });
     }
   }
@@ -364,6 +368,7 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
 
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
+  ...syntheticRoutes,
   ['GET', '/me', () => ok(db.me())],
   ['GET', '/dashboard', () => ok(dashboard())],
   ['GET', '/clusters', () => items(liveClusters())],
@@ -399,6 +404,9 @@ const routes: [string, string, Handler][] = [
         created_at: new Date().toISOString(),
         eol: false,
         version_skew: false,
+        probe_status: 'pending',
+        probe_version: '',
+        probe_last_seen_at: null,
       };
       db.clusters.push(c);
       db.enrolling.set(c.id, Date.now());
@@ -514,6 +522,7 @@ const routes: [string, string, Handler][] = [
       const roles = (r.body.roles ?? []) as Role[];
       if (!roles.length) return invalid('invalid grant', { roles: 'Select at least one role.' });
       if (u.is_guest && roles.some((x) => x === 'vault-approver' || x === 'admin')) return invalid('invalid grant', { roles: 'vault-approver and admin cannot be granted to guest accounts' });
+      if (u.is_guest && roles.includes('synthetic-editor')) return invalid('invalid grant', { roles: 'synthetic-editor cannot be granted to guest accounts' });
       const p = { id: db.uuid(), tenant_id: db.people.yigit.tenant_id, object_id: u.object_id, upn: u.upn, display_name: u.display_name, user_type: u.user_type, account_enabled: true };
       const ids: string[] = [];
       for (const role of roles) {
