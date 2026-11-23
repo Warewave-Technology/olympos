@@ -225,7 +225,7 @@ func ValidateRule(r Rule) (Rule, error) {
 		}
 		base = r.Pattern[2:]
 	default:
-		return Rule{}, fmt.Errorf("hostallow: rule kind %q is not exact, wildcard or suffix", r.Kind)
+		return Rule{}, fmt.Errorf("%w %q: rule kind %q is not exact, wildcard or suffix", ErrInvalidHost, r.Pattern, r.Kind)
 	}
 	if strings.Contains(base, "*") {
 		return Rule{}, fmt.Errorf("%w %q: \"*\" is only allowed as the first label of a wildcard rule", ErrInvalidHost, r.Pattern)

@@ -254,6 +254,35 @@ func TestValidateRule(t *testing.T) {
 	}
 }
 
+func TestValidateRuleUnknownKind(t *testing.T) {
+	for _, k := range []Kind{"", "Exact", "glob"} {
+		_, err := ValidateRule(Rule{"wrw.com", k})
+		if !errors.Is(err, ErrInvalidHost) {
+			t.Errorf("ValidateRule(kind %q) error %v, want ErrInvalidHost", k, err)
+		}
+	}
+}
+
+// TestReasonConstants pins the exported reason values; callers store and
+// compare them.
+func TestReasonConstants(t *testing.T) {
+	cases := []struct{ got, want string }{
+		{ReasonInvalid, "invalid"},
+		{ReasonUnspecified, "unspecified"},
+		{ReasonLoopback, "loopback"},
+		{ReasonMetadata, "metadata"},
+		{ReasonLinkLocal, "link_local"},
+		{ReasonMulticast, "multicast"},
+		{ReasonBroadcast, "broadcast"},
+		{ReasonKubernetesAPI, "kubernetes_api"},
+	}
+	for _, c := range cases {
+		if c.got != c.want {
+			t.Errorf("reason constant %q, want %q", c.got, c.want)
+		}
+	}
+}
+
 func TestMatch(t *testing.T) {
 	list := List{Version: 7, Rules: []Rule{
 		{"partner-sftp.acme.net", Exact},
@@ -487,6 +516,19 @@ func TestDeniedIP(t *testing.T) {
 		{"64:ff9b:1::808:808", false, ""},
 		{"64:ff9b:2::127.0.0.1", false, ""}, // outside 64:ff9b:1::/48
 		{"2002:7f00:1::", false, ""},        // 6to4 is not decoded
+
+		// SIIT IPv4-translated, ::ffff:0:0:0/96.
+		{"::ffff:0:127.0.0.1", true, "loopback"},
+		{"::ffff:0:7f00:1", true, "loopback"},
+		{"::ffff:0:169.254.169.254", true, "metadata"},
+		{"::ffff:0:100.100.100.200", true, "metadata"},
+		{"::ffff:0:169.254.1.1", true, "link_local"},
+		{"::ffff:0:0.0.0.0", true, "unspecified"},
+		{"::ffff:0:224.0.0.1", true, "multicast"},
+		{"::ffff:0:255.255.255.255", true, "broadcast"},
+		{"::ffff:0:10.96.0.1", true, "kubernetes_api"},
+		{"::ffff:0:8.8.8.8", false, ""},
+		{"::ffff:1:127.0.0.1", false, ""}, // outside ::ffff:0:0/96
 	}
 	for _, c := range cases {
 		reason, denied := DeniedIP(netip.MustParseAddr(c.ip), apiServer)

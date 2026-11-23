@@ -2,15 +2,17 @@ package hostallow
 
 import "net/netip"
 
+// The reasons DeniedIP returns. Their values are stable, so callers can
+// report them and compare against them.
 const (
-	reasonInvalid       = "invalid"
-	reasonUnspecified   = "unspecified"
-	reasonLoopback      = "loopback"
-	reasonMetadata      = "metadata"
-	reasonLinkLocal     = "link_local"
-	reasonMulticast     = "multicast"
-	reasonBroadcast     = "broadcast"
-	reasonKubernetesAPI = "kubernetes_api"
+	ReasonInvalid       = "invalid"
+	ReasonUnspecified   = "unspecified"
+	ReasonLoopback      = "loopback"
+	ReasonMetadata      = "metadata"
+	ReasonLinkLocal     = "link_local"
+	ReasonMulticast     = "multicast"
+	ReasonBroadcast     = "broadcast"
+	ReasonKubernetesAPI = "kubernetes_api"
 )
 
 var (
@@ -22,6 +24,11 @@ var (
 	// IPv4-compatible IPv6 (::a.b.c.d, deprecated by RFC 4291). Checked
 	// too, so that "::127.0.0.1" cannot pass as a plain IPv6 address.
 	v4CompatPrefix = netip.MustParsePrefix("::/96")
+	// SIIT IPv4-translated (::ffff:0:a.b.c.d, RFC 2765), that is
+	// 0:0:0:0:ffff:0:a.b.c.d. The prefix is written in full: "::ffff:0:0"
+	// would parse as the IPv4-mapped ::ffff:0.0.0.0, which Unmap already
+	// handles.
+	siitPrefix = netip.MustParsePrefix("::ffff:0:0:0/96")
 	// 0.0.0.0/8: "this network"; Linux connects 0.0.0.0 to the local host.
 	thisNetwork = netip.MustParsePrefix("0.0.0.0/8")
 
@@ -42,13 +49,14 @@ var (
 // address 255.255.255.255 (reason "broadcast") and the Kubernetes API
 // service addresses in apiServer.
 //
-// IPv4-mapped (::ffff:a.b.c.d), NAT64 (64:ff9b::/96, and 64:ff9b:1::/48 in
-// its /96 layout) and IPv4-compatible (::a.b.c.d) addresses are also checked
-// as the IPv4 address they carry.
+// IPv4-mapped (::ffff:a.b.c.d), SIIT IPv4-translated (::ffff:0:a.b.c.d),
+// NAT64 (64:ff9b::/96, and 64:ff9b:1::/48 in its /96 layout) and
+// IPv4-compatible (::a.b.c.d) addresses are also checked as the IPv4
+// address they carry.
 // An invalid ip is denied with reason "invalid".
 func DeniedIP(ip netip.Addr, apiServer []netip.Addr) (reason string, denied bool) {
 	if !ip.IsValid() {
-		return reasonInvalid, true
+		return ReasonInvalid, true
 	}
 	ip = ip.WithZone("").Unmap()
 	if reason, denied := deniedAddr(ip, apiServer); denied {
@@ -63,21 +71,21 @@ func DeniedIP(ip netip.Addr, apiServer []netip.Addr) (reason string, denied bool
 func deniedAddr(ip netip.Addr, apiServer []netip.Addr) (string, bool) {
 	switch {
 	case ip.IsUnspecified() || thisNetwork.Contains(ip):
-		return reasonUnspecified, true
+		return ReasonUnspecified, true
 	case ip.IsLoopback():
-		return reasonLoopback, true
+		return ReasonLoopback, true
 	case isMetadata(ip):
-		return reasonMetadata, true
+		return ReasonMetadata, true
 	case ip.IsLinkLocalUnicast():
-		return reasonLinkLocal, true
+		return ReasonLinkLocal, true
 	case ip.IsMulticast():
-		return reasonMulticast, true
+		return ReasonMulticast, true
 	case ip == limitedBroadcast:
-		return reasonBroadcast, true
+		return ReasonBroadcast, true
 	}
 	for _, a := range apiServer {
 		if a.IsValid() && a.WithZone("").Unmap() == ip {
-			return reasonKubernetesAPI, true
+			return ReasonKubernetesAPI, true
 		}
 	}
 	return "", false
@@ -93,10 +101,11 @@ func isMetadata(ip netip.Addr) bool {
 }
 
 // embeddedV4 returns the IPv4 address in the last 32 bits of a NAT64
-// (well-known or local-use) or IPv4-compatible address. ip has already been
-// unmapped.
+// (well-known or local-use), SIIT IPv4-translated or IPv4-compatible
+// address. ip has already been unmapped.
 func embeddedV4(ip netip.Addr) (netip.Addr, bool) {
-	if !ip.Is6() || !(nat64Prefix.Contains(ip) || nat64LocalPrefix.Contains(ip) || v4CompatPrefix.Contains(ip)) {
+	if !ip.Is6() || !(nat64Prefix.Contains(ip) || nat64LocalPrefix.Contains(ip) ||
+		siitPrefix.Contains(ip) || v4CompatPrefix.Contains(ip)) {
 		return netip.Addr{}, false
 	}
 	b := ip.As16()
