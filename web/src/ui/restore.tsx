@@ -78,8 +78,9 @@ export function RestoreProgressView({ progress, engine }: { progress: RestorePro
   const phase = p.phase ? (PHASES[p.phase] ?? p.phase) : 'Starting';
   const where = [p.database, p.table].filter(Boolean).join('.');
   const total = p.total ?? 0;
-  const read = p.bytes ?? 0;
-  const pct = total > 0 ? Math.min(100, Math.round((read / total) * 100)) : null;
+  // Never more read than the copy holds, whatever the server reports.
+  const read = total > 0 ? Math.min(p.bytes ?? 0, total) : (p.bytes ?? 0);
+  const pct = total > 0 ? Math.round((read / total) * 100) : null;
   return (
     <div className="stack-sm" role="group" aria-labelledby="rs-prog-t">
       <div className="spread small">

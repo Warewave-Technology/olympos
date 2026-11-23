@@ -1,11 +1,12 @@
 // Restore from the UI (docs/design/ui-restore.md): the dialog on a run, the
 // requests on Approvals, and the waiting badge. Runs against the mock API.
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as db from '../mocks/db';
 import { relDateTime } from '../lib/format';
 import { readable } from '../ui/RestoreDialog';
+import { RestoreProgressView } from '../ui/restore';
 import { renderApp } from './renderApp';
 
 afterEach(() => {
@@ -241,6 +242,12 @@ describe('restore requests on Approvals', () => {
     expect(bar).toHaveAttribute('aria-valuenow', '45');
     expect(screen.getByText('1.4 GB of 3.1 GB read')).toBeInTheDocument();
     expect(screen.getByText(/Created on the target:/)).toHaveTextContent('Created on the target: billing');
+  });
+
+  it('never shows more read than the copy holds', () => {
+    render(<RestoreProgressView engine="postgresql" progress={{ phase: 'restore', bytes: 2.1e9, total: 1e9 }} />);
+    expect(screen.getByText('1 GB of 1 GB read')).toBeInTheDocument();
+    expect(screen.getByRole('progressbar', { name: 'Backup read' })).toHaveAttribute('aria-valuenow', '100');
   });
 
   it('shows per-database results with what ClickHouse did not restore', async () => {
