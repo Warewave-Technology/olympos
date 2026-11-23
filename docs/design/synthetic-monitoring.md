@@ -24,6 +24,21 @@ These change or settle parts of the spec below. Where they conflict, they win.
    `<cluster-uuid>/probe`, and its serial is stored apart from the agent's (`clusters.probe_cert_serial`), so the probe can be
    revoked alone. The gateway maps each identity to its role. A probe identity may only use `ProbeGateway`, and an agent
    identity may never use it.
+4. **Settled with the implementation plan [decided].**
+   - **Degraded / failing.** A cluster cell is *degraded* when its last run failed but the cluster alert is not firing yet,
+     and *failing* while that alert is firing.
+   - **Scope.** `owner_selector` is a display label only. To make a scenario run on all clusters, a `synthetic-editor` needs
+     a global grant. To make it run on a selector, they need the grant on every cluster that matches it now.
+   - **Limits.** At most 120 requests per minute per scenario per cluster, and at most 2 retries for a failed step.
+   - **Name resolution.** The probe resolves names as absolute names, without the search list, so short names such as
+     `kubernetes` cannot get past the allowlist. In-cluster services are written in full: `svc.ns.svc.cluster.local`.
+   - **Deleting what is in use.** An allowlist rule or a credential that a scenario still uses cannot be removed (409);
+     the error names the scenarios.
+   - **Default route.** `synthetic.allowlist_changed` gets the routes of `grant.changed` when the migration runs.
+   - **Runs that count.** *Run now* counts toward alerting; only test runs from the editor never alert. Test runs are
+     kept for 7 days.
+   - **Upgrading without a probe token.** A `helm upgrade` without a probe token succeeds: the probe waits and the
+     cluster shows "Probe: not installed" until *Install probe* is used.
 
 ---
 
