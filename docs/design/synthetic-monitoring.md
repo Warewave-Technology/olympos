@@ -46,7 +46,7 @@ These change or settle parts of the spec below. Where they conflict, they win.
 
 ## Decisions taken during implementation
 
-Rulings P1–P24 of the implementation (in the order they were taken). Where they differ from the spec below,
+Rulings P1–P25 of the implementation (in the order they were taken). Where they differ from the spec below,
 they win. The user-visible ones:
 
 | Ruling | Decision | Cost |
@@ -75,6 +75,7 @@ they win. The user-visible ones:
 | P22 | The editor has **Store response excerpts** (`store_responses`) and the scenario detail **Delete** with a confirm dialog; both are in the mockups. | None. |
 | P23 | The probe's state is part of the *Status* cell of *Settings › Clusters & agents* (no extra column; no sideways scroll at 1440 px). | None. |
 | P24 | `POST /clusters/{id}/probe-token` answers 409 while the cluster waits for its first agent: its *Add cluster* command already installs the probe. | None. |
+| P25 | The allowlist version is a time: every change, and every server start, sets it to `greatest(version + 1, now in milliseconds)`. A database restored from an older dump is then ahead of every version a probe has seen once a server starts on it; the probe's check that versions never go back is unchanged. A probe whose certificate was renewed after the dump needs *Install probe* (P6), and credentials rotated after it must be rotated again (`docs/restore-olympos.md`). | Versions are large numbers; runs after a restore wait for a server start. |
 
 Also settled while building, and documented for users: names must be fully qualified (no search list), a
 literal `${` cannot be written, `Accept-Encoding`, `Range`, `If-Range` and `Host` are reserved headers, test runs
@@ -88,7 +89,7 @@ are limited to 6 a minute per person, and after a full outage late runs go out t
 - `synthetic_alerts.reason`, `clusters`, **`still_failing`** (cluster alerts still firing when the fleet alert
   resolved), `notified_at`, `resolved_notified_at`; one firing alert per scenario and cluster (or fleet).
 - `synthetic_state` (streaks, last run, `blocked_reason`), `synthetic_hourly` (the 400-day roll-up),
-  `synthetic_allowlist_version` (bumped by trigger), `scenario_assertions.position`.
+  `synthetic_allowlist_version` (moved by trigger and at server start, P25), `scenario_assertions.position`.
 - `clusters.probe_*` (status, version, current and previous certificate serial, expiry, last seen, offline
   since, alerted) and `enroll_tokens.roles`, `agent_used_at`, `probe_used_at`.
 - Retention indexes: runs by `finished_at`, step results with an excerpt, `synthetic_hourly.hour`, and the

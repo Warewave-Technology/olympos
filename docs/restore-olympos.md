@@ -96,6 +96,24 @@ at start-up; a dump from an older version is upgraded, a dump from a **newer** v
   but their blobs are still in the destinations.
 - *Approvals*: change requests opened after the dump are gone; open them again.
 
+## Synthetic monitoring after a restore
+
+- **Probes reconnect by themselves**, like agents. At start-up the server moves the version of the host
+  allowlist past every version a probe saw before the restore, so the probes accept the restored list and
+  runs resume within a minute. The allowlist, scenarios and credentials are as they were at the dump time.
+- **A probe whose certificate was renewed after the dump stays pending or offline.** Olympos accepts only
+  the probe certificate it last issued, and the restored database names an older one. The agent renews the
+  probe's certificate every 20 days, so with an older dump this is most clusters; a probe enrolled after
+  the dump is not in the restored database at all. Its `probe.offline` alert fires after
+  `synthetic.probeOfflineAlertAfter`. In *Settings › Clusters & agents*, choose **Install probe** on each of
+  these clusters and run the command it shows.
+- **Credentials rotated after the dump must be rotated again.** A credential stored in Olympos holds the
+  value it had at the dump time: open it in *Settings › Synthetic monitoring › Credentials*, tick **Rotate
+  the secret** and enter the current one. Credentials created after the dump are gone; create them again.
+  A Key Vault reference reads the current secret and needs nothing.
+
+See [Synthetic monitoring](synthetic-monitoring.md).
+
 ## If the KEK is lost
 
 Without the KEK no sealed value can be opened: the internal CA key, destination credentials and Vault

@@ -16,6 +16,7 @@ keeps failing, Olympos alerts a notification channel; when it passes again, it s
 - [Rate caps](#rate-caps)
 - [Who can do what](#who-can-do-what)
 - [Retention](#retention)
+- [After a restore of Olympos](#after-a-restore-of-olympos)
 - [Try it in the lab](#try-it-in-the-lab)
 
 ![Monitoring › Synthetic: scenarios by cluster](images/monitoring-01-overview.png)
@@ -353,6 +354,13 @@ cap*); saving a scenario that would itself be blocked is refused with the cluste
 | Response excerpts | 7 days | `synthetic.excerptRetention` |
 | Test runs | 7 days | |
 | Alerts | forever | |
+
+## After a restore of Olympos
+
+Probes reconnect by themselves after Olympos is restored from a dump of its database. A probe whose
+certificate was renewed after the dump stays pending or offline until you use *Install probe* on its
+cluster, and credentials rotated after the dump must be rotated again. See
+[Synthetic monitoring after a restore](restore-olympos.md#synthetic-monitoring-after-a-restore).
 
 ## Try it in the lab
 
