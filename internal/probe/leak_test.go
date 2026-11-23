@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 
+	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/synthetic/hostallow"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
 )
 
@@ -587,25 +591,166 @@ func TestTaintedVariableStaysOnBoundHosts(t *testing.T) {
 	})
 }
 
-// Tainted values are scrubbed from every excerpt and actual value,
-// whatever their length, so short pieces cannot come back in the result.
-func TestTaintedValuesScrubbedWhateverTheirLength(t *testing.T) {
+// Ruling P12: a tainted value of minExtractLiteral bytes or more is
+// scrubbed from every excerpt and actual value; a shorter one is not, so
+// that an id such as "1" leaves "HTTP/1.1 200 OK", dates and prices
+// readable. P11 still keeps it on the bound hosts.
+func TestTaintedValuesScrubbedFromMinimumLength(t *testing.T) {
+	run := func(t *testing.T, id string) *pb.RunResult {
+		e := newEnv(t)
+		e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Date", "Mon, 23 Nov 2026 10:11:12 GMT")
+			if r.URL.Path == "/catalog" {
+				fmt.Fprintf(w, `{"items":[{"id":%q}],"total":1}`, id)
+				return
+			}
+			fmt.Fprintf(w, `{"item":%q,"price":10.15,"updated":"2026-11-23"}`, strings.TrimPrefix(r.URL.Path, "/items/"))
+		})))
+		cred := bearer(leakCanary, "exact:a.example.test")
+		one := withCred(httpStep("http://a.example.test/catalog"), cred)
+		one.Extracts = []spec.Extract{{Name: "item", Source: spec.SourceJSONPath, Expr: "$.items[0].id"}}
+		two := httpStep("http://a.example.test/items/${item}", assertion(spec.SubjectStatusCode, spec.OpEquals, "200"))
+		res := e.run(scenario(one, two), cred)
+		wantPassed(t, res)
+		return res
+	}
+
+	t.Run("short id stays readable", func(t *testing.T) {
+		res := run(t, "1")
+		for _, sr := range res.Steps {
+			ex := string(sr.ResponseExcerpt)
+			for _, want := range []string{"HTTP/1.1 200 OK", "Mon, 23 Nov 2026 10:11:12 GMT"} {
+				if !strings.Contains(ex, want) {
+					t.Errorf("step %d excerpt lacks %q: %q", sr.Position, want, ex)
+				}
+			}
+		}
+		if ex := string(res.Steps[1].ResponseExcerpt); !strings.Contains(ex, `"price":10.15,"updated":"2026-11-23"`) {
+			t.Errorf("price or date garbled: %q", ex)
+		}
+	})
+	t.Run("long id scrubbed", func(t *testing.T) {
+		res := run(t, "Qz7k")
+		if resultHolds(t, res, "Qz7k") {
+			t.Fatal("a 4-byte tainted value is in the result")
+		}
+	})
+}
+
+// Ruling P12: a bound server that saw the credential in one step can hand
+// it back to a later step that does not attach it. Extracts from a
+// response of a bound host are tainted with that credential all the same,
+// so they stay on its bound hosts; the static check agrees.
+func TestBoundHostResponsesAreTainted(t *testing.T) {
+	setup := func(t *testing.T, mode string) (*env, *headerRecorder, spec.RunCredential) {
+		var mu sync.Mutex
+		var last string
+		e := newEnv(t)
+		e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			defer mu.Unlock()
+			switch r.URL.Path {
+			case "/record":
+				last = r.Header.Get("Authorization")
+			case "/hop":
+				http.Redirect(w, r, "http://a.example.test/last", http.StatusFound)
+			default:
+				b := []byte(last)
+				if mode == "reversed" {
+					slices.Reverse(b)
+				}
+				fmt.Fprintf(w, `{"last":%q}`, b)
+			}
+		})))
+		b := &headerRecorder{}
+		e.host("b.example.test", "203.0.113.2", server(t, b))
+		e.host("c.example.test", "203.0.113.3", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "http://a.example.test/last", http.StatusFound)
+		})))
+		return e, b, bearer(leakCanary, "exact:a.example.test")
+	}
+	steps := func(cred spec.RunCredential, readURL, useURL string) *spec.Scenario {
+		s1 := withCred(httpStep("http://a.example.test/record"), cred)
+		s2 := httpStep(readURL) // no credential, no tainted variable
+		s2.Extracts = []spec.Extract{{Name: "v", Source: spec.SourceJSONPath, Expr: "last"}}
+		s3 := httpStep(useURL)
+		s3.HTTP.Headers = map[string]string{"X-Leak": "${v}"}
+		return scenario(s1, s2, s3)
+	}
+	bounds := func(cred spec.RunCredential) map[uuid.UUID][]hostallow.Rule {
+		r, err := hostallow.ParseRule(cred.BoundHosts[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return map[uuid.UUID][]hostallow.Rule{cred.ID: {r}}
+	}
+
+	for _, mode := range []string{"verbatim", "reversed"} {
+		t.Run(mode+" to an unbound host", func(t *testing.T) {
+			e, b, cred := setup(t, mode)
+			sc := steps(cred, "http://a.example.test/last", "http://b.example.test/")
+			if f := spec.ValidateTaint(sc, bounds(cred)); !strings.Contains(f["steps.2.http.headers.X-Leak"], cred.ID.String()) {
+				t.Errorf("static check: %v", f)
+			}
+			res := e.run(sc, cred)
+			if res.Status == StatusPassed || len(b.requests()) != 0 {
+				t.Fatalf("the unbound host got a value from a bound host's response: %s %q", res.Status, res.FailureReason)
+			}
+			if !strings.HasPrefix(res.FailureReason, CodeCredentialError+": ") {
+				t.Fatalf("reason %q", res.FailureReason)
+			}
+		})
+	}
+	t.Run("redirect hop onto a bound host", func(t *testing.T) {
+		e, b, cred := setup(t, "reversed")
+		res := e.run(steps(cred, "http://c.example.test/", "http://b.example.test/"), cred)
+		wantCode(t, res, 2, CodeCredentialError)
+		if len(b.requests()) != 0 {
+			t.Fatal("a value read through a redirect to a bound host reached the unbound host")
+		}
+	})
+	t.Run("back to the bound host", func(t *testing.T) {
+		e, _, cred := setup(t, "reversed")
+		sc := steps(cred, "http://a.example.test/last", "http://a.example.test/use")
+		if f := spec.ValidateTaint(sc, bounds(cred)); len(f) != 0 {
+			t.Errorf("static check refuses a bound use: %v", f)
+		}
+		wantPassed(t, e.run(sc, cred))
+	})
+}
+
+// Ruling P12: the taint comes from the references spec.StepVars reads, so
+// a template whose references do not parse is refused: "${${tok}" would
+// otherwise substitute ${tok} outside the taint.
+func TestUnparsedReferenceRefused(t *testing.T) {
 	e := newEnv(t)
 	e.host("a.example.test", "203.0.113.1", server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/one" {
-			fmt.Fprint(w, `{"p":"Qz"}`)
-			return
-		}
-		fmt.Fprintf(w, "piece=%s", r.URL.Query().Get("p"))
+		fmt.Fprint(w, `{"session":"sess-abcdef123456"}`)
 	})))
+	b := &headerRecorder{}
+	e.host("b.example.test", "203.0.113.2", server(t, b))
 	cred := bearer(leakCanary, "exact:a.example.test")
-	one := withCred(httpStep("http://a.example.test/one"), cred)
-	one.Extracts = []spec.Extract{{Name: "p", Source: spec.SourceJSONPath, Expr: "p"}}
-	two := httpStep("http://a.example.test/two?p=${p}", assertion(spec.SubjectBody, spec.OpContains, "piece"))
-	res := e.run(scenario(one, two), cred)
-	wantPassed(t, res)
-	if resultHolds(t, res, "Qz") {
-		t.Fatal("a 2-byte tainted value is in the result")
+	for _, tc := range []struct{ name, url, header, body string }{
+		{"header", "http://b.example.test/", "${${tok}", ""},
+		{"url", "http://b.example.test/${${tok}", "", ""},
+		{"body", "http://b.example.test/", "", "x=${${tok}"},
+		{"unclosed", "http://b.example.test/", "${tok", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s1 := withCred(httpStep("http://a.example.test/"), cred)
+			s1.Extracts = []spec.Extract{{Name: "tok", Source: spec.SourceJSONPath, Expr: "session"}}
+			s2 := httpStep(tc.url)
+			if tc.header != "" {
+				s2.HTTP.Headers = map[string]string{"X-Leak": tc.header}
+			}
+			if tc.body != "" {
+				s2.HTTP.Method, s2.HTTP.Body = "POST", tc.body
+			}
+			wantCode(t, e.run(scenario(s1, s2), cred), 1, CodeInvalidRequest)
+		})
+	}
+	if len(b.requests()) != 0 {
+		t.Fatal("a step with an unparsed reference was sent")
 	}
 }
 

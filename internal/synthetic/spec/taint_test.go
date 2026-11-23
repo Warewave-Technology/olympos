@@ -84,3 +84,78 @@ func TestValidateTaint(t *testing.T) {
 		t.Fatal("nil scenario")
 	}
 }
+
+// Ruling P12: an extract from a step on a bound host is tainted with that
+// credential even when the step does not attach it.
+func TestValidateTaintBoundHostResponses(t *testing.T) {
+	a := uuid.New()
+	rule, err := hostallow.ParseRule("wildcard:*.prod.wrw.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bounds := map[uuid.UUID][]hostallow.Rule{a: {rule}}
+	steps := func(st ...Step) *Scenario {
+		for i := range st {
+			st[i].Position = i
+		}
+		return &Scenario{Steps: st}
+	}
+
+	// No credential on the reading step: still tainted.
+	f := ValidateTaint(steps(
+		taintStep("https://api.prod.wrw.com/record", &a, "", nil, ""),
+		taintStep("https://api.prod.wrw.com/last", nil, "v", nil, ""),
+		taintStep("https://elsewhere.example.org/", nil, "", map[string]string{"X-V": "${v}"}, ""),
+	), bounds)
+	if len(f) != 1 || !strings.Contains(f["steps.2.http.headers.X-V"], a.String()) {
+		t.Fatalf("bound-host response not tainted: %v", f)
+	}
+
+	// The mockup flow: the item id read from the catalog goes back to a
+	// bound host, with or without the credential on the second step.
+	for _, cred := range []*uuid.UUID{&a, nil} {
+		f = ValidateTaint(steps(
+			taintStep("https://api.prod.wrw.com/v1/catalog?limit=1", &a, "item", nil, ""),
+			taintStep("https://api.prod.wrw.com/v1/items/${item}", cred, "", nil, ""),
+		), bounds)
+		if len(f) != 0 {
+			t.Fatalf("mockup flow refused: %v", f)
+		}
+	}
+
+	// A response from a host outside every bound host taints nothing.
+	f = ValidateTaint(steps(
+		taintStep("https://public.example.org/", nil, "v", nil, ""),
+		taintStep("https://elsewhere.example.org/${v}", nil, "", nil, ""),
+	), bounds)
+	if len(f) != 0 {
+		t.Fatalf("unbound response tainted: %v", f)
+	}
+}
+
+// ParseStepVars reports a "${" that does not start a valid reference,
+// which Substitute would read past ("${${a}" still replaces ${a}).
+func TestParseStepVars(t *testing.T) {
+	for _, tc := range []struct {
+		url, header, body string
+		ok                bool
+	}{
+		{"https://a/${x}", "${y}", "${x}", true},
+		{"https://a/", "${${tok}", "", false},
+		{"https://a/${${tok}", "", "", false},
+		{"https://a/", "", "${tok", false},
+		{"https://a/", "", "${1x}", false},
+	} {
+		st := taintStep(tc.url, nil, "", map[string]string{"X": tc.header}, tc.body)
+		if _, ok := ParseStepVars(&st); ok != tc.ok {
+			t.Errorf("%+v: ok=%v", tc, ok)
+		}
+	}
+	st := taintStep("https://a/${x}", nil, "", map[string]string{"X": "${y}"}, "${x}")
+	if names, _ := ParseStepVars(&st); strings.Join(names, ",") != "x,y" {
+		t.Errorf("names %v", names)
+	}
+	if names, ok := ParseStepVars(nil); names != nil || !ok {
+		t.Error("nil step")
+	}
+}

@@ -86,7 +86,8 @@ type outcome struct {
 	statusCode int
 	remote     netip.Addr
 	// taint is that of the step's extracts: the taint of the variables
-	// its request used, plus its own credential (P11).
+	// its request used, plus its own credential (P11), plus every
+	// credential bound to a host its request reached (P12).
 	taint spec.Taint
 }
 
@@ -128,14 +129,11 @@ func (r *Runner) Run(ctx context.Context, s *spec.Scenario, creds []spec.RunCred
 		}
 		o := r.runStep(ctx, rs, st)
 		for _, n := range o.names {
-			v, ok := o.extracted[n]
-			switch {
-			case !ok:
-			case len(o.taint) > 0:
-				// A tainted value may be a piece of a credential:
-				// scrubbed whatever its length (P11).
-				cs.lits.addSecret([]byte(v))
-			default:
+			// Tainted or not, a value shorter than minExtractLiteral is
+			// not scrubbed (ruling P12): scrubbing an id such as "1" in
+			// all its forms garbles every excerpt ("HTTP/[redacted]").
+			// P11 keeps a tainted one on its bound hosts all the same.
+			if v, ok := o.extracted[n]; ok {
 				cs.lits.addExtracted(v)
 			}
 		}

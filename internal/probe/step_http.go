@@ -102,6 +102,15 @@ func stepHeaders(h map[string]string, vars map[string]string) (http.Header, erro
 
 func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *outcome {
 	h := st.HTTP
+	// The taint below comes from the references ParseStepVars reads.
+	// After a "${" that does not parse, Substitute still replaces the
+	// references that follow ("${${a}" replaces ${a}), and their names
+	// would be outside the taint. Such a step is refused, as spec.Validate
+	// refuses it at save time.
+	usedVars, refsOK := spec.ParseStepVars(st)
+	if !refsOK {
+		return failOutcome(errorf(CodeInvalidRequest, "a \"${\" in the request does not start a valid variable reference"))
+	}
 	u, err := buildURL(h.URL, rs.vars)
 	if err != nil {
 		return failOutcome(classify(ctx, err))
@@ -121,9 +130,10 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	// Ruling P11: the variables this request uses carry the taint of the
 	// steps they come from; the request may only go where every credential
 	// of that taint is bound. The step's own extracts inherit it, plus the
-	// step's credential.
+	// step's credential, plus (P12) every credential bound to a host the
+	// request reached (added once the response is in).
 	used := spec.Taint{}
-	for _, n := range spec.StepVars(st) {
+	for _, n := range usedVars {
 		used.Add(rs.taint[n])
 	}
 	o := &outcome{timings: &pb.StepTimings{}, taint: spec.Taint{}}
@@ -192,11 +202,12 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 
 	tr := r.transport(sess)
 	defer tr.CloseIdleConnections()
+	ct := &credTransport{
+		base: tr, r: r, cred: cred, cs: rs.creds, ctx: ctx, taint: used,
+		origHost: origHost, origScheme: strings.ToLower(u.Scheme),
+	}
 	client := &http.Client{
-		Transport: &credTransport{
-			base: tr, r: r, cred: cred, cs: rs.creds, ctx: ctx, taint: used,
-			origHost: origHost, origScheme: strings.ToLower(u.Scheme),
-		},
+		Transport: ct,
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
 			return checkRedirect(sess, rs.creds, used, h.FollowRedirects, next, via)
 		},
@@ -228,6 +239,11 @@ func (r *Runner) httpStep(ctx context.Context, rs *runState, st *spec.Step) *out
 	}
 	traceMu.Unlock()
 	o.statusCode = resp.StatusCode
+	// Ruling P12: a bound server has seen its credential, from this step
+	// or an earlier one, and may give it back in a form the echo gate
+	// does not know. Extracts from a response of a bound host (on any hop)
+	// are tainted with that credential, attached here or not.
+	o.taint.Add(rs.creds.boundTaint(ct.sentHosts()))
 
 	f := &facts{
 		kind:       spec.KindHTTP,

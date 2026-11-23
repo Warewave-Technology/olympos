@@ -235,6 +235,25 @@ func (cs *credSet) checkTaint(host string, t spec.Taint) error {
 	return nil
 }
 
+// boundTaint is the taint of a response from hosts (ruling P12): every
+// credential of the run whose bound hosts cover one of them. A credential
+// whose bound hosts did not parse is never attached, so it taints nothing.
+func (cs *credSet) boundTaint(hosts []string) spec.Taint {
+	t := spec.Taint{}
+	for id, c := range cs.byID {
+		if c.boundErr != nil {
+			continue
+		}
+		for _, h := range hosts {
+			if h != "" && c.allows(h) {
+				t[id] = true
+				break
+			}
+		}
+	}
+	return t
+}
+
 // echoes reports whether a response's headers or body carry a secret form
 // of a credential of the run. Ruling P10: no extract is taken from such a
 // response, since an extract (or several, piece by piece) could carry the
@@ -591,6 +610,16 @@ type credTransport struct {
 	// origHost and origScheme are those of the step's first request.
 	origHost   string
 	origScheme string
+
+	mu    sync.Mutex
+	hosts []string // the hosts of the requests sent, every hop included
+}
+
+// sentHosts returns the hosts of the requests the transport sent.
+func (t *credTransport) sentHosts() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return append([]string(nil), t.hosts...)
 }
 
 func (t *credTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -635,6 +664,9 @@ func (t *credTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		// extracted token): it stays with the step's host.
 		strip()
 	}
+	t.mu.Lock()
+	t.hosts = append(t.hosts, host)
+	t.mu.Unlock()
 	return t.base.RoundTrip(req)
 }
 

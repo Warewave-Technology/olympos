@@ -13,9 +13,12 @@ import (
 )
 
 // Taint is the set of credentials a variable may carry a piece of
-// (ruling P11). A variable extracted by a step that uses a credential is
-// tainted with that credential; one extracted by a step whose request used
-// a tainted variable inherits that variable's taint as well.
+// (rulings P11 and P12). A variable extracted by a step is tainted with:
+//   - the step's own credential, if it has one;
+//   - the taint of every variable the step's request used;
+//   - every credential of the run whose bound hosts cover the step's host,
+//     whether or not the step attached it: a bound server has seen the
+//     credential and may hand it back to a later step without it (P12).
 type Taint map[uuid.UUID]bool
 
 // Add adds every credential of o to t.
@@ -33,19 +36,32 @@ func (t Taint) IDs() []uuid.UUID {
 }
 
 // StepVars returns the names of the variables an HTTP step's request uses
-// (URL, header values, body), once each, in order.
+// (URL, header values, body), once each, in order. It stops at a "${" that
+// does not start a valid reference; ParseStepVars reports that case.
 func StepVars(st *Step) []string {
+	names, _ := ParseStepVars(st)
+	return names
+}
+
+// ParseStepVars is StepVars, with ok false when the URL, a header value or
+// the body has a "${" that does not start a valid reference. Substitute
+// still replaces references after such a "${" (in "${${a}" it replaces
+// ${a}), so a caller that derives taint from these names must refuse a
+// step that does not parse: then the names are exactly those Substitute
+// can replace.
+func ParseStepVars(st *Step) (names []string, ok bool) {
 	if st == nil || st.HTTP == nil {
-		return nil
+		return nil, true
 	}
-	var out []string
+	ok = true
 	seen := map[string]bool{}
 	add := func(s string) {
-		names, _ := varRefs(s)
-		for _, n := range names {
+		refs, good := varRefs(s)
+		ok = ok && good
+		for _, n := range refs {
 			if !seen[n] {
 				seen[n] = true
-				out = append(out, n)
+				names = append(names, n)
 			}
 		}
 	}
@@ -54,17 +70,20 @@ func StepVars(st *Step) []string {
 		add(st.HTTP.Headers[name])
 	}
 	add(st.HTTP.Body)
-	return out
+	return names, ok
 }
 
-// ValidateTaint checks ruling P11 at save time: a tainted variable may only
-// be used in a step whose host is within the bound hosts of every
-// credential of its taint. bounds gives each credential's bound hosts (as
+// ValidateTaint checks rulings P11 and P12 at save time: a tainted variable
+// may only be used in a step whose host is within the bound hosts of every
+// credential of its taint (see Taint for what taints a variable). bounds
+// gives each credential's bound hosts (as
 // stored, validated rules); a credential missing from bounds covers no
 // host. It returns one message per offending field, keyed like Validate
 // ("steps.2.http.url", "steps.2.http.headers.X-Token", "steps.2.http.body"),
 // and an empty map when the scenario keeps to the rule. Call it after
-// Validate; fields that Validate refuses are skipped.
+// Validate; fields that Validate refuses are skipped. bounds must hold the
+// same credentials the probe is given for the run, since P12 taints the
+// extracts of a step on a bound host with every one of them.
 //
 // The probe enforces the same rule again at run time, on every request and
 // redirect hop.
@@ -104,6 +123,15 @@ func ValidateTaint(s *Scenario, bounds map[uuid.UUID][]hostallow.Rule) map[strin
 				check(p+".headers."+name, st.HTTP.Headers[name])
 			}
 			check(p+".body", st.HTTP.Body)
+			// P12: a response from a bound host may carry that
+			// credential, attached by this step or not.
+			if host != "" {
+				for id, rules := range bounds {
+					if covers(rules, host) {
+						used[id] = true
+					}
+				}
+			}
 		}
 		if st.CredentialID != nil {
 			used[*st.CredentialID] = true
