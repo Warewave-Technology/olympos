@@ -6,9 +6,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ClickHouse/ch-go"
+	"github.com/ClickHouse/ch-go/proto"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/restore"
@@ -97,12 +101,13 @@ const reqID = "0f6c1d9e-5d1a-4a53-8e0b-7a1f3c2b9d44"
 func shopBackup() *fakeBackup {
 	b := newFakeBackup()
 	shop := b.db("shop", "Atomic")
-	b.obj(shop, Table{Name: "events", Kind: KindTable, Engine: "MergeTree",
+	b.obj(shop, Table{Name: "events", Kind: KindTable, Engine: "MergeTree", PartitionKey: "d", SortingKey: "x", PrimaryKey: "x",
 		Columns: []Column{{Name: "d", Type: "Date"}, {Name: "x", Type: "UInt64"}, {Name: "x2", Type: "UInt64", DefaultKind: "MATERIALIZED", DefaultExpression: "x * 2"}}},
-		"CREATE TABLE shop.events (`d` Date, `x` UInt64) ENGINE = MergeTree PARTITION BY d ORDER BY x", 3, 0, 2)
-	b.obj(shop, Table{Name: "agg", Kind: KindTable, Engine: "AggregatingMergeTree", DataFormat: FormatRowBinary},
+		"CREATE TABLE shop.events (`d` Date, `x` UInt64, `x2` UInt64 MATERIALIZED x * 2) ENGINE = MergeTree PARTITION BY d ORDER BY x", 3, 0, 2)
+	b.obj(shop, Table{Name: "agg", Kind: KindTable, Engine: "AggregatingMergeTree", DataFormat: FormatRowBinary, SortingKey: "k", PrimaryKey: "k",
+		Columns: []Column{{Name: "k", Type: "UInt8"}, {Name: "u", Type: "AggregateFunction(uniq, UInt64)"}}},
 		"CREATE TABLE shop.agg (`k` UInt8, `u` AggregateFunction(uniq, UInt64)) ENGINE = AggregatingMergeTree ORDER BY k", 4)
-	b.obj(shop, Table{Name: "r", Kind: KindTable, Engine: "ReplicatedMergeTree"},
+	b.obj(shop, Table{Name: "r", Kind: KindTable, Engine: "ReplicatedMergeTree", SortingKey: "x", PrimaryKey: "x", Columns: []Column{{Name: "x", Type: "UInt64"}}},
 		"CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x", 1)
 	b.obj(shop, Table{Name: "k", Kind: KindTable, Engine: "Kafka"},
 		"CREATE TABLE shop.k (`x` String) ENGINE = Kafka SETTINGS kafka_broker_list = 'broker:9092', kafka_sasl_password = 'kafka-secret'")
@@ -113,7 +118,8 @@ func shopBackup() *fakeBackup {
 	b.obj(shop, Table{Name: "v", Kind: KindView, Engine: "View"}, "CREATE VIEW shop.v (`x` UInt64) AS SELECT x FROM shop.events")
 	b.obj(shop, Table{Name: "mv", Kind: KindMaterializedView, Engine: "MaterializedView", UUID: "11111111-1111-1111-1111-111111111111"},
 		"CREATE MATERIALIZED VIEW shop.mv (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY d AS SELECT d, count() AS c FROM shop.events GROUP BY d")
-	b.obj(shop, Table{Name: ".inner_id.11111111-1111-1111-1111-111111111111", Kind: KindMVInner, Engine: "SummingMergeTree", InnerOf: "mv"},
+	b.obj(shop, Table{Name: ".inner_id.11111111-1111-1111-1111-111111111111", Kind: KindMVInner, Engine: "SummingMergeTree", InnerOf: "mv",
+		SortingKey: "d", PrimaryKey: "d", Columns: []Column{{Name: "d", Type: "Date"}, {Name: "c", Type: "UInt64"}}},
 		"CREATE TABLE shop.`.inner_id.11111111-1111-1111-1111-111111111111` (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY d", 2)
 	b.obj(shop, Table{Name: "mv_k", Kind: KindMaterializedView, Engine: "MaterializedView"},
 		"CREATE MATERIALIZED VIEW shop.mv_k TO shop.events (`d` Date, `x` UInt64) AS SELECT toDate(now()) AS d, length(x) AS x FROM shop.k")
@@ -158,28 +164,39 @@ func TestPlanDatabaseAndSteps(t *testing.T) {
 		t.Fatalf("skipped carries DDL: %s", skipped)
 	}
 	notes := strings.Join(p.notes, "\n")
-	if !strings.Contains(notes, "shop.r: its Keeper path was moved under /olympos-restore/"+reqID+"/") ||
-		!strings.Contains(notes, "the data of materialized view shop.mv was restored into table shop.mv__restored_data; recreate the view with TO `shop`.`mv__restored_data`") ||
-		!strings.Contains(notes, "shop.events: MATERIALIZED columns (x2)") {
-		t.Fatalf("notes: %s", notes)
-	}
-	for _, o := range p.objs {
-		if o.t.Name == "r" && !strings.Contains(o.st.sql(), "'/olympos-restore/"+reqID+"/clickhouse/tables/{database}/{table}/{shard}'") {
-			t.Fatalf("r: %s", o.st.sql())
-		}
-		if o.t.Kind == KindMVInner && (o.target != "mv__restored_data" || o.t.Rows != 2 ||
-			o.st.sql() != "CREATE TABLE shop.`mv__restored_data` (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY d") {
-			t.Fatalf("mv inner: %+v %s", o, o.st.sql())
+	for _, w := range []string{
+		"shop.r: its Keeper path is /olympos-restore/" + reqID + "/shop/r (replica {replica})",
+		"the data of materialized view shop.mv was restored into table shop.mv__restored_data; recreate the view with TO `shop`.`mv__restored_data`",
+		"shop.events: created from its columns, types, engine and keys; not restored: the MATERIALIZED, ALIAS and EPHEMERAL columns `x2` " +
+			"(not in the backup's data); any codecs, TTL, indexes, projections, constraints, comments, sampling key and settings; re-apply them from your schema",
+		"shop.mv__restored_data: created from its columns",
+	} {
+		if !strings.Contains(notes, w) {
+			t.Errorf("notes lack %q:\n%s", w, notes)
 		}
 	}
-	if p.create == nil || p.create.sql() != "CREATE DATABASE `shop`\nENGINE = Atomic" {
-		t.Fatalf("create: %+v", p.create)
+	want = []string{
+		"CREATE TABLE `shop`.`events` (`d` Date, `x` UInt64) ENGINE = MergeTree PARTITION BY `d` ORDER BY `x`",
+		"CREATE TABLE `shop`.`agg` (`k` UInt8, `u` AggregateFunction(uniq, UInt64)) ENGINE = AggregatingMergeTree ORDER BY `k`",
+		"CREATE TABLE `shop`.`r` (`x` UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + reqID + "/shop/r', '{replica}') ORDER BY `x`",
+		"CREATE TABLE `shop`.`mv__restored_data` (`d` Date, `c` UInt64) ENGINE = SummingMergeTree ORDER BY `d`",
+	}
+	for i, o := range p.objs {
+		if o.sql != want[i] {
+			t.Errorf("%s:\n got %s\nwant %s", o.target, o.sql, want[i])
+		}
+		if o.t.Kind == KindMVInner && (o.target != "mv__restored_data" || o.t.Rows != 2) {
+			t.Errorf("mv inner: %+v", o)
+		}
+	}
+	if p.create != "CREATE DATABASE `shop` ENGINE = Atomic" {
+		t.Fatalf("create: %q", p.create)
 	}
 
 	// An existing empty database is restored into, without CREATE DATABASE.
 	ts.dbs["shop"] = targetDB{engine: "Atomic"}
 	p, msg = planDatabase(&b.m.Databases[0], entries, ts, reqID)
-	if msg != "" || !p.exists || p.create != nil {
+	if msg != "" || !p.exists || p.create != "" {
 		t.Fatalf("existing empty: %q %+v", msg, p)
 	}
 	if s := steps([]*dbPlan{p}); s[0].String() != "table shop.events" {
@@ -187,7 +204,7 @@ func TestPlanDatabaseAndSteps(t *testing.T) {
 	}
 
 	// The view's data table would collide with a table of the backup.
-	b.obj(&b.m.Databases[0], Table{Name: "mv__restored_data", Kind: KindTable, Engine: "Memory"}, "CREATE TABLE shop.mv__restored_data (x UInt8) ENGINE = Memory")
+	b.obj(&b.m.Databases[0], Table{Name: "mv__restored_data", Kind: KindTable, Engine: "Memory", Columns: []Column{{Name: "x", Type: "UInt8"}}}, "")
 	if _, msg := planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID); !strings.Contains(msg, "which the backup also holds") {
 		t.Fatalf("collision: %q", msg)
 	}
@@ -205,7 +222,7 @@ func TestPlanInnerTables(t *testing.T) {
 		}
 		for i, in := range inner {
 			name := ".inner_id." + string(rune('a'+i))
-			b.obj(shop, Table{Name: name, Kind: KindMVInner, Engine: "Memory", InnerOf: in},
+			b.obj(shop, Table{Name: name, Kind: KindMVInner, Engine: "Memory", InnerOf: in, Columns: []Column{{Name: "x", Type: "UInt8"}}},
 				"CREATE TABLE shop."+quoteIdent(name)+" (x UInt8) ENGINE = Memory", 1)
 		}
 		return planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID)
@@ -229,9 +246,10 @@ func TestPlanInnerTables(t *testing.T) {
 		t.Fatal(msg)
 	}
 	for _, o := range p.objs {
-		if !strings.HasSuffix(o.target, "__restored_data") || !strings.Contains(o.st.sql(), quoteIdent(o.target)) {
-			t.Errorf("target %q: %s", o.target, o.st.sql())
+		if !strings.HasSuffix(o.target, "__restored_data") || o.sql != "CREATE TABLE `shop`."+quoteIdent(o.target)+" (`x` UInt8) ENGINE = Memory" {
+			t.Errorf("target %q: %s", o.target, o.sql)
 		}
+		assertGenerated(t, o.sql)
 	}
 	for _, n := range p.notes {
 		if strings.ContainsAny(n, "\n\r\x00") {
@@ -255,25 +273,13 @@ func TestPlanDatabaseRefuses(t *testing.T) {
 			b.m.Databases[0].Engine = "Replicated"
 		}, "Replicated database engine"},
 		{"MySQL database", func(b *fakeBackup, ts *targetState) { b.m.Databases[0].Engine = "MySQL" }, "proxy for another system"},
-		{"wrong name in DDL", func(b *fakeBackup, ts *targetState) {
-			b.files["schema/shop/events.sql"] = "CREATE TABLE shop.other (`x` UInt8) ENGINE = MergeTree ORDER BY x"
-		}, "events: the schema entry creates shop.other, not shop.events"},
-		{"two statements", func(b *fakeBackup, ts *targetState) {
-			b.files["schema/shop/agg.sql"] = "CREATE TABLE shop.agg (x UInt8) ENGINE = AggregatingMergeTree ORDER BY x; DROP DATABASE other"
-		}, "more than one statement"},
-		{"database clauses", func(b *fakeBackup, ts *targetState) {
-			b.files["schema/shop.sql"] = "CREATE DATABASE shop ENGINE = Atomic SETTINGS x = 1"
-		}, "CREATE DATABASE has clauses"},
-		{"other database", func(b *fakeBackup, ts *targetState) {
-			b.files["schema/shop.sql"] = "CREATE DATABASE other ENGINE = Atomic"
-		}, "creates database other"},
 		{"missing data entry", func(b *fakeBackup, ts *targetState) { delete(b.files, "data/shop/events/c.native") }, "missing from the backup"},
 		{"data entry of another table", func(b *fakeBackup, ts *targetState) {
 			b.m.Databases[0].Tables[0].Partitions[0].Entry = "data/shop/agg/a.native"
 		}, "missing from the backup"},
 		{"wrong size", func(b *fakeBackup, ts *targetState) { b.files["data/shop/events/a.native"] = "xx" }, "has 2 bytes"},
 		{"rows disagree", func(b *fakeBackup, ts *targetState) { b.m.Databases[0].Tables[0].Rows = 99 }, "hold 5 rows, its table 99"},
-		{"ReplacingMergeTree replaced by Log", func(b *fakeBackup, ts *targetState) { b.m.Databases[0].Tables[0].Engine = "Log" }, "the backup recorded Log"},
+		{"unknown data format", func(b *fakeBackup, ts *targetState) { b.m.Databases[0].Tables[0].DataFormat = "CSV" }, `unknown data format "CSV"`},
 	}
 	for _, c := range cases {
 		b := shopBackup()
@@ -356,8 +362,8 @@ func twoPlans() []*dbPlan {
 		}
 		return &objPlan{db: db, t: t, target: name}
 	}
-	a := &dbPlan{db: Database{Name: "a"}, create: &createStmt{}, objs: []*objPlan{obj("a", "t", KindTable, true), obj("a", "u", KindTable, false)}}
-	b := &dbPlan{db: Database{Name: "b"}, create: &createStmt{}, objs: []*objPlan{obj("b", "t", KindTable, true)}}
+	a := &dbPlan{db: Database{Name: "a"}, create: databaseSQL("a"), objs: []*objPlan{obj("a", "t", KindTable, true), obj("a", "u", KindTable, false)}}
+	b := &dbPlan{db: Database{Name: "b"}, create: databaseSQL("b"), objs: []*objPlan{obj("b", "t", KindTable, true)}}
 	return []*dbPlan{a, b}
 }
 
@@ -387,5 +393,38 @@ func TestRunStopsAtTheFirstFailure(t *testing.T) {
 	})
 	if res.Items[0].Status != "succeeded" || res.Items[1].Status != "failed" || res.Items[1].Error != "b.t (data): boom" {
 		t.Fatalf("result: %+v", res.Items)
+	}
+}
+
+// TestCreateError: a refused CREATE is reported by error code and name,
+// never with the server's message.
+func TestCreateError(t *testing.T) {
+	exc := &ch.Exception{Code: proto.ErrBadArguments, Name: "DB::Exception", Message: "DB::Exception: file contents: root:x:0:0"}
+	got := createError(fmt.Errorf("query: %w", exc)).Error()
+	if got != "the target refused it: Code 36 BAD_ARGUMENTS" {
+		t.Fatalf("createError = %q", got)
+	}
+	if got := createError(&ch.Exception{Code: proto.Error(999999), Message: "secret"}).Error(); got != "the target refused it: Code 999999 UNKNOWN" {
+		t.Fatalf("unknown code: %q", got)
+	}
+	conn := errors.New("read: connection reset by peer")
+	if got := createError(conn); got != conn {
+		t.Fatalf("connection error: %v", got)
+	}
+}
+
+// TestPlanDatabaseEngine: a database is created with the Atomic engine,
+// whatever the backup's was, and the result says so.
+func TestPlanDatabaseEngine(t *testing.T) {
+	b := newFakeBackup()
+	b.db("old", "Ordinary")
+	b.files["schema/old.sql"] = "CREATE DATABASE old ENGINE = Ordinary COMMENT 'x' SETTINGS evil = file('/etc/passwd')"
+	p, msg := planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID)
+	if msg != "" || p.create != "CREATE DATABASE `old` ENGINE = Atomic" ||
+		!strings.Contains(strings.Join(p.notes, "\n"), "old: created with the Atomic database engine (the backup's was Ordinary)") {
+		t.Fatalf("%q %q %v", msg, p.create, p.notes)
+	}
+	if got := databaseSQL("we`ird\nname"); got != "CREATE DATABASE `we\\`ird\\x0aname` ENGINE = Atomic" {
+		t.Fatalf("databaseSQL: %s", got)
 	}
 }

@@ -188,26 +188,49 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   (`AggregateFunction`, `Tuple`, `JSON`/`Variant`, `LowCardinality(Nullable(…))`); the official client parses
   every format, so every table is restored. Rows written per table are compared with the rows the backup
   streamed for that table (`rows` in the archive's manifest); a difference fails the table.
-- **ClickHouse objects (changed during implementation for security; recreate views, MVs and dictionaries
-  from your schema):**
-  - **Created:** databases (`Replicated` is refused, because its Keeper path could collide with the source's
-    when Keeper is shared) and tables of the MergeTree family, their `Replicated*` variants, the Log family and
-    Memory. Each table's data follows.
-  - **Materialized views:** each one's inner table is restored as `<view>__restored_data` with its rows, and the
-    result says to recreate the view with `TO` that table. A view with `TO` needs nothing more, because its
-    target is a table of the backup.
-  - **Checks on a table definition:** it must be a single `CREATE TABLE` of the manifest's database and name. It
-    may not be `AS …` or `EMPTY AS`. Only an allowlist of storage settings is accepted. Expressions may not
-    contain a subquery, `IN`, or any function outside an allowlist of pure scalar functions.
-  - **Keeper paths:** `Replicated*MergeTree` paths are rewritten to `/olympos-restore/<request id>/…`, with
-    `{uuid}` replaced by `{database}/{table}` (the UUID clause is dropped), and reported.
+- **ClickHouse objects (changed during implementation for security; recreate views, MVs and dictionaries,
+  and re-apply secondary table features, from your schema):**
+  - **No SQL text from the backup is run.** Olympos generates every `CREATE DATABASE` and `CREATE TABLE`
+    from the manifest's structured data. The review showed that validating source DDL text could be bypassed
+    again and again, and that the target then runs it with the restore credential.
+  - **Databases:** `CREATE DATABASE <db> ENGINE = Atomic`. A `Replicated` database is refused, because its
+    Keeper path could collide with the source's when Keeper is shared; another engine becomes Atomic, which the
+    result notes.
+  - **Tables created:** the MergeTree family (`MergeTree`, `Replacing`, `Summing`, `Aggregating`,
+    `Collapsing`, `VersionedCollapsing`), their `Replicated*` variants, `Log`, `TinyLog`, `StripeLog` and
+    `Memory`, each followed by its data. Each one is generated as
+    `CREATE TABLE <db>.<table> (<columns>) ENGINE = <engine>[(<parameters>)] [PARTITION BY …] ORDER BY …
+    [PRIMARY KEY …]`:
+    - **columns:** the ordinary columns, which are the ones in the backup's data. Names are quoted by Olympos.
+      Types are read by a strict grammar and written again: numeric types, `Decimal`, `String`, `FixedString`,
+      `UUID`, `IPv4`/`IPv6`, dates and times with a time zone, `Bool`, `Enum8`/`Enum16`, `Nullable`,
+      `LowCardinality`, `Array`, `Tuple`, `Map`, `Nested`, `Object('json')`, `JSON`, `Dynamic`, `Variant`,
+      and `AggregateFunction`/`SimpleAggregateFunction` with an allowlisted aggregate function, combinators
+      and literal parameters. A table with any other type is not created.
+    - **engine parameters:** only bare columns of the table, read from the schema entry's `ENGINE` clause for
+      Replacing (version, is_deleted), Summing (columns), Collapsing (sign) and VersionedCollapsing (sign,
+      version). If they cannot be read in that shape, the table is not created, because other parameters
+      change how its rows merge.
+    - **Keeper path:** a `Replicated*` table gets `'/olympos-restore/<request id>/<db>/<table>'`, with the
+      names escaped like ClickHouse file names, and the replica `'{replica}'`. The source path is not used. A
+      target without Keeper or the `{replica}` macro refuses the `CREATE`.
+    - **keys:** the sorting, partition and primary keys are kept when they are bare columns. A partition key of
+      the form `toYYYYMM(col)`, `toYYYYMMDD(col)`, `toDate(col)` or `toStartOfMonth(col)` is also kept, and
+      Olympos writes it itself. Otherwise a `MergeTree` table gets `ORDER BY tuple()` and no partition key; a
+      table of an engine that merges rows is not created. A primary key is kept only when it is a prefix of the
+      sorting key.
+  - **Not restored, reported once per table (re-apply from your schema):** `DEFAULT` expressions, `MATERIALIZED`,
+    `ALIAS` and `EPHEMERAL` columns (they are not in the backup's data), codecs, TTL, indexes, projections,
+    constraints, comments, the sampling key, settings, and keys that are not bare columns.
+  - **Materialized views:** each one's inner table is generated the same way as `<view>__restored_data`, from
+    the inner table's columns, engine and keys, with its rows. The result says to recreate the view with `TO`
+    that table. A view with `TO` needs nothing more, because its target is a table of the backup.
   - **Not created, reported by name and reason (never with their DDL):** views, materialized views,
-    dictionaries, live and window views, and tables of any other engine (Kafka, S3, URL, MySQL, PostgreSQL,
-    Distributed, Merge, Buffer, Join, Set, KeeperMap, EmbeddedRocksDB, …). The same applies to tables whose
-    definition fails the checks.
-  - **Why:** the review showed that query text in view definitions, dictionary sources and settings can read or
-    send any data the definer can reach. A restore cannot prove such text confined to the restored databases;
-    its job is the data.
+    dictionaries, live and window views, `GraphiteMergeTree` (its rollup rules live in the server
+    configuration), and tables of any other engine (Kafka, S3, URL, MySQL, PostgreSQL, Distributed, Merge,
+    Buffer, Join, Set, KeeperMap, EmbeddedRocksDB, …).
+  - **Errors:** a refused `CREATE` is reported by error code and name only (for example `Code 36
+    BAD_ARGUMENTS`), never with the server's message, which can quote what the statement made the server read.
 - **Vault/OpenBao:** the snapshot (the blob, not a zip) is streamed to `POST /v1/sys/storage/raft/
   snapshot-force` with the request's token. The result explains the unseal step.
 

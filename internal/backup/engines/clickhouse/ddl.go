@@ -7,17 +7,15 @@ import (
 	"strings"
 )
 
-// The restore creates databases and tables only, from the archive's
-// schema entries (never from table data), one statement at a time, and
-// only after the statement was checked (table.go): exactly one CREATE
-// TABLE for the database and name the manifest records, of an engine that
-// keeps its data on the target (MergeTree family, Log family, Memory),
-// whose settings and expressions are an allowlist that cannot read
-// anything. Views, materialized views, dictionaries and every other
-// engine are not created and are reported by name, never with their DDL
-// (it can carry another system's credentials): parsing ClickHouse queries
-// to prove them confined to the restored databases is not something a
-// restore can do safely.
+// The restore never runs SQL text from the backup. It generates every
+// CREATE DATABASE and CREATE TABLE itself (table.go) from structured data:
+// the manifest's names, column types (read by the strict type grammar in
+// types.go and written again), engine and keys. The lexer below is used to
+// read those fields and, for the engines whose parameters are columns
+// (ReplacingMergeTree, SummingMergeTree, CollapsingMergeTree,
+// VersionedCollapsingMergeTree), the ENGINE clause of the archive's schema
+// entry; only bare column names that exist in the restored table are taken
+// from it.
 
 // ---------------------------------------------------------------- lexer
 
@@ -273,4 +271,101 @@ func lexQuoted(s string, i int) (string, int, error) {
 		}
 	}
 	return "", 0, lexErr("unterminated literal")
+}
+
+// ---------------------------------------------------------------- engine clause
+
+var errEngineClause = errors.New("its ENGINE clause could not be read")
+
+// tokenAt is toks[i], or an end marker outside the slice.
+func tokenAt(toks []token, i int) token {
+	if i >= 0 && i < len(toks) {
+		return toks[i]
+	}
+	return token{kind: tokPunct, val: "<end>"}
+}
+
+// matching returns the index of the ")" or "]" closing the bracket at
+// toks[i] (-1 when there is none).
+func matching(toks []token, i int) int {
+	if i < 0 || i >= len(toks) {
+		return -1
+	}
+	d := toks[i].depth
+	for j := i + 1; j < len(toks); j++ {
+		if (toks[j].punct(")") || toks[j].punct("]")) && toks[j].depth == d {
+			return j
+		}
+	}
+	return -1
+}
+
+// splitArgs splits the tokens between the bracket at open and its match
+// at the commas of that level. "()" gives no arguments; an empty argument
+// ("f(a,)") is an empty slice, which no caller accepts.
+func splitArgs(toks []token, open, end int) [][]token {
+	if end == open+1 {
+		return nil
+	}
+	var out [][]token
+	d := toks[open].depth + 1
+	from := open + 1
+	for j := open + 1; j <= end; j++ {
+		if j == end || (toks[j].punct(",") && toks[j].depth == d) {
+			out = append(out, toks[from:j])
+			from = j + 1
+		}
+	}
+	return out
+}
+
+// sourceEngine reads the engine name and arguments of a table's schema
+// entry (SHOW CREATE TABLE text) by position only:
+//
+//	CREATE TABLE [db.]name [UUID '…'] (columns) ENGINE = Name[(args)] …
+//
+// Nothing else of the statement is used.
+func sourceEngine(ddl string) (string, [][]token, error) {
+	if len(ddl) > maxSchemaEntry {
+		return "", nil, errEngineClause
+	}
+	toks, err := lexSQL(ddl)
+	if err != nil {
+		return "", nil, errEngineClause
+	}
+	at := func(i int) token { return tokenAt(toks, i) }
+	if !at(0).is("CREATE") || !at(1).is("TABLE") || !at(2).ident() {
+		return "", nil, errEngineClause
+	}
+	i := 3
+	if at(i).punct(".") {
+		if !at(i + 1).ident() {
+			return "", nil, errEngineClause
+		}
+		i += 2
+	}
+	if at(i).is("UUID") && at(i+1).kind == tokString {
+		i += 2
+	}
+	if !at(i).punct("(") {
+		return "", nil, errEngineClause
+	}
+	c := matching(toks, i)
+	if c < 0 || !at(c).punct(")") {
+		return "", nil, errEngineClause
+	}
+	i = c + 1
+	if !at(i).is("ENGINE") || !at(i+1).punct("=") || !at(i+2).ident() {
+		return "", nil, errEngineClause
+	}
+	name := at(i + 2).val
+	i += 3
+	if !at(i).punct("(") {
+		return name, nil, nil
+	}
+	c = matching(toks, i)
+	if c < 0 || !at(c).punct(")") {
+		return "", nil, errEngineClause
+	}
+	return name, splitArgs(toks, i, c), nil
 }

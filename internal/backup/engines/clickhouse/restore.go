@@ -143,15 +143,15 @@ var phaseNames = []string{"database", "table", "data"}
 type objPlan struct {
 	db     string
 	t      Table
-	st     *createStmt
+	sql    string // the CREATE TABLE Olympos generated (table.go)
 	target string // its name on the target
 }
 
 // dbPlan is a selected database that passed its preflight.
 type dbPlan struct {
 	db      Database
-	exists  bool        // exists on the target without objects: restored into
-	create  *createStmt // CREATE DATABASE (nil when it exists)
+	exists  bool   // exists on the target without objects: restored into
+	create  string // the generated CREATE DATABASE ("" when it exists)
 	objs    []*objPlan
 	skipped []string
 	notes   []string
@@ -186,7 +186,7 @@ func (s step) String() string {
 func steps(plans []*dbPlan) []step {
 	var out []step
 	for _, p := range plans {
-		if p.create != nil {
+		if p.create != "" {
 			out = append(out, step{phase: phaseDatabase, plan: p})
 		}
 	}
@@ -264,10 +264,10 @@ var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 
 // planDatabase checks one selected database without writing anything: it
 // is in the backup, not on the target with objects, its database engine is
-// restorable, and every table's schema entry is the CREATE TABLE the
-// manifest records (classify), with its data entries. Objects that are not
-// created are listed in skipped. msg is why the database cannot be
-// restored ("" when it can).
+// restorable, and every table that is created has its data entries. It
+// generates the CREATE DATABASE and each CREATE TABLE (buildTable); objects
+// that are not created are listed in skipped. msg is why the database
+// cannot be restored ("" when it can).
 func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, requestID string) (*dbPlan, string) {
 	p, msg := planDatabase1(md, entries, ts, requestID)
 	for i := range p.skipped {
@@ -331,25 +331,10 @@ func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, 
 		return p, why
 	}
 	if !p.exists {
-		f := entries[md.SchemaEntry]
-		if f == nil || !strings.HasPrefix(md.SchemaEntry, "schema/") {
-			return p, "the backup holds no schema entry for the database"
+		p.create = databaseSQL(md.Name)
+		if md.Engine != "Atomic" {
+			p.notes = append(p.notes, md.Name+": created with the Atomic database engine (the backup's was "+md.Engine+")")
 		}
-		b, err := readSmall(f, maxSchemaEntry)
-		if err != nil {
-			return p, err.Error()
-		}
-		st, err := checkCreate(string(b), kindDatabase, md.Name, "")
-		if err != nil {
-			return p, "CREATE DATABASE: " + err.Error()
-		}
-		if why := st.databaseProblem(); why != "" {
-			return p, why
-		}
-		if e := st.engineName(); e != "" && e != md.Engine {
-			return p, fmt.Sprintf("CREATE DATABASE has engine %s, the backup recorded %s", e, md.Engine)
-		}
-		p.create = st
 	}
 
 	names := map[string]string{} // name -> kind
@@ -391,6 +376,10 @@ func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, 
 	}
 	for _, t := range md.Tables {
 		what := md.Name + "." + t.Name + " (" + kindWord(t.Kind) + ")"
+		if t.Kind != KindTable && t.Kind != KindMVInner {
+			p.skipped = append(p.skipped, what+": "+notRecreated)
+			continue
+		}
 		target := t.Name
 		if t.Kind == KindMVInner {
 			// The view is not created; its rows are kept in a table of
@@ -408,63 +397,41 @@ func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, 
 			}
 			targets[target] = true
 		}
-		var ddl string
-		if t.Kind == KindTable || t.Kind == KindMVInner {
-			f := entries[t.SchemaEntry]
-			if f == nil || !strings.HasPrefix(t.SchemaEntry, "schema/") {
-				return p, t.Name + ": the backup holds no schema entry for it"
-			}
-			b, err := readSmall(f, maxSchemaEntry)
-			if err != nil {
-				return p, err.Error()
-			}
-			ddl = string(b)
+		if _, replicated, ok := splitEngine(t.Engine); ok && replicated && !requestIDRe.MatchString(requestID) {
+			return p, t.Name + ": a Keeper path needs the restore request's id, and there is none"
 		}
-		c, err := classify(md.Name, t, ddl)
-		if err != nil {
-			return p, t.Name + ": " + err.Error()
+		// The schema entry is only read for engine parameters; a missing or
+		// oversized one leaves "" (the engines that need it are then not
+		// created).
+		ddl := ""
+		if f := entries[t.SchemaEntry]; f != nil && strings.HasPrefix(t.SchemaEntry, "schema/") {
+			if b, err := readSmall(f, maxSchemaEntry); err == nil {
+				ddl = string(b)
+			}
 		}
-		if !c.create {
+		def, why := buildTable(md.Name, target, t, ddl, requestID)
+		if why != "" {
 			if t.Kind == KindMVInner {
-				p.skipped = append(p.skipped, fmt.Sprintf("%s (%d rows) was not restored: %s", what, t.Rows, c.reason))
+				p.skipped = append(p.skipped, fmt.Sprintf("%s (%d rows) was not restored: %s; not created (create it by hand)", what, t.Rows, why))
 			} else {
-				p.skipped = append(p.skipped, what+": "+c.reason)
+				p.skipped = append(p.skipped, what+": "+why+"; not created (create it by hand)")
 			}
 			continue
 		}
 		if why := checkData(t); why != "" {
 			return p, why
 		}
-		rewritten, why := c.st.rewriteKeeperPaths(requestID)
-		if why != "" {
-			p.skipped = append(p.skipped, what+": "+why+"; not created (create it by hand)")
-			continue
-		}
-		if rewritten {
-			if !requestIDRe.MatchString(requestID) {
-				return p, t.Name + ": a Keeper path needs the restore request's id, and there is none"
-			}
-			p.notes = append(p.notes, md.Name+"."+target+": its Keeper path was moved under /olympos-restore/"+requestID+"/, "+
+		if def.keeperPath != "" {
+			p.notes = append(p.notes, md.Name+"."+target+": its Keeper path is "+def.keeperPath+" (replica {replica}), "+
 				"so it shares no Keeper state with the source")
 		}
 		if t.Kind == KindMVInner {
-			c.st.rename(target)
 			p.notes = append(p.notes, fmt.Sprintf("%s was restored into table %s.%s; recreate the view with TO %s.%s",
 				what, md.Name, target, quoteIdent(md.Name), quoteIdent(target)))
 		}
-		if t.HasData {
-			var mat []string
-			for _, col := range t.Columns {
-				if col.DefaultKind == "MATERIALIZED" {
-					mat = append(mat, col.Name)
-				}
-			}
-			if len(mat) > 0 {
-				p.notes = append(p.notes, md.Name+"."+target+": MATERIALIZED columns ("+strings.Join(mat, ", ")+") are not in the backup's "+
-					"data; the target computed them again from the restored columns")
-			}
-		}
-		p.objs = append(p.objs, &objPlan{db: md.Name, t: t, st: c.st, target: target})
+		p.notes = append(p.notes, md.Name+"."+target+": created from its columns, types, engine and keys; not restored: "+
+			strings.Join(def.notRestored, "; ")+"; re-apply them from your schema")
+		p.objs = append(p.objs, &objPlan{db: md.Name, t: t, sql: def.sql, target: target})
 	}
 	return p, ""
 }
@@ -503,12 +470,13 @@ func (r *restorer) session(ctx context.Context) (*session, error) {
 // Restore implements backup.Restorer (docs/design/ui-restore.md
 // "Engines"). Nothing is written before every selected database passed its
 // preflight (in the backup, not on the target with objects, a restorable
-// database engine, every table's schema entry the CREATE TABLE the
-// manifest records) and the clickhouse client was found. Then, across the
-// selected databases: CREATE DATABASE (unless it exists without objects),
-// the tables of the MergeTree and Log families and Memory (materialized
-// views' inner tables as <view>__restored_data), and their data through
-// `clickhouse client`. Views, materialized views, dictionaries and other
+// database engine, the data entries of every created table) and the
+// clickhouse client was found. Then, across the selected databases: CREATE
+// DATABASE (unless it exists without objects), the tables of the MergeTree
+// and Log families and Memory (materialized views' inner tables as
+// <view>__restored_data), and their data through `clickhouse client`.
+// Every statement is generated by Olympos from the manifest (table.go); no
+// SQL text of the backup is run. Views, materialized views, dictionaries and other
 // engines are not created and are reported by name. Nothing is dropped;
 // the first failure ends the restore.
 func (Engine) Restore(ctx context.Context, rc backup.RestoreContext) (_ *backup.RestoreResult, err error) {
@@ -665,9 +633,24 @@ var ddlSettings = []ch.Setting{
 	{Key: "allow_experimental_json_type", Value: "1"},
 }
 
-// exec runs one checked statement over the native protocol.
+// exec runs one statement Olympos generated over the native protocol.
 func (s *session) exec(ctx context.Context, stmt string) error {
 	return s.client.Do(ctx, ch.Query{Body: stmt, Settings: ddlSettings})
+}
+
+// createError is a failed CREATE without the server's message, which can
+// quote anything the statement made the server read: the error code and
+// name only. Other errors (the connection) are kept.
+func createError(err error) error {
+	e, ok := ch.AsException(err)
+	if !ok {
+		return err
+	}
+	name := "UNKNOWN"
+	if e.Code.IsAError() {
+		name = e.Code.String()
+	}
+	return fmt.Errorf("the target refused it: Code %d %s", int(e.Code), name)
 }
 
 // run performs the steps in order; the first failure ends the restore. A
@@ -740,8 +723,8 @@ func (r *restorer) do(ctx context.Context, st step) error {
 	}
 	if st.obj == nil {
 		r.progress(db, "")
-		if err := r.s.exec(ctx, st.plan.create.sql()); err != nil {
-			return fmt.Errorf("create the database: %w", err)
+		if err := r.s.exec(ctx, st.plan.create); err != nil {
+			return fmt.Errorf("create the database: %w", createError(err))
 		}
 		r.res.Created = append(r.res.Created, db)
 		r.progress(db, "")
@@ -755,10 +738,10 @@ func (r *restorer) do(ctx context.Context, st step) error {
 		item.Bytes += n
 		return err
 	}
-	if err := r.s.exec(ctx, o.st.sql()); err != nil {
-		if strings.HasSuffix(o.t.Engine, "GraphiteMergeTree") {
-			// The server's message can quote its rollup configuration.
-			return errors.New("the target refused to create this GraphiteMergeTree table (check its rollup configuration section on the target)")
+	if err := r.s.exec(ctx, o.sql); err != nil {
+		err = createError(err)
+		if _, replicated, _ := splitEngine(o.t.Engine); replicated {
+			return fmt.Errorf("%w (a Replicated table needs Keeper and the {replica} macro on the target)", err)
 		}
 		return err
 	}

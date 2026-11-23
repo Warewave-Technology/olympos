@@ -205,7 +205,7 @@ FROM numbers(1000);
 CREATE TABLE rs.agg (k UInt8, u AggregateFunction(uniq, UInt64)) ENGINE = AggregatingMergeTree ORDER BY k;
 INSERT INTO rs.agg SELECT number % 4, uniqState(number) FROM numbers(1000) GROUP BY number % 4;
 
-CREATE TABLE rs.rep (k UInt8, v UInt32) ENGINE = ReplacingMergeTree ORDER BY k;
+CREATE TABLE rs.rep (k UInt8, v UInt32) ENGINE = ReplacingMergeTree(v) ORDER BY k;
 INSERT INTO rs.rep SETTINGS optimize_on_insert = 0 VALUES (1, 1), (1, 2), (2, 3);
 
 CREATE TABLE rs.audit (msg String) ENGINE = TinyLog;
@@ -228,12 +228,44 @@ INSERT INTO rs.events SELECT toDate('2024-03-01') + intDiv(number, 20), number, 
 -- Into the view's inner table through the view: mv_chain reads it.
 INSERT INTO rs.mv VALUES ('2025-01-01', 7);
 
--- Tables not created: a setting outside the allowlist, a function
--- outside it.
+-- Restored from their columns, types, engine and keys only: settings,
+-- defaults, codecs, TTL, indexes, constraints and comments are dropped.
 CREATE TABLE rs.bad_set (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS min_age_to_force_merge_seconds = 10;
 INSERT INTO rs.bad_set VALUES (1);
 CREATE TABLE rs.bad_expr (x UInt64, h String DEFAULT hostName()) ENGINE = MergeTree ORDER BY x;
 INSERT INTO rs.bad_expr (x) VALUES (1);
+CREATE TABLE rs.rich (d DateTime, id UInt64 CODEC(ZSTD(1)), s String DEFAULT currentUser() COMMENT 'c', n Nullable(UInt32),
+  INDEX ix s TYPE bloom_filter GRANULARITY 1, CONSTRAINT pos CHECK id >= 0)
+ENGINE = MergeTree ORDER BY (id, lower(s)) PARTITION BY toYYYYMMDD(d) TTL d + INTERVAL 50 YEAR
+SETTINGS index_granularity = 1024 COMMENT 'rich';
+INSERT INTO rs.rich SELECT toDateTime('2024-01-01 00:00:00') + number * 3600, number, toString(number), if(number % 3 = 0, NULL, number) FROM numbers(200);
+-- Not created: a ReplacingMergeTree whose sorting key is an expression
+-- (another key would merge its rows differently).
+CREATE TABLE rs.rep_expr (k UInt8, s String) ENGINE = ReplacingMergeTree ORDER BY (k, lower(s));
+INSERT INTO rs.rep_expr VALUES (1, 'a');
+-- Every engine in scope, with engine parameters and AggregateFunction types.
+CREATE TABLE rs.summ (k UInt8, a UInt64, b UInt64, c String) ENGINE = SummingMergeTree((a, b)) ORDER BY k;
+INSERT INTO rs.summ SETTINGS optimize_on_insert = 0 SELECT number % 5, number, 1, 'x' FROM numbers(100);
+CREATE TABLE rs.coll (k UInt8, sign Int8) ENGINE = CollapsingMergeTree(sign) ORDER BY k;
+INSERT INTO rs.coll SETTINGS optimize_on_insert = 0 VALUES (1, 1), (1, -1), (2, 1);
+CREATE TABLE rs.vcoll (k UInt8, sign Int8, ver UInt16) ENGINE = VersionedCollapsingMergeTree(sign, ver) ORDER BY k;
+INSERT INTO rs.vcoll SETTINGS optimize_on_insert = 0 VALUES (1, 1, 1), (1, -1, 1), (2, 1, 1);
+CREATE TABLE rs.aggf (k UInt8, q AggregateFunction(quantiles(0.5, 0.9), Float64), si AggregateFunction(sumIf, UInt64, UInt8),
+  s SimpleAggregateFunction(sum, UInt64), m SimpleAggregateFunction(max, Nullable(String)))
+ENGINE = AggregatingMergeTree ORDER BY k;
+INSERT INTO rs.aggf SELECT number % 3, quantilesState(0.5, 0.9)(toFloat64(number)), sumIfState(number, toUInt8(number % 2)), sum(number), max(toString(number))
+FROM numbers(300) GROUP BY number % 3;
+CREATE TABLE rs.nkey (n Nullable(UInt8), v String) ENGINE = MergeTree ORDER BY n SETTINGS allow_nullable_key = 1;
+INSERT INTO rs.nkey VALUES (NULL, 'a'), (1, 'b');
+CREATE TABLE rs.slog (x UInt8) ENGINE = StripeLog;
+INSERT INTO rs.slog VALUES (1), (2);
+CREATE TABLE rs.plog (x UInt8) ENGINE = Log;
+INSERT INTO rs.plog VALUES (3);
+CREATE TABLE rs.mem (x UInt8, t Tuple(a UInt8, b Map(String, Array(Nullable(Int64))))) ENGINE = Memory;
+INSERT INTO rs.mem VALUES (1, (2, {'k': [1, NULL]}));
+CREATE TABLE rs.odd (` + "`we``ird col`" + ` UInt8, ` + "`tab\tcol`" + ` Enum8('it''s' = 1, 'b' = -2), dt DateTime64(3, 'Europe/Istanbul'), dec Decimal(18, 4))
+ENGINE = MergeTree ORDER BY ` + "`we``ird col`" + `;
+INSERT INTO rs.odd VALUES (1, 'it''s', '2024-01-01 00:00:00.123', 1.5), (2, 'b', '2024-01-02 00:00:00', -2.25);
 
 CREATE DATABASE rs2;
 CREATE TABLE rs2.t (n UInt64, p Tuple(a UInt8, b String)) ENGINE = MergeTree ORDER BY n;
@@ -269,10 +301,21 @@ func TestRestoreIntegration(t *testing.T) {
 	checks := map[string]check{
 		"events": same("SELECT count(), sum(cityHash64(formatRow('RowBinary', *))) FROM rs.events"),
 		"rep":    same("SELECT count(), sum(cityHash64(k, v)) FROM rs.rep"),
-		"audit":  same("SELECT count(), sum(cityHash64(msg)) FROM rs.audit"),
-		"agg":    same("SELECT count(), sum(cityHash64(k, finalizeAggregation(u))) FROM rs.agg"),
-		"v2":     same("SELECT sum(v2) FROM rs.events"),
-		"daily":  same("SELECT count(), sum(c) FROM rs.daily"),
+		"bad":    same("SELECT count(), sum(cityHash64(x, h)) FROM rs.bad_expr"),
+		"rich":   same("SELECT count(), sum(cityHash64(d, id, s, n)) FROM rs.rich"),
+		"summ":   same("SELECT count(), sum(a), sum(b) FROM rs.summ"),
+		"coll":   same("SELECT count(), sum(sign) FROM rs.coll"),
+		"vcoll":  same("SELECT count(), sum(sign * ver) FROM rs.vcoll"),
+		"aggf": same("SELECT arrayStringConcat(groupArray(toString((k, finalizeAggregation(q), finalizeAggregation(si), s, m))), ';') " +
+			"FROM (SELECT * FROM rs.aggf ORDER BY k)"),
+		"nkey":  same("SELECT count(), countIf(n IS NULL) FROM rs.nkey"),
+		"slog":  same("SELECT count(), sum(x) FROM rs.slog"),
+		"plog":  same("SELECT count(), sum(x) FROM rs.plog"),
+		"mem":   same("SELECT count(), toString(groupArray(t)) FROM rs.mem"),
+		"odd":   same("SELECT count(), sum(cityHash64(formatRow('RowBinary', *))), toString(groupArray(`tab\tcol`)) FROM rs.odd"),
+		"audit": same("SELECT count(), sum(cityHash64(msg)) FROM rs.audit"),
+		"agg":   same("SELECT count(), sum(cityHash64(k, finalizeAggregation(u))) FROM rs.agg"),
+		"daily": same("SELECT count(), sum(c) FROM rs.daily"),
 		"mv": {"SELECT count(), sum(c), sum(cityHash64(d, c)) FROM rs.mv",
 			"SELECT count(), sum(c), sum(cityHash64(d, c)) FROM rs.mv__restored_data"},
 		"mv_chain": {"SELECT count(), sum(c) FROM rs.mv_chain", "SELECT count(), sum(c) FROM rs.mv_chain__restored_data"},
@@ -326,10 +369,31 @@ func TestRestoreIntegration(t *testing.T) {
 		}
 	}
 
+	// A CREATE the target refuses: only the error code and name are
+	// reported, never the server's message (it can quote what the
+	// statement made the server read). Nothing is created.
+	crafted := withManifest(t, archive, func(m *Manifest) {
+		for i := range m.Databases {
+			if m.Databases[i].Name == "rs2" {
+				m.Databases[i].Tables[0].Columns[0].Type = "Nullable(Array(UInt8))"
+			}
+		}
+	})
+	rc, _ := rcFor(false, "rs2")
+	rc.Archive = memObject{bytes.NewReader(crafted)}
+	res, err := Engine{}.Restore(ctx, rc)
+	if err != nil || len(res.Items) != 1 || res.Items[0].Status != "failed" ||
+		!strings.HasSuffix(res.Items[0].Error, "rs2.t (table): the target refused it: Code 43 ILLEGAL_TYPE_OF_ARGUMENT") {
+		t.Fatalf("refused CREATE: %v %+v", err, res)
+	}
+	if got := chq(t, "SELECT count() FROM system.tables WHERE database = 'rs2'"); got != "0" {
+		t.Fatalf("rs2 after a refused CREATE: %s tables", got)
+	}
+
 	// rs2 over TLS: clickhouse client verifies the target's name through
 	// the local bridge.
-	rc, _ := rcFor(true, "rs2")
-	res, err := Engine{}.Restore(ctx, rc)
+	rc, _ = rcFor(true, "rs2")
+	res, err = Engine{}.Restore(ctx, rc)
 	if err != nil {
 		t.Fatalf("restore rs2: %v (%+v)", err, res)
 	}
@@ -365,13 +429,12 @@ func TestRestoreIntegration(t *testing.T) {
 	skipped := strings.Join(it.Skipped, "\n")
 	for _, w := range []string{
 		"rs.k (table): engine Kafka is not restored",
-		"rs.bad_set (table): it has setting min_age_to_force_merge_seconds",
-		"rs.bad_expr (table): an expression of it calls hostName()",
 		"rs.v (view): " + notRecreated,
 		"rs.mv (materialized view): " + notRecreated,
 		"rs.mv_to (materialized view): " + notRecreated,
 		"rs.mv_k (materialized view): " + notRecreated,
 		"rs.dict (dictionary): " + notRecreated,
+		"rs.rep_expr (table): its sorting key is not a column list (another key changes how its rows merge); not created (create it by hand)",
 	} {
 		if !strings.Contains(skipped, w) {
 			t.Errorf("skipped lacks %q:\n%s", w, skipped)
@@ -380,9 +443,17 @@ func TestRestoreIntegration(t *testing.T) {
 	if strings.Contains(skipped, "127.0.0.1:1") || strings.Contains(skipped, "olympos-t") {
 		t.Fatalf("skipped carries DDL: %s", skipped)
 	}
-	if n := strings.Join(res.Notes, "\n"); !strings.Contains(n, "the data of materialized view rs.mv was restored into table rs.mv__restored_data; recreate the view with TO `rs`.`mv__restored_data`") ||
-		!strings.Contains(n, "rs.events: MATERIALIZED columns (v2)") {
-		t.Fatalf("notes: %v", res.Notes)
+	notes := strings.Join(res.Notes, "\n")
+	for _, w := range []string{
+		"the data of materialized view rs.mv was restored into table rs.mv__restored_data; recreate the view with TO `rs`.`mv__restored_data`",
+		"rs.events: created from its columns, types, engine and keys; not restored: the MATERIALIZED, ALIAS and EPHEMERAL columns `v2`",
+		"rs.bad_expr: created from its columns, types, engine and keys; not restored: the DEFAULT expressions of `h`",
+		"rs.rich: created from its columns, types, engine and keys; not restored: the DEFAULT expressions of `s`; its sorting key (ORDER BY tuple() instead)",
+		"rs.audit: created from its columns, types, engine and keys; not restored: any codecs, constraints, comments and settings; re-apply them from your schema",
+	} {
+		if !strings.Contains(notes, w) {
+			t.Errorf("notes lack %q:\n%s", w, notes)
+		}
 	}
 	for k, q := range checks {
 		if k == "rs2" {
@@ -394,8 +465,32 @@ func TestRestoreIntegration(t *testing.T) {
 	}
 	// Only tables, each an ordinary one.
 	if got := chq(t, "SELECT arrayStringConcat(groupArray(name), ',') FROM (SELECT name FROM system.tables WHERE database = 'rs' ORDER BY name)"); got !=
-		"agg,audit,daily,events,mv__restored_data,mv_chain__restored_data,rep" {
+		"agg,aggf,audit,bad_expr,bad_set,coll,daily,events,mem,mv__restored_data,mv_chain__restored_data,nkey,odd,plog,rep,rich,slog,summ,vcoll" {
 		t.Errorf("restored objects: %s", got)
+	}
+	// The tables are what Olympos generated: engine, parameters and keys
+	// kept; MATERIALIZED columns, defaults, codecs, indexes, constraints,
+	// TTL, comments and settings not.
+	for table, want := range map[string]string{
+		"rich":    "MergeTree PARTITION BY toYYYYMMDD(d) ORDER BY tuple() SETTINGS index_granularity = 8192",
+		"rep":     "ReplacingMergeTree(v) ORDER BY k SETTINGS index_granularity = 8192",
+		"summ":    "SummingMergeTree((a, b)) ORDER BY k SETTINGS index_granularity = 8192",
+		"vcoll":   "VersionedCollapsingMergeTree(sign, ver) ORDER BY k SETTINGS index_granularity = 8192",
+		"events":  "MergeTree PARTITION BY toYYYYMM(d) ORDER BY id SETTINGS index_granularity = 8192",
+		"nkey":    "MergeTree ORDER BY n SETTINGS allow_nullable_key = 1, index_granularity = 8192",
+		"bad_set": "MergeTree ORDER BY x SETTINGS index_granularity = 8192",
+	} {
+		got := chq(t, "SELECT engine_full FROM system.tables WHERE database = 'rs' AND name = '"+table+"'")
+		if got != want {
+			t.Errorf("%s: engine_full %q, want %q", table, got, want)
+		}
+	}
+	ddl := chq(t, "SELECT arrayStringConcat(groupArray(create_table_query), '\\n') FROM system.tables WHERE database = 'rs'")
+	for _, no := range []string{"DEFAULT", "MATERIALIZED", "CODEC", "INDEX", "CONSTRAINT", "TTL", "COMMENT", "currentUser", "hostName", "lower(", "v2", "1024",
+		"min_age_to_force_merge_seconds"} {
+		if strings.Contains(ddl, no) {
+			t.Errorf("a restored table holds %q:\n%s", no, ddl)
+		}
 	}
 	var wantRows int64
 	for _, d := range m.Databases {
@@ -403,7 +498,7 @@ func TestRestoreIntegration(t *testing.T) {
 			continue
 		}
 		for _, tb := range d.Tables {
-			if tb.Name != "k" && tb.Name != "bad_set" && tb.Name != "bad_expr" {
+			if tb.Name != "k" && tb.Name != "rep_expr" {
 				wantRows += int64(tb.Rows)
 			}
 		}
@@ -493,6 +588,44 @@ func manifestOf(t *testing.T, b []byte) Manifest {
 	return *m
 }
 
+// withManifest returns the archive b with its manifest changed by mod.
+func withManifest(t *testing.T, b []byte, mod func(*Manifest)) []byte {
+	t.Helper()
+	m := manifestOf(t, b)
+	mod(&m)
+	mj, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	a := newArchive(&out, time.Now())
+	for _, f := range zr.File {
+		data := mj
+		if f.Name != "manifest.json" {
+			r, err := f.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err = io.ReadAll(r)
+			_ = r.Close()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := a.writeFile(f.Name, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := a.close(); err != nil {
+		t.Fatal(err)
+	}
+	return out.Bytes()
+}
+
 type memObject struct{ *bytes.Reader }
 
 func (memObject) Close() error { return nil }
@@ -577,8 +710,10 @@ func TestRestoreReplicatedIntegration(t *testing.T) {
 	q(`CREATE DATABASE rp;
 CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
 CREATE TABLE rp.e (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/rp_e', '{replica}', v) ORDER BY x;
+CREATE TABLE rp.a (k UInt8, u AggregateFunction(uniq, UInt64)) ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/tables/{shard}/rp_a', '{replica}') ORDER BY k;
 INSERT INTO rp.t SELECT number FROM numbers(1000);
-INSERT INTO rp.e SELECT number, 1 FROM numbers(10);`)
+INSERT INTO rp.e SELECT number, 1 FROM numbers(10);
+INSERT INTO rp.a SELECT number % 4, uniqState(number) FROM numbers(100) GROUP BY number % 4;`)
 	if got := q("SELECT create_table_query FROM system.tables WHERE database = 'rp' AND name = 't'"); !strings.Contains(got, "{uuid}") {
 		t.Fatalf("SHOW CREATE should carry the {uuid} path: %s", got)
 	}
@@ -594,21 +729,21 @@ INSERT INTO rp.e SELECT number, 1 FROM numbers(10);`)
 	rc := backup.RestoreContext{EngineContext: env.ec(false, nil), RequestID: id, Archive: memObject{bytes.NewReader(buf.Bytes())},
 		Databases: []string{"rp"}, Progress: func(backup.Progress) {}}
 	res, err := Engine{}.Restore(ctx, rc)
-	if err != nil || len(res.Items) != 1 || res.Items[0].Status != "succeeded" || res.Items[0].Rows != 1010 || res.Items[0].Tables != 2 {
+	if err != nil || len(res.Items) != 1 || res.Items[0].Status != "succeeded" || res.Items[0].Rows != 1014 || res.Items[0].Tables != 3 {
 		t.Fatalf("restore: %v %+v", err, res)
 	}
 	paths := q("SELECT arrayStringConcat(groupArray(concat(table, '=', zookeeper_path)), ',') FROM (SELECT table, zookeeper_path FROM system.replicas WHERE database = 'rp' ORDER BY table)")
-	want := "e=/olympos-restore/" + id + "/clickhouse/tables/s1/rp_e,t=/olympos-restore/" + id + "/clickhouse/tables/rp/t/s1"
+	want := "a=/olympos-restore/" + id + "/rp/a,e=/olympos-restore/" + id + "/rp/e,t=/olympos-restore/" + id + "/rp/t"
 	if paths != want {
 		t.Fatalf("restored Keeper paths: %s, want %s", paths, want)
 	}
-	if got := q("SELECT count() FROM rp.t") + "," + q("SELECT count() FROM rp.e"); got != "1000,10" {
+	if got := q("SELECT count() FROM rp.t") + "," + q("SELECT count() FROM rp.e") + "," + q("SELECT sum(finalizeAggregation(u)) FROM rp.a"); got != "1000,10,100" {
 		t.Fatalf("restored rows: %s", got)
 	}
-	if got := q("SELECT count() FROM rp_src.t") + "," + q("SELECT count() FROM system.replicas WHERE database = 'rp_src' AND zookeeper_path NOT LIKE '/olympos-restore/%'"); got != "1000,2" {
+	if got := q("SELECT count() FROM rp_src.t") + "," + q("SELECT count() FROM system.replicas WHERE database = 'rp_src' AND zookeeper_path NOT LIKE '/olympos-restore/%'"); got != "1000,3" {
 		t.Fatalf("source tables: %s", got)
 	}
-	if !strings.Contains(strings.Join(res.Notes, "\n"), "rp.t: its Keeper path was moved under /olympos-restore/"+id+"/") {
+	if !strings.Contains(strings.Join(res.Notes, "\n"), "rp.t: its Keeper path is /olympos-restore/"+id+"/rp/t (replica {replica})") {
 		t.Fatalf("notes: %v", res.Notes)
 	}
 }
