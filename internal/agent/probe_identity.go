@@ -100,6 +100,9 @@ type probeCreds struct {
 	certDER   []byte
 	key       *ecdsa.PrivateKey
 	what      string // "enrolled" or "renewed", for the log
+	// token is the bootstrap token an enrollment used: only it is deleted
+	// from the Secret, never a newer one. "" for a renewal.
+	token string
 }
 
 // probeState is what the loop remembers between steps.
@@ -116,6 +119,11 @@ type probeState struct {
 // whether or not the agent is connected.
 func (a *Agent) startProbeIdentity(ctx context.Context, e probeEnroller) bool {
 	if !a.cfg.ProbeEnabled {
+		return false
+	}
+	if a.cfg.ProbeIdentitySecret == a.cfg.IdentitySecret {
+		a.log.Error("probe identity: OLYMPOS_PROBE_IDENTITY_SECRET is the agent's own identity Secret; the probe identity is not kept",
+			"secret", a.cfg.ProbeIdentitySecret)
 		return false
 	}
 	go a.runProbeIdentity(ctx, e)
@@ -197,7 +205,7 @@ func (a *Agent) enrollProbe(ctx context.Context, e probeEnroller, store *identit
 		// is not tried again, and keep the current certificate.
 		a.log.Error("probe identity: the bootstrap token was refused (invalid, expired or used); dropping it and keeping the current certificate. Generate a new Install probe command in Olympos if the probe needs a new identity",
 			"err", err)
-		if derr := store.dropToken(ctx); derr != nil {
+		if derr := store.dropToken(ctx, token); derr != nil {
 			a.log.Error("probe identity: cannot drop the bootstrap token; retrying in 10m", "err", derr)
 		}
 		return
@@ -211,7 +219,7 @@ func (a *Agent) enrollProbe(ctx context.Context, e probeEnroller, store *identit
 		a.log.Error("probe identity: enrollment returned a bad certificate; retrying in 10m", "err", err)
 		return
 	}
-	st.pending = &probeCreds{clusterID: clusterID, certDER: der, key: key, what: "enrolled"}
+	st.pending = &probeCreds{clusterID: clusterID, certDER: der, key: key, what: "enrolled", token: token}
 	st.lockedOut = false
 	a.flushProbeCreds(ctx, store, st)
 }
@@ -250,12 +258,23 @@ func (a *Agent) renewProbe(ctx context.Context, e probeEnroller, store *identity
 	a.flushProbeCreds(ctx, store, st)
 }
 
-// flushProbeCreds writes the pending identity to the Secret at once. It keeps
-// it, and the caller tries again later, when the write fails.
+// flushProbeCreds writes the pending identity to the Secret at once, and once
+// more right away if that fails. It keeps the identity, and the caller tries
+// again in 10 minutes, when both fail.
 func (a *Agent) flushProbeCreds(ctx context.Context, store *identityStore, st *probeState) bool {
 	p := st.pending
-	if err := store.save(ctx, p.clusterID, p.certDER, p.key); err != nil {
-		a.log.Error("probe identity: cannot write the Secret; the new certificate is kept in memory, retrying in 10m", "what", p.what, "err", err)
+	var err error
+	for range 2 {
+		if err = store.saveMerged(ctx, p.clusterID, p.certDER, p.key, p.token); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		lost := "if the agent restarts before this succeeds, the renewed certificate is lost and the old one is renewed again"
+		if p.what == "enrolled" {
+			lost = "if the agent restarts before this succeeds, the identity is lost with its spent token and a new Install probe command must be generated in Olympos"
+		}
+		a.log.Error("probe identity: cannot write the Secret; the new certificate is kept in memory, retrying in 10m; "+lost, "what", p.what, "err", err)
 		return false
 	}
 	st.pending = nil

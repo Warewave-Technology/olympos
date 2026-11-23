@@ -260,22 +260,20 @@ func TestProbeIdentityRenewsAtTwoThirds(t *testing.T) {
 	oldDER, oldKey := probeCert(t, 12, nb, na)
 	h.seed(t, certData(t, oldDER, oldKey))
 	newDER, _ := probeCert(t, 13, nb.Add(20*24*time.Hour), nb.Add(50*24*time.Hour))
-	e := &fakeEnroller{renewScript: []func() ([]byte, error){func() ([]byte, error) { return newDER, nil }}}
 	renewAt := nb.Add(20 * 24 * time.Hour)
-
 	var renewedAt time.Time
-	h.run(t, e, 10000, func() bool {
-		if renewedAt.IsZero() && len(e.renewCerts) > 0 {
-			renewedAt = h.now
-		}
-		return len(e.renewCerts) > 0 && h.storedSerial(t) == 13
-	})
+	e := &fakeEnroller{renewScript: []func() ([]byte, error){func() ([]byte, error) {
+		renewedAt = h.now
+		return newDER, nil
+	}}}
+
+	h.run(t, e, 10000, func() bool { return len(e.renewCerts) > 0 && h.storedSerial(t) == 13 })
 
 	if len(e.renewCerts) != 1 || !bytes.Equal(e.renewCerts[0], oldDER) {
 		t.Fatalf("renew must be dialled with the old certificate once; calls %d", len(e.renewCerts))
 	}
-	// No renewal before 2/3 of the life: the clock is within one retry step.
-	if renewedAt.Before(renewAt) || renewedAt.After(renewAt.Add(probeRetry)) {
+	// The renewal is made at 2/3 of the life, not before and not after.
+	if !renewedAt.Equal(renewAt) {
 		t.Fatalf("renewed at %v, 2/3 of life is %v", renewedAt, renewAt)
 	}
 	h.agentSecretIntact(t)
@@ -428,7 +426,7 @@ func TestProbeIdentityKeepsNewIdentityUntilItIsWritten(t *testing.T) {
 	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1")})
 	der, _ := probeCert(t, 60, h.now.Add(-time.Minute), h.now.Add(30*24*time.Hour))
 	e := &fakeEnroller{enrollCert: func() ([]byte, error) { return der, nil }}
-	fails := 1
+	fails := 2 // both writes of the first pass
 	h.kube.PrependReactor("update", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
 		if fails > 0 {
 			fails--
@@ -442,8 +440,130 @@ func TestProbeIdentityKeepsNewIdentityUntilItIsWritten(t *testing.T) {
 	if len(e.enrollToks) != 1 {
 		t.Fatalf("the spent token was used %d times", len(e.enrollToks))
 	}
-	if h.storedSerial(t) != 60 {
-		t.Fatal("identity not written after the retry")
+	if h.storedSerial(t) != 60 || len(h.waits) != 2 {
+		t.Fatalf("identity not written by the 10m retry (waits %v)", h.waits)
+	}
+	if !strings.Contains(h.logs.String(), "a new Install probe command must be generated") {
+		t.Fatalf("no warning about a restart:\n%s", h.logs)
+	}
+}
+
+func TestProbeIdentityRetriesAFailedWriteAtOnce(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1")})
+	der, _ := probeCert(t, 61, h.now.Add(-time.Minute), h.now.Add(30*24*time.Hour))
+	e := &fakeEnroller{enrollCert: func() ([]byte, error) { return der, nil }}
+	fails := 1
+	h.kube.PrependReactor("update", "secrets", func(k8stesting.Action) (bool, runtime.Object, error) {
+		if fails > 0 {
+			fails--
+			return true, nil, errors.New("conflict")
+		}
+		return false, nil, nil
+	})
+	var st probeState
+	store := &identityStore{kube: h.kube, namespace: testNS, name: testProbeSecret}
+
+	h.a.probeIdentityStep(context.Background(), e, store, &st, h.now)
+
+	if h.storedSerial(t) != 61 || st.pending != nil {
+		t.Fatal("not written by the immediate retry")
+	}
+}
+
+func TestProbeIdentityWritesKeepOtherKeys(t *testing.T) {
+	t.Run("enroll", func(t *testing.T) {
+		h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1"), "chart-key": []byte("keep")})
+		der, _ := probeCert(t, 100, h.now.Add(-time.Minute), h.now.Add(30*24*time.Hour))
+		e := &fakeEnroller{enrollCert: func() ([]byte, error) { return der, nil }}
+		h.run(t, e, 1, func() bool { return true })
+		got := h.secret(t, testProbeSecret).Data
+		if string(got["chart-key"]) != "keep" || h.storedSerial(t) != 100 {
+			t.Fatalf("enroll: %v", got)
+		}
+		if _, ok := got[keyBootstrap]; ok {
+			t.Fatal("used token kept")
+		}
+	})
+	t.Run("renew", func(t *testing.T) {
+		h := newProbeHarness(t, nil)
+		nb := h.now.Add(-21 * 24 * time.Hour)
+		oldDER, oldKey := probeCert(t, 101, nb, nb.Add(30*24*time.Hour))
+		data := certData(t, oldDER, oldKey)
+		data["chart-key"] = []byte("keep")
+		h.seed(t, data)
+		newDER, _ := probeCert(t, 102, h.now, h.now.Add(30*24*time.Hour))
+		e := &fakeEnroller{renewScript: []func() ([]byte, error){func() ([]byte, error) { return newDER, nil }}}
+		h.run(t, e, 1, func() bool { return true })
+		got := h.secret(t, testProbeSecret).Data
+		if string(got["chart-key"]) != "keep" || h.storedSerial(t) != 102 {
+			t.Fatalf("renew: %v", got)
+		}
+	})
+}
+
+func TestProbeIdentityNewerTokenWrittenDuringEnrollmentSurvives(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-A")})
+	derA, _ := probeCert(t, 110, h.now.Add(-time.Minute), h.now.Add(30*24*time.Hour))
+	derB, _ := probeCert(t, 111, h.now.Add(-time.Minute), h.now.Add(30*24*time.Hour))
+	e := &fakeEnroller{}
+	e.enrollCert = func() ([]byte, error) {
+		if len(e.enrollToks) == 1 {
+			// An operator generates a new Install probe while A is in flight.
+			s := h.secret(t, testProbeSecret)
+			s.Data[keyBootstrap] = []byte("tok-B")
+			if _, err := h.kube.CoreV1().Secrets(testNS).Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			return derA, nil
+		}
+		return derB, nil
+	}
+	var st probeState
+	store := &identityStore{kube: h.kube, namespace: testNS, name: testProbeSecret}
+
+	h.a.probeIdentityStep(context.Background(), e, store, &st, h.now)
+	if got := h.secret(t, testProbeSecret).Data; string(got[keyBootstrap]) != "tok-B" || h.storedSerial(t) != 110 {
+		t.Fatalf("after A: token %q serial %d", got[keyBootstrap], h.storedSerial(t))
+	}
+	h.a.probeIdentityStep(context.Background(), e, store, &st, h.now)
+
+	if !reflect.DeepEqual(e.enrollToks, []string{"tok-A", "tok-B"}) {
+		t.Fatalf("enroll tokens %v", e.enrollToks)
+	}
+	if _, ok := h.secret(t, testProbeSecret).Data[keyBootstrap]; ok || h.storedSerial(t) != 111 {
+		t.Fatal("B not used and dropped")
+	}
+}
+
+func TestProbeIdentityRefusedTokenDropKeepsNewerToken(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-A")})
+	e := &fakeEnroller{}
+	e.enrollCert = func() ([]byte, error) {
+		s := h.secret(t, testProbeSecret)
+		s.Data[keyBootstrap] = []byte("tok-B")
+		if _, err := h.kube.CoreV1().Secrets(testNS).Update(context.Background(), s, metav1.UpdateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		return nil, status.Error(codes.PermissionDenied, "used")
+	}
+	var st probeState
+	store := &identityStore{kube: h.kube, namespace: testNS, name: testProbeSecret}
+	h.a.probeIdentityStep(context.Background(), e, store, &st, h.now)
+	if string(h.secret(t, testProbeSecret).Data[keyBootstrap]) != "tok-B" {
+		t.Fatal("the newer token was dropped")
+	}
+}
+
+func TestProbeIdentityRefusesTheAgentsOwnSecret(t *testing.T) {
+	h := newProbeHarness(t, map[string][]byte{keyBootstrap: []byte("tok-1")})
+	h.a.cfg.ProbeIdentitySecret = h.a.cfg.IdentitySecret
+	h.kube.ClearActions()
+	e := &fakeEnroller{}
+	if h.a.startProbeIdentity(context.Background(), e) {
+		t.Fatal("started on the agent's own Secret")
+	}
+	if e.calls() != 0 || len(h.kube.Actions()) != 0 || !strings.Contains(h.logs.String(), "level=ERROR") {
+		t.Fatalf("calls %d actions %v logs %s", e.calls(), h.kube.Actions(), h.logs)
 	}
 }
 

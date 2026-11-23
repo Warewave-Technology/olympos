@@ -94,13 +94,43 @@ func (s *identityStore) save(ctx context.Context, clusterID string, certDER []by
 	return err
 }
 
-// dropToken removes the bootstrap token and leaves the rest of the Secret.
-func (s *identityStore) dropToken(ctx context.Context) error {
+// saveMerged is save for a Secret somebody else also writes to (the probe's,
+// which the chart manages): it sets the three identity keys and leaves every
+// other key alone. The bootstrap token is deleted only if it is still the
+// one that was used (consumed): a newer token written meanwhile stays for the
+// next pass. consumed "" (a renewal) leaves the token alone.
+func (s *identityStore) saveMerged(ctx context.Context, clusterID string, certDER []byte, key *ecdsa.PrivateKey, consumed string) error {
 	sec, err := s.kube.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
-	if _, ok := sec.Data[keyBootstrap]; !ok {
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return err
+	}
+	data := make(map[string][]byte, len(sec.Data)+3)
+	for k, v := range sec.Data {
+		data[k] = v
+	}
+	data[keyCert] = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	data[keyKey] = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	data[keyClusterID] = []byte(clusterID)
+	if consumed != "" && string(data[keyBootstrap]) == consumed {
+		delete(data, keyBootstrap)
+	}
+	sec.Data = data
+	_, err = s.kube.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	return err
+}
+
+// dropToken removes the bootstrap token if it is still the given one, and
+// leaves the rest of the Secret.
+func (s *identityStore) dropToken(ctx context.Context, token string) error {
+	sec, err := s.kube.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if cur, ok := sec.Data[keyBootstrap]; !ok || string(cur) != token {
 		return nil
 	}
 	delete(sec.Data, keyBootstrap)
