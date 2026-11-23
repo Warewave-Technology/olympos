@@ -288,3 +288,10 @@ export function HiddenNote({ children }: { children?: ReactNode }) {
     </span>
   );
 }
+
+const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+
+/** A message that names a credential by its id (spec.ValidateTaint) names it by its name instead. */
+export function withCredentialNames(text: string, creds: { id: string; name: string }[]): string {
+  return text.replace(UUID, (id) => creds.find((c) => c.id.toLowerCase() === id.toLowerCase())?.name ?? id);
+}

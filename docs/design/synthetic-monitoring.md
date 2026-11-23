@@ -198,8 +198,8 @@ Global list, admin-only, every change → `activity_log` + `grant.changed`-style
 | File | Screen |
 |---|---|
 | `monitoring-overview.html` | Monitoring › Synthetic: KPIs (scenarios, failing, degraded, probes), filter pills, **scenario × cluster matrix** (passing / failing / degraded / probe offline / excluded, text + symbol, not colour only), 24 h availability, p95 |
-| `monitoring-scenario.html` | Scenario detail: steps as cards (failed step marked), per-cluster table with last result, failed step, p50/p95, availability and a 48 × 30 min timeline; alert rule; alert history |
-| `monitoring-editor.html` | Editor: basics, type, steps (method, URL, headers, **auth**, assertions, extracts, reorder), allowlist hint per URL, schedule, **Runs on + exclude chips** with live count, alerting, test run on one cluster |
+| `monitoring-scenario.html` | Scenario detail: steps as cards (failed step marked), per-cluster table with last result, failed step, p50/p95, availability and a 48 × 30 min timeline; alert rule; alert history; Delete (editors in scope) with a confirm dialog that names the scenario, says its runs and alert history go with it, and asks for its name |
+| `monitoring-editor.html` | Editor: basics, type, **Store response excerpts** (`store_responses`; off keeps no excerpts or response text, a privacy control), steps (method, URL, headers, **auth**, assertions, extracts, reorder), allowlist hint per URL, schedule, **Runs on + exclude chips** with live count, alerting, test run on one cluster |
 | `monitoring-run.html` | Run detail modal: per-step waterfall (DNS, connect, TLS, TTFB, download), assertion results, redacted response excerpt, "Copy as curl" (credentials replaced by `$TOKEN`) |
 | `settings-synthetic.html` | Settings › Synthetic monitoring: **host allowlist** (exact / wildcard / suffix, "check a host"), always-denied note, **credentials** (type, bound hosts, expiry) with the exception notice |
 | `dialog-add-cluster.html` | Add cluster now says the probe is installed with the agent |

@@ -188,11 +188,15 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
                 <td>
                   <ScenarioStatusBadge status={s.status} failing={s.failing_clusters} degraded={s.degraded_clusters} />
                 </td>
-                {s.cells.map((c, i) => (
-                  <td key={c.cluster_id} className="mx-cell">
-                    <MatrixCell cluster={cols[i]?.name ?? ''} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id ? () => openRun(c.last_run_id!) : undefined} />
-                  </td>
-                ))}
+                {cols.map((col) => {
+                  // matched by cluster id, not by position
+                  const c = s.cells.find((x) => x.cluster_id === col.id);
+                  return (
+                    <td key={col.id} className="mx-cell">
+                      {c ? <MatrixCell cluster={col.name} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id ? () => openRun(c.last_run_id!) : undefined} /> : <MatrixCell cluster={col.name} state="no_data" />}
+                    </td>
+                  );
+                })}
                 <td className="num mono">{pct(s.availability_24h)}</td>
                 <td className="num mono">{ms(s.p95_ms_24h)}</td>
               </tr>

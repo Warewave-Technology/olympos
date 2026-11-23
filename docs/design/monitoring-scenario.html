@@ -90,7 +90,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap"><h1 style="margin: 0; font-size: 28px; font-weight: 650; color: #fbf1c7">Checkout API flow</h1><span class="badge crit">Failing in 2 of 9 clusters</span></div>
 <p class="muted" style="margin: 6px 0 0; font-size: 13px">HTTP flow · 4 steps · every 1 min · timeout 10 s · runs on 9 clusters, 1 excluded · owner team=payments</p>
 </div>
-<div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn">Pause</button><button class="btn">Run now</button><a href="monitoring-editor.html" class="btn pri" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none; box-sizing: border-box">Edit</a></div>
+<div style="display: flex; gap: 10px; flex-wrap: wrap"><button class="btn">Pause</button><button class="btn">Run now</button><button class="btn danger">Delete</button><a href="monitoring-editor.html" class="btn pri" style="display: inline-flex; align-items: center; justify-content: center; text-decoration: none; box-sizing: border-box">Edit</a></div>
 </header>
 <nav class="tabs" aria-label="Monitoring sections"><a href="monitoring-overview.html" class="on">Synthetic</a></nav>
 <section class="card" style="padding: 20px; display: flex; flex-direction: column; gap: 14px">
@@ -138,6 +138,18 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </section>
 </div>
 </main>
+</div>
+<!-- Delete opens this dialog (editors in scope only). Shown here below the page; in the app it is a modal over it. -->
+<div style="display: flex; justify-content: center; padding: 40px 16px; background: #1d2021; font-family: Inter, system-ui, sans-serif; color: #ebdbb2">
+<div role="dialog" aria-modal="true" aria-labelledby="del-t" style="width: 500px; max-width: 100%; box-sizing: border-box; background: #282828; border: 1px solid #cc241d; border-radius: 12px; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); padding: 28px; display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; gap: 12px; align-items: flex-start">
+<div><div style="font-size: 11.5px; font-weight: 500; color: #fc7f6f; text-transform: uppercase; letter-spacing: .06em">Delete scenario</div><h2 id="del-t" style="margin: 6px 0 0; font-size: 20px; font-weight: 650; color: #fbf1c7">Delete Checkout API flow?</h2></div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<p class="muted" style="margin: 0; font-size: 14px">The scenario stops running on every cluster. Its runs and its alert history are deleted with it; this cannot be undone. To stop it for a while instead, pause it.</p>
+<div><label class="lbl" for="del-n">Type <span class="mono">Checkout API flow</span> to confirm</label><input id="del-n" class="in mono" value="Checkout API fl"><div class="muted" style="font-size: 12px; margin-top: 6px">Does not match yet.</div></div>
+<div style="display: flex; justify-content: flex-end; gap: 10px"><button class="btn">Cancel</button><button class="btn danger" disabled style="opacity: .6">Delete scenario</button></div>
+</div>
 </div>
 </body>
 </html>

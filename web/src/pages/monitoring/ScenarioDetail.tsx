@@ -1,11 +1,12 @@
 // Scenario detail (docs/design/monitoring-scenario.html): the steps as cards with the failed step marked, the
 // scenario on each cluster over 24 h, the alert rule and the alert history.
+import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { api, errorMessage } from '../../api/client';
 import type { ItemList, Scenario, ScenarioClusterRow, ScenarioClusters, SyntheticAlert, TimelineBucket } from '../../api/types';
 import { clockTime, duration, plural } from '../../lib/format';
-import { Badge, ErrorState, Loading, QueryView, useToast } from '../../ui/kit';
+import { Badge, ErrorState, FormError, Loading, Modal, QueryView, TypeToConfirm, useToast } from '../../ui/kit';
 import { PageHead } from '../../ui/status';
 import { HiddenNote, ScenarioStatusBadge, assertionsLine, clusterResult, intervalText, reasonText, stepTitle, TYPE_LABEL, variableSource } from '../../ui/synthetic';
 import { ms, pct, useSyntheticOverview } from './SyntheticOverview';
@@ -127,6 +128,7 @@ export function CrumbLinks({ name, scenarioId, tail }: { name: string; scenarioI
 }
 
 function Actions({ s }: { s: Scenario }) {
+  const [deleting, setDeleting] = useState(false);
   const qc = useQueryClient();
   const toast = useToast();
   const refresh = () => {
@@ -157,10 +159,48 @@ function Actions({ s }: { s: Scenario }) {
       <button type="button" className="btn" onClick={() => run.mutate()} disabled={run.isPending || !s.enabled} title={s.enabled ? 'One run on every cluster it runs on now; it counts toward alerts' : 'Resume the scenario first'}>
         {run.isPending ? 'Queueing…' : 'Run now'}
       </button>
+      <button type="button" className="btn danger" onClick={() => setDeleting(true)}>
+        Delete
+      </button>
       <Link to="/monitoring/editor" search={{ scenario: s.id }} className="btn pri">
         Edit
       </Link>
+      {deleting && <DeleteDialog s={s} onClose={() => setDeleting(false)} />}
     </>
+  );
+}
+
+/** Delete a scenario: names it, says what goes with it, and asks for its name (docs/design/monitoring-scenario.html). */
+function DeleteDialog({ s, onClose }: { s: Scenario; onClose: () => void }) {
+  const [typed, setTyped] = useState('');
+  const qc = useQueryClient();
+  const toast = useToast();
+  const navigate = useNavigate();
+  const del = useMutation({
+    mutationFn: () => api.del(`/synthetic/scenarios/${s.id}`),
+    onSuccess: () => {
+      qc.removeQueries({ queryKey: scenarioKey(s.id) });
+      void qc.invalidateQueries({ queryKey: ['synthetic'] });
+      toast(`Deleted ${s.name}.`);
+      void navigate({ to: '/monitoring' });
+    },
+  });
+  return (
+    <Modal open onClose={onClose} danger size="narrow" eyebrow="Delete scenario" eyebrowTone="crit" title={`Delete ${s.name}?`} closeOnBackdrop={false}>
+      <p className="muted" style={{ margin: 0 }}>
+        The scenario stops running on every cluster. Its runs and its alert history are deleted with it; this cannot be undone. To stop it for a while instead, pause it.
+      </p>
+      <FormError error={del.error} />
+      <TypeToConfirm id="del-name" expected={s.name} value={typed} onChange={setTyped} />
+      <div className="end">
+        <button type="button" className="btn" onClick={onClose}>
+          Cancel
+        </button>
+        <button type="button" className="btn danger" disabled={typed !== s.name || del.isPending} onClick={() => del.mutate()}>
+          {del.isPending ? 'Deleting…' : 'Delete scenario'}
+        </button>
+      </div>
+    </Modal>
   );
 }
 

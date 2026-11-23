@@ -98,6 +98,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div><label class="lbl" for="so">Owner label</label><input id="so" class="in mono" value="team=payments"></div>
 </div>
 <div><div class="lbl">Type</div><div style="display: flex; gap: 8px; flex-wrap: wrap"><button class="pill on">HTTP flow</button><button class="pill">HTTP</button><button class="pill">DNS</button><button class="pill">TCP</button><button class="pill">TLS certificate</button></div></div>
+<div><label class="chk" style="padding: 0"><input type="checkbox" checked aria-describedby="sr-h"> Store response excerpts</label><div id="sr-h" class="muted" style="font-size: 12px; margin-top: 6px">Keeps the first 2 KB of each HTTP response for 7 days, redacted on the probe, so a failed run shows what came back. Off: no response excerpts or response text are kept for this scenario. It is a privacy control for responses that may hold personal data; runs still record status, timings and assertions.</div></div>
 </section>
 
 <section class="card" style="padding: 22px; display: flex; flex-direction: column; gap: 14px">

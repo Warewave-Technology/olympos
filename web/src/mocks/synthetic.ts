@@ -292,7 +292,7 @@ function cell(s: Scenario, c: Cluster): SyntheticCell {
 }
 
 function view(s: Scenario): Scenario {
-  const canEdit = perms().synthetic_edit;
+  const canEdit = perms().synthetic_edit && editRefusal(s) === '';
   const ch = (id: string | null) => db.channels.find((c) => c.id === id)?.name ?? '';
   return {
     ...s,
@@ -301,7 +301,7 @@ function view(s: Scenario): Scenario {
     requests_per_minute: requestsPerMinute(s),
     can_edit: canEdit,
     // a viewer does not see the headers and body of a step that uses a credential
-    steps: s.steps.map((st) => (st.credential_id && !canEdit ? { ...st, http: st.http ? { ...st.http, headers: null, body: null } : st.http, hidden: true } : { ...st, hidden: false })),
+    steps: s.steps.map((st) => (st.credential_id && !perms().synthetic_edit ? { ...st, http: st.http ? { ...st.http, headers: null, body: null } : st.http, hidden: true } : { ...st, hidden: false })),
   };
 }
 
@@ -329,7 +329,7 @@ function overview(): SyntheticOverview {
       runs_24h: runs,
       availability_24h: runs ? (st?.avail ?? null) : null,
       p95_ms_24h: runs && st?.p95 ? st.p95 : null,
-      can_edit: perms().synthetic_edit,
+      can_edit: perms().synthetic_edit && editRefusal(s) === '',
     };
   });
   return {
@@ -566,6 +566,79 @@ function stepHosts(st: ScenarioStep, i: number): [string, string][] {
   return out;
 }
 
+/** Whether a credential's bound hosts cover a host (allowlist-style rules). */
+function credCovers(id: string, host: string): boolean {
+  const c = credentials.find((x) => x.id === id);
+  return !!c && c.bound_hosts.some((b) => ruleMatches(b, host));
+}
+
+/**
+ * spec.ValidateTaint (rulings P11 and P12): a variable extracted by a step carries the step's credential, the taint
+ * of the variables its request used, and every credential of the run whose bound hosts cover the step's host. Such
+ * a variable may only be sent to hosts inside the bounds of every credential it carries. The API names credentials
+ * by name in the message (it replaces the ids spec.ValidateTaint writes).
+ */
+function validateTaint(steps: ScenarioStep[], fields: Record<string, string>) {
+  const runCreds = [...new Set(steps.map((st) => st.credential_id).filter((x): x is string => !!x))];
+  const taint = new Map<string, Set<string>>();
+  steps.forEach((st, i) => {
+    const used = new Set<string>();
+    if (st.kind === 'http' && st.http) {
+      const h = checkHost(st.http.url);
+      const host = h.denied_reason || h.host.includes('${') ? '' : h.host;
+      const check = (key: string, text: string | null | undefined) => {
+        for (const m of (text ?? '').matchAll(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) {
+          const t = taint.get(m[1]);
+          if (!t) continue;
+          for (const id of [...t].sort()) {
+            used.add(id);
+            if ((!host || !credCovers(id, host)) && !fields[key]) {
+              const name = credentials.find((c) => c.id === id)?.name ?? id;
+              fields[key] = `\${${m[1]}} comes from a step that uses credential ${name}, so it may only be sent to that credential's bound hosts`;
+            }
+          }
+        }
+      };
+      check(`steps.${i}.http.url`, st.http.url);
+      for (const name of Object.keys(st.http.headers ?? {}).sort()) check(`steps.${i}.http.headers.${name}`, st.http.headers![name]);
+      check(`steps.${i}.http.body`, st.http.body);
+      // P12: a response from a bound host may carry that credential, attached by this step or not
+      if (host) for (const id of runCreds) if (credCovers(id, host)) used.add(id);
+    }
+    if (st.credential_id) used.add(st.credential_id);
+    for (const e of st.extracts) if (used.size) taint.set(e.name, new Set(used));
+  });
+}
+
+/** What the other scenarios on a cluster already ask for, per minute (a fixture for the per-cluster cap). */
+export const clusterDemand: Record<string, number> = { 'eks-fra-data': 590 };
+
+function overCap(b: ScenarioInput): { cluster: string; requests_per_minute: number }[] {
+  if (b.enabled === false) return [];
+  const rpm = requestsPerMinute(b);
+  return fleet()
+    .filter((c) => !excluded({ run_on: b.run_on, run_on_selector: b.run_on_selector ?? '', exclude_selectors: b.exclude_selectors ?? [] }, c))
+    .filter((c) => (clusterDemand[c.name] ?? 0) + rpm > CLUSTER_CAP)
+    .map((c) => ({ cluster: c.name, requests_per_minute: Math.round((clusterDemand[c.name] ?? 0) + rpm) }));
+}
+
+/** The edit rule of decision 4 for the "scoped" preset: run_on all needs scope all; a selector, every cluster it runs on. */
+export function editRefusal(t: Targeting): string {
+  if (!perms().synthetic_edit) return 'your role does not allow this action';
+  if (perms().synthetic_edit_global) return '';
+  if (t.run_on === 'all') return 'A scenario that runs on all clusters needs the synthetic-editor role with scope all. Choose clusters matching labels in your scope.';
+  const targets = fleet().filter((c) => !excluded(t, c));
+  if (!targets.length) return 'The selector matches no cluster now. A scenario on a selector must run on at least one cluster in your scope.';
+  const outside = targets.filter((c) => !matchesSelector(db.SYNTHETIC_SCOPE, c.labels)).length;
+  if (outside) return `The scenario would run on ${outside === 1 ? '1 cluster' : `${outside} clusters`} outside your synthetic-editor scope. Narrow the selector or exclude those clusters.`;
+  return '';
+}
+const refused = (msg: string): MockRes => ({ status: 403, body: { error: msg } });
+
+/** Accepted test runs per minute (the API's per-user limit). localStorage olympos.mock.testRun = 409 | 429 forces that answer. */
+const testRunTimes: number[] = [];
+export const TEST_RUNS_PER_MINUTE = 6;
+
 function validateSteps(b: ScenarioInput, fields: Record<string, string>) {
   const steps = b.steps ?? [];
   if (!steps.length) fields.steps = 'Add at least one step.';
@@ -586,6 +659,12 @@ function validateSteps(b: ScenarioInput, fields: Record<string, string>) {
       else if (h.denied_reason === 'no_rule') fields[key] = notAllowedMessage(h.host);
       else if (h.denied_reason) fields[key] = h.message;
     }
+    if (st.kind === 'http' && st.credential_id && !fields[`steps.${i}.http.url`]) {
+      const c = credentials.find((x) => x.id === st.credential_id);
+      const host = checkHost(st.http?.url ?? '').host;
+      if (!c) fields[`steps.${i}.credential_id`] = 'unknown credential';
+      else if (!credCovers(c.id, host)) fields[`steps.${i}.credential_id`] = `Credential ${c.name} is not bound to host ${host} (bound hosts: ${c.bound_hosts.map((b) => b.pattern).join(', ')}).`;
+    }
     if (st.kind === 'tcp' && !(st.tcp && st.tcp.port > 0 && st.tcp.port < 65536)) fields[`steps.${i}.tcp.port`] = 'Enter a port from 1 to 65535.';
     st.assertions.forEach((a, j) => {
       if (a.operator !== 'exists' && a.value.trim() === '') fields[`steps.${i}.assertions.${j}.value`] = 'Enter a value.';
@@ -594,6 +673,10 @@ function validateSteps(b: ScenarioInput, fields: Record<string, string>) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(e.name)) fields[`steps.${i}.extracts.${j}.name`] = 'Use letters, digits and _ (not starting with a digit).';
     });
   });
+  // the taint rule runs last, on fields the checks above left alone
+  const taintFields: Record<string, string> = {};
+  validateTaint(steps, taintFields);
+  for (const [k, v] of Object.entries(taintFields)) fields[k] ??= v;
 }
 
 function validateSave(b: ScenarioInput, self: string | null): Record<string, string> {
@@ -619,6 +702,11 @@ function validateSave(b: ScenarioInput, self: string | null): Record<string, str
     const rpm = requestsPerMinute(b);
     if (rpm > SCENARIO_CAP)
       fields.interval_seconds = `The scenario makes up to ${rpm.toFixed(1)} requests per minute on each cluster; the cap is ${SCENARIO_CAP}. Run it less often, retry less or follow fewer redirects.`;
+    else {
+      const over = overCap(b);
+      if (over.length)
+        fields.interval_seconds = `Over the cap of ${CLUSTER_CAP} requests per minute per cluster on ${over.map((o) => `${o.cluster} (${o.requests_per_minute}/min)`).join(', ')}. Run it less often, retry less, or pause other scenarios there.`;
+    }
   }
   return fields;
 }
@@ -659,13 +747,15 @@ function preview(b: ScenarioInput): MockRes {
     if (e) return invalid('invalid targeting', { [`exclude_selectors.${i}`]: e });
   }
   const rpm = requestsPerMinute(b);
-  const p: ScenarioPreview = { ...targetsOf({ run_on: b.run_on, run_on_selector: b.run_on_selector ?? '', exclude_selectors: b.exclude_selectors ?? [] }), requests_per_minute: rpm, scenario_cap: SCENARIO_CAP, cluster_cap: CLUSTER_CAP, over_scenario_cap: rpm > SCENARIO_CAP, over_limit: [] };
+  const p: ScenarioPreview = { ...targetsOf({ run_on: b.run_on, run_on_selector: b.run_on_selector ?? '', exclude_selectors: b.exclude_selectors ?? [] }), requests_per_minute: rpm, scenario_cap: SCENARIO_CAP, cluster_cap: CLUSTER_CAP, over_scenario_cap: rpm > SCENARIO_CAP, over_limit: rpm > SCENARIO_CAP ? [] : overCap(b) };
   return ok(p);
 }
 
 // ------------------------------------------------------------ routes
 
 const byId = (id: string) => scenarios.find((s) => s.id === id);
+/** The body of the last PUT /synthetic/scenarios/{id} (tests check what the editor sends). */
+export const lastPut: { body: unknown } = { body: undefined };
 
 export const syntheticRoutes: [string, string, Handler][] = [
   ['GET', '/synthetic/overview', () => ok(overview())],
@@ -687,6 +777,8 @@ export const syntheticRoutes: [string, string, Handler][] = [
       if (!perms().synthetic_edit) return forbidden();
       const fields = validateSave(r.body as ScenarioInput, null);
       if (Object.keys(fields).length) return invalid('invalid scenario', fields);
+      const no = editRefusal(r.body as ScenarioInput);
+      if (no) return refused(no);
       const s = stored(r.body as ScenarioInput);
       scenarios.push(s);
       db.record('synthetic.scenario_created', 'synthetic_scenario', s.id, s.name);
@@ -709,8 +801,12 @@ export const syntheticRoutes: [string, string, Handler][] = [
       const s = byId(p.id);
       if (!s) return notFound();
       if (!perms().synthetic_edit) return forbidden();
+      lastPut.body = r.body;
+      if (editRefusal(s)) return refused('This scenario runs on clusters outside your synthetic-editor scope; you cannot change it.');
       const fields = validateSave({ ...(r.body as ScenarioInput), enabled: (r.body as ScenarioInput).enabled ?? s.enabled }, s.id);
       if (Object.keys(fields).length) return invalid('invalid scenario', fields);
+      const no = editRefusal(r.body as ScenarioInput);
+      if (no) return refused(no);
       const next = stored(r.body as ScenarioInput, s);
       scenarios[scenarios.indexOf(s)] = next;
       // a renamed scenario keeps its fixture story
@@ -725,7 +821,7 @@ export const syntheticRoutes: [string, string, Handler][] = [
     (r, p) => {
       const s = byId(p.id);
       if (!s) return notFound();
-      if (!perms().synthetic_edit) return forbidden();
+      if (editRefusal(s)) return refused('This scenario runs on clusters outside your synthetic-editor scope; you cannot change it.');
       s.enabled = !!r.body?.enabled;
       s.updated_at = new Date().toISOString();
       db.record(s.enabled ? 'synthetic.scenario_resumed' : 'synthetic.scenario_paused', 'synthetic_scenario', s.id, s.name);
@@ -738,8 +834,9 @@ export const syntheticRoutes: [string, string, Handler][] = [
     (_r, p) => {
       const s = byId(p.id);
       if (!s) return notFound();
-      if (!perms().synthetic_edit) return forbidden();
+      if (editRefusal(s)) return refused('This scenario runs on clusters outside your synthetic-editor scope; you cannot change it.');
       scenarios.splice(scenarios.indexOf(s), 1);
+      db.record('synthetic.scenario_deleted', 'synthetic_scenario', s.id, s.name);
       return { status: 204 };
     },
   ],
@@ -749,7 +846,7 @@ export const syntheticRoutes: [string, string, Handler][] = [
     (r, p) => {
       const s = byId(p.id);
       if (!s) return notFound();
-      if (!perms().synthetic_edit) return forbidden();
+      if (editRefusal(s)) return refused('This scenario runs on clusters outside your synthetic-editor scope; you cannot change it.');
       if (!s.enabled) return { status: 409, body: { error: 'The scenario is paused; resume it first.' } };
       const cid = r.body?.cluster_id as string | undefined;
       const targets = fleet().filter((c) => !excluded(s, c));
@@ -786,8 +883,13 @@ export const syntheticRoutes: [string, string, Handler][] = [
       const fields: Record<string, string> = {};
       validateSteps(draft, fields);
       if (Object.keys(fields).length) return invalid('invalid test run', fields);
-      if (c.probe_status !== 'online') return { status: 409, body: { error: `The cluster's probe is not online: ${c.name} is ${c.probe_status.replace('_', ' ')}` } };
+      const forced = localStorage.getItem('olympos.mock.testRun');
+      const now = Date.now();
+      while (testRunTimes.length && now - testRunTimes[0] > MIN) testRunTimes.shift();
+      if (forced === '429' || testRunTimes.length >= TEST_RUNS_PER_MINUTE) return { status: 429, body: { error: `At most ${TEST_RUNS_PER_MINUTE} test runs a minute; wait a moment.` } };
+      if (forced === '409' || c.probe_status !== 'online') return { status: 409, body: { error: `The cluster's probe is not online: ${c.name} is ${forced === '409' ? 'offline' : c.probe_status.replace('_', ' ')}` } };
       const steps = draft.steps.map((st) => ({ ...st, credential: credentials.find((x) => x.id === st.credential_id) ? credRef(credentials.find((x) => x.id === st.credential_id)!.name).credential : null }));
+      testRunTimes.push(now);
       return { status: 202, body: { run_id: startRun(steps, { id: draft.id ?? null, name: draft.name, type: draft.type }, c, 'test') } };
     },
   ],
@@ -811,5 +913,5 @@ export const syntheticRoutes: [string, string, Handler][] = [
   ],
   ['GET', '/synthetic/allowlist', () => (perms().synthetic_edit || perms().read ? ok({ items: allowlist, version: 7 }) : forbidden())],
   ['POST', '/synthetic/allowlist/check', (r) => (perms().synthetic_edit ? ok(checkHost(String(r.body?.host ?? ''))) : forbidden())],
-  ['GET', '/synthetic/credentials', () => items(credentials.map((c) => ({ ...c, scenarios: scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id)).map((s) => ({ id: s.id, name: s.name })) })))],
+  ['GET', '/synthetic/credentials', () => localStorage.getItem('olympos.mock.credentials') === 'fail' ? { status: 500, body: { error: 'database unavailable' } } : items(credentials.map((c) => ({ ...c, scenarios: scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id)).map((s) => ({ id: s.id, name: s.name })) })))],
 ];

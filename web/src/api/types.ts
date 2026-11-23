@@ -1101,7 +1101,7 @@ export interface SyntheticCredentialRef {
   id: string;
   name: string;
   kind: CredentialKind | string;
-  header_name: string;
+  header_name?: string;
 }
 /** A step (openapi SyntheticStep). Exactly one of dns, http, tcp, tls: the one `kind` names. */
 export interface ScenarioStep {
@@ -1269,7 +1269,7 @@ export interface ScenarioClusterRow {
   cluster_name: string;
   probe_status: ProbeStatus | string;
   state: SyntheticCellState;
-  last_run: { id: string; status: string; finished_at: string; failed_step: number | null; failure_reason: string } | null;
+  last_run: { id: string; status: string; finished_at: string | null; failed_step: number | null; failure_reason: string } | null;
   consecutive_failures: number;
   consecutive_passes: number;
   blocked_reason: string;

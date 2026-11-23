@@ -24,12 +24,22 @@ const runKey = (id: string) => ['synthetic', 'run', id] as const;
 const msOf = (us: number) => (us >= 10_000 ? `${Math.round(us / 1000)} ms` : `${Math.round(us / 100) / 10} ms`);
 const done = (r: SyntheticRunDetail | undefined) => !!r && r.status !== 'scheduled' && r.status !== 'running';
 
-export function useSyntheticRun(id: string | null) {
+/** How long after the run's own timeout a test run is still polled for. */
+export const POLL_MARGIN_MS = 30_000;
+
+/** Whether a run is still worth polling: not finished, and (with a deadline) not past it. */
+export function shouldPoll(r: SyntheticRunDetail | undefined, now: number, deadline?: number): boolean {
+  if (done(r)) return false;
+  return deadline === undefined || now < deadline;
+}
+
+/** A run, polled every 1.5 s until it ends; with `deadline` (epoch ms) polling stops then even if it has not. */
+export function useSyntheticRun(id: string | null, deadline?: number) {
   return useQuery({
     queryKey: runKey(id ?? ''),
     queryFn: () => api.get<SyntheticRunDetail>(`/synthetic/runs/${id}`),
     enabled: !!id,
-    refetchInterval: (q) => (q.state.data && !done(q.state.data) ? 1500 : false),
+    refetchInterval: (q) => (q.state.data && shouldPoll(q.state.data, Date.now(), deadline) ? 1500 : false),
   });
 }
 

@@ -179,9 +179,14 @@ const ROLE_PRESETS: Record<string, Role[]> = {
   maker: ['viewer', 'vault-maker'],
   approver: ['viewer', 'vault-approver'],
   editor: ['viewer', 'synthetic-editor'],
+  // synthetic-editor on env=staging only (SYNTHETIC_SCOPE): no scenario on all clusters
+  scoped: ['viewer', 'synthetic-editor'],
 };
 
-/** Switch with localStorage.setItem('olympos.mock.role', 'viewer'|'operator'|'maker'|'approver'|'editor'|'admin'). */
+/** The synthetic-editor scope of the "scoped" preset. */
+export const SYNTHETIC_SCOPE = 'env=staging';
+
+/** Switch with localStorage.setItem('olympos.mock.role', 'viewer'|'operator'|'maker'|'approver'|'editor'|'scoped'|'admin'). */
 export function me(): Me {
   let preset = 'admin';
   try {
@@ -195,7 +200,7 @@ export function me(): Me {
     principal: people.yigit,
     is_guest: false,
     roles,
-    grants: roles.map((role) => ({ role, scope: 'all' })),
+    grants: roles.map((role) => ({ role, scope: preset === 'scoped' && role === 'synthetic-editor' ? SYNTHETIC_SCOPE : 'all' })),
     permissions: {
       read: true,
       operate: has('operator') || has('admin'),
@@ -205,7 +210,7 @@ export function me(): Me {
       admin: has('admin'),
       admin_global: has('admin'),
       synthetic_edit: has('synthetic-editor') || has('admin'),
-      synthetic_edit_global: has('synthetic-editor') || has('admin'),
+      synthetic_edit_global: (has('synthetic-editor') && preset !== 'scoped') || has('admin'),
     },
     csrf_token: 'mock-csrf',
     dev_mode: true,

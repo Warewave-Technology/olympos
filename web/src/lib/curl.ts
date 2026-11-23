@@ -8,16 +8,16 @@ export function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** The header a credential of this kind is sent in, or null for basic (curl -u). */
-function credentialHeader(cred: Pick<SyntheticCredentialRef, 'kind' | 'header_name'>): { name: string; value: string } | null {
+/** The header a credential of this kind is sent in (its value before $TOKEN), or null for basic (curl -u). */
+function credentialHeader(cred: Pick<SyntheticCredentialRef, 'kind' | 'header_name'>): { name: string; prefix: string } | null {
   switch (cred.kind) {
     case 'basic':
       return null;
     case 'header':
-      return { name: cred.header_name || 'X-Api-Key', value: '$TOKEN' };
+      return { name: cred.header_name || 'X-Api-Key', prefix: '' };
     default:
       // bearer and oauth2_client_credentials: the probe sends the token (or the token it fetched) as a bearer
-      return { name: 'Authorization', value: 'Bearer $TOKEN' };
+      return { name: 'Authorization', prefix: 'Bearer ' };
   }
 }
 
@@ -41,7 +41,8 @@ export function toCurl(step: ScenarioStep, cred?: Pick<SyntheticCredentialRef, '
     if (credHeader && name.toLowerCase() === credHeader.name.toLowerCase()) continue;
     parts.push('-H', shellQuote(`${name}: ${value}`));
   }
-  if (credHeader) parts.push('-H', `"${credHeader.name}: ${credHeader.value}"`);
+  // the name and prefix single-quoted (nothing in them expands), the token a shell variable: 'X-Api-Key: '"$TOKEN"
+  if (credHeader) parts.push('-H', `${shellQuote(`${credHeader.name}: ${credHeader.prefix}`)}"$TOKEN"`);
   if (c?.kind === 'basic') parts.push('-u', '"$USERNAME:$PASSWORD"');
   if (h.body) {
     if (h.body_type === 'json' && !headers.some(([n]) => n.toLowerCase() === 'content-type')) parts.push('-H', shellQuote('Content-Type: application/json'));

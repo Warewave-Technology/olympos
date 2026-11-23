@@ -2,10 +2,10 @@
 // assertions, extracts, reorder) with an allowlist hint per host, schedule, "Runs on" with exclusions and the live
 // count, alerting, and a test run on one cluster. Header values and bodies may hold secrets a user typed, so the
 // save and the test run go through useAction (nothing in the mutation cache), and no query key holds them.
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { ApiError, api } from '../../api/client';
+import { ApiError, api, errorMessage } from '../../api/client';
 import type {
   AssertionOperator,
   Channel,
@@ -30,12 +30,12 @@ import { parseSelector } from '../../lib/labels';
 import { plural } from '../../lib/format';
 import { monitoringEditorRoute } from '../../router';
 import { CheckIcon, IconArrowDown, IconArrowUp, IconClose } from '../../ui/icons';
-import { ErrorState, ForbiddenState, Loading, Spinner, aria, sentence, useAction, useToast } from '../../ui/kit';
+import { ErrorState, ForbiddenState, Loading, Spinner, aria, sentence, useAction, useNow, useToast } from '../../ui/kit';
 import { SpaLink } from '../../ui/SpaLink';
 import { PageHead } from '../../ui/status';
 import { TagInput } from '../../ui/TagInput';
-import { OPERATOR_LABEL, SUBJECT_LABEL, TYPE_LABEL, actualText, assertionText, reasonText, stepTitle, urlHost } from '../../ui/synthetic';
-import { RunDialog, useSyntheticRun } from './RunDialog';
+import { HiddenNote, OPERATOR_LABEL, SUBJECT_LABEL, TYPE_LABEL, actualText, assertionText, reasonText, stepTitle, urlHost, withCredentialNames } from '../../ui/synthetic';
+import { POLL_MARGIN_MS, RunDialog, useSyntheticRun } from './RunDialog';
 import { CrumbLinks, scenarioKey } from './ScenarioDetail';
 import { useSyntheticOverview } from './SyntheticOverview';
 
@@ -107,21 +107,61 @@ function blank(): Draft {
   return { name: '', type: 'http', owner_selector: '', interval_seconds: 60, timeout_seconds: 10, step_retries: 0, enabled: true, store_responses: true, run_on: 'all', run_on_selector: '', exclude_selectors: [], steps: [wrap(newStep('http'))], alerts: { ...DEFAULT_ALERTS } };
 }
 
-/** The ScenarioInput of a draft (what PUT, POST and the test run send). */
-function toInput(d: Draft): ScenarioInput & { id?: string } {
-  const steps = d.steps.map(({ step, headers }) => {
-    const out: ScenarioStep = { kind: step.kind, assertions: step.assertions, extracts: step.extracts.filter((e) => e.name || e.expr) };
-    if (step.kind === 'http' && step.http) {
-      out.http = { ...step.http, headers: Object.fromEntries(headers.filter((h) => h.name.trim()).map((h) => [h.name.trim(), h.value])) };
-      out.credential_id = step.credential_id || null;
-    }
-    if (step.kind === 'dns') out.dns = step.dns;
-    if (step.kind === 'tcp') out.tcp = step.tcp;
-    if (step.kind === 'tls') out.tls = step.tls;
-    return out;
-  });
-  const { steps: _s, id, ...rest } = d; // eslint-disable-line @typescript-eslint/no-unused-vars
-  return { ...rest, ...(id ? { id } : {}), run_on_selector: d.run_on === 'selector' ? d.run_on_selector : '', steps };
+/** The step a draft step sends. A hidden step (headers and body not shown to the caller) is never rebuilt. */
+function stepInput({ step, headers }: EStep): ScenarioStep {
+  if (step.hidden) return step;
+  const out: ScenarioStep = { kind: step.kind, assertions: step.assertions, extracts: step.extracts.filter((e) => e.name || e.expr) };
+  if (step.kind === 'http' && step.http) {
+    out.http = { ...step.http, headers: Object.fromEntries(headers.filter((h) => h.name.trim()).map((h) => [h.name.trim(), h.value])) };
+    out.credential_id = step.credential_id || null;
+  }
+  if (step.kind === 'dns') out.dns = step.dns;
+  if (step.kind === 'tcp') out.tcp = step.tcp;
+  if (step.kind === 'tls') out.tls = step.tls;
+  return out;
+}
+
+/**
+ * The ScenarioInput of a draft (what PUT, POST and the test run send). With `initial` (a PUT), enabled and
+ * store_responses are sent only when the user changed them: the server keeps the stored values when they are
+ * omitted, so a pause made elsewhere meanwhile is not undone.
+ */
+function toInput(d: Draft, initial?: Draft): ScenarioInput & { id?: string } {
+  const { steps: _s, id, enabled, store_responses, ...rest } = d; // eslint-disable-line @typescript-eslint/no-unused-vars
+  return {
+    ...rest,
+    ...(id ? { id } : {}),
+    ...(!initial || enabled !== initial.enabled ? { enabled } : {}),
+    ...(!initial || store_responses !== initial.store_responses ? { store_responses } : {}),
+    run_on_selector: d.run_on === 'selector' ? d.run_on_selector : '',
+    steps: d.steps.map(stepInput),
+  };
+}
+
+/** A field of a step as sent ("http.url", "http.headers.X-Token", "http.body", "tcp.host"…), to tell a stale error. */
+function stepValue(st: ScenarioStep | undefined, rest: string): unknown {
+  if (!st) return undefined;
+  const [kind, field, ...more] = rest.split('.');
+  const spec = (st as unknown as Record<string, Record<string, unknown> | null | undefined>)[kind];
+  if (kind === 'credential_id') return st.credential_id ?? null;
+  if (!spec || !field) return undefined;
+  if (field === 'headers' && more.length) return (spec.headers as Record<string, string> | null)?.[more.join('.')];
+  return spec[field];
+}
+
+/**
+ * Field errors keyed by the step they belong to: "steps.N.rest" (or "scenario.steps.N.rest" from a test run)
+ * becomes "#<step key>.rest" for the step that was at N when the request was sent, so a later reorder keeps each
+ * error on its step. Messages that name a credential by id name it by name.
+ */
+function keyFields(raw: Record<string, string>, keys: string[], creds: { id: string; name: string }[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k0, v] of Object.entries(raw)) {
+    const k = k0.replace(/^scenario\./, '');
+    const m = /^steps\.(\d+)\.(.+)$/.exec(k);
+    out[m && keys[Number(m[1])] ? `#${keys[Number(m[1])]}.${m[2]}` : k] = withCredentialNames(v, creds);
+  }
+  return out;
 }
 
 /** What the preview needs (targeting and the request rate), with no URL, header or body: safe in a query key. */
@@ -284,24 +324,47 @@ const FIELD_NAMES: Record<string, string> = {
   'alerts.critical_channel_id': 'Critical channel',
   cluster_id: 'Cluster',
 };
-function fieldLabel(k: string): string {
+function fieldLabel(k: string, stepKeys: string[] = []): string {
   const m = /^(?:scenario\.)?steps\.(\d+)\.(.*)$/.exec(k);
   if (m) return `Step ${Number(m[1]) + 1} ${m[2].replace(/^(http|dns|tcp|tls)\./, '').replace(/\./g, ' ')}`;
+  const s = /^#([^.]+)\.(.*)$/.exec(k);
+  if (s) {
+    const i = stepKeys.indexOf(s[1]);
+    const what = s[2].replace(/^(http|dns|tcp|tls)\./, '').replace(/^headers\./, 'header ').replace(/\./g, ' ');
+    return i >= 0 ? `Step ${i + 1} ${what}` : `A removed step: ${what}`;
+  }
   const x = /^exclude_selectors\.(\d+)$/.exec(k);
   if (x) return `Exclusion ${Number(x[1]) + 1}`;
   return FIELD_NAMES[k] ?? k;
 }
 
-/** Keys the form shows next to their field; the rest are listed in the summary. */
-function shownInline(k: string): boolean {
-  return /^(name|owner_selector|interval_seconds|timeout_seconds|step_retries|run_on_selector|alerts\.[a-z_]+|steps\.\d+\.(http\.url|dns\.name|tcp\.host|tcp\.port|tls\.host|tls\.sni|credential_id))$/.test(k);
+const STEP_INLINE = /^(http\.url|http\.body|http\.headers\..+|dns\.name|tcp\.host|tcp\.port|tls\.host|tls\.sni|credential_id)$/;
+
+/** Keys of top-level fields the form shows next to their input. */
+function topInline(k: string): boolean {
+  return /^(name|owner_selector|interval_seconds|timeout_seconds|step_retries|run_on_selector|alerts\.[a-z_]+)$/.test(k);
 }
 
-function ErrorSummary({ error, admin, title }: { error: unknown; admin: boolean; title?: string }) {
+/**
+ * Whether the form shows an error next to its field. A step's field is shown on its step card (the step opens), a
+ * header error on the header row of that name, as long as the row still exists.
+ */
+function shownInline(k: string, steps: EStep[]): boolean {
+  if (topInline(k)) return true;
+  const m = /^#([^.]+)\.(.+)$/.exec(k);
+  if (!m || !STEP_INLINE.test(m[2])) return false;
+  const es = steps.find((s) => s.key === m[1]);
+  if (!es || es.step.hidden) return false;
+  if (m[2].startsWith('http.headers.')) return es.headers.some((h) => h.name.trim() === m[2].slice('http.headers.'.length));
+  return true;
+}
+
+/** The message of a failed save or test run. `all`: list every field (the test-run panel), else the ones not highlighted. */
+function ErrorSummary({ error, fields, steps, admin, title, all }: { error: unknown; fields: Record<string, string>; steps: EStep[]; admin: boolean; title?: string; all?: boolean }) {
   if (!error) return null;
-  const fields = error instanceof ApiError ? error.fields : {};
-  const rest = Object.entries(fields).filter(([k]) => !shownInline(k));
-  const inline = Object.keys(fields).length - rest.length;
+  const keys = steps.map((s) => s.key);
+  const rest = Object.entries(fields).filter(([k]) => all || !shownInline(k, steps));
+  const inline = Object.keys(fields).filter((k) => shownInline(k, steps)).length;
   return (
     <div className="note crit" role="alert">
       <b>{title ?? sentence(error instanceof Error ? error.message : 'Could not save the scenario.')}</b>
@@ -310,11 +373,24 @@ function ErrorSummary({ error, admin, title }: { error: unknown; admin: boolean;
         <ul className="note-list">
           {rest.map(([k, v]) => (
             <li key={k}>
-              {fieldLabel(k)}: <ApiMessage text={v} admin={admin} />
+              {fieldLabel(k, keys)}: <ApiMessage text={v} admin={admin} />
             </li>
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+/** A query the form needs that failed: say so where its control is, with a retry. */
+function LoadError({ what, q }: { what: string; q: { isError: boolean; error: unknown; refetch: () => unknown } }) {
+  if (!q.isError) return null;
+  return (
+    <div className="field-error" role="alert">
+      Could not load {what}: {errorMessage(q.error)}{' '}
+      <button type="button" className="link-btn small" onClick={() => void q.refetch()}>
+        Retry
+      </button>
     </div>
   );
 }
@@ -348,15 +424,35 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
   const [d, setD] = useState<Draft>(initial);
   const [open, setOpen] = useState<string | null>(initial.steps.length === 1 ? initial.steps[0].key : null);
   const save = useAction<Scenario>();
-  // the steps as they were saved: a host's error goes away once the host is changed
-  const [savedSteps, setSavedSteps] = useState<ScenarioStep[]>([]);
+  // Field errors of the last save or test run, keyed by step key (keyFields); `sent` holds each step as it was sent,
+  // so an error on a field goes away once that field is changed.
+  const [errState, setErrs] = useState<{ source: 'save' | 'test' | ''; fields: Record<string, string>; sent: Record<string, ScenarioStep> }>({ source: '', fields: {}, sent: {} });
   const navigate = useNavigate();
   const qc = useQueryClient();
   const toast = useToast();
-  const fields = save.error instanceof ApiError ? save.error.fields : {};
+  const fields = errState.fields;
   const credsQ = useQuery({ queryKey: ['synthetic', 'credentials'], queryFn: () => api.get<ItemList<SyntheticCredential>>('/synthetic/credentials'), retry: false });
   const channelsQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
   const single = d.type !== 'http_flow';
+  const hidden = d.steps.some((s) => s.step.hidden);
+  /** Runs a request that sends the draft; its field errors go to the form. */
+  const sending = async <R,>(source: 'save' | 'test', fn: () => Promise<R>): Promise<R> => {
+    const keys = d.steps.map((s) => s.key);
+    const sent = Object.fromEntries(d.steps.map((s) => [s.key, stepInput(s)]));
+    try {
+      const r = await fn();
+      setErrs({ source: '', fields: {}, sent: {} });
+      return r;
+    } catch (e) {
+      const raw = e instanceof ApiError ? e.fields : {};
+      const f = keyFields(raw, keys, credsQ.data?.items ?? []);
+      setErrs({ source, fields: f, sent });
+      // a request that names a step's field opens that step
+      const first = Object.keys(f).map((k) => /^#([^.]+)\./.exec(k)?.[1]).find(Boolean);
+      if (first) setOpen(first);
+      throw e;
+    }
+  };
 
   const set = (p: Partial<Draft>) => setD((x) => ({ ...x, ...p }));
   const setStep = (key: string, f: (s: EStep) => EStep) => setD((x) => ({ ...x, steps: x.steps.map((s) => (s.key === key ? f(s) : s)) }));
@@ -376,18 +472,9 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
       return { ...x, steps };
     });
 
-  // a save that names a step's field opens that step
-  useEffect(() => {
-    const m = Object.keys(fields)
-      .map((k) => /^steps\.(\d+)\./.exec(k))
-      .find(Boolean);
-    if (m && d.steps[Number(m[1])]) setOpen(d.steps[Number(m[1])].key);
-  }, [save.error]); // eslint-disable-line react-hooks/exhaustive-deps
-
   const onSave = async () => {
-    const body = toInput(d);
-    setSavedSteps(d.steps.map((x) => x.step));
-    const r = await save.run(() => (d.id ? api.put<Scenario>(`/synthetic/scenarios/${d.id}`, body) : api.post<Scenario>('/synthetic/scenarios', body)));
+    const body = toInput(d, d.id ? initial : undefined);
+    const r = await save.run(() => sending('save', () => (d.id ? api.put<Scenario>(`/synthetic/scenarios/${d.id}`, body) : api.post<Scenario>('/synthetic/scenarios', body))));
     if (!r) {
       window.scrollTo?.({ top: 0 });
       return;
@@ -398,7 +485,7 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
     void navigate({ to: '/monitoring', search: { scenario: r.id } });
   };
 
-  const stepErrors = (i: number) => Object.entries(fields).filter(([k]) => k.startsWith(`steps.${i}.`));
+  const stepErrors = (key: string) => Object.entries(fields).filter(([k]) => k.startsWith(`#${key}.`));
   const cancel = d.id ? (
     <Link to="/monitoring" search={{ scenario: d.id }} className="btn">
       Cancel
@@ -417,13 +504,19 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
         actions={
           <>
             {cancel}
-            <button type="button" className="btn pri" onClick={() => void onSave()} disabled={save.pending}>
+            <button type="button" className="btn pri" onClick={() => void onSave()} disabled={save.pending || hidden} aria-describedby={hidden ? 'hidden-why' : undefined}>
               {save.pending ? 'Saving…' : 'Save scenario'}
             </button>
           </>
         }
       />
-      <ErrorSummary error={save.error} admin={admin} />
+      {hidden && (
+        <div className="note warn" role="note" id="hidden-why">
+          Some steps use a credential and their headers and body are hidden from you, so this scenario cannot be saved from here: saving would send those steps back without them. Ask an
+          editor to change it.
+        </div>
+      )}
+      <ErrorSummary error={errState.source === 'save' ? save.error : null} fields={fields} steps={d.steps} admin={admin} />
       <div className="editor-cols">
         <div className="editor-main">
           <section className="card pad-lg" aria-labelledby="basics-h">
@@ -461,6 +554,16 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
                 ))}
               </div>
             </div>
+            <div>
+              <label className="chk">
+                <input type="checkbox" checked={d.store_responses} onChange={(e) => set({ store_responses: e.target.checked })} aria-describedby="sr-hint" /> Store response excerpts
+              </label>
+              <div className="field-hint" id="sr-hint">
+                {d.store_responses
+                  ? 'Keeps the first 2 KB of each HTTP response for 7 days, redacted on the probe, so a failed run shows what came back.'
+                  : 'Off: no response excerpts or response text are kept for this scenario. A privacy control for responses that may hold personal data; runs still record status, timings and assertions.'}
+              </div>
+            </div>
           </section>
 
           <section className="card pad-lg" aria-labelledby="steps-h">
@@ -471,7 +574,7 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
             {fields.steps && <div className="field-error" role="alert">{fields.steps}</div>}
             <ol className="plain-list stack-sm" aria-label="Steps">
               {d.steps.map((es, i) => {
-                const errs = stepErrors(i);
+                const errs = stepErrors(es.key);
                 const isOpen = single || open === es.key;
                 if (!isOpen) {
                   const { title, detail } = stepTitle(es.step);
@@ -500,7 +603,8 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
                       count={d.steps.length}
                       creds={credsQ.data?.items ?? []}
                       fields={fields}
-                      saved={savedSteps[i]}
+                      sent={errState.sent[es.key]}
+                      credsQ={credsQ}
                       admin={admin}
                       onChange={(f) => setStep(es.key, f)}
                       onMove={(by) => move(i, by)}
@@ -573,6 +677,7 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
               <NumberField id="a1" label="Alert a cluster after" unit="failed runs" value={d.alerts.cluster_fail_after} onChange={(v) => set({ alerts: { ...d.alerts, cluster_fail_after: v } })} error={fields['alerts.cluster_fail_after']} admin={admin} />
               <NumberField id="a2" label="Critical when failing in" unit="clusters" value={d.alerts.fleet_critical_clusters} onChange={(v) => set({ alerts: { ...d.alerts, fleet_critical_clusters: v } })} error={fields['alerts.fleet_critical_clusters']} admin={admin} />
             </div>
+            <LoadError what="the channels" q={channelsQ} />
             <ChannelSelect id="ch" label="Channel" value={d.alerts.channel_id} none="The routes of the synthetic events" channels={channelsQ.data?.items ?? []} onChange={(v) => set({ alerts: { ...d.alerts, channel_id: v } })} error={fields['alerts.channel_id']} admin={admin} />
             <ChannelSelect id="ch2" label="Critical channel" value={d.alerts.critical_channel_id} none="Same as the channel" channels={channelsQ.data?.items ?? []} onChange={(v) => set({ alerts: { ...d.alerts, critical_channel_id: v } })} error={fields['alerts.critical_channel_id']} admin={admin} />
             <div className="chk wrap-gap">
@@ -584,7 +689,7 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
             <FieldMsg id="rec" text={fields['alerts.recovery_after']} admin={admin} />
           </section>
 
-          <TestRun d={d} admin={admin} initialCluster={testCluster} />
+          <TestRun d={d} admin={admin} initialCluster={testCluster} sending={(fn) => sending('test', fn)} disabled={hidden} fields={errState.source === 'test' ? fields : {}} />
         </aside>
       </div>
     </>
@@ -742,9 +847,12 @@ function StepEditor({
   onMove,
   onRemove,
   onDone,
-  saved,
+  sent,
+  credsQ,
 }: {
-  saved?: ScenarioStep;
+  /** The step as the last save or test run sent it. */
+  sent?: ScenarioStep;
+  credsQ: { isError: boolean; error: unknown; refetch: () => unknown };
   index: number;
   es: EStep;
   single: boolean;
@@ -759,17 +867,29 @@ function StepEditor({
 }) {
   const st = es.step;
   const id = useId().replace(/:/g, '');
-  const f = (k: string) => {
-    const msg = fields[`steps.${index}.${k}`];
-    // a host field changed since the save: its error no longer applies (the allowlist hint takes over)
-    const [kind, field] = k.split('.');
-    const now = (st as unknown as Record<string, Record<string, unknown> | undefined>)[kind]?.[field];
-    const then = saved && (saved as unknown as Record<string, Record<string, unknown> | undefined>)[kind]?.[field];
-    return msg && field && saved && now !== then ? undefined : msg;
+  const now = stepInput(es);
+  /** The error of a field of this step, until the field is changed (then the live hint takes over). */
+  const f = (rest: string) => {
+    const msg = fields[`#${es.key}.${rest}`];
+    return msg && sent && JSON.stringify(stepValue(now, rest)) !== JSON.stringify(stepValue(sent, rest)) ? undefined : msg;
   };
   const setStep = (p: Partial<ScenarioStep>) => onChange((s) => ({ ...s, step: { ...s.step, ...p } }));
   const n = index + 1;
-  const others = Object.entries(fields).filter(([k]) => k.startsWith(`steps.${index}.`) && !shownInline(k));
+  const others = Object.entries(fields).filter(([k]) => k.startsWith(`#${es.key}.`) && !shownInline(k, [es]));
+  if (st.hidden) {
+    const { title, detail } = stepTitle(st);
+    return (
+      <div className="stack-sm">
+        <div className="inline-sm">
+          <span className="snum">{n}</span>
+          <b>{title}</b>
+          <span className="mono muted break">{detail}</span>
+        </div>
+        <HiddenNote />
+        <span className="muted small">This step is read-only here: it is kept exactly as it is saved.</span>
+      </div>
+    );
+  }
   return (
     <div className="stack-sm">
       <div className="spread">
@@ -825,7 +945,7 @@ function StepEditor({
           </div>
           <FieldMsg id={`${id}-url`} text={f('http.url')} admin={admin} />
           {!f('http.url') && <HostHint value={st.http.url} admin={admin} />}
-          <HeadersEditor n={n} rows={es.headers} onChange={(headers) => onChange((s) => ({ ...s, headers }))} />
+          <HeadersEditor n={n} id={id} rows={es.headers} errorOf={(name) => f(`http.headers.${name}`)} admin={admin} onChange={(headers) => onChange((s) => ({ ...s, headers }))} />
           {st.http.method !== 'GET' && st.http.method !== 'HEAD' && (
             <div>
               <div className="spread">
@@ -837,7 +957,8 @@ function StepEditor({
                   <option value="json">JSON</option>
                 </select>
               </div>
-              <textarea id={`${id}-body`} className="in mono" rows={4} value={st.http.body ?? ''} onChange={(e) => setStep({ http: { ...st.http!, body: e.target.value } })} spellCheck={false} />
+              <textarea className="in mono" rows={4} value={st.http.body ?? ''} onChange={(e) => setStep({ http: { ...st.http!, body: e.target.value } })} spellCheck={false} {...aria(`${id}-body`, f('http.body'))} />
+              <FieldMsg id={`${id}-body`} text={f('http.body')} admin={admin} />
             </div>
           )}
           <label className="chk">
@@ -863,6 +984,7 @@ function StepEditor({
               })}
             </select>
             <FieldMsg id={`${id}-auth`} text={f('credential_id')} admin={admin} />
+            <LoadError what="the credentials" q={credsQ} />
             {!f('credential_id') && (
               <div className="field-hint" id={`${id}-auth-hint`}>
                 Stored encrypted in Olympos. Sent to the probe only for this run and attached only to requests whose host matches the credential's hosts.
@@ -917,13 +1039,13 @@ function StepEditor({
         </div>
       )}
 
-      <AssertionsEditor n={n} kind={st.kind} list={st.assertions} fields={fields} index={index} onChange={(assertions) => setStep({ assertions })} />
+      <AssertionsEditor n={n} kind={st.kind} list={st.assertions} errorOf={(i) => f(`assertions.${i}.value`) ?? f(`assertions.${i}.subject`) ?? f(`assertions.${i}`)} onChange={(assertions) => setStep({ assertions })} />
       {st.kind === 'http' && <ExtractsEditor n={n} list={st.extracts} onChange={(extracts) => setStep({ extracts })} />}
       {others.length > 0 && (
         <ul className="plain-list">
           {others.map(([k, v]) => (
             <li key={k} className="field-error" role="alert">
-              {fieldLabel(k)}: <ApiMessage text={v} admin={admin} />
+              {fieldLabel(k, [es.key]).replace(/^Step 1 /, '')}: <ApiMessage text={v} admin={admin} />
             </li>
           ))}
         </ul>
@@ -948,21 +1070,42 @@ function HostPort({ n, id, host, port, hostError, portError, admin, onChange }: 
   );
 }
 
-function HeadersEditor({ n, rows, onChange }: { n: number; rows: { name: string; value: string }[]; onChange: (rows: { name: string; value: string }[]) => void }) {
+function HeadersEditor({
+  n,
+  id,
+  rows,
+  errorOf,
+  admin,
+  onChange,
+}: {
+  n: number;
+  id: string;
+  rows: { name: string; value: string }[];
+  /** The error of the header with this name (a taint error is keyed by the header name). */
+  errorOf: (name: string) => string | undefined;
+  admin: boolean;
+  onChange: (rows: { name: string; value: string }[]) => void;
+}) {
   const set = (i: number, p: Partial<{ name: string; value: string }>) => onChange(rows.map((r, j) => (j === i ? { ...r, ...p } : r)));
   return (
     <div>
       <div className="lbl">Headers</div>
       <div className="stack-xs">
-        {rows.map((h, i) => (
-          <div key={i} className="hrow">
-            <input className="in mono" aria-label={`Step ${n} header ${i + 1} name`} value={h.name} onChange={(e) => set(i, { name: e.target.value })} spellCheck={false} />
-            <input className="in mono" aria-label={`Step ${n} header ${i + 1} value`} value={h.value} onChange={(e) => set(i, { value: e.target.value })} spellCheck={false} autoComplete="off" />
-            <button type="button" className="btn sm icon-sq" aria-label={`Remove header ${i + 1} of step ${n}`} onClick={() => onChange(rows.filter((_, j) => j !== i))}>
-              <IconClose />
-            </button>
-          </div>
-        ))}
+        {rows.map((h, i) => {
+          const err = h.name.trim() ? errorOf(h.name.trim()) : undefined;
+          return (
+            <div key={i}>
+              <div className="hrow">
+                <input className="in mono" aria-label={`Step ${n} header ${i + 1} name`} value={h.name} onChange={(e) => set(i, { name: e.target.value })} spellCheck={false} aria-invalid={err ? true : undefined} />
+                <input className="in mono" aria-label={`Step ${n} header ${i + 1} value`} value={h.value} onChange={(e) => set(i, { value: e.target.value })} spellCheck={false} autoComplete="off" {...aria(`${id}-h${i}`, err)} />
+                <button type="button" className="btn sm icon-sq" aria-label={`Remove header ${i + 1} of step ${n}`} onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+                  <IconClose />
+                </button>
+              </div>
+              <FieldMsg id={`${id}-h${i}`} text={err} admin={admin} />
+            </div>
+          );
+        })}
         <button type="button" className="btn sm self-start" onClick={() => onChange([...rows, { name: '', value: '' }])}>
           + Add header
         </button>
@@ -972,7 +1115,7 @@ function HeadersEditor({ n, rows, onChange }: { n: number; rows: { name: string;
   );
 }
 
-function AssertionsEditor({ n, kind, list, fields, index, onChange }: { n: number; kind: StepKind; list: ScenarioAssertion[]; fields: Record<string, string>; index: number; onChange: (l: ScenarioAssertion[]) => void }) {
+function AssertionsEditor({ n, kind, list, errorOf, onChange }: { n: number; kind: StepKind; list: ScenarioAssertion[]; errorOf: (i: number) => string | undefined; onChange: (l: ScenarioAssertion[]) => void }) {
   const set = (i: number, a: ScenarioAssertion) => onChange(list.map((x, j) => (j === i ? a : x)));
   const subjects = SUBJECTS[kind];
   return (
@@ -982,7 +1125,7 @@ function AssertionsEditor({ n, kind, list, fields, index, onChange }: { n: numbe
         {list.map((a, i) => {
           const base = baseOf(a.subject);
           const ops = OPERATORS[base] ?? (Object.keys(OPERATOR_LABEL) as AssertionOperator[]);
-          const err = fields[`steps.${index}.assertions.${i}.value`] ?? fields[`steps.${index}.assertions.${i}.subject`] ?? fields[`steps.${index}.assertions.${i}`];
+          const err = errorOf(i);
           return (
             <div key={i}>
               <div className="arow">
@@ -1082,31 +1225,53 @@ export function failedCheck(a: SyntheticStepResult['assertions'][number]): strin
   return `${assertionText(a)}: got ${actualText(a) || 'nothing'}`;
 }
 
-function TestRun({ d, admin, initialCluster }: { d: Draft; admin: boolean; initialCluster?: string }) {
+function TestRun({
+  d,
+  admin,
+  initialCluster,
+  sending,
+  disabled,
+  fields,
+}: {
+  d: Draft;
+  admin: boolean;
+  initialCluster?: string;
+  sending: <R>(fn: () => Promise<R>) => Promise<R>;
+  disabled: boolean;
+  /** The form's field errors: after a failed test run, its own (keyed by step, credentials by name). */
+  fields: Record<string, string>;
+}) {
   const ov = useSyntheticOverview();
   const clusters = ov.data?.clusters ?? [];
   const [cluster, setCluster] = useState('');
   const picked = cluster || clusters.find((c) => c.id === initialCluster || c.name === initialCluster)?.id || clusters.find((c) => c.probe_status === 'online')?.id || '';
   const start = useAction<{ run_id: string }>();
   const [runId, setRunId] = useState<string | null>(null);
+  // polling stops at the run's timeout plus a margin; after that the panel says there is no result yet
+  const [deadline, setDeadline] = useState<number | undefined>();
   const [details, setDetails] = useState(false);
-  const runQ = useSyntheticRun(runId);
+  const runQ = useSyntheticRun(runId, deadline);
   const r = runQ.data;
-  const running = !!runId && (!r || r.status === 'running' || r.status === 'scheduled');
-  const startedFor = useRef('');
+  const unfinished = !!runId && (!r || r.status === 'running' || r.status === 'scheduled');
+  const now = useNow(unfinished ? 1000 : 60_000);
+  const late = unfinished && deadline !== undefined && now >= deadline;
+  const running = unfinished && !late;
   const go = async () => {
     setRunId(null);
-    startedFor.current = picked;
-    const res = await start.run(() => api.post<{ run_id: string }>('/synthetic/test-runs', { scenario: toInput(d), cluster_id: picked }));
-    if (res) setRunId(res.run_id);
+    const res = await start.run(() => sending(() => api.post<{ run_id: string }>('/synthetic/test-runs', { scenario: toInput(d), cluster_id: picked })));
+    if (res) {
+      setDeadline(Date.now() + d.timeout_seconds * 1000 + POLL_MARGIN_MS);
+      setRunId(res.run_id);
+    }
   };
-  const name = useMemo(() => clusters.find((c) => c.id === picked)?.name ?? '', [clusters, picked]);
+  const name = clusters.find((c) => c.id === picked)?.name ?? '';
+  const e = start.error;
   return (
     <section className="card pad-lg" aria-labelledby="test-h">
       <h2 id="test-h">Test run</h2>
       <div className="test-row">
-        <select className="in" aria-label="Cluster for test run" value={picked} onChange={(e) => setCluster(e.target.value)}>
-          {clusters.length === 0 && <option value="">Loading clusters…</option>}
+        <select className="in" aria-label="Cluster for test run" value={picked} onChange={(ev) => setCluster(ev.target.value)}>
+          {clusters.length === 0 && <option value="">{ov.isError ? 'Clusters not loaded' : 'Loading clusters…'}</option>}
           {clusters.map((c) => (
             <option key={c.id} value={c.id} disabled={c.probe_status !== 'online'}>
               {c.name}
@@ -1114,14 +1279,39 @@ function TestRun({ d, admin, initialCluster }: { d: Draft; admin: boolean; initi
             </option>
           ))}
         </select>
-        <button type="button" className="btn" onClick={() => void go()} disabled={!picked || start.pending || running}>
+        <button type="button" className="btn" onClick={() => void go()} disabled={!picked || start.pending || running || disabled}>
           {start.pending || running ? 'Running…' : 'Run once'}
         </button>
       </div>
-      {start.error ? <ErrorSummary error={start.error} admin={admin} title={start.error instanceof ApiError && start.error.status === 429 ? sentence(start.error.message) : undefined} /> : null}
+      <LoadError what="the clusters" q={ov} />
+      {e ? (
+        <ErrorSummary
+          error={e}
+          fields={fields}
+          steps={d.steps}
+          admin={admin}
+          all
+          title={
+            e instanceof ApiError && e.status === 429
+              ? `Not run: ${sentence(e.message)}`
+              : e instanceof ApiError && e.status === 409
+                ? `Not run: ${sentence(e.message)} Pick a cluster whose probe is online.`
+                : e instanceof ApiError && e.status === 422
+                  ? 'Not run: the draft has errors.'
+                  : undefined
+          }
+        />
+      ) : null}
       {runId && (
         <div aria-live="polite" aria-label="Test run result">
-          {!r || running ? (
+          {late ? (
+            <div className="stack-xs">
+              <div className="chk muted">No result yet: the probe on {name} has not reported back within the timeout. It may still arrive.</div>
+              <button type="button" className="link-btn small self-start" onClick={() => setDetails(true)}>
+                Open the run details
+              </button>
+            </div>
+          ) : !r || running ? (
             <div className="chk muted">
               <Spinner label="Test run" /> Running on {name}…
             </div>

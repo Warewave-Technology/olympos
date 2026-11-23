@@ -6,13 +6,15 @@ import userEvent from '@testing-library/user-event';
 import type { ScenarioStep } from '../api/types';
 import { toCurl } from '../lib/curl';
 import * as syn from '../mocks/synthetic';
-import { REASON_TEXT, reasonText } from '../ui/synthetic';
+import { REASON_TEXT, reasonText, withCredentialNames } from '../ui/synthetic';
+import { POLL_MARGIN_MS, shouldPoll } from '../pages/monitoring/RunDialog';
 import { MONITORING_TABS } from '../pages/monitoring/tabs';
 import { renderApp } from './renderApp';
 
 afterEach(() => {
   cleanup();
   localStorage.removeItem('olympos.mock.role');
+  localStorage.removeItem('olympos.mock.testRun');
 });
 
 const T = { timeout: 5000 };
@@ -162,7 +164,7 @@ describe('run dialog', () => {
 
     await user.click(within(dlg).getByRole('button', { name: 'Copy as curl' }));
     const curl = await navigator.clipboard.readText();
-    expect(curl).toBe(`curl 'https://api.prod.wrw.com/v1/catalog?limit=1' -H 'Accept: application/json' -H "Authorization: Bearer $TOKEN"`);
+    expect(curl).toBe(`curl 'https://api.prod.wrw.com/v1/catalog?limit=1' -H 'Accept: application/json' -H 'Authorization: Bearer '"$TOKEN"`);
     expect(within(dlg).getByRole('button', { name: 'Run again on oke-fra-erp' })).toBeInTheDocument();
 
     // another step: its own assertions
@@ -310,6 +312,181 @@ describe('scenario editor', () => {
   });
 });
 
+describe('scenario editor, fix round 1', () => {
+  async function editCheckout(path = `/monitoring/editor?scenario=${checkout().id}&cluster=oke-fra-erp`) {
+    const user = userEvent.setup();
+    await renderApp(path);
+    await screen.findByRole('heading', { name: /Edit scenario|New scenario/ }, T);
+    return user;
+  }
+  const setUrl = async (user: ReturnType<typeof userEvent.setup>, n: number, url: string) => {
+    const el = screen.getByLabelText(`Step ${n} URL`);
+    await user.clear(el);
+    await user.type(el, url.replace(/[{[]/g, '$&$&'));
+  };
+
+  it('shows a test run 422 on the fields and in the test-run panel', async () => {
+    const user = await editCheckout();
+    await user.click(screen.getByRole('button', { name: 'Edit step 3' }));
+    await setUrl(user, 3, 'https://api.other.io/v1');
+    const panel = screen.getByRole('region', { name: 'Test run' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Run once' })).toBeEnabled(), T);
+    await user.click(within(panel).getByRole('button', { name: 'Run once' }));
+    const note = await within(panel).findByText('Not run: the draft has errors.', {}, T);
+    expect(note.closest('[role=alert]')).toHaveTextContent('Step 3 url: Host api.other.io is not allowed. Add a rule in Settings › Synthetic monitoring.');
+    // and on the field itself
+    await waitFor(() => expect(screen.getByLabelText('Step 3 URL')).toHaveAttribute('aria-invalid', 'true'));
+    expect(screen.getAllByText(/Host api\.other\.io is not allowed/).length).toBeGreaterThanOrEqual(2);
+    // the save summary stays empty: this was the test run
+    expect(screen.queryByText(/Could not save|invalid scenario/i)).toBeNull();
+  });
+
+  it('says why a test run was not run on 409 and 429', async () => {
+    const user = await editCheckout();
+    const panel = screen.getByRole('region', { name: 'Test run' });
+    await waitFor(() => expect(within(panel).getByRole('button', { name: 'Run once' })).toBeEnabled(), T);
+    localStorage.setItem('olympos.mock.testRun', '409');
+    await user.click(within(panel).getByRole('button', { name: 'Run once' }));
+    expect(await within(panel).findByText("Not run: The cluster's probe is not online: oke-fra-erp is offline. Pick a cluster whose probe is online.", {}, T)).toBeInTheDocument();
+    localStorage.setItem('olympos.mock.testRun', '429');
+    await user.click(within(panel).getByRole('button', { name: 'Run once' }));
+    expect(await within(panel).findByText('Not run: At most 6 test runs a minute; wait a moment.', {}, T)).toBeInTheDocument();
+    expect(panel).toHaveTextContent('Test runs never send alerts.');
+  });
+
+  it('shows the taint rule on the URL, the header row and the body, naming the credential', async () => {
+    const user = await editCheckout();
+    await user.click(screen.getByRole('button', { name: 'Edit step 4' }));
+    // ${item} comes from step 3 (catalog-monitor, bound to *.prod.wrw.com); send it to search.wrw.com
+    await setUrl(user, 4, 'https://search.wrw.com/items/${item}');
+    await user.selectOptions(screen.getByLabelText('Step 4 method'), 'POST');
+    await user.click(screen.getByRole('button', { name: '+ Add header' }));
+    const rows = screen.getAllByLabelText(/^Step 4 header \d+ name$/);
+    await user.type(rows[rows.length - 1], 'X-Item');
+    await user.type(screen.getAllByLabelText(/^Step 4 header \d+ value$/).at(-1)!, '$' + '{{item}');
+    const body = screen.getByLabelText('Body');
+    await user.type(body, '{{"id":"$' + '{{item}"}');
+    // the step's own credential is bound to *.prod.wrw.com: take it off
+    await user.selectOptions(screen.getAllByLabelText('Auth').at(-1)!, '');
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    const msg = "comes from a step that uses credential catalog-monitor, so it may only be sent to that credential's bound hosts";
+    await waitFor(() => expect(screen.getByLabelText('Step 4 URL')).toHaveAttribute('aria-invalid', 'true'), T);
+    const value = screen.getAllByLabelText(/^Step 4 header \d+ value$/).at(-1)!;
+    expect(value).toHaveAttribute('aria-invalid', 'true');
+    expect(document.getElementById(value.getAttribute('aria-describedby')!)).toHaveTextContent('${item} ' + msg);
+    expect(body).toHaveAttribute('aria-invalid', 'true');
+    expect(document.getElementById(body.getAttribute('aria-describedby')!)).toHaveTextContent('${item} ' + msg);
+    expect(screen.getByText(/Check the highlighted fields/)).toBeInTheDocument();
+    // the mock follows spec.ValidateTaint: on a bound host the same variable is fine
+    await setUrl(user, 4, 'https://api.prod.wrw.com/v1/items/${item}');
+    expect(screen.getByLabelText('Step 4 URL')).not.toHaveAttribute('aria-invalid');
+  });
+
+  it('keeps an error on its step when the steps are reordered', async () => {
+    const user = await editCheckout();
+    await user.click(screen.getByRole('button', { name: 'Edit step 3' }));
+    await setUrl(user, 3, 'https://api.other.io/v1');
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    await waitFor(() => expect(screen.getByLabelText('Step 3 URL')).toHaveAttribute('aria-invalid', 'true'), T);
+    await user.click(screen.getByRole('button', { name: 'Move step 3 up' }));
+    expect(screen.getByLabelText('Step 2 URL')).toHaveAttribute('aria-invalid', 'true');
+    expect(screen.getByLabelText('Step 2 URL')).toHaveValue('https://api.other.io/v1');
+    expect(screen.getByRole('button', { name: 'Edit step 3' }).closest('li')).not.toHaveClass('failed');
+  });
+
+  it('sends a scenario back with its headers and credential, and leaves enabled out unless changed', async () => {
+    const user = await editCheckout();
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    await screen.findByRole('heading', { name: 'Alert rule' }, T);
+    const body = syn.lastPut.body as Record<string, unknown> & { steps: ScenarioStep[] };
+    expect('enabled' in body).toBe(false);
+    expect('store_responses' in body).toBe(false);
+    const s = checkout();
+    expect(s.steps[2].http?.headers).toEqual({ Accept: 'application/json' });
+    expect(s.steps[2].credential_id).toBe(syn.credentials[0].id);
+    expect(s.steps[3].credential?.name).toBe('catalog-monitor');
+  });
+
+  it('turns response excerpts off, and says what that means', async () => {
+    const user = await editCheckout();
+    const box = screen.getByRole('checkbox', { name: 'Store response excerpts' });
+    expect(box).toBeChecked();
+    await user.click(box);
+    expect(screen.getByText(/Off: no response excerpts or response text are kept for this scenario\. A privacy control/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    await screen.findByRole('heading', { name: 'Alert rule' }, T);
+    expect((syn.lastPut.body as { store_responses?: boolean }).store_responses).toBe(false);
+    expect(checkout().store_responses).toBe(false);
+    checkout().store_responses = true;
+  });
+
+  it('warns and refuses a save over the per-cluster cap', async () => {
+    const user = await editCheckout();
+    await user.click(screen.getByRole('button', { name: '30 s' }));
+    expect(await screen.findByText('Over the cap of 600 requests per minute per cluster on eks-fra-data (608/min).', {}, T)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    expect(await screen.findByText('Over the cap of 600 requests per minute per cluster on eks-fra-data (608/min). Run it less often, retry less, or pause other scenarios there.', {}, T)).toBeInTheDocument();
+  });
+
+  it('tells a scoped synthetic-editor what scope all clusters needs', async () => {
+    localStorage.setItem('olympos.mock.role', 'scoped');
+    // a scenario on all clusters is not theirs to edit
+    await renderApp(`/monitoring/editor?scenario=${checkout().id}`);
+    expect(await screen.findByText(/You cannot edit this scenario: it runs on clusters outside your synthetic-editor scope/, {}, T)).toBeInTheDocument();
+    cleanup();
+    const user = await editCheckout('/monitoring/editor');
+    expect(screen.getByRole('radio', { name: /All clusters/ }).closest('label')).toHaveTextContent('Needs the synthetic-editor role with scope all');
+    await user.type(screen.getByLabelText('Name'), 'Staging health');
+    await setUrl(user, 1, 'https://api.prod.wrw.com/healthz');
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    expect(await screen.findByText('A scenario that runs on all clusters needs the synthetic-editor role with scope all. Choose clusters matching labels in your scope.', {}, T)).toBeInTheDocument();
+    await user.click(screen.getByRole('radio', { name: /Clusters matching labels/ }));
+    await user.type(screen.getByLabelText('Cluster labels'), 'env=staging');
+    await user.click(screen.getByRole('button', { name: 'Save scenario' }));
+    await screen.findByRole('heading', { name: /Staging health/ }, T);
+    syn.scenarios.splice(syn.scenarios.findIndex((s) => s.name === 'Staging health'), 1);
+  });
+
+  it('shows an error where the credentials could not be loaded', async () => {
+    localStorage.setItem('olympos.mock.credentials', 'fail');
+    try {
+      const user = await editCheckout();
+      await user.click(screen.getByRole('button', { name: 'Edit step 3' }));
+      expect(await screen.findByText(/Could not load the credentials/, {}, T)).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem('olympos.mock.credentials');
+    }
+  });
+});
+
+describe('delete scenario', () => {
+  it('asks for the name, says what goes with it, and deletes', async () => {
+    const extra = { ...checkout(), id: 'aaaaaaaa-0000-4000-8000-000000000002', name: 'Old probe check' };
+    syn.scenarios.push(extra);
+    const user = userEvent.setup();
+    await renderApp(detailOf('Old probe check'));
+    await user.click(await screen.findByRole('button', { name: 'Delete' }, T));
+    const dlg = screen.getByRole('dialog', { name: 'Delete Old probe check?' });
+    expect(dlg).toHaveTextContent('Its runs and its alert history are deleted with it; this cannot be undone.');
+    const go = within(dlg).getByRole('button', { name: 'Delete scenario' });
+    expect(go).toBeDisabled();
+    await user.type(within(dlg).getByLabelText(/Type Old probe check to confirm/), 'Old probe chec');
+    expect(go).toBeDisabled();
+    await user.type(within(dlg).getByLabelText(/Type Old probe check to confirm/), 'k');
+    await user.click(go);
+    await screen.findByRole('table', { name: 'Scenarios by cluster' }, T);
+    expect(syn.scenarios.some((s) => s.id === extra.id)).toBe(false);
+    await waitFor(() => expect(screen.queryByRole('link', { name: 'Old probe check' })).toBeNull(), T);
+  });
+
+  it('is not offered to a viewer', async () => {
+    localStorage.setItem('olympos.mock.role', 'viewer');
+    await renderApp(detailOf('Checkout API flow'));
+    await screen.findByRole('region', { name: 'Steps' }, T);
+    expect(screen.queryByRole('button', { name: 'Delete' })).toBeNull();
+  });
+});
+
 describe('toCurl', () => {
   const step = (p: Partial<ScenarioStep> = {}, headers: Record<string, string> | null = { Accept: 'application/json' }): ScenarioStep => ({
     kind: 'http',
@@ -320,9 +497,12 @@ describe('toCurl', () => {
   });
   it('puts $TOKEN, $USERNAME and $PASSWORD where the credential goes', () => {
     const ref = (kind: string, header_name = '') => ({ id: 'c', name: 'n', kind, header_name });
-    expect(toCurl(step({ credential: ref('bearer') }))).toBe(`curl 'https://api.prod.wrw.com/v1/items/\${item}' -H 'Accept: application/json' -H "Authorization: Bearer $TOKEN"`);
-    expect(toCurl(step(), ref('oauth2_client_credentials'))).toContain(`-H "Authorization: Bearer $TOKEN"`);
-    expect(toCurl(step(), ref('header', 'X-Api-Key'))).toContain(`-H "X-Api-Key: $TOKEN"`);
+    expect(toCurl(step({ credential: ref('bearer') }))).toBe(`curl 'https://api.prod.wrw.com/v1/items/\${item}' -H 'Accept: application/json' -H 'Authorization: Bearer '"$TOKEN"`);
+    expect(toCurl(step(), ref('oauth2_client_credentials'))).toContain(`-H 'Authorization: Bearer '"$TOKEN"`);
+    expect(toCurl(step(), ref('header', 'X-Api-Key'))).toContain(`-H 'X-Api-Key: '"$TOKEN"`);
+    // the header name is single-quoted: a backtick or $ in it never runs or expands; only $TOKEN does
+    expect(toCurl(step({}, {}), ref('header', 'X-`id`$HOME'))).toBe(`curl 'https://api.prod.wrw.com/v1/items/\${item}' -H 'X-\`id\`$HOME: '"$TOKEN"`);
+    expect(toCurl(step({}, {}), ref('header', "X-it's"))).toContain(`-H 'X-it'\\''s: '"$TOKEN"`);
     expect(toCurl(step(), ref('basic'))).toContain(`-u "$USERNAME:$PASSWORD"`);
     // a header of the same name in the step never wins over the variable
     const c = toCurl(step({}, { authorization: 'Bearer literal' }), ref('bearer'));
@@ -334,6 +514,22 @@ describe('toCurl', () => {
     expect(toCurl(post)).toBe(`curl -X POST -L --max-redirs 5 'https://x.wrw.com/q?a=1&b='\\''2'\\''' -H 'X-Trace: it'\\''s' -H 'Content-Type: application/json' --data-raw '{"q":1}'`);
     expect(toCurl(step({ http: { method: 'HEAD', url: 'https://x.wrw.com/', headers: null, body: null } }))).toBe(`curl --head 'https://x.wrw.com/'`);
     expect(toCurl({ kind: 'dns', dns: { name: 'x', record_type: 'A' }, assertions: [], extracts: [] })).toBe('');
+  });
+});
+
+describe('helpers', () => {
+  it('names credentials by name in a message that holds their id', () => {
+    const id = syn.credentials[0].id;
+    expect(withCredentialNames(`\${item} comes from a step that uses credential ${id}, so …`, syn.credentials)).toBe('${item} comes from a step that uses credential catalog-monitor, so …');
+    expect(withCredentialNames('credential 00000000-0000-4000-8000-000000000000', syn.credentials)).toBe('credential 00000000-0000-4000-8000-000000000000');
+  });
+  it('stops polling a run at its deadline', () => {
+    const running = { status: 'running' } as Parameters<typeof shouldPoll>[0];
+    expect(shouldPoll(running, 1000, 2000)).toBe(true);
+    expect(shouldPoll(running, 2000, 2000)).toBe(false);
+    expect(shouldPoll({ status: 'passed' } as Parameters<typeof shouldPoll>[0], 0, 2000)).toBe(false);
+    expect(shouldPoll(running, 1e12)).toBe(true);
+    expect(POLL_MARGIN_MS).toBeGreaterThan(0);
   });
 });
 
