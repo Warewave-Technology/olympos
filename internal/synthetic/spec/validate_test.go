@@ -2,6 +2,7 @@ package spec
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 
@@ -476,5 +477,25 @@ func TestScenarioJSON(t *testing.T) {
 	wantValid(t, &back)
 	if *back.Steps[1].CredentialID != id || back.Steps[4].TLS.SNI != "edge.wrw.com" {
 		t.Fatalf("round trip lost fields: %+v", back)
+	}
+}
+
+// One list of the headers a header credential may not name, used by the
+// server when the credential is saved and by the probe when it sends it.
+func TestReservedCredentialHeaders(t *testing.T) {
+	want := []string{"Accept-Encoding", "Connection", "Content-Length", "Content-Type", "Cookie", "Host", "If-Range",
+		"Keep-Alive", "Proxy-Connection", "Range", "Te", "Trailer", "Transfer-Encoding", "Upgrade"}
+	if got := ReservedCredentialHeaders(); !slices.Equal(got, want) {
+		t.Fatalf("reserved credential headers = %v, want %v", got, want)
+	}
+	for _, h := range []string{"range", "TE", "accept-encoding", "content-type", "COOKIE", "if-range"} {
+		if !ReservedCredentialHeader(h) {
+			t.Errorf("%s not reserved", h)
+		}
+	}
+	for _, h := range []string{"X-Api-Key", "Authorization", "X-Range"} {
+		if ReservedCredentialHeader(h) {
+			t.Errorf("%s reserved", h)
+		}
 	}
 }

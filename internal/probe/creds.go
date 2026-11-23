@@ -26,13 +26,6 @@ import (
 // credential's bound hosts never carries them.
 var credentialHeaders = []string{"Authorization", "Proxy-Authorization", "Cookie"}
 
-// Header names a credential of kind "header" may not use.
-var reservedCredHeaders = map[string]bool{
-	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true,
-	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
-	"Content-Type": true,
-}
-
 // maxTokenResponse is how much of an OAuth2 token response is read.
 const maxTokenResponse = 64 << 10
 
@@ -423,7 +416,7 @@ func (c *credential) headerValue(ctx context.Context, r *Runner, cs *credSet) (s
 		return "Authorization", v, nil
 	case spec.CredHeader:
 		s := c.c.Secret.Bytes()
-		if !validHeaderName(c.header) || reservedCredHeaders[c.header] {
+		if !validHeaderName(c.header) || spec.ReservedCredentialHeader(c.header) {
 			return "", "", errorf(CodeCredentialError, "header name %q cannot carry a credential", c.c.HeaderName)
 		}
 		if len(s) == 0 || !validHeaderBytes(s) {

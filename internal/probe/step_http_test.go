@@ -595,3 +595,23 @@ func TestExtractMissingFails(t *testing.T) {
 
 // rule is an exact allowlist rule.
 func rule(host string) hostallow.Rule { return hostallow.Rule{Pattern: host, Kind: hostallow.Exact} }
+
+// A header credential that names a reserved header is never sent (the
+// server refuses it at save; spec.ReservedCredentialHeader is the one
+// list): the step ends credential_error before any request.
+func TestReservedCredentialHeaderRefused(t *testing.T) {
+	for _, name := range []string{"Range", "accept-encoding", "If-Range", "Content-Type", "TE"} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			srv := &headerRecorder{}
+			e.host("api.example.test", "203.0.113.10", server(t, srv))
+			cred := spec.RunCredential{ID: uuid.New(), Kind: spec.CredHeader, BoundHosts: []string{"exact:api.example.test"},
+				HeaderName: name, Secret: secret("CANARY-reserved-1")}
+			res := e.run(scenario(withCred(httpStep("http://api.example.test/"), cred)), cred)
+			wantCode(t, res, 0, CodeCredentialError)
+			if len(srv.requests()) != 0 {
+				t.Fatal("request sent")
+			}
+		})
+	}
+}

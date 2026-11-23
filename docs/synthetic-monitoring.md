@@ -163,6 +163,9 @@ back.
   runs that use it end *error* (`credential_expired`). To rotate, open the credential, tick **Rotate the
   secret** and enter the new one; otherwise the current secret is kept.
 - A credential that a scenario still uses cannot be deleted: *409*, with the scenarios.
+- A header credential cannot name `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Cookie`,
+  `Upgrade`, `TE`, `Trailer`, `Keep-Alive`, `Proxy-Connection`, `Content-Type`, `Accept-Encoding`, `Range` or
+  `If-Range`: the probe never sends a credential in these headers, so saving one is refused.
 
 ### Where values from a credentialed step may go
 

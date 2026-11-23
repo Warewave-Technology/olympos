@@ -542,11 +542,6 @@ func (v *validCredential) boundStrings() []string {
 	return out
 }
 
-// Headers a header credential may not set.
-var reservedCredentialHeaders = map[string]bool{
-	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true, "Cookie": true,
-}
-
 // validateCredential checks the metadata of a credential (not its secret)
 // against the allowlist l: each bound host within the allowlist; an OAuth2
 // token URL https, allowlisted and inside the bound hosts (ruling P2).
@@ -593,7 +588,7 @@ func validateCredential(in *credentialInput, l hostallow.List, fields map[string
 			fields["header_name"] = "required for a header credential"
 		case !httpguts.ValidHeaderFieldName(v.header):
 			fields["header_name"] = "not a valid header name"
-		case reservedCredentialHeaders[canon]:
+		case spec.ReservedCredentialHeader(canon):
 			fields["header_name"] = canon + " cannot carry a credential"
 		}
 	} else if v.header != "" {

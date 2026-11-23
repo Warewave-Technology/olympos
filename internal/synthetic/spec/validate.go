@@ -54,6 +54,31 @@ var reservedHeaders = map[string]bool{
 	"Accept-Encoding": true, "Range": true, "If-Range": true,
 }
 
+// reservedCredentialHeaders are the headers a header credential may not
+// name: the step's own reserved headers (the transport's, Host,
+// Accept-Encoding, Range and If-Range), Cookie (the probe strips it from
+// requests outside a credential's bound hosts and redacts it from reports
+// as a credential of its own) and Content-Type (the step's body decides
+// it). The server refuses such a credential when it is saved, and the
+// probe refuses to send one: it could never be sent.
+var reservedCredentialHeaders = map[string]bool{
+	"Host": true, "Content-Length": true, "Transfer-Encoding": true, "Connection": true, "Cookie": true,
+	"Upgrade": true, "Te": true, "Trailer": true, "Keep-Alive": true, "Proxy-Connection": true,
+	"Content-Type": true, "Accept-Encoding": true, "Range": true, "If-Range": true,
+}
+
+// ReservedCredentialHeader reports whether a header credential may not use
+// header name, in any case.
+func ReservedCredentialHeader(name string) bool {
+	return reservedCredentialHeaders[textproto.CanonicalMIMEHeaderKey(name)]
+}
+
+// ReservedCredentialHeaders lists the headers a header credential may not
+// name, in canonical form and sorted.
+func ReservedCredentialHeaders() []string {
+	return slices.Sorted(maps.Keys(reservedCredentialHeaders))
+}
+
 // subject classes: which operators apply and what Value holds.
 type subjectClass int
 

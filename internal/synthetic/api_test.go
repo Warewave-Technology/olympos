@@ -338,6 +338,22 @@ func TestCredentialsAndHiddenHeaders(t *testing.T) {
 		}
 	}
 	x.addCredential(admin, oauth("https://auth.prod.wrw.com/token"))
+	// A header credential that the probe would never send is refused when
+	// saved: the server and the probe share spec.ReservedCredentialHeader.
+	header := func(name string) map[string]any {
+		return map[string]any{"name": "h-" + name, "kind": "header", "header_name": name,
+			"bound_hosts": []map[string]any{{"kind": "wildcard", "pattern": "*.prod.wrw.com"}},
+			"secret":      map[string]any{"source": "stored", "password": canary}}
+	}
+	for _, name := range spec.ReservedCredentialHeaders() {
+		for _, spelled := range []string{name, strings.ToLower(name)} {
+			e = errBody{}
+			if code := admin.Do("POST", "/api/v1/synthetic/credentials", header(spelled), &e); code != 422 || !strings.Contains(e.Fields["header_name"], "cannot carry a credential") {
+				t.Fatalf("header credential %s: %d %v", spelled, code, e.Fields)
+			}
+		}
+	}
+	x.addCredential(admin, header("X-Api-Key"))
 	// Only admins write credentials.
 	if code := editor.Do("POST", "/api/v1/synthetic/credentials", bearer("c", canary, "wildcard:*.prod.wrw.com"), nil); code != 403 {
 		t.Fatalf("editor creates a credential: %d", code)

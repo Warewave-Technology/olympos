@@ -2752,7 +2752,7 @@ components:
             Required on create; on update it rotates the secret. password is the token, password or client
             secret. username: the login (basic) or the client id (oauth2_client_credentials); none for bearer and
             header.
-        header_name: {type: string, example: X-Api-Key, description: header credentials only}
+        header_name: {type: string, example: X-Api-Key, description: "Header credentials only. Not Host, Content-Length, Transfer-Encoding, Connection, Cookie, Upgrade, TE, Trailer, Keep-Alive, Proxy-Connection, Content-Type, Accept-Encoding, Range or If-Range (422)."}
         oauth_token_url: {type: string, description: "oauth2_client_credentials only: https, allowlisted, inside bound_hosts"}
         oauth_scopes: {type: string}
         expires_at: {type: [string, "null"], format: date-time, description: "In the future (create and update); null for none. synthetic.credential_expiring fires 14 and 3 days before"}

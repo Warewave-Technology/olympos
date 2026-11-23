@@ -649,6 +649,9 @@ export function editRefusal(t: Targeting): string {
 }
 const refused = (msg: string): MockRes => ({ status: 403, body: { error: msg } });
 
+/** Headers a header credential may not name (spec.ReservedCredentialHeader on the server and the probe). */
+const RESERVED_CREDENTIAL_HEADERS = ['accept-encoding', 'connection', 'content-length', 'content-type', 'cookie', 'host', 'if-range', 'keep-alive', 'proxy-connection', 'range', 'te', 'trailer', 'transfer-encoding', 'upgrade'];
+
 /** Accepted test runs per minute (the API's per-user limit). localStorage olympos.mock.testRun = 409 | 429 forces that answer. */
 const testRunTimes: number[] = [];
 export const TEST_RUNS_PER_MINUTE = 6;
@@ -843,7 +846,7 @@ function validateCredential(b: SyntheticCredentialInput, prev: SyntheticCredenti
   if (b.kind === 'header') {
     if (!header) f.header_name = 'required for a header credential';
     else if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/.test(header)) f.header_name = 'not a valid header name';
-    else if (['host', 'content-length', 'transfer-encoding', 'connection', 'cookie'].includes(header.toLowerCase())) f.header_name = `${header} cannot carry a credential`;
+    else if (RESERVED_CREDENTIAL_HEADERS.includes(header.toLowerCase())) f.header_name = `${header} cannot carry a credential`;
   } else if (header) f.header_name = 'only a header credential names its header';
   if (b.kind === 'oauth2_client_credentials') {
     const raw = (b.oauth_token_url ?? '').trim();
