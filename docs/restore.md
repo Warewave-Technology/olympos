@@ -103,6 +103,20 @@ the same target is refused until it ends. A server runs at most two restores at 
 count against the target cluster's `backup.perClusterConcurrency` together with its backups. There are no
 retries: a failed restore is a new request (often with another target or credential).
 
+**When the server stops during a restore.** A restore whose server cannot finish it fails, and the error
+says that part of the data may have been written. The databases created so far are listed: check the
+target and drop them before you open a new request.
+
+- `interrupted: server stopped during the restore`: the server shut down while it restored.
+- `interrupted: the server running the restore stopped or lost contact with Olympos' database`: the
+  request showed no progress for 5 minutes and was not running on any server, so a server (another
+  replica, or this one after a restart) failed it and freed the target.
+- `stopped: this server lost contact with Olympos' database for <duration>`: the server could not write the
+  restore's progress for 4 minutes and stopped the restore itself. After 5 minutes another replica may fail
+  the request and free the target, so the server stops writing to the target before that. A server never
+  fails a restore it is still running, and a restore whose request was failed elsewhere stops at its next
+  progress write without recording anything more.
+
 ![A PostgreSQL restore that succeeded](images/restore-03-result.png)
 
 ### What a PostgreSQL restore does

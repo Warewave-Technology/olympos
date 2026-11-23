@@ -46,12 +46,20 @@ type fakeRestorer struct {
 	// block, when set, holds the restore after the first database was
 	// created until it is closed; started is closed at that point.
 	block, started chan struct{}
+	// stopped is set when the restore's context ended it while it was held.
+	stopped bool
 }
 
 func (f *fakeRestorer) reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls, f.block, f.started = nil, nil, nil
+	f.calls, f.block, f.started, f.stopped = nil, nil, nil, false
+}
+
+func (f *fakeRestorer) wasStopped() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.stopped
 }
 
 func (f *fakeRestorer) callCount() int {
@@ -100,6 +108,9 @@ func (f *fakeRestorer) Restore(ctx context.Context, rc backup.RestoreContext) (*
 			select {
 			case <-block:
 			case <-ctx.Done():
+				f.mu.Lock()
+				f.stopped = true
+				f.mu.Unlock()
 				return res, ctx.Err()
 			}
 		}
@@ -429,7 +440,8 @@ func TestReapStale(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := x.stored(id)
-	if s.Status != restore.StatusFailed || !strings.HasPrefix(s.Error, "interrupted: server stopped during the restore") ||
+	if s.Status != restore.StatusFailed || !strings.HasPrefix(s.Error, "interrupted: the server running the restore stopped or lost contact") ||
+		!strings.Contains(s.Error, "part of the data may have been written") ||
 		!strings.Contains(s.Error, "shop, billing") || strings.Join(s.Result.Created, ",") != "shop,billing" || s.FinishedAt == nil {
 		t.Fatalf("reaped: %+v", s)
 	}
@@ -672,4 +684,128 @@ func TestExecuteManifestMismatch(t *testing.T) {
 		t.Fatal("the target was contacted")
 	}
 	x.wiped(id)
+}
+
+// holdRestore makes the fake PostgreSQL restorer wait after it created the
+// first database; it returns the channel that releases it and the one
+// closed when it waits.
+func holdRestore() (block, started chan struct{}) {
+	pgRestorer.mu.Lock()
+	defer pgRestorer.mu.Unlock()
+	pgRestorer.block, pgRestorer.started = make(chan struct{}), make(chan struct{})
+	return pgRestorer.block, pgRestorer.started
+}
+
+// The reaper never fails a request this replica executes, however old its
+// last progress write: a replica that lost its database for a while must
+// not fail its own live restore (and free the target) when the database is
+// back. Another replica's reaper, which does not run it, does.
+func TestReapStaleSkipsInFlight(t *testing.T) {
+	x := newXEnv(t)
+	id := x.approved(x.pgTarget)
+	x.claim(id)
+	x.ex.StaleAfter = 100 * time.Millisecond
+	time.Sleep(250 * time.Millisecond)
+	done := restore.MarkInFlightForTest(x.ex, id)
+	if err := x.ex.ReapStale(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s := x.stored(id); s.Status != restore.StatusRunning {
+		t.Fatalf("an in-flight request was reaped: %+v", s)
+	}
+	other := &restore.Executor{DB: x.DB, Log: x.Log, StaleAfter: 100 * time.Millisecond}
+	if err := other.ReapStale(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if s := x.stored(id); s.Status != restore.StatusFailed || !strings.HasPrefix(s.Error, "interrupted:") {
+		t.Fatalf("another replica did not reap it: %+v", s)
+	}
+	done()
+}
+
+// A progress write that finds the request no longer running (another
+// server reaped it) stops the restore at once, and the other server's
+// terminal state stands: no second outcome, event or audit row.
+func TestLostOwnershipStopsRestore(t *testing.T) {
+	x := newXEnv(t)
+	id := x.approved(x.pgTarget)
+	_, started := holdRestore()
+	x.claim(id)
+	done := make(chan struct{})
+	go func() { x.ex.Execute(context.Background(), id); close(done) }()
+	<-started
+	x.exec(`UPDATE restore_requests SET status = 'failed', error = 'reaped elsewhere', finished_at = now() WHERE id = $1`, id)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restore kept running after its request ended elsewhere")
+	}
+	if !pgRestorer.wasStopped() {
+		t.Fatal("the restorer was not stopped")
+	}
+	if s := x.stored(id); s.Status != restore.StatusFailed || s.Error != "reaped elsewhere" {
+		t.Fatalf("the other server's outcome was overwritten: %+v", s)
+	}
+	if ev := x.eventTypes(id); strings.Join(ev, ",") != "restore.requested,restore.approved,restore.started" {
+		t.Fatalf("events: %v", ev)
+	}
+	if a := x.actions(id); strings.Contains(strings.Join(a, ","), "restore.failed") || strings.Contains(strings.Join(a, ","), "restore.succeeded") {
+		t.Fatalf("audit: %v", a)
+	}
+}
+
+// A restore whose progress cannot be written (here: the row is locked, as
+// if the database did not answer) stops itself once the lease, StaleAfter
+// less LeaseMargin, has passed, before another replica may reap it, and
+// says so; the databases it created are listed.
+func TestLeaseStopsRestore(t *testing.T) {
+	x := newXEnv(t)
+	x.ex.StaleAfter, x.ex.LeaseMargin = time.Second, 200*time.Millisecond
+	id := x.approved(x.pgTarget)
+	_, started := holdRestore()
+	x.claim(id)
+	done := make(chan struct{})
+	go func() { x.ex.Execute(context.Background(), id); close(done) }()
+	<-started
+
+	ctx := context.Background()
+	tx, err := x.DB.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT 1 FROM restore_requests WHERE id = $1 FOR UPDATE`, id); err != nil {
+		t.Fatal(err)
+	}
+	locked := time.Now()
+	time.Sleep(300 * time.Millisecond)
+	if pgRestorer.wasStopped() {
+		t.Fatal("the restore stopped before its lease ended")
+	}
+	for !pgRestorer.wasStopped() {
+		if time.Since(locked) > 5*time.Second {
+			t.Fatal("the restore was not stopped after its lease")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if el := time.Since(locked); el >= time.Second {
+		t.Fatalf("stopped after %s, not before StaleAfter", el)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Execute did not return")
+	}
+	s := x.stored(id)
+	if s.Status != restore.StatusFailed || !strings.HasPrefix(s.Error, "stopped: this server lost contact with Olympos' database for ") ||
+		!strings.Contains(s.Error, "part of the data may have been written to the target") || !strings.Contains(s.Error, "left in place: shop") {
+		t.Fatalf("after the lease: %+v", s)
+	}
+	x.wiped(id)
+	if ev := x.eventTypes(id); ev[len(ev)-1] != "restore.failed" {
+		t.Fatalf("events: %v", ev)
+	}
 }

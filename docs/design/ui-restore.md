@@ -266,7 +266,12 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
 - The backup worker (same claim loop and per-cluster limits) also claims `approved` restore requests whose
   target's agent is connected here; it sets `running`, heartbeats `progress`, and finishes with
   `succeeded`/`failed`, `result`, `error`. A request left `running` by a stopped replica is failed by the
-  stale-run reaper (as backups), with the databases it created listed.
+  stale-run reaper (as backups), with the databases it created listed. The reaper skips the requests its
+  own replica is executing. The executor holds a lease on the request: a progress write that finds the
+  request no longer `running` stops the restore at once and records nothing over the other server's
+  outcome, and a restore with no successful progress write for `StaleAfter` less a margin (4 of 5 minutes)
+  stops itself, because another replica may reap it after `StaleAfter`. Its error says that the server lost
+  contact with its database and that part of the data may have been written.
 - No retries: a failed restore is a new request (it may need a different target or credential).
 
 ### API, UI, notifications

@@ -50,18 +50,76 @@ type Executor struct {
 	ProgressEvery time.Duration
 	// InspectTimeout bounds the start-time check of the target (default 60 s).
 	InspectTimeout time.Duration
-	Now            func() time.Time
+	// LeaseMargin is how long before StaleAfter a restore whose progress
+	// could not be written stops itself (default StaleAfter/5): after
+	// StaleAfter another replica may fail it, and the target must not be
+	// written to once that happened.
+	LeaseMargin time.Duration
+	Now         func() time.Time
+
+	// running holds the requests this replica executes: ReapStale never
+	// fails them, whatever their last progress write.
+	runningMu sync.Mutex
+	running   map[uuid.UUID]struct{}
 }
 
 // Error texts of interrupted restores.
 const (
-	reapedMessage      = "interrupted: server stopped during the restore"
-	interruptedMessage = reapedMessage
+	// reapedMessage: the request was running without a progress write for
+	// StaleAfter, on no server's list of restores in flight.
+	reapedMessage = "interrupted: the server running the restore stopped or lost contact with Olympos' database; " +
+		"part of the data may have been written to the target, check it"
+	// interruptedMessage: the server shut down during the restore.
+	interruptedMessage = "interrupted: server stopped during the restore; part of the data may have been written to the target, check it"
 )
+
+// leaseMessage is the error of a restore that stopped itself because its
+// progress could not be written for d.
+func leaseMessage(d time.Duration) string {
+	return fmt.Sprintf("stopped: this server lost contact with Olympos' database for %s, so it stopped the restore before "+
+		"another server could fail it; part of the data may have been written to the target, check it", d.Round(time.Second))
+}
+
+// errLostOwnership cancels a restore whose request is no longer running
+// (another server failed it): it must stop writing to the target.
+var errLostOwnership = errors.New("the restore request ended elsewhere")
+
+// leaseExpired cancels a restore whose progress could not be written for
+// longer than the lease.
+type leaseExpired struct{ since time.Duration }
+
+func (e *leaseExpired) Error() string { return "no progress written for " + e.since.String() }
+
+func (x *Executor) track(id uuid.UUID) {
+	x.runningMu.Lock()
+	defer x.runningMu.Unlock()
+	if x.running == nil {
+		x.running = map[uuid.UUID]struct{}{}
+	}
+	x.running[id] = struct{}{}
+}
+
+func (x *Executor) untrack(id uuid.UUID) {
+	x.runningMu.Lock()
+	defer x.runningMu.Unlock()
+	delete(x.running, id)
+}
+
+// inFlight lists the requests this replica executes (never nil).
+func (x *Executor) inFlight() []uuid.UUID {
+	x.runningMu.Lock()
+	defer x.runningMu.Unlock()
+	out := make([]uuid.UUID, 0, len(x.running))
+	for id := range x.running {
+		out = append(out, id)
+	}
+	return out
+}
 
 // Run claims and executes approved requests until ctx is done, then waits
 // for the restores in flight (they are interrupted by ctx and recorded as
-// failed). It also reaps requests left running by a stopped replica.
+// failed). It also reaps requests left running by a stopped replica (never
+// the ones it executes itself).
 func (x *Executor) Run(ctx context.Context) {
 	global, _ := x.limits()
 	poll := x.Poll
@@ -108,6 +166,8 @@ func (x *Executor) Run(ctx context.Context) {
 			continue
 		}
 		inflight++
+		// On the list of restores in flight before the next reap.
+		x.track(id)
 		go func() {
 			defer func() { <-sem; done <- struct{}{} }()
 			x.Execute(ctx, id)
@@ -156,7 +216,19 @@ func (x *Executor) load(ctx context.Context, id uuid.UUID) (*job, error) {
 // check over the tunnel (reads only), then the engine's Restorer. It
 // records succeeded or failed with the result and wipes the request's
 // secrets. A request that is not running (reaped meanwhile) is left alone.
+//
+// While it runs, the request is on this replica's list of restores in
+// flight (ReapStale skips it), and it holds a lease on the request: a
+// progress write that finds the request no longer running stops the
+// restore at once and records nothing (another server ended it), and a
+// restore whose progress could not be written for StaleAfter less
+// LeaseMargin stops itself, because another replica may fail it then.
 func (x *Executor) Execute(ctx context.Context, id uuid.UUID) {
+	x.track(id)
+	defer x.untrack(id)
+	pctx, stop := context.WithCancelCause(ctx)
+	defer stop(nil)
+	pw := newProgressWriter(x, id, stop)
 	j, err := x.load(ctx, id)
 	if err != nil {
 		x.Log.Error("load restore request", "restore_id", id, "err", err.Error())
@@ -166,19 +238,32 @@ func (x *Executor) Execute(ctx context.Context, id uuid.UUID) {
 		x.Log.Info("restore request not running; not executed", "restore_id", id, "status", string(j.status))
 		return
 	}
-	pw := newProgressWriter(x, id)
-	hbCtx, stopHB := context.WithCancel(ctx)
-	hbDone := make(chan struct{})
-	go func() { pw.run(hbCtx); close(hbDone) }()
-	res, msg := x.perform(ctx, j, pw)
+	hbCtx, stopHB := context.WithCancel(pctx)
+	hbDone := make(chan struct{}, 2)
+	go func() { pw.run(hbCtx); hbDone <- struct{}{} }()
+	go func() { pw.watchLease(hbCtx); hbDone <- struct{}{} }()
+	res, msg := x.perform(pctx, j, pw)
 	stopHB()
+	<-hbDone
 	<-hbDone
 
 	fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
-	pw.flush(fctx)
+	cause := context.Cause(pctx)
+	if errors.Is(cause, errLostOwnership) || pw.flush(fctx) == writeLost {
+		// Another server ended the request (the reaper): its terminal
+		// state stands, and this outcome is only logged.
+		x.Log.Warn("restore request ended elsewhere while it ran; the restore was stopped and its outcome is not recorded",
+			"restore_id", id, "target_id", j.targetID, "outcome", msg, "created", strings.Join(union(res.Created, pw.createdSoFar()), ","))
+		return
+	}
 	res.Created = union(res.Created, pw.createdSoFar())
-	if msg != "" && ctx.Err() != nil {
+	var lease *leaseExpired
+	switch {
+	case msg == "":
+	case errors.As(cause, &lease):
+		msg = leaseMessage(lease.since)
+	case ctx.Err() != nil:
 		msg = interruptedMessage
 	}
 	st := StatusSucceeded
@@ -192,11 +277,13 @@ func (x *Executor) Execute(ctx context.Context, id uuid.UUID) {
 		return err
 	})
 	if err != nil {
-		x.Log.Error("finish restore request", "restore_id", id, "err", err.Error())
+		// The request stays running until a reaper fails it.
+		x.Log.Error("finish restore request", "restore_id", id, "err", err.Error(), "status", string(st), "outcome", msg)
 		return
 	}
 	if !finished {
-		x.Log.Warn("restore request ended elsewhere while it ran (reaped)", "restore_id", id)
+		x.Log.Warn("restore request ended elsewhere while it ran (reaped); its outcome is not recorded",
+			"restore_id", id, "status", string(st), "outcome", msg)
 		return
 	}
 	lvl := slog.LevelInfo
@@ -504,15 +591,18 @@ func shortError(s string) string {
 }
 
 // ReapStale fails running requests without a progress write for StaleAfter
-// (the replica running them stopped): the databases created so far (from
-// the last progress) are listed and stay on the target, the secrets are
-// wiped and the target is free for a new request.
+// (the replica running them stopped, or lost its database): the databases
+// created so far (from the last progress) are listed and stay on the
+// target, the secrets are wiped and the target is free for a new request.
+// The requests this replica executes are never reaped here: they write
+// again once the database is back, or stop themselves (the lease).
 func (x *Executor) ReapStale(ctx context.Context) error {
 	n := 0
 	err := store.Tx(ctx, x.DB, func(tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `SELECT id, progress FROM restore_requests
 			WHERE status = 'running' AND updated_at < now() - make_interval(secs => $1::double precision)
-			FOR UPDATE SKIP LOCKED`, x.staleAfter().Seconds())
+			AND id <> ALL($2::uuid[])
+			FOR UPDATE SKIP LOCKED`, x.staleAfter().Seconds(), x.inFlight())
 		if err != nil {
 			return err
 		}
@@ -560,16 +650,40 @@ func (x *Executor) staleAfter() time.Duration {
 	return 5 * time.Minute
 }
 
+// lease is how long a restore runs on without a progress write before it
+// stops itself: StaleAfter less LeaseMargin (default a fifth of it).
+func (x *Executor) lease() time.Duration {
+	stale := x.staleAfter()
+	margin := x.LeaseMargin
+	if margin <= 0 || margin >= stale {
+		margin = stale / 5
+	}
+	return stale - margin
+}
+
+func (x *Executor) heartbeat() time.Duration {
+	if x.Heartbeat > 0 {
+		return x.Heartbeat
+	}
+	return 30 * time.Second
+}
+
 // ---------------------------------------------------------------- progress
 
 // progressWriter keeps a request's latest progress and writes it: at most
 // every ProgressEvery, at least every Heartbeat (the heartbeat the reaper
 // looks for), and at once when a database was created, so that a stopped
 // server still lists it. Bytes and Total are the executor's: bytes of the
-// backup read in the current phase, of its size.
+// backup read in the current phase (each byte once, however often the
+// restorer reads it), of its size.
+//
+// It also holds the restore's lease on its request: stop cancels the
+// restore when a write finds the request no longer running, and when no
+// write succeeded for the lease (watchLease).
 type progressWriter struct {
 	x    *Executor
 	id   uuid.UUID
+	stop context.CancelCauseFunc
 	read atomic.Int64
 	kick chan struct{}
 
@@ -578,12 +692,16 @@ type progressWriter struct {
 	created []string
 	size    int64
 	last    time.Time
+	// lastOK is when the last successful write was sent: the request's
+	// updated_at is no older than that.
+	lastOK time.Time
+	seen   coverage
 
 	writeMu sync.Mutex
 }
 
-func newProgressWriter(x *Executor, id uuid.UUID) *progressWriter {
-	return &progressWriter{x: x, id: id, kick: make(chan struct{}, 1)}
+func newProgressWriter(x *Executor, id uuid.UUID, stop context.CancelCauseFunc) *progressWriter {
+	return &progressWriter{x: x, id: id, stop: stop, kick: make(chan struct{}, 1), lastOK: time.Now()}
 }
 
 func (p *progressWriter) poke() {
@@ -597,6 +715,7 @@ func (p *progressWriter) poke() {
 func (p *progressWriter) phase(name string) {
 	p.mu.Lock()
 	p.cur = backup.Progress{Phase: name}
+	p.seen = coverage{}
 	p.read.Store(0)
 	p.mu.Unlock()
 	p.poke()
@@ -606,6 +725,17 @@ func (p *progressWriter) setTotal(n int64) {
 	p.mu.Lock()
 	p.size = n
 	p.mu.Unlock()
+}
+
+// readAt counts the bytes [off, off+n) of the backup as read.
+func (p *progressWriter) readAt(off int64, n int) {
+	if n <= 0 {
+		return
+	}
+	p.mu.Lock()
+	p.read.Store(p.seen.add(off, off+int64(n)))
+	p.mu.Unlock()
+	p.poke()
 }
 
 // report is RestoreContext.Progress.
@@ -639,7 +769,19 @@ func (p *progressWriter) createdSoFar() []string {
 	return append([]string{}, p.created...)
 }
 
-func (p *progressWriter) flush(ctx context.Context) {
+// writeResult is the outcome of a progress write.
+type writeResult int
+
+const (
+	written   writeResult = iota
+	writeFail             // the database did not answer: the lease runs on
+	writeLost             // the request is no longer running
+)
+
+// flush writes the progress, within the heartbeat (at least 1 s, at most
+// 10 s) so that a database that does not answer does not hold the writer.
+// A write that finds the request no longer running stops the restore.
+func (p *progressWriter) flush(ctx context.Context) writeResult {
 	p.writeMu.Lock()
 	defer p.writeMu.Unlock()
 	p.mu.Lock()
@@ -650,23 +792,36 @@ func (p *progressWriter) flush(ctx context.Context) {
 	p.mu.Unlock()
 	b, err := json.Marshal(snap)
 	if err != nil {
-		return
+		return writeFail
 	}
-	if _, err := p.x.DB.Exec(ctx, `UPDATE restore_requests SET progress = $2 WHERE id = $1 AND status = 'running'`, p.id, b); err != nil && ctx.Err() == nil {
-		p.x.Log.Warn("restore progress", "restore_id", p.id, "err", err.Error())
+	sent := time.Now()
+	wctx, cancel := context.WithTimeout(ctx, min(max(p.x.heartbeat(), time.Second), 10*time.Second))
+	defer cancel()
+	tag, err := p.x.DB.Exec(wctx, `UPDATE restore_requests SET progress = $2 WHERE id = $1 AND status = 'running'`, p.id, b)
+	if err != nil {
+		if ctx.Err() == nil {
+			p.x.Log.Warn("restore progress", "restore_id", p.id, "err", err.Error())
+		}
+		return writeFail
 	}
+	if tag.RowsAffected() == 0 {
+		p.stop(errLostOwnership)
+		return writeLost
+	}
+	p.mu.Lock()
+	if sent.After(p.lastOK) {
+		p.lastOK = sent
+	}
+	p.mu.Unlock()
+	return written
 }
 
 func (p *progressWriter) run(ctx context.Context) {
-	hb := p.x.Heartbeat
-	if hb <= 0 {
-		hb = 30 * time.Second
-	}
 	every := p.x.ProgressEvery
 	if every <= 0 {
 		every = 2 * time.Second
 	}
-	tick := time.NewTicker(hb)
+	tick := time.NewTicker(p.x.heartbeat())
 	defer tick.Stop()
 	var timer <-chan time.Time
 	for {
@@ -691,6 +846,33 @@ func (p *progressWriter) run(ctx context.Context) {
 	}
 }
 
+// watchLease stops the restore once no progress write succeeded for the
+// lease (StaleAfter less LeaseMargin): from StaleAfter on, another replica
+// may fail the request and free the target, so this one must have stopped
+// writing to it by then. It checks every heartbeat (at most every 5 s), on
+// its own so that a write that hangs does not delay it.
+func (p *progressWriter) watchLease(ctx context.Context) {
+	lease := p.x.lease()
+	tick := time.NewTicker(min(p.x.heartbeat(), 5*time.Second))
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			p.mu.Lock()
+			since := time.Since(p.lastOK)
+			p.mu.Unlock()
+			if since > lease {
+				p.x.Log.Error("restore stopped: its progress could not be written for too long; another server may fail it",
+					"restore_id", p.id, "since", since.Round(time.Second).String())
+				p.stop(&leaseExpired{since: since})
+				return
+			}
+		}
+	}
+}
+
 func contains(ss []string, s string) bool {
 	for _, x := range ss {
 		if x == s {
@@ -698,6 +880,37 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// coverage is the set of byte ranges read so far, as sorted disjoint
+// spans: a byte read twice (the read-ahead window reads again what it
+// dropped, archive/zip reads the directory at the end first) counts once.
+type coverage struct {
+	spans [][2]int64
+	total int64
+}
+
+// add records [off, end) and returns the bytes covered.
+func (c *coverage) add(off, end int64) int64 {
+	if end <= off {
+		return c.total
+	}
+	out := make([][2]int64, 0, len(c.spans)+1)
+	i := 0
+	for ; i < len(c.spans) && c.spans[i][1] < off; i++ {
+		out = append(out, c.spans[i])
+	}
+	for ; i < len(c.spans) && c.spans[i][0] <= end; i++ {
+		off, end = min(off, c.spans[i][0]), max(end, c.spans[i][1])
+	}
+	out = append(out, [2]int64{off, end})
+	out = append(out, c.spans[i:]...)
+	c.spans = out
+	c.total = 0
+	for _, s := range c.spans {
+		c.total += s[1] - s[0]
+	}
+	return c.total
 }
 
 // countingObject counts the bytes read from the backup for the progress.
@@ -708,8 +921,7 @@ type countingObject struct {
 
 func (c *countingObject) ReadAt(b []byte, off int64) (int, error) {
 	n, err := c.Object.ReadAt(b, off)
-	c.p.read.Add(int64(n))
-	c.p.poke()
+	c.p.readAt(off, n)
 	return n, err
 }
 
