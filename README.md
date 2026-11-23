@@ -105,9 +105,14 @@ Released in v0.2 ([all roadmap issues](https://github.com/Warewave-Technology/ol
 
 Planned for v0.3:
 
+- Synthetic monitoring: scenarios that run from every cluster, with alerts ([#46](https://github.com/Warewave-Technology/olympos/issues/46))
+
+Planned for v0.4:
+
 - More than one approval for Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23))
 - S3 destinations with IAM roles instead of static keys ([#24](https://github.com/Warewave-Technology/olympos/issues/24))
 - Image scans from ACR with the server's managed identity ([#25](https://github.com/Warewave-Technology/olympos/issues/25))
+- Restore: an admin can cancel an approved request; an event when a request expires ([#42](https://github.com/Warewave-Technology/olympos/issues/42), [#43](https://github.com/Warewave-Technology/olympos/issues/43))
 
 Ideas and comments are welcome on the issues.
 
