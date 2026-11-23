@@ -51,10 +51,7 @@ func kindWord(kind string) string {
 func checkCreate(stmt, kind, db, name string) (*createStmt, error) {
 	toks, err := lexSQL(stmt)
 	if err != nil {
-		if errors.Is(err, errNonASCII) {
-			return nil, err
-		}
-		return nil, fmt.Errorf("cannot read the statement: %w", err)
+		return nil, err
 	}
 	if n := len(toks); n > 0 && toks[n-1].punct(";") {
 		toks = toks[:n-1]
@@ -242,90 +239,113 @@ var storageSettings = map[string]bool{
 	"storage_policy": true, "allow_nullable_key": true, "enable_mixed_granularity_parts": true,
 }
 
-// pureFunctions may appear in a restored table's expressions (DEFAULT,
-// MATERIALIZED, ALIAS, CODEC, TTL, INDEX, PARTITION BY, ORDER BY, ...):
-// scalar functions that read nothing but their arguments, plus the type,
-// codec, index type and engine names written with parentheses. Names are
-// compared lower case.
-var pureFunctions = func() map[string]bool {
+// pureFunctions may be called in a restored table's expressions
+// (DEFAULT, MATERIALIZED, ALIAS, TTL, PARTITION BY, ORDER BY, INDEX, ...):
+// built-in scalar functions that read nothing but their arguments, by
+// their exact names (a target's user-defined function cannot take a
+// built-in's name, so it is never called). ciFunctions are built-ins that
+// ClickHouse also accepts in any case.
+var pureFunctions = words(`
+	plus minus multiply divide intDiv intDivOrZero modulo moduloOrZero negate abs gcd lcm
+	equals notEquals less greater lessOrEquals greaterOrEquals and or not xor
+	if multiIf coalesce ifNull nullIf assumeNotNull toNullable isNull isNotNull isNaN isFinite isInfinite ifNotFinite
+	CAST accurateCast accurateCastOrNull accurateCastOrDefault
+	toString toFixedString toInt8 toInt16 toInt32 toInt64 toInt128 toInt256 toUInt8 toUInt16 toUInt32 toUInt64
+	toUInt128 toUInt256 toFloat32 toFloat64 toDecimal32 toDecimal64 toDecimal128 toDecimal256 toDate toDate32
+	toDateTime toDateTime64 toUUID toIPv4 toIPv6 toBool
+	toInt32OrZero toInt64OrZero toUInt32OrZero toUInt64OrZero toFloat64OrZero toDateOrZero toDateTimeOrZero toUUIDOrZero
+	toInt32OrNull toInt64OrNull toUInt32OrNull toUInt64OrNull toFloat64OrNull toDateOrNull toDateTimeOrNull toUUIDOrNull
+	reinterpretAsUInt64 reinterpretAsInt64 reinterpretAsString
+	now now64 today yesterday toYear toQuarter toMonth toDayOfYear toDayOfMonth toDayOfWeek toHour toMinute toSecond
+	toUnixTimestamp toStartOfYear toStartOfQuarter toStartOfMonth toStartOfWeek toMonday toStartOfDay toStartOfHour
+	toStartOfMinute toStartOfSecond toStartOfFiveMinutes toStartOfTenMinutes toStartOfFifteenMinutes toStartOfInterval
+	toYYYYMM toYYYYMMDD toYYYYMMDDhhmmss toISOWeek toISOYear toWeek toYearWeek toTimeZone
+	toRelativeDayNum toRelativeHourNum toRelativeMonthNum toRelativeWeekNum toRelativeYearNum
+	toIntervalSecond toIntervalMinute toIntervalHour toIntervalDay toIntervalWeek toIntervalMonth toIntervalQuarter toIntervalYear
+	addSeconds addMinutes addHours addDays addWeeks addMonths addQuarters addYears
+	subtractSeconds subtractMinutes subtractHours subtractDays subtractWeeks subtractMonths subtractQuarters subtractYears
+	dateDiff date_diff dateTrunc date_trunc formatDateTime parseDateTimeBestEffort parseDateTimeBestEffortOrZero
+	parseDateTimeBestEffortOrNull parseDateTime64BestEffort fromUnixTimestamp fromUnixTimestamp64Milli
+	fromUnixTimestamp64Micro fromUnixTimestamp64Nano toUnixTimestamp64Milli toUnixTimestamp64Micro toUnixTimestamp64Nano
+	makeDate makeDate32 makeDateTime makeDateTime64 timeSlot YYYYMMDDToDate YYYYMMDDhhmmssToDateTime
+	lower upper lowerUTF8 upperUTF8 length lengthUTF8 empty notEmpty concat concatWithSeparator substring substr
+	substringUTF8 trim trimLeft trimRight trimBoth replace replaceAll replaceOne replaceRegexpAll replaceRegexpOne
+	position positionCaseInsensitive splitByChar splitByString splitByRegexp leftPad rightPad lpad rpad left right
+	reverse base64Encode base64Decode hex unhex extract extractAll match like ilike notLike startsWith endsWith repeat
+	cityHash64 sipHash64 sipHash128 xxHash32 xxHash64 xxh3 halfMD5 MD5 SHA1 SHA224 SHA256 SHA512 CRC32 CRC64
+	intHash32 intHash64 farmFingerprint64 farmHash64 wyHash64 javaHash hiveHash
+	murmurHash2_32 murmurHash2_64 murmurHash3_32 murmurHash3_64 murmurHash3_128 gccMurmurHash
+	rand rand32 rand64 randConstant generateUUIDv4 generateUUIDv7 generateULID generateSnowflakeID
+	array tuple map has hasAny hasAll indexOf range emptyArrayUInt8 emptyArrayString tupleElement
+	mapKeys mapValues mapContains arrayMap arrayFilter arrayConcat arrayElement arraySort arrayReverseSort
+	arrayDistinct arrayStringConcat arraySlice arrayCount arraySum arrayMin arrayMax arrayExists arrayAll
+	arrayFirst arrayUniq arrayCompact arrayPushBack arrayPushFront arrayResize arrayZip arrayEnumerate
+	arrayReverse arrayFlatten arrayIntersect
+	round roundBankers floor ceil trunc sqrt exp log ln log2 log10 pow power greatest least sign
+	bitAnd bitOr bitXor bitNot bitShiftLeft bitShiftRight
+`)
+
+var ciFunctions = words(`
+	if and or not cast lower upper length concat substring substr coalesce ifnull nullif round floor ceil abs
+	sqrt exp ln log log2 log10 pow power greatest least now today trim replace reverse position left right lpad
+	rpad repeat date_trunc datediff date_diff mod sign hex unhex
+`)
+
+// typeNames, codecNames and indexTypes are written with parentheses in a
+// table's DDL (any case); they are not functions.
+var (
+	typeNames = words(`
+		array nullable lowcardinality map tuple nested decimal decimal32 decimal64 decimal128 decimal256
+		datetime datetime64 fixedstring enum enum8 enum16 variant dynamic json object time time64`)
+	codecNames = words(`codec zstd lz4 lz4hc delta doubledelta gorilla t64 fpc gcd none aes_128_gcm_siv aes_256_gcm_siv`)
+	indexTypes = words(`minmax set bloom_filter tokenbf_v1 ngrambf_v1 full_text text vector_similarity`)
+)
+
+func words(s string) map[string]bool {
 	m := map[string]bool{}
-	for _, n := range strings.Fields(`
-		plus minus multiply divide intdiv intdivorzero modulo moduloorzero negate abs gcd lcm
-		equals notequals less greater lessorequals greaterorequals and or not xor
-		if multiif coalesce ifnull nullif assumenotnull isnull isnotnull isnan isfinite isinfinite ifnotfinite
-		cast accuratecast accuratecastornull accuratecastordefault
-		now now64 today yesterday date_trunc datetrunc dateadd date_add datesub date_sub datediff date_diff
-		timestamp_add timestamp_sub formatdatetime makedate makedate32 makedatetime makedatetime64 timeslot
-		yyyymmddtodate yyyymmddhhmmsstodatetime
-		lower upper lowerutf8 upperutf8 length lengthutf8 empty notempty concat concatwithseparator substring substr
-		substringutf8 trim trimleft trimright trimboth replace replaceall replaceone replaceregexpall replaceregexpone
-		position positioncaseinsensitive splitbychar splitbystring splitbyregexp lpad rpad leftpad rightpad left right
-		reverse base64encode base64decode hex unhex extract extractall match like ilike notlike startswith endswith
-		repeat
-		cityhash64 siphash64 siphash128 xxhash32 xxhash64 xxh3 halfmd5 md5 sha1 sha224 sha256 sha512 crc32 crc64
-		inthash32 inthash64 farmfingerprint64 wyhash64 javahash hiveHash
-		rand rand32 rand64 randconstant generateuuidv4 generateuuidv7 generateulid generatesnowflakeid
-		array tuple map has hasany hasall indexof range emptyarrayuint8 tupleelement mapkeys mapvalues mapcontains
-		round roundbankers floor ceil trunc sqrt exp log ln log2 log10 pow power greatest least sign
-		bitand bitor bitxor bitnot bitshiftleft bitshiftright materialize
-		nullable lowcardinality nested decimal decimal32 decimal64 decimal128 decimal256 datetime datetime64
-		fixedstring enum enum8 enum16 variant dynamic json object time time64 interval
-		codec zstd lz4 lz4hc delta doubledelta gorilla t64 fpc gcd none
-		minmax set bloom_filter tokenbf_v1 ngrambf_v1 full_text text vector_similarity
-	`) {
-		m[strings.ToLower(n)] = true
-	}
-	for e := range tableEngines {
-		m[strings.ToLower(e)] = true
-		if isMergeTree(e) {
-			m["replicated"+strings.ToLower(e)] = true
-		}
+	for _, w := range strings.Fields(s) {
+		m[w] = true
 	}
 	return m
-}()
+}
 
-// purePrefixes: families of pure functions (toString, toStartOfDay,
-// addDays, arrayMap, murmurHash3_64, ...).
-var purePrefixes = []string{"to", "add", "subtract", "reinterpret", "parsedatetime", "fromunixtimestamp", "murmurhash",
-	"array", "round", "datediff", "formatreadable"}
-
-// aggregateTypes take aggregate function names (with parameters) as type
-// arguments: their arguments are types, not calls.
+// aggregateTypes take aggregate function names (with literal parameters)
+// as type arguments.
 var aggregateTypes = map[string]bool{"aggregatefunction": true, "simpleaggregatefunction": true}
 
 // keywordParens are words that may precede "(" without being a call.
-var keywordParens = map[string]bool{
-	"by": true, "key": true, "default": true, "materialized": true, "alias": true, "ephemeral": true, "ttl": true,
-	"check": true, "assume": true, "and": true, "or": true, "not": true, "like": true, "ilike": true, "between": true,
-	"is": true, "then": true, "else": true, "when": true, "case": true, "delete": true, "where": true, "set": true,
-	"to": true, "comment": true, "type": true, "granularity": true, "recompress": true, "statistics": true,
-}
+var keywordParens = words(`by key default materialized alias ephemeral ttl check assume and or not like ilike between
+	is then else when case delete where set to comment type granularity recompress statistics`)
 
-func pureFunction(name string) bool {
-	n := strings.ToLower(name)
-	if strings.HasPrefix(n, "addressto") {
+// callable is whether a call named t may appear in a restored table's DDL.
+func callable(t token) bool {
+	if t.kind != tokWord {
 		return false
 	}
-	if pureFunctions[n] {
-		return true
-	}
-	for _, p := range purePrefixes {
-		if strings.HasPrefix(n, p) {
-			return true
-		}
-	}
-	return false
+	n := strings.ToLower(t.val)
+	return pureFunctions[t.val] || ciFunctions[n] || typeNames[n] || codecNames[n] || indexTypes[n] ||
+		restorableEngine(t.val)
 }
 
-// tableProblem is why a checked CREATE TABLE of engine is not created
-// ("": it is): no AS or EMPTY, a restorable engine, only storage settings,
-// and expressions without subqueries, IN or functions outside
-// pureFunctions.
+// tableProblem is why a checked CREATE TABLE is not created ("": it is):
+// no AS or EMPTY, a restorable engine with a literal Keeper path, only
+// storage settings, and expressions without queries, IN or calls outside
+// callable.
 func (s *createStmt) tableProblem() string {
 	for i := s.body; i < len(s.toks); i++ {
 		t := s.toks[i]
 		if t.depth == 0 && (t.is("AS") || t.is("EMPTY")) {
 			return "it is defined AS another table, a query or a table function"
+		}
+		if t.kind == tokWord {
+			switch strings.ToUpper(t.val) {
+			case "SELECT", "WITH", "EXPLAIN", "DESCRIBE":
+				return "an expression of it holds a query"
+			case "IN", "GLOBAL":
+				return "an expression of it uses IN"
+			case "PROJECTION":
+				return "it has a projection (a query)"
+			}
 		}
 	}
 	engine := s.engineName()
@@ -347,16 +367,6 @@ func (s *createStmt) tableProblem() string {
 	}
 	for i := s.body; i < end; i++ {
 		t := s.toks[i]
-		if t.kind == tokWord {
-			switch strings.ToUpper(t.val) {
-			case "SELECT", "WITH", "EXPLAIN", "DESCRIBE":
-				return "an expression of it holds a query"
-			case "IN", "GLOBAL":
-				return "an expression of it uses IN"
-			case "PROJECTION":
-				return "it has a projection (a query)"
-			}
-		}
 		if !t.ident() || i+1 >= end || !s.toks[i+1].punct("(") {
 			continue
 		}
@@ -365,12 +375,42 @@ func (s *createStmt) tableProblem() string {
 		case t.kind == tokWord && keywordParens[n]:
 		case i > 0 && s.toks[i-1].is("INDEX"):
 			// INDEX name (expr) TYPE ...
-		case aggregateTypes[n]:
+		case t.kind == tokWord && aggregateTypes[n]:
+			if why := s.aggregateTypeProblem(i + 1); why != "" {
+				return why
+			}
 			i = s.close(i + 1)
-		case t.kind == tokWord && pureFunction(n):
+		case callable(t):
 		default:
 			return "an expression of it calls " + t.val + "(), which Olympos does not restore in a table definition"
 		}
+	}
+	return ""
+}
+
+// aggregateTypeProblem checks AggregateFunction(...) at open: inside, a
+// call is a type or an aggregate function with literal parameters only.
+func (s *createStmt) aggregateTypeProblem(open int) string {
+	end := s.close(open)
+	for i := open + 1; i < end; i++ {
+		t := s.toks[i]
+		if !t.ident() || !s.toks[i+1].punct("(") {
+			continue
+		}
+		if t.kind == tokWord && typeNames[strings.ToLower(t.val)] {
+			continue
+		}
+		args := s.args(i + 1)
+		ok := t.kind == tokWord && len(args) > 0
+		for _, a := range args {
+			if a[1]-a[0] != 1 || (s.toks[a[0]].kind != tokNumber && s.toks[a[0]].kind != tokString) {
+				ok = false
+			}
+		}
+		if !ok {
+			return "an AggregateFunction type of it has parameters Olympos does not restore"
+		}
+		i = s.close(i + 1)
 	}
 	return ""
 }
@@ -444,7 +484,7 @@ func classify(db string, t Table, ddl string) (classification, error) {
 		return classification{reason: notRecreated}, nil
 	}
 	st, err := checkCreate(ddl, t.Kind, db, t.Name)
-	if errors.Is(err, errNonASCII) {
+	if errors.Is(err, errLex) {
 		return classification{reason: err.Error() + "; not created (create it by hand)"}, nil
 	}
 	if err != nil {
@@ -461,15 +501,19 @@ func classify(db string, t Table, ddl string) (classification, error) {
 
 // ---------------------------------------------------------------- Keeper paths
 
-// defaultReplicaPath is ClickHouse's default_replica_path (used when a
-// Replicated table names no path; the restore always sets one).
+// defaultReplicaPath is the Keeper path a restored Replicated table gets
+// when its statement names none (under /olympos-restore/<request id>/).
+// {uuid} is never used: the restore drops the UUID clause, so the target
+// cannot expand it; the request id and {database}/{table} keep the path
+// unique.
 const (
-	defaultReplicaPath = "/clickhouse/tables/{uuid}/{shard}"
+	defaultReplicaPath = "/clickhouse/tables/{database}/{table}/{shard}"
 	defaultReplicaName = "{replica}"
 )
 
 // restorePath puts a Keeper path under /olympos-restore/<request id>/,
-// keeping an auxiliary Keeper's "name:" prefix.
+// keeping an auxiliary Keeper's "name:" prefix, with {uuid} replaced by
+// {database}/{table}.
 func restorePath(path, requestID string) string {
 	aux := ""
 	if i := strings.Index(path, ":"); i > 0 && !strings.Contains(path[:i], "/") {
@@ -478,34 +522,46 @@ func restorePath(path, requestID string) string {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	path = strings.ReplaceAll(path, "{uuid}", "{database}/{table}")
 	return aux + "/olympos-restore/" + requestID + path
 }
 
 // rewriteKeeperPaths puts the Keeper path of a Replicated*MergeTree under
 // /olympos-restore/<request id>/, so the restored table never shares
 // Keeper state with the source's when Keeper is shared. Without a path in
-// the statement, one is set (with the default replica name). It returns
-// whether anything was rewritten.
-func (s *createStmt) rewriteKeeperPaths(requestID string) bool {
+// the statement (only engine parameters, or none), one is set with the
+// default replica name. rewritten reports a Replicated table; why is set
+// when its arguments are not literals Olympos reads (it is not created).
+func (s *createStmt) rewriteKeeperPaths(requestID string) (rewritten bool, why string) {
 	i := s.engine()
 	if i < 0 {
-		return false
+		return false, ""
 	}
-	if engine := s.toks[i].val; !strings.HasPrefix(engine, "Replicated") || !isMergeTree(engine) {
-		return false
+	engine := s.toks[i].val
+	if !strings.HasPrefix(engine, "Replicated") || !isMergeTree(engine) {
+		return false, ""
 	}
 	hasParen := i+1 < len(s.toks) && s.toks[i+1].punct("(")
 	var args [][2]int
 	if hasParen {
 		args = s.args(i + 1)
 	}
-	str := func(a [2]int) bool { return a[1]-a[0] == 1 && s.toks[a[0]].kind == tokString }
-	// The path form: the first two arguments are strings (GraphiteMergeTree
-	// takes one string of its own, so a single string is not a path).
-	if len(args) >= 2 && str(args[0]) && str(args[1]) {
+	single := func(a [2]int) bool { return a[1]-a[0] == 1 }
+	str := func(a [2]int) bool { return single(a) && s.toks[a[0]].kind == tokString }
+	for _, a := range args {
+		if a[1] <= a[0] {
+			return true, "its engine arguments cannot be read"
+		}
+	}
+	switch {
+	case len(args) >= 2 && str(args[0]) && str(args[1]):
 		t := s.toks[args[0][0]]
 		s.edits = append(s.edits, edit{start: t.start, end: t.end, repl: quoteString(restorePath(t.val, requestID))})
-		return true
+		return true, ""
+	case len(args) >= 1 && (!single(args[0]) || (len(args) >= 2 && !single(args[1]))):
+		return true, "its Keeper path or replica name is not a literal Olympos reads"
+	case len(args) >= 2 && str(args[0]) != str(args[1]):
+		return true, "its Keeper path or replica name is not a literal Olympos reads"
 	}
 	prefix := quoteString(restorePath(defaultReplicaPath, requestID)) + ", " + quoteString(defaultReplicaName)
 	switch {
@@ -518,23 +574,5 @@ func (s *createStmt) rewriteKeeperPaths(requestID string) bool {
 		p := s.toks[args[0][0]].start
 		s.edits = append(s.edits, edit{start: p, end: p, repl: prefix + ", "})
 	}
-	return true
-}
-
-// rewriteReplicatedPath rewrites the Keeper path of a Replicated*MergeTree
-// CREATE TABLE statement to /olympos-restore/<request id>/…; ok is false
-// (and ddl unchanged) for any other statement or one that cannot be read.
-func rewriteReplicatedPath(ddl, requestID string) (string, bool) {
-	toks, err := lexSQL(ddl)
-	if err != nil || len(toks) < 3 || !toks[0].is("CREATE") || !toks[1].is("TABLE") {
-		return ddl, false
-	}
-	st := &createStmt{src: ddl, toks: toks, kind: KindTable, body: 2}
-	if n := len(st.toks); st.toks[n-1].punct(";") {
-		st.toks = st.toks[:n-1]
-	}
-	if !st.rewriteKeeperPaths(requestID) {
-		return ddl, false
-	}
-	return st.sql(), true
+	return true, ""
 }

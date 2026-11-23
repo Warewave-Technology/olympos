@@ -164,7 +164,7 @@ func TestPlanDatabaseAndSteps(t *testing.T) {
 		t.Fatalf("notes: %s", notes)
 	}
 	for _, o := range p.objs {
-		if o.t.Name == "r" && !strings.Contains(o.st.sql(), "'/olympos-restore/"+reqID+"/clickhouse/tables/{uuid}/{shard}'") {
+		if o.t.Name == "r" && !strings.Contains(o.st.sql(), "'/olympos-restore/"+reqID+"/clickhouse/tables/{database}/{table}/{shard}'") {
 			t.Fatalf("r: %s", o.st.sql())
 		}
 		if o.t.Kind == KindMVInner && (o.target != "mv__restored_data" || o.t.Rows != 2 ||
@@ -190,6 +190,56 @@ func TestPlanDatabaseAndSteps(t *testing.T) {
 	b.obj(&b.m.Databases[0], Table{Name: "mv__restored_data", Kind: KindTable, Engine: "Memory"}, "CREATE TABLE shop.mv__restored_data (x UInt8) ENGINE = Memory")
 	if _, msg := planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID); !strings.Contains(msg, "which the backup also holds") {
 		t.Fatalf("collision: %q", msg)
+	}
+}
+
+// TestPlanInnerTables: a materialized view's data table needs its view in
+// the backup, a unique name the target can store, and its name in a note
+// is printable (review round 3).
+func TestPlanInnerTables(t *testing.T) {
+	plan := func(views []string, inner ...string) (*dbPlan, string) {
+		b := newFakeBackup()
+		shop := b.db("shop", "Atomic")
+		for _, v := range views {
+			b.obj(shop, Table{Name: v, Kind: KindMaterializedView, Engine: "MaterializedView"}, "CREATE MATERIALIZED VIEW x")
+		}
+		for i, in := range inner {
+			name := ".inner_id." + string(rune('a'+i))
+			b.obj(shop, Table{Name: name, Kind: KindMVInner, Engine: "Memory", InnerOf: in},
+				"CREATE TABLE shop."+quoteIdent(name)+" (x UInt8) ENGINE = Memory", 1)
+		}
+		return planDatabase(&b.m.Databases[0], b.entries(t), &targetState{dbs: map[string]targetDB{}}, reqID)
+	}
+	if _, msg := plan(nil, "nope"); !strings.Contains(msg, `names no materialized view "nope"`) {
+		t.Errorf("no view: %q", msg)
+	}
+	if _, msg := plan([]string{"v"}, ""); !strings.Contains(msg, "names no materialized view") {
+		t.Errorf("empty InnerOf: %q", msg)
+	}
+	if _, msg := plan([]string{"dup"}, "dup", "dup"); !strings.Contains(msg, "which the backup also holds") {
+		t.Errorf("duplicate target: %q", msg)
+	}
+	long := strings.Repeat("a", 240)
+	if _, msg := plan([]string{long}, long); !strings.Contains(msg, "too long") {
+		t.Errorf("long name: %q", msg)
+	}
+	odd := "m`v'x\n" + "y"
+	p, msg := plan([]string{odd, "line\nbreak"}, odd, "line\nbreak")
+	if msg != "" {
+		t.Fatal(msg)
+	}
+	for _, o := range p.objs {
+		if !strings.HasSuffix(o.target, "__restored_data") || !strings.Contains(o.st.sql(), quoteIdent(o.target)) {
+			t.Errorf("target %q: %s", o.target, o.st.sql())
+		}
+	}
+	for _, n := range p.notes {
+		if strings.ContainsAny(n, "\n\r\x00") {
+			t.Errorf("note not printable: %q", n)
+		}
+	}
+	if !strings.Contains(strings.Join(p.notes, "|"), `line\x0abreak__restored_data`) {
+		t.Errorf("notes: %q", p.notes)
 	}
 }
 

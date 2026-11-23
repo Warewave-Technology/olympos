@@ -1,12 +1,13 @@
 package clickhouse
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
 
 func TestLexSQL(t *testing.T) {
-	toks, err := lexSQL("CREATE TABLE `a``b`.\"c\\\"d\" -- c;\n /* x /* y */ ; */ ('it''s;', 'x\\'y', $tag$ ; $tag$, 1e-5) # z;\n;")
+	toks, err := lexSQL("CREATE TABLE `a``b`.\"c\\\"d\" ('it''s;', 'x\\'y', 1e-5, 0x1F, 0x1e-5, 0b101, 1.5, 2., t.1, a::String, a <= b, a != b, a || b, x -> x);")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -14,13 +15,26 @@ func TestLexSQL(t *testing.T) {
 	for _, tk := range toks {
 		got = append(got, tk.val)
 	}
-	want := []string{"CREATE", "TABLE", "a`b", ".", `c"d`, "(", "it's;", ",", "x'y", ",", " ; ", ",", "1e-5", ")", ";"}
+	want := []string{"CREATE", "TABLE", "a`b", ".", `c"d`, "(", "it's;", ",", "x'y", ",", "1e-5", ",", "0x1F", ",", "0x1e", "-", "5", ",",
+		"0b101", ",", "1.5", ",", "2.", ",", "t", ".", "1", ",", "a", "::", "String", ",", "a", "<=", "b", ",", "a", "!=", "b", ",",
+		"a", "||", "b", ",", "x", "->", "x", ")", ";"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("tokens:\n got %q\nwant %q", got, want)
 	}
-	for _, bad := range []string{"SELECT 'open", "SELECT `open", "SELECT /* open", "SELECT $a$ open", "SELECT \x01", "SELECT ‘x’", "SELECT\u00a01"} {
-		if _, err := lexSQL(bad); err == nil {
-			t.Errorf("%q: expected a lexer error", bad)
+	// 0x1e- followed by a name: the number ends at 0x1e, the call is seen.
+	toks, err = lexSQL("0x1e-dictGetUInt64('secret.d', 'v', id)")
+	if err != nil || len(toks) < 4 || toks[0].val != "0x1e" || toks[2].val != "dictGetUInt64" || !toks[3].punct("(") {
+		t.Fatalf("hex then call: %v %+v", err, toks)
+	}
+	for _, bad := range []string{
+		"SELECT 'open", "SELECT `open", "SELECT \x01", "SELECT ‘x’", "SELECT\u00a01",
+		"SELECT 1 -- comment", "SELECT /* c */ 1", "SELECT 1 # c", "SELECT $a$ x $a$", "SELECT $$x$$",
+		"SELECT @@version", "SELECT ?", "SELECT {x:String}", "SELECT {'a': 1}", "SELECT a & b", "SELECT !a",
+		"SELECT 1p-uptime()", "SELECT 1e-x", "SELECT 1.2.hostName()", "SELECT 0x", "SELECT 0xg", "SELECT 12abc",
+		"SELECT 'a\\Nb'", "SELECT 'a\\x4'", "SELECT 1e", "SELECT x == 1",
+	} {
+		if _, err := lexSQL(bad); err == nil || !errors.Is(err, errLex) {
+			t.Errorf("%q: expected an errLex, got %v", bad, err)
 		}
 	}
 }
@@ -94,35 +108,57 @@ func TestCheckCreateEdits(t *testing.T) {
 	}
 }
 
-func TestRewriteReplicatedPath(t *testing.T) {
+func TestRewriteKeeperPaths(t *testing.T) {
 	const id = "0f6c1d9e-5d1a-4a53-8e0b-7a1f3c2b9d44"
+	rewrite := func(stmt string) (string, bool, string) {
+		st, err := checkCreate(stmt, KindTable, "shop", "r")
+		if err != nil {
+			t.Fatalf("%q: %v", stmt, err)
+		}
+		ok, why := st.rewriteKeeperPaths(id)
+		return st.sql(), ok, why
+	}
 	cases := []struct{ in, want string }{
-		{"CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x",
-			"CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x"},
+		// SHOW CREATE's default path: {uuid} cannot expand without the UUID
+		// clause the restore drops.
+		{"CREATE TABLE shop.r UUID 'a5d0b0e6-0000-4000-8000-000000000001' (`x` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x",
+			"CREATE TABLE shop.r (`x` UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{database}/{table}/{shard}', '{replica}') ORDER BY x"},
 		{"CREATE TABLE shop.r (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('rel/it\\'s', 'r1', v) ORDER BY x",
 			"CREATE TABLE shop.r (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/olympos-restore/" + id + "/rel/it\\'s', 'r1', v) ORDER BY x"},
 		{"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('aux:/p/x', 'r') ORDER BY x",
 			"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('aux:/olympos-restore/" + id + "/p/x', 'r') ORDER BY x"},
+		{"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/{database}/{table}', '{replica}') ORDER BY x",
+			"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{shard}/{database}/{table}', '{replica}') ORDER BY x"},
 		// No path: one is set, with the default replica name.
 		{"CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree(s) ORDER BY x",
-			"CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{uuid}/{shard}', '{replica}', s) ORDER BY x"},
+			"CREATE TABLE shop.r (x UInt64, s Int8) ENGINE = ReplicatedCollapsingMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{database}/{table}/{shard}', '{replica}', s) ORDER BY x"},
 		{"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree ORDER BY x",
-			"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x"},
+			"CREATE TABLE shop.r (x UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{database}/{table}/{shard}', '{replica}') ORDER BY x"},
+		{"CREATE TABLE shop.r (P String, T DateTime, V Float64, W UInt32) ENGINE = ReplicatedGraphiteMergeTree('graphite_rollup') ORDER BY P",
+			"CREATE TABLE shop.r (P String, T DateTime, V Float64, W UInt32) ENGINE = ReplicatedGraphiteMergeTree('/olympos-restore/" + id + "/clickhouse/tables/{database}/{table}/{shard}', '{replica}', 'graphite_rollup') ORDER BY P"},
 	}
 	for _, c := range cases {
-		got, ok := rewriteReplicatedPath(c.in, id)
-		if !ok || got != c.want {
-			t.Errorf("rewrite(%q):\n got %q %v\nwant %q", c.in, got, ok, c.want)
+		got, ok, why := rewrite(c.in)
+		if !ok || why != "" || got != c.want {
+			t.Errorf("rewrite(%q):\n got %q %v %q\nwant %q", c.in, got, ok, why, c.want)
 		}
 	}
 	for _, in := range []string{
-		"CREATE TABLE shop.t (x UInt64) ENGINE = MergeTree ORDER BY x",
-		"CREATE TABLE shop.t (`ReplicatedMergeTree('/a', 'b')` UInt8) ENGINE = Log",
-		"CREATE VIEW shop.v AS SELECT 'ENGINE = ReplicatedMergeTree(''/a'', ''b'')' AS x",
-		"CREATE MATERIALIZED VIEW shop.mv (`d` Date) ENGINE = ReplicatedSummingMergeTree('/ch/mv', '{replica}') ORDER BY d AS SELECT d FROM shop.e",
+		"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree(concat('/clickhouse/', 'x'), '{replica}') ORDER BY x",
+		"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x",
+		"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x",
+		"CREATE TABLE shop.r (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', x) ORDER BY x",
 	} {
-		if got, ok := rewriteReplicatedPath(in, id); ok || got != in {
-			t.Errorf("rewrite(%q) = %q %v, want unchanged", in, got, ok)
+		if _, ok, why := rewrite(in); !ok || why == "" {
+			t.Errorf("rewrite(%q): want a refusal, got %v %q", in, ok, why)
+		}
+	}
+	for _, in := range []string{
+		"CREATE TABLE shop.r (x UInt64) ENGINE = MergeTree ORDER BY x",
+		"CREATE TABLE shop.r (`ReplicatedMergeTree('/a', 'b')` UInt8) ENGINE = Log",
+	} {
+		if got, ok, why := rewrite(in); ok || why != "" || got != in {
+			t.Errorf("rewrite(%q) = %q %v %q, want unchanged", in, got, ok, why)
 		}
 	}
 }
@@ -142,6 +178,13 @@ func TestClassifyTables(t *testing.T) {
 		{tbl("l", "TinyLog"), "CREATE TABLE shop.l (x UInt8) ENGINE = TinyLog"},
 		{tbl("m", "Memory"), "CREATE TABLE shop.m (x UInt8) ENGINE = Memory COMMENT 'kept'"},
 		{tbl("c", "MergeTree"), "CREATE TABLE shop.c (x UInt8) ENGINE = MergeTree ORDER BY x SETTINGS index_granularity = 8192 COMMENT 'x'"},
+		{tbl("ttl", "MergeTree"), "CREATE TABLE shop.ttl (d DateTime, k UInt8) ENGINE = MergeTree ORDER BY d TTL d + toIntervalDay(1) DELETE WHERE k = 1, d + toIntervalDay(2) RECOMPRESS CODEC(ZSTD(3))"},
+		{tbl("graph", "GraphiteMergeTree"), "CREATE TABLE shop.graph (Path String, Time DateTime, Value Float64, Version UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY Path"},
+		{tbl("idx", "MergeTree"), "CREATE TABLE shop.idx (s String, INDEX i s TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 1, INDEX j s TYPE set(100) GRANULARITY 1) ENGINE = MergeTree ORDER BY s"},
+		{tbl("obj", "MergeTree"), "CREATE TABLE shop.obj (o Object('json'), e Enum8('a' = 1, 'b' = 2), j JSON(max_dynamic_paths = 10), dy Dynamic(max_types = 3)) ENGINE = MergeTree ORDER BY tuple()"},
+		{tbl("lambda", "MergeTree"), "CREATE TABLE shop.lambda (a Array(UInt8) DEFAULT arrayMap(x -> x * 2, [1, 2])) ENGINE = MergeTree ORDER BY tuple()"},
+		{tbl("cast", "MergeTree"), "CREATE TABLE shop.cast (id UInt64, m String DEFAULT CAST(id, 'String'), n String DEFAULT id::String, h UInt64 DEFAULT 0x1e - 5) ENGINE = MergeTree ORDER BY id"},
+		{tbl("dec", "MergeTree"), "CREATE TABLE shop.dec (a Decimal(18, 4), d DateTime64(3, 'UTC'), f Float64 DEFAULT 1.5e-3, s SimpleAggregateFunction(sum, UInt64)) ENGINE = MergeTree ORDER BY tuple()"},
 	}
 	for _, c := range created {
 		o, err := classify("shop", c.t, c.ddl)
@@ -252,9 +295,41 @@ func TestReviewProbes(t *testing.T) {
 		{"MergeTree", "CREATE TABLE shop.t (`x` UInt64) ENGINE = MergeTree ORDER BY x SETTINGS disk = 'default'"},
 		{"MergeTree", "CREATE TABLE shop.t (`k` String DEFAULT (SELECT any(x) FROM paimonS3('http://e/', 'k', 's'))) ENGINE = MergeTree ORDER BY k"},
 		{"EmbeddedRocksDB", "CREATE TABLE shop.t (`k` String, `v` String) ENGINE = EmbeddedRocksDB(0, '/var/lib/clickhouse/store/abc/other_rocksdb', 1) PRIMARY KEY k"},
+		// Round 3 (probe10): number lexing, global variables, aggregate types,
+		// target UDFs, Keeper paths that are not literals.
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt64 MATERIALIZED 0x1e-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt8 DEFAULT 0x1e-hasColumnInTable('secret', 'creds', 'password')) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m Int64 MATERIALIZED 0x0e+joinGet('secret.j', 'v', id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String MATERIALIZED toString(0x0e+uptime())) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt64 ALIAS 0x1E-dictGetUInt64('secret.d', 'v', id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, s String, m UInt8 DEFAULT 0x1e-in(s, secret.creds)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (`1p` UInt64, m UInt64 MATERIALIZED 1p-uptime()) ENGINE = MergeTree ORDER BY `1p`"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT 1.2.hostName()) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT @@version) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m String DEFAULT @@hostname) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT {p:UInt64}) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a AggregateFunction(sum, (SELECT 1))) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a UInt64 DEFAULT `AggregateFunction`(currentDatabase())) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, a UInt64 DEFAULT AggregateFunction(currentDatabase())) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT tOSTRING(id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (id UInt64, m UInt64 DEFAULT toMyUDF(id)) ENGINE = MergeTree ORDER BY id"},
+		{"MergeTree", "CREATE TABLE shop.t (a Array(String) DEFAULT arrayMap(x -> hostName(), [1, 2])) ENGINE = MergeTree ORDER BY tuple()"},
+		{"MergeTree", "CREATE TABLE shop.t (d DateTime DEFAULT nowInBlock()) ENGINE = MergeTree ORDER BY d"},
+		{"MergeTree", "CREATE TABLE shop.t (s String, INDEX i (s) TYPE set(currentDatabase()) GRANULARITY 1) ENGINE = MergeTree ORDER BY s"},
+		{"Memory", "CREATE TABLE shop.t (id UInt64) ENGINE = Memory SETTINGS max_rows_to_keep = 1"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree(concat('/clickhouse/', 'x'), '{replica}') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree($$/a/b$$, 'r') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', 'r' || '') ORDER BY x"},
+		{"ReplicatedMergeTree", "CREATE TABLE shop.t (x UInt8) ENGINE = ReplicatedMergeTree('/a/b', '{replica}', ) ORDER BY x"},
 	}
 	for _, c := range tables {
 		o, err := classify("shop", Table{Name: "t", Kind: KindTable, Engine: c.engine}, c.ddl)
+		if err == nil && o.create && o.st != nil {
+			// Created by classify, but a Keeper path may still refuse it.
+			if _, why := o.st.rewriteKeeperPaths("req-1"); why != "" {
+				continue
+			}
+		}
 		if err != nil || o.create {
 			t.Errorf("%q: create=%v reason=%q err=%v", c.ddl, o.create, o.reason, err)
 		}

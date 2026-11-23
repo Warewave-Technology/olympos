@@ -199,8 +199,8 @@ archive (ReaderAt) or snapshot reader, the selected databases, options and a pro
   - **Checks on a table definition:** it must be a single `CREATE TABLE` of the manifest's database and name. It
     may not be `AS …` or `EMPTY AS`. Only an allowlist of storage settings is accepted. Expressions may not
     contain a subquery, `IN`, or any function outside an allowlist of pure scalar functions.
-  - **Keeper paths:** `Replicated*MergeTree` paths are rewritten to `/olympos-restore/<request id>/…` and
-    reported.
+  - **Keeper paths:** `Replicated*MergeTree` paths are rewritten to `/olympos-restore/<request id>/…`, with
+    `{uuid}` replaced by `{database}/{table}` (the UUID clause is dropped), and reported.
   - **Not created, reported by name and reason (never with their DDL):** views, materialized views,
     dictionaries, live and window views, and tables of any other engine (Kafka, S3, URL, MySQL, PostgreSQL,
     Distributed, Merge, Buffer, Join, Set, KeeperMap, EmbeddedRocksDB, …). The same applies to tables whose

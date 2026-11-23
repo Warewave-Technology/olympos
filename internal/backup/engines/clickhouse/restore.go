@@ -269,6 +269,50 @@ var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 // created are listed in skipped. msg is why the database cannot be
 // restored ("" when it can).
 func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, requestID string) (*dbPlan, string) {
+	p, msg := planDatabase1(md, entries, ts, requestID)
+	for i := range p.skipped {
+		p.skipped[i] = printable(p.skipped[i])
+	}
+	for i := range p.notes {
+		p.notes[i] = printable(p.notes[i])
+	}
+	return p, printable(msg)
+}
+
+// printable escapes control characters (names in the backup may hold
+// any) so a message is one plain line.
+func printable(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
+			fmt.Fprintf(&b, "\\x%02x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// maxFileName is the longest file name the target's filesystem takes; a
+// table's metadata file is its escaped name with ".sql".
+const maxFileName = 255
+
+// escapeForFileName is ClickHouse's: [A-Za-z0-9_] stay, every other byte
+// is %XX.
+func escapeForFileName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isWordByte(c) {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, requestID string) (*dbPlan, string) {
 	p := &dbPlan{}
 	if md == nil {
 		return p, "the backup holds no such database"
@@ -308,10 +352,11 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		p.create = st
 	}
 
-	names := map[string]bool{}
+	names := map[string]string{} // name -> kind
 	for _, t := range md.Tables {
-		names[t.Name] = true
+		names[t.Name] = t.Kind
 	}
+	targets := map[string]bool{}
 	dataPrefix := func(t Table) string { return "data/" + pathSegment(md.Name) + "/" + pathSegment(t.Name) + "/" }
 	checkData := func(t Table) string {
 		if !t.HasData {
@@ -350,11 +395,18 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		if t.Kind == KindMVInner {
 			// The view is not created; its rows are kept in a table of
 			// their own.
+			if t.InnerOf == "" || names[t.InnerOf] != KindMaterializedView {
+				return p, fmt.Sprintf("%s: the backup names no materialized view %q for this inner table", t.Name, t.InnerOf)
+			}
 			target = t.InnerOf + "__restored_data"
 			what = "the data of materialized view " + md.Name + "." + t.InnerOf
-			if names[target] {
+			switch {
+			case names[target] != "" || targets[target]:
 				return p, fmt.Sprintf("the data of materialized view %s would be restored into table %s, which the backup also holds", t.InnerOf, target)
+			case len(escapeForFileName(target))+len(".sql.tmp") > maxFileName:
+				return p, fmt.Sprintf("the data of materialized view %s would be restored into table %s, a name too long for the target", t.InnerOf, target)
 			}
+			targets[target] = true
 		}
 		var ddl string
 		if t.Kind == KindTable || t.Kind == KindMVInner {
@@ -383,17 +435,22 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		if why := checkData(t); why != "" {
 			return p, why
 		}
-		if t.Kind == KindMVInner {
-			c.st.rename(target)
-			p.notes = append(p.notes, fmt.Sprintf("%s was restored into table %s.%s; recreate the view with TO %s.%s",
-				what, md.Name, target, quoteIdent(md.Name), quoteIdent(target)))
+		rewritten, why := c.st.rewriteKeeperPaths(requestID)
+		if why != "" {
+			p.skipped = append(p.skipped, what+": "+why+"; not created (create it by hand)")
+			continue
 		}
-		if c.st.rewriteKeeperPaths(requestID) {
+		if rewritten {
 			if !requestIDRe.MatchString(requestID) {
 				return p, t.Name + ": a Keeper path needs the restore request's id, and there is none"
 			}
 			p.notes = append(p.notes, md.Name+"."+target+": its Keeper path was moved under /olympos-restore/"+requestID+"/, "+
 				"so it shares no Keeper state with the source")
+		}
+		if t.Kind == KindMVInner {
+			c.st.rename(target)
+			p.notes = append(p.notes, fmt.Sprintf("%s was restored into table %s.%s; recreate the view with TO %s.%s",
+				what, md.Name, target, quoteIdent(md.Name), quoteIdent(target)))
 		}
 		if t.HasData {
 			var mat []string
@@ -613,9 +670,9 @@ func (s *session) exec(ctx context.Context, stmt string) error {
 	return s.client.Do(ctx, ch.Query{Body: stmt, Settings: ddlSettings})
 }
 
-// run performs the steps; the first failure ends the restore. A step whose
-// statement names an object not created yet (a view on a view) is retried
-// after the other steps of its phase.
+// run performs the steps in order; the first failure ends the restore. A
+// database whose steps all succeeded is reported succeeded, the failing
+// one with the error, the others as not completed.
 func (r *restorer) run(ctx context.Context, plans []*dbPlan) {
 	all := steps(plans)
 	left := map[string]int{} // database -> steps not done yet

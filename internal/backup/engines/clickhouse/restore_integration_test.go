@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 )
@@ -494,3 +495,118 @@ func manifestOf(t *testing.T, b []byte) Manifest {
 type memObject struct{ *bytes.Reader }
 
 func (memObject) Close() error { return nil }
+
+// keeperXML runs an embedded Keeper and the macros Replicated tables need.
+const keeperXML = `<clickhouse>
+  <keeper_server>
+    <tcp_port>9181</tcp_port>
+    <server_id>1</server_id>
+    <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+    <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+    <raft_configuration><server><id>1</id><hostname>localhost</hostname><port>9234</port></server></raft_configuration>
+  </keeper_server>
+  <zookeeper><node><host>localhost</host><port>9181</port></node></zookeeper>
+  <macros><shard>s1</shard><replica>r1</replica></macros>
+</clickhouse>`
+
+const keeperContainer = "olympos-t8-keeper-ch"
+
+// TestRestoreReplicatedIntegration restores Replicated tables (SHOW
+// CREATE's default {uuid} path, and an explicit one) into a server whose
+// Keeper still holds the source tables: the restored tables live under
+// /olympos-restore/<request id>/ and the source's are untouched.
+func TestRestoreReplicatedIntegration(t *testing.T) {
+	startClickHouse(t) // skips without Docker, like the other tests
+	bin := restoreClientBin(t)
+	SetClientBin(bin)
+	t.Cleanup(func() { SetClientBin("") })
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "keeper.xml"), []byte(keeperXML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = docker("rm", "-f", keeperContainer)
+	if out, err := docker("create", "--name", keeperContainer,
+		"-e", "CLICKHOUSE_USER="+chUser, "-e", "CLICKHOUSE_PASSWORD="+chPassword, "-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
+		"-p", "127.0.0.1::9000", chImage); err != nil {
+		t.Fatalf("docker create: %v %s", err, out)
+	}
+	t.Cleanup(func() { _, _ = docker("rm", "-f", keeperContainer) })
+	if out, err := docker("cp", filepath.Join(dir, "keeper.xml"), keeperContainer+":/etc/clickhouse-server/config.d/keeper.xml"); err != nil {
+		t.Fatalf("docker cp: %v %s", err, out)
+	}
+	if out, err := docker("start", keeperContainer); err != nil {
+		t.Fatalf("docker start: %v %s", err, out)
+	}
+	port, err := docker("port", keeperContainer, "9000/tcp")
+	if err != nil {
+		t.Fatalf("docker port: %v %s", err, port)
+	}
+	env := &chEnv{native: strings.Split(port, "\n")[0]}
+	q := func(query string) string {
+		t.Helper()
+		cmd := exec.Command("docker", "exec", "-i", keeperContainer, "clickhouse-client", "-u", chUser, "--password", chPassword, "-n", "-q", query)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", query, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	ctx := context.Background()
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		s, err := connect(cctx, env.ec(false, nil), Options{})
+		if err == nil {
+			_, err = s.queryValue(cctx, "SELECT toString(count()) FROM system.zookeeper WHERE path = '/'")
+			s.close()
+		}
+		cancel()
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			logs, _ := docker("logs", "--tail", "50", keeperContainer)
+			t.Fatalf("clickhouse with keeper not ready: %v\n%s", err, logs)
+		}
+		time.Sleep(time.Second)
+	}
+
+	q(`CREATE DATABASE rp;
+CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
+CREATE TABLE rp.e (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/rp_e', '{replica}', v) ORDER BY x;
+INSERT INTO rp.t SELECT number FROM numbers(1000);
+INSERT INTO rp.e SELECT number, 1 FROM numbers(10);`)
+	if got := q("SELECT create_table_query FROM system.tables WHERE database = 'rp' AND name = 't'"); !strings.Contains(got, "{uuid}") {
+		t.Fatalf("SHOW CREATE should carry the {uuid} path: %s", got)
+	}
+	var buf bytes.Buffer
+	if _, err := (Engine{}).Run(ctx, env.ec(false, map[string]any{"databases": []string{"rp"}}), &buf); err != nil {
+		t.Fatal(err)
+	}
+	// The source's tables stay (and keep their Keeper state) under
+	// another name.
+	q("RENAME DATABASE rp TO rp_src")
+
+	const id = "7d1b0c2e-3f4a-4b5c-8d6e-9f0a1b2c3d4e"
+	rc := backup.RestoreContext{EngineContext: env.ec(false, nil), RequestID: id, Archive: memObject{bytes.NewReader(buf.Bytes())},
+		Databases: []string{"rp"}, Progress: func(backup.Progress) {}}
+	res, err := Engine{}.Restore(ctx, rc)
+	if err != nil || len(res.Items) != 1 || res.Items[0].Status != "succeeded" || res.Items[0].Rows != 1010 || res.Items[0].Tables != 2 {
+		t.Fatalf("restore: %v %+v", err, res)
+	}
+	paths := q("SELECT arrayStringConcat(groupArray(concat(table, '=', zookeeper_path)), ',') FROM (SELECT table, zookeeper_path FROM system.replicas WHERE database = 'rp' ORDER BY table)")
+	want := "e=/olympos-restore/" + id + "/clickhouse/tables/s1/rp_e,t=/olympos-restore/" + id + "/clickhouse/tables/rp/t/s1"
+	if paths != want {
+		t.Fatalf("restored Keeper paths: %s, want %s", paths, want)
+	}
+	if got := q("SELECT count() FROM rp.t") + "," + q("SELECT count() FROM rp.e"); got != "1000,10" {
+		t.Fatalf("restored rows: %s", got)
+	}
+	if got := q("SELECT count() FROM rp_src.t") + "," + q("SELECT count() FROM system.replicas WHERE database = 'rp_src' AND zookeeper_path NOT LIKE '/olympos-restore/%'"); got != "1000,2" {
+		t.Fatalf("source tables: %s", got)
+	}
+	if !strings.Contains(strings.Join(res.Notes, "\n"), "rp.t: its Keeper path was moved under /olympos-restore/"+id+"/") {
+		t.Fatalf("notes: %v", res.Notes)
+	}
+}
