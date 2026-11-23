@@ -442,6 +442,17 @@ func TestDeniedIP(t *testing.T) {
 		{"::ffff:169.254.169.254", true, "metadata"},
 		{"64:ff9b::a9fe:a9fe", true, "metadata"},
 		{"fd00:ec2::254", true, "metadata"},
+		{"100.100.100.200", true, "metadata"},
+		{"::ffff:100.100.100.200", true, "metadata"},
+		{"64:ff9b::6464:64c8", true, "metadata"},
+		{"192.0.0.192", true, "metadata"},
+		{"::ffff:192.0.0.192", true, "metadata"},
+		{"64:ff9b:1::a9fe:a9fe", true, "metadata"},
+		{"64:ff9b:1::127.0.0.1", true, "loopback"},
+		{"64:ff9b:1:ffff::a60:1", true, "kubernetes_api"},
+		{"255.255.255.255", true, "broadcast"},
+		{"::ffff:255.255.255.255", true, "broadcast"},
+		{"64:ff9b::ffff:ffff", true, "broadcast"},
 		{"169.254.1.1", true, "link_local"},
 		{"fe80::1", true, "link_local"},
 		{"fe80::1%eth0", true, "link_local"},
@@ -469,6 +480,13 @@ func TestDeniedIP(t *testing.T) {
 		{"10.96.0.2", false, ""},
 		{"192.168.1.10", false, ""},
 		{"fd00:ec2::253", false, ""},
+		{"100.100.100.201", false, ""},
+		{"100.64.0.10", false, ""}, // CGNAT: may be an in-cluster range
+		{"192.0.0.193", false, ""},
+		{"255.255.255.254", false, ""},
+		{"64:ff9b:1::808:808", false, ""},
+		{"64:ff9b:2::127.0.0.1", false, ""}, // outside 64:ff9b:1::/48
+		{"2002:7f00:1::", false, ""},        // 6to4 is not decoded
 	}
 	for _, c := range cases {
 		reason, denied := DeniedIP(netip.MustParseAddr(c.ip), apiServer)
