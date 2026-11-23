@@ -339,7 +339,7 @@ func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 	var token string
 	var exp time.Time
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND used_at IS NULL AND expires_at > now()`, id); err != nil {
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND (agent_used_at IS NULL OR probe_used_at IS NULL) AND expires_at > now()`, id); err != nil {
 			return err
 		}
 		var err error
@@ -525,7 +525,7 @@ func (a *API) revokeCluster(w http.ResponseWriter, r *http.Request) {
 		if err := a.Gateway.Revoke(r.Context(), tx, id); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND used_at IS NULL`, id); err != nil {
+		if _, err := tx.Exec(r.Context(), `UPDATE enroll_tokens SET expires_at = now() WHERE cluster_id = $1 AND (agent_used_at IS NULL OR probe_used_at IS NULL)`, id); err != nil {
 			return err
 		}
 		return httpx.Record(r, tx, "cluster.revoked", "cluster", id.String(), &id, nil)

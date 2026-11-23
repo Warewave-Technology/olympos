@@ -155,7 +155,7 @@ func (g *Gateway) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.Enroll
 	defer tx.Rollback(ctx) //nolint:errcheck
 	var tokenID, clusterID uuid.UUID
 	err = tx.QueryRow(ctx, `SELECT t.id, t.cluster_id FROM enroll_tokens t JOIN clusters c ON c.id = t.cluster_id
-		WHERE t.token_hash = $1 AND t.used_at IS NULL AND t.expires_at > now() AND c.status <> 'revoked'
+		WHERE t.token_hash = $1 AND t.agent_used_at IS NULL AND t.expires_at > now() AND c.status <> 'revoked'
 		FOR UPDATE OF t`, HashToken(req.BootstrapToken)).Scan(&tokenID, &clusterID)
 	if err != nil {
 		g.Log.Warn("enroll rejected", "reason", "invalid or expired token", "peer", peerAddr(ctx))
@@ -165,7 +165,7 @@ func (g *Gateway) Enroll(ctx context.Context, req *pb.EnrollRequest) (*pb.Enroll
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	if _, err := tx.Exec(ctx, `UPDATE enroll_tokens SET used_at = now() WHERE id = $1`, tokenID); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE enroll_tokens SET agent_used_at = now() WHERE id = $1`, tokenID); err != nil {
 		return nil, status.Error(codes.Unavailable, "database error")
 	}
 	if _, err := tx.Exec(ctx, `UPDATE clusters SET cert_serial = $2, cert_expires_at = $3, agent_version = $4 WHERE id = $1`,
