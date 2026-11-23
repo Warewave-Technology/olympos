@@ -862,7 +862,8 @@ function validateCredential(b: SyntheticCredentialInput, prev: SyntheticCredenti
       else if (!bound.some((h) => validateRule(h.pattern ?? '', h.kind).rule && ruleMatches(validateRule(h.pattern, h.kind).rule!, host))) f.oauth_token_url = `${host} must be inside the credential's bound hosts: the client secret is sent to it`;
     }
   } else if ((b.oauth_token_url ?? '').trim()) f.oauth_token_url = 'only an OAuth2 credential has a token URL';
-  if (b.expires_at && !prev && new Date(b.expires_at).getTime() <= Date.now()) f.expires_at = 'must be in the future';
+  // as the server, on create and on update: a past expiry means nothing
+  if (b.expires_at && new Date(b.expires_at).getTime() <= Date.now()) f.expires_at = 'must be in the future';
   const sec = b.secret;
   if (!sec && !prev) f.secret = 'required';
   if (sec) {

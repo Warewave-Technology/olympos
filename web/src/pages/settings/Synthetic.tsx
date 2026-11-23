@@ -597,7 +597,10 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
     if (kind === 'header' && !header.trim()) e.header_name = 'Enter the header name, for example X-Api-Key.';
     if (kind === 'oauth2_client_credentials' && !/^https:\/\//i.test(tokenUrl.trim())) e.oauth_token_url = 'Enter the https:// token URL. It must be allowlisted and inside the bound hosts.';
     // the API refuses a past expiry on create and on update: it would mean nothing
-    if (expires && new Date(`${expires}T00:00:00`).getTime() <= Date.now()) e.expires_at = 'Choose a date in the future, or leave it empty.';
+    // An unchanged date keeps the stored timestamp (see the body below), which may be later today: check that one.
+    const keptExpiry = !!cred?.expires_at && expires === dateInput(cred.expires_at);
+    const expiryAt = keptExpiry ? new Date(cred!.expires_at!).getTime() : new Date(`${expires}T00:00:00`).getTime();
+    if (expires && expiryAt <= Date.now()) e.expires_at = 'Choose a date in the future, or leave it empty.';
     if (rotate) {
       if (sec.user && !username.trim()) e['secret.username'] = `Enter the ${sec.user.toLowerCase()}.`;
       if (source === 'keyvault_ref') {

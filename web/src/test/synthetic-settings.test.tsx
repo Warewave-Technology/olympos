@@ -297,6 +297,28 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     expect(syn.credentials.find((c) => c.name === 'catalog-monitor')!.rotated_at).not.toBeNull();
   });
 
+  it('keeps an unchanged expiry later today on edit; the API refuses a past one on update', async () => {
+    const user = userEvent.setup();
+    const c = syn.credentials.find((x) => x.name === 'reports-login')!;
+    const saved = c.expires_at;
+    // a few minutes from now: the start of its date is past, the stored time is not
+    const later = new Date(Date.now() + 5 * 60_000);
+    c.expires_at = later.toISOString();
+    try {
+      await renderApp('/settings/synthetic');
+      await user.click(await screen.findByRole('button', { name: 'Edit credential reports-login' }, T));
+      const dlg = screen.getByRole('dialog', { name: 'Edit reports-login' });
+      await user.click(within(dlg).getByRole('button', { name: 'Save credential' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument(), T);
+      expect(c.expires_at).toBe(later.toISOString());
+    } finally {
+      c.expires_at = saved;
+    }
+    const body = { name: c.name, kind: c.kind, bound_hosts: c.bound_hosts, header_name: '', oauth_token_url: '', oauth_scopes: '', expires_at: new Date(Date.now() - 3600_000).toISOString() };
+    const res = await match('PUT', `/synthetic/credentials/${c.id}`)!.h({ method: 'PUT', path: '', query: new URLSearchParams(), body }, { id: c.id });
+    expect(res).toEqual({ status: 422, body: { error: 'invalid credential', fields: { expires_at: 'must be in the future' } } });
+  });
+
   it('asks for the login again on rotation, and refuses a past expiry on edit', async () => {
     const user = userEvent.setup();
     await renderApp('/settings/synthetic');
