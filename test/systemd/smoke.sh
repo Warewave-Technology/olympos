@@ -76,7 +76,21 @@ olympos:
   security: {trivyBin: /usr/lib/olympos/bin/trivy, trivyCacheDir: /var/lib/olympos/trivy-cache}
 YAML
 install -d -o olympos -g olympos -m 0750 /var/lib/olympos/nfs/smoke
-test -x /usr/lib/olympos/bin/clickhouse && /usr/lib/olympos/bin/clickhouse client --version
+# unit_run runs a command the way the service runs its tools: as olympos,
+# under every [Service] setting of the installed unit (drop-ins included),
+# except how the service starts and stops. A tool that the hardening breaks
+# (SystemCallFilter, MemoryDenyWriteExecute, ...) fails here, not in the
+# first restore.
+unit_run() {
+  local props=() line
+  while IFS= read -r line; do props+=(-p "$line"); done < <(
+    systemctl cat olympos-server | sed -n '/^\[Service\]/,/^\[/p' | grep -E '^[A-Za-z]+=' |
+      grep -vE '^(Type|Exec[A-Za-z]*|Restart[A-Za-z]*|Timeout[A-Za-z]*)=')
+  systemd-run --quiet --wait --pipe --collect "${props[@]}" -- "$@"
+}
+test -x /usr/lib/olympos/bin/clickhouse && unit_run /usr/lib/olympos/bin/clickhouse client --version
+# The restore of a PostgreSQL target runs pg_restore of the target's major.
+unit_run /usr/lib/postgresql/16/bin/pg_restore --version
 sudo -u olympos olympos-server check-config -db
 systemctl enable --now olympos-server
 for i in $(seq 60); do curl -fsS http://127.0.0.1:9090/readyz >/dev/null 2>&1 && break; sleep 2; done
