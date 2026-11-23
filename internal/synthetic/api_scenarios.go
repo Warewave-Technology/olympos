@@ -1205,7 +1205,8 @@ func (a *API) preview(w http.ResponseWriter, r *http.Request) {
 }
 
 // runScenario is "Run now": a manual run on one cluster, or on every
-// cluster the scenario runs on now. It counts toward alerting.
+// cluster the scenario runs on now. It counts toward alerting. Each user
+// makes at most RunNowPerMinute such requests a minute.
 func (a *API) runScenario(w http.ResponseWriter, r *http.Request) {
 	id, ok := httpx.UUIDParam(w, r, "id")
 	if !ok {
@@ -1241,7 +1242,16 @@ func (a *API) runScenario(w http.ResponseWriter, r *http.Request) {
 		}
 		clusters = []uuid.UUID{*in.ClusterID}
 	}
+	slot, ok := a.manualRuns.allow(sub.Principal.ID, a.now(), a.runNowPerMinute())
+	if !ok {
+		httpx.Error(w, http.StatusTooManyRequests, fmt.Sprintf("At most %d Run now requests a minute; wait a moment.", a.runNowPerMinute()))
+		return
+	}
 	ids, err := a.Svc.RunNow(ctx, id, clusters, sub.Principal.ID)
+	if err != nil {
+		// No run was made: the slot goes back.
+		a.manualRuns.undo(sub.Principal.ID, slot)
+	}
 	switch {
 	case errors.Is(err, ErrScenarioDisabled):
 		httpx.Error(w, http.StatusConflict, "The scenario is paused; resume it first.")

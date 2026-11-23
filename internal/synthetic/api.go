@@ -42,8 +42,12 @@ type API struct {
 	// TestRunsPerMinute caps the test runs one user starts per minute on
 	// this replica (default 6): TestRun has no rate guard of its own.
 	TestRunsPerMinute int
+	// RunNowPerMinute caps the Run now requests one user makes per minute
+	// on this replica (default 6), whatever the number of clusters each
+	// runs on.
+	RunNowPerMinute int
 
-	testRuns rateWindow
+	testRuns, manualRuns rateWindow
 }
 
 // Routes mounts the module under /api/v1.
@@ -279,7 +283,7 @@ func editRefusal(sub *authz.Subject, t Targeting, f *fleet) string {
 	return ""
 }
 
-// ---------------------------------------------------------------- rate of test runs
+// ---------------------------------------------------------------- rate of test runs and Run now
 
 // rateWindow counts events per key over the last minute.
 type rateWindow struct {
@@ -332,6 +336,13 @@ func (w *rateWindow) undo(key uuid.UUID, t time.Time) {
 func (a *API) testRunsPerMinute() int {
 	if a.TestRunsPerMinute > 0 {
 		return a.TestRunsPerMinute
+	}
+	return 6
+}
+
+func (a *API) runNowPerMinute() int {
+	if a.RunNowPerMinute > 0 {
+		return a.RunNowPerMinute
 	}
 	return 6
 }

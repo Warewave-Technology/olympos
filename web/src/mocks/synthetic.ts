@@ -656,6 +656,16 @@ const RESERVED_CREDENTIAL_HEADERS = ['accept-encoding', 'connection', 'content-l
 const testRunTimes: number[] = [];
 export const TEST_RUNS_PER_MINUTE = 6;
 
+/** Accepted Run now requests per minute (the API's per-user limit); a request that makes no run does not count. */
+const runNowTimes: number[] = [];
+const RUN_NOW_PER_MINUTE = 6;
+function runNowLimited(): MockRes | null {
+  const now = Date.now();
+  while (runNowTimes.length && now - runNowTimes[0] > MIN) runNowTimes.shift();
+  if (runNowTimes.length >= RUN_NOW_PER_MINUTE) return { status: 429, body: { error: `At most ${RUN_NOW_PER_MINUTE} Run now requests a minute; wait a moment.` } };
+  return null;
+}
+
 function validateSteps(b: ScenarioInput, fields: Record<string, string>) {
   const steps = b.steps ?? [];
   if (!steps.length) fields.steps = 'Add at least one step.';
@@ -1095,11 +1105,17 @@ export const syntheticRoutes: [string, string, Handler][] = [
         const c = fleet().find((x) => x.id === cid);
         if (!c) return invalid('invalid run', { cluster_id: 'unknown cluster' });
         if (!targets.includes(c)) return invalid('invalid run', { cluster_id: 'The scenario does not run on this cluster.' });
+        const limited = runNowLimited();
+        if (limited) return limited;
         if (c.probe_status !== 'online') return { status: 409, body: { error: `The cluster's probe is not online: ${c.name} is ${c.probe_status.replace('_', ' ')}` } };
+        runNowTimes.push(Date.now());
         return { status: 202, body: { run_ids: [startRun(s.steps, s, c, 'manual')] } };
       }
+      const limited = runNowLimited();
+      if (limited) return limited;
       const online = targets.filter((c) => c.probe_status === 'online');
       if (!online.length) return { status: 409, body: { error: 'The scenario runs on no cluster now: none of its clusters has an online probe that the request caps leave room on.' } };
+      runNowTimes.push(Date.now());
       return { status: 202, body: { run_ids: online.map((c) => startRun(s.steps, s, c, 'manual')) } };
     },
   ],

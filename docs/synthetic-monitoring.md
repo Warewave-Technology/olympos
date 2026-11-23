@@ -275,7 +275,8 @@ scenario back on a cluster, the cell and the scenario's cluster table say *Held 
 
 Open a scenario for its steps (the failed one marked), a table per cluster with the last result, the failed
 step, p50/p95, availability and a 48 × 30-minute timeline, the alert rule and the alert history. **Run now**
-runs it at once on one cluster or on all of them; these runs count toward alerts. **Delete** (editors in
+runs it at once on one cluster or on all of them; these runs count toward alerts. Each person can use Run now
+6 times a minute. **Delete** (editors in
 scope) asks for the scenario's name and removes its runs and alert history with it.
 
 ![A scenario](images/monitoring-02-scenario.png)

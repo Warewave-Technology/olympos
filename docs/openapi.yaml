@@ -1261,6 +1261,7 @@ paths:
       summary: >-
         Run now: one manual run on cluster_id, or on every cluster the scenario runs on now with an online
         probe. Manual runs count toward alerting. Same permission as editing the scenario. The body is optional.
+        At most 6 requests per user per minute on each server replica; a request that makes no run does not count.
       requestBody:
         content: {application/json: {schema: {type: object, properties: {cluster_id: {type: string, format: uuid}}}}}
       responses:
@@ -1269,7 +1270,7 @@ paths:
           content: {application/json: {schema: {type: object, properties: {run_ids: {type: array, items: {type: string, format: uuid}}}}}}
         "409": {description: "The scenario is paused, the cluster's probe is not online, or no cluster can run it now"}
         "422": {description: "cluster_id unknown, or not a cluster the scenario runs on"}
-        "429": {description: A request cap blocks the run}
+        "429": {description: "A request cap blocks the run, or more than 6 Run now requests in a minute"}
   /synthetic/scenarios/{id}/clusters:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:

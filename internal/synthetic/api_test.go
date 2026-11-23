@@ -972,6 +972,39 @@ func TestRunNowAndTestRuns(t *testing.T) {
 	}
 }
 
+// Run now is limited per user (6 a minute by default), like test runs: a
+// request that makes no run uses up no slot, and one user's limit does not
+// hold another back.
+func TestRunNowRateLimit(t *testing.T) {
+	x := newEnv(t)
+	admin := x.login("admin", "admin")
+	x.addRule(admin, "wrw.com", "suffix")
+	id := x.createScenario(admin, scenarioBody("s", httpStep("https://api.wrw.com/")))
+	path := "/api/v1/synthetic/scenarios/" + id.String() + "/run"
+	one := map[string]any{"cluster_id": x.clusters["dev-1"]}
+
+	x.exec(`UPDATE clusters SET probe_status = 'offline'`)
+	for range 7 {
+		if code := admin.Do("POST", path, one, nil); code != 409 {
+			t.Fatalf("run now on an offline probe: %d", code)
+		}
+	}
+	x.exec(`UPDATE clusters SET probe_status = 'online'`)
+	for i := range 6 {
+		if code := admin.Do("POST", path, one, nil); code != 202 {
+			t.Fatalf("run now %d: %d", i, code)
+		}
+	}
+	var e errBody
+	if code := admin.Do("POST", path, nil, &e); code != 429 || !strings.Contains(e.Error, "At most 6 Run now requests a minute") {
+		t.Fatalf("seventh run now: %d %+v", code, e)
+	}
+	other := x.login("admin-2", "admin")
+	if code := other.Do("POST", path, one, nil); code != 202 {
+		t.Fatalf("another user's run now: %d", code)
+	}
+}
+
 // ---------------------------------------------------------------- inventory
 
 func TestProbeTokenAndRevoke(t *testing.T) {
