@@ -446,7 +446,7 @@ function stepResults(steps: ScenarioStep[], f: Fx | undefined): SyntheticStepRes
     const us = ms * 1000;
     const timings =
       st.kind === 'http'
-        ? { dns_us: Math.round(us * 0.06), connect_us: Math.round(us * 0.12), tls_us: Math.round(us * 0.18), ttfb_us: Math.round(us * 0.58), download_us: Math.round(us * 0.06), total_us: us }
+        ? { dns_us: Math.round(us * 0.06), connect_us: Math.round(us * 0.12), tls_us: Math.round(us * 0.18), ttfb_us: Math.round(us * 0.94), download_us: Math.round(us * 0.06), total_us: us }
         : st.kind === 'dns'
           ? { dns_us: us, connect_us: 0, tls_us: 0, ttfb_us: 0, download_us: 0, total_us: us }
           : { dns_us: 1000, connect_us: us - 1000, tls_us: st.kind === 'tls' ? 20_000 : 0, ttfb_us: 0, download_us: 0, total_us: us };

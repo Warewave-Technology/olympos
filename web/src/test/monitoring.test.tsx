@@ -7,7 +7,7 @@ import type { ScenarioStep } from '../api/types';
 import { toCurl } from '../lib/curl';
 import * as syn from '../mocks/synthetic';
 import { REASON_TEXT, reasonText, withCredentialNames } from '../ui/synthetic';
-import { POLL_MARGIN_MS, shouldPoll } from '../pages/monitoring/RunDialog';
+import { POLL_MARGIN_MS, shouldPoll, waterfallPhases } from '../pages/monitoring/RunDialog';
 import { MONITORING_TABS } from '../pages/monitoring/tabs';
 import { renderApp } from './renderApp';
 
@@ -151,7 +151,7 @@ describe('run dialog', () => {
     expect(rows[2]).toHaveAttribute('aria-pressed', 'true');
     expect(rows[2]).toHaveTextContent('912 ms');
     expect(rows[3]).toHaveTextContent('skipped');
-    expect(within(rows[2]).getByRole('img').getAttribute('aria-label')).toMatch(/^DNS [\d.]+ ms, connect [\d.]+ ms, TLS [\d.]+ ms, waiting \(TTFB\) [\d.]+ ms, download [\d.]+ ms$/);
+    expect(within(rows[2]).getByRole('img').getAttribute('aria-label')).toMatch(/^DNS [\d.]+ ms, connect [\d.]+ ms, TLS [\d.]+ ms, waiting [\d.]+ ms \(TTFB [\d.]+ ms\), download [\d.]+ ms$/);
 
     const asserts = within(dlg).getByRole('list', { name: 'Step 3 assertions' });
     const items = within(asserts).getAllByRole('listitem');
@@ -186,6 +186,29 @@ describe('run dialog', () => {
     // a step without a credential still copies
     await user.click(within(within(dlg).getByRole('list', { name: 'Steps' })).getAllByRole('button')[1]);
     expect(within(dlg).getByRole('button', { name: 'Copy as curl' })).toBeInTheDocument();
+  });
+});
+
+describe('waterfallPhases', () => {
+  const us = (ps: { key: string; us: number }[]) => Object.fromEntries(ps.map((p) => [p.key, Math.round(p.us)]));
+
+  it('takes DNS, connect and TLS out of the TTFB, which the probe measures from the start of the step', () => {
+    // A lab run: TTFB 1000 µs includes DNS 300 and connect 200; the bar must not run past the step's total.
+    const ps = waterfallPhases({ dns_us: 300, connect_us: 200, tls_us: 0, ttfb_us: 1000, download_us: 50, total_us: 1060 });
+    expect(us(ps)).toEqual({ dns_us: 300, connect_us: 200, ttfb_us: 500, download_us: 50 });
+    expect(ps.map((p) => p.label)).toEqual(['DNS', 'connect', 'waiting (TTFB)', 'download']);
+    expect(ps.reduce((n, p) => n + p.us, 0)).toBeLessThanOrEqual(1060);
+  });
+
+  it('never lets the segments add up to more than the step', () => {
+    // Redirects: DNS and connect add up over every hop, TTFB is the last hop's.
+    const ps = waterfallPhases({ dns_us: 4000, connect_us: 4000, tls_us: 2000, ttfb_us: 6000, download_us: 1000, total_us: 9000 });
+    expect(us(ps)).toEqual({ dns_us: 3273, connect_us: 3273, tls_us: 1636, download_us: 818 });
+    expect(Math.round(ps.reduce((n, p) => n + p.us, 0))).toBe(9000);
+  });
+
+  it('keeps steps without a response as they are', () => {
+    expect(us(waterfallPhases({ dns_us: 2000, connect_us: 10_000_000, tls_us: 0, ttfb_us: 0, download_us: 0, total_us: 10_002_000 }))).toEqual({ dns_us: 2000, connect_us: 10_000_000 });
   });
 });
 

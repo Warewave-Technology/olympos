@@ -1329,6 +1329,7 @@ export interface StepTimings {
   dns_us: number;
   connect_us: number;
   tls_us: number;
+  /** From the start of the step to the first response byte: includes DNS, connect and TLS. */
   ttfb_us: number;
   download_us: number;
   total_us: number;

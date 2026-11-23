@@ -3576,6 +3576,7 @@ button.cell:focus-visible {
   border-radius: 3px;
   position: relative;
   display: block;
+  overflow: hidden;
 }
 .wf-bar span {
   position: absolute;

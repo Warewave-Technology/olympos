@@ -20,6 +20,20 @@ const PHASES: { key: keyof Omit<StepTimings, 'total_us'>; label: string; cls: st
   { key: 'download_us', label: 'download', cls: 'ph-dl' },
 ];
 
+/**
+ * The waterfall segments of one step, in µs, in order. The probe measures TTFB from the start of the step
+ * (it includes DNS, connect and TLS, like curl's time_starttransfer), so the "waiting" segment is TTFB minus
+ * those. Segments never add up to more than the step's total: they are scaled down if they would, so a bar
+ * stays inside its own step.
+ */
+export function waterfallPhases(t: StepTimings): { key: (typeof PHASES)[number]['key']; label: string; cls: string; us: number }[] {
+  const waiting = t.ttfb_us > 0 ? Math.max(0, t.ttfb_us - t.dns_us - t.connect_us - t.tls_us) : 0;
+  const us: Record<string, number> = { dns_us: t.dns_us, connect_us: t.connect_us, tls_us: t.tls_us, ttfb_us: waiting, download_us: t.download_us };
+  const sum = PHASES.reduce((n, p) => n + us[p.key], 0);
+  const scale = t.total_us > 0 && sum > t.total_us ? t.total_us / sum : 1;
+  return PHASES.filter((p) => us[p.key] > 0).map((p) => ({ ...p, us: us[p.key] * scale }));
+}
+
 const runKey = (id: string) => ['synthetic', 'run', id] as const;
 const msOf = (us: number) => (us >= 10_000 ? `${Math.round(us / 1000)} ms` : `${Math.round(us / 100) / 10} ms`);
 const done = (r: SyntheticRunDetail | undefined) => !!r && r.status !== 'scheduled' && r.status !== 'running';
@@ -97,15 +111,15 @@ function Waterfall({ r, selected, onSelect }: { r: SyntheticRunDetail; selected:
           if (t) offset += t.total_us;
           let left = (start / total) * 100;
           const phases = t
-            ? PHASES.filter((p) => t[p.key] > 0).map((p) => {
-                const w = (t[p.key] / total) * 100;
-                const seg = { ...p, left, width: Math.max(w, 0.3), us: t[p.key] };
+            ? waterfallPhases(t).map((p) => {
+                const w = (p.us / total) * 100;
+                const seg = { ...p, left, width: Math.max(w, 0.3) };
                 left += w;
                 return seg;
               })
             : [];
           const right = st.status === 'skipped' ? 'skipped' : st.status === '' ? (done(r) ? 'no result' : 'running') : t ? msOf(t.total_us) : '—';
-          const summary = phases.map((p) => `${p.label} ${msOf(p.us)}`).join(', ');
+          const summary = phases.map((p) => (p.key === 'ttfb_us' && t ? `waiting ${msOf(p.us)} (TTFB ${msOf(t.ttfb_us)})` : `${p.label} ${msOf(p.us)}`)).join(', ');
           return (
             <li key={i}>
               <button type="button" className={`wf${selected === i ? ' on' : ''}${failed ? ' failed' : ''}${st.status === 'skipped' ? ' skipped' : ''}`} aria-pressed={selected === i} onClick={() => onSelect(i)}>
