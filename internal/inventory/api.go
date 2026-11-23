@@ -434,6 +434,14 @@ func (a *API) newProbeToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusConflict, "cluster is revoked; add it again as a new cluster")
 		return
 	}
+	// Ruling P24: a cluster still waiting for its first agent has its add
+	// cluster token, which enrolls the probe too. A probe token would take
+	// the probe role from it, and its helm upgrade needs a release that does
+	// not exist yet.
+	if c.Status == "pending" {
+		httpx.Error(w, http.StatusConflict, "the agent has not enrolled yet; its install command already installs the probe")
+		return
+	}
 	var token string
 	var exp time.Time
 	err = store.Tx(r.Context(), a.DB, func(tx pgx.Tx) error {

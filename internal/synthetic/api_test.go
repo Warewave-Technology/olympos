@@ -408,6 +408,14 @@ func TestCredentialsAndHiddenHeaders(t *testing.T) {
 	if code := admin.Do("PUT", "/api/v1/synthetic/credentials/"+cred.String(), rot, &cv); code != 200 || cv.RotatedAt == nil {
 		t.Fatalf("rotate: %d %+v", code, cv)
 	}
+	// A past expiry is refused on update too.
+	past := bearer("catalog", "", "wildcard:*.prod.wrw.com")
+	delete(past, "secret")
+	past["expires_at"] = time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	e = errBody{}
+	if code := admin.Do("PUT", "/api/v1/synthetic/credentials/"+cred.String(), past, &e); code != 422 || e.Fields["expires_at"] != "must be in the future" {
+		t.Fatalf("update with a past expiry: %d %+v", code, e)
+	}
 	if code := admin.Do("DELETE", path, nil, nil); code != 204 {
 		t.Fatalf("delete scenario: %d", code)
 	}
@@ -968,6 +976,18 @@ func TestProbeTokenAndRevoke(t *testing.T) {
 	if err := x.DB.QueryRow(ctx, `SELECT roles FROM enroll_tokens WHERE cluster_id = $1`, id).Scan(&roles); err != nil || !slices.Equal(roles, []string{"agent", "probe"}) {
 		t.Fatalf("add cluster token roles %v %v", roles, err)
 	}
+	// Ruling P24: no probe token while the cluster waits for its first agent;
+	// the add cluster token keeps both roles.
+	var pe errBody
+	if code := admin.Do("POST", "/api/v1/clusters/"+id.String()+"/probe-token", nil, &pe); code != 409 || !strings.Contains(pe.Error, "already installs the probe") {
+		t.Fatalf("probe token for a pending cluster: %d %+v", code, pe)
+	}
+	if err := x.DB.QueryRow(ctx, `SELECT roles FROM enroll_tokens WHERE cluster_id = $1`, id).Scan(&roles); err != nil || !slices.Equal(roles, []string{"agent", "probe"}) {
+		t.Fatalf("add cluster token roles after a refused probe token %v %v", roles, err)
+	}
+	// From here the cluster is enrolled (its install token left unused, so
+	// the withdrawal below still has an agent role to keep).
+	x.exec(`UPDATE clusters SET status = 'online' WHERE id = $1`, id)
 	var inst struct {
 		Command string `json:"command"`
 	}

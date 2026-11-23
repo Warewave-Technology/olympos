@@ -110,7 +110,7 @@ paths:
         tokens lose their unused probe role (an install token keeps its agent role).
       responses:
         "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
-        "409": {description: The cluster is revoked}
+        "409": {description: "The cluster is revoked, or still pending: its add cluster command already installs the probe (ruling P24)"}
   /clusters/{id}/probe:
     parameters: [{$ref: "#/components/parameters/id"}]
     delete:
@@ -1424,7 +1424,7 @@ paths:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticCredential"}}}}
         "404": {description: Not found}
         "409": {description: Scenarios would break, content: {application/json: {schema: {$ref: "#/components/schemas/InUse"}}}}
-        "422": {description: Validation, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+        "422": {description: "Validation (expires_at must be in the future, or null)", content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
     delete:
       tags: [synthetic]
       summary: Delete a credential and its secret (admin, scope all). Refused while a scenario uses it.
@@ -2755,7 +2755,7 @@ components:
         header_name: {type: string, example: X-Api-Key, description: header credentials only}
         oauth_token_url: {type: string, description: "oauth2_client_credentials only: https, allowlisted, inside bound_hosts"}
         oauth_scopes: {type: string}
-        expires_at: {type: [string, "null"], format: date-time, description: "synthetic.credential_expiring fires 14 and 3 days before"}
+        expires_at: {type: [string, "null"], format: date-time, description: "In the future (create and update); null for none. synthetic.credential_expiring fires 14 and 3 days before"}
     SyntheticCredential:
       type: object
       properties:

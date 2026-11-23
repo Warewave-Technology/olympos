@@ -932,6 +932,10 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request) {
 		if in.Secret != nil {
 			validateSecret(v.kind, v.name, in.Secret, fields)
 		}
+		// A past expiry means nothing: clear it (null) or set a future one.
+		if v.expiresAt != nil && !v.expiresAt.After(a.now()) {
+			fields["expires_at"] = "must be in the future"
+		}
 		if len(fields) > 0 {
 			return invalid("invalid credential", fields)
 		}
