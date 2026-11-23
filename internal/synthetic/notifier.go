@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -31,8 +32,11 @@ type pendingAlert struct {
 	lastRunID   *uuid.UUID
 	failedStep  *int
 	stepKind    string
-	opened      bool // notified_at is set
-	resolved    bool // state resolved and resolved_notified_at is set
+	// stillFailing: for a resolved fleet alert, the cluster alerts that
+	// still fired when it resolved.
+	stillFailing int
+	opened       bool // notified_at is set
+	resolved     bool // state resolved and resolved_notified_at is set
 }
 
 func (a *pendingAlert) fleet() bool { return a.clusterID == nil }
@@ -47,6 +51,9 @@ func (a *pendingAlert) fleet() bool { return a.clusterID == nil }
 // An alert is marked notified in the transaction that writes its message to
 // the outbox, so each one opens and resolves with one message at most; the
 // idempotency key (synthetic.<kind>:<alert id>) is the outbox's own guard.
+// The messages of one scenario in one pass are delivered in the order they
+// are written (notify.Event.Seq): earlier alerts' resolutions, then the
+// opens, then the resolutions of alerts that opened in the same pass.
 func (s *Service) Notify(ctx context.Context) error {
 	rows, err := s.DB.Query(ctx, `SELECT DISTINCT scenario_id FROM synthetic_alerts
 		WHERE notified_at IS NULL OR (state = 'resolved' AND resolved_notified_at IS NULL)`)
@@ -80,7 +87,7 @@ func (s *Service) notifyScenario(ctx context.Context, tx pgx.Tx, scenarioID uuid
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `SELECT a.id, a.cluster_id, COALESCE(c.name, ''), a.state, a.reason, a.clusters, a.last_run_id,
+	rows, err := tx.Query(ctx, `SELECT a.id, a.cluster_id, COALESCE(c.name, ''), a.state, a.reason, a.clusters, COALESCE(a.still_failing, 0), a.last_run_id,
 			r.failed_step, COALESCE(st.kind, ''), a.notified_at IS NOT NULL, a.resolved_notified_at IS NOT NULL
 		FROM synthetic_alerts a
 		LEFT JOIN clusters c ON c.id = a.cluster_id
@@ -94,52 +101,80 @@ func (s *Service) notifyScenario(ctx context.Context, tx pgx.Tx, scenarioID uuid
 	}
 	alerts, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (*pendingAlert, error) {
 		a := &pendingAlert{}
-		return a, r.Scan(&a.id, &a.clusterID, &a.clusterName, &a.state, &a.reason, &a.clusters, &a.lastRunID,
+		return a, r.Scan(&a.id, &a.clusterID, &a.clusterName, &a.state, &a.reason, &a.clusters, &a.stillFailing, &a.lastRunID,
 			&a.failedStep, &a.stepKind, &a.opened, &a.resolved)
 	})
 	if err != nil {
 		return err
 	}
-	var opened, resolved []*pendingAlert
+	// Order (fix round 1): resolutions of alerts whose open went out in
+	// an earlier pass come first, then this pass's opens, then the
+	// resolutions of alerts that opened in this pass too. A fleet alert
+	// that resolved and a new one that opened thus read "no longer
+	// critical", then "critical".
+	var earlier, opened, blips []*pendingAlert
 	for _, a := range alerts {
 		if !a.opened {
 			opened = append(opened, a)
 		}
 		if a.state == "resolved" && !a.resolved {
-			resolved = append(resolved, a)
+			if a.opened {
+				earlier = append(earlier, a)
+			} else {
+				blips = append(blips, a)
+			}
 		}
 	}
 	now := s.now()
+	seq := 0
+	emit := func(e notify.Event) error {
+		e.Seq = seq
+		seq++
+		return notify.Emit(ctx, tx, e)
+	}
+	resolve := func(group []*pendingAlert) error {
+		if len(group) == 0 {
+			return nil
+		}
+		if rule.SendRecovery {
+			if err := emitResolved(scenarioID, name, rule, group, emit); err != nil {
+				return err
+			}
+		}
+		// Marked when recoveries are off too: turning them on later does
+		// not send old ones.
+		_, err := tx.Exec(ctx, `UPDATE synthetic_alerts SET resolved_notified_at = $2 WHERE id = ANY($1)`, alertIDs(group), now)
+		return err
+	}
 
+	if err := resolve(earlier); err != nil {
+		return err
+	}
 	if len(opened) > 0 {
-		if err := s.emitOpened(ctx, tx, scenarioID, name, rule, opened); err != nil {
+		if err := emitOpened(ctx, tx, scenarioID, name, rule, opened, emit); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `UPDATE synthetic_alerts SET notified_at = $2 WHERE id = ANY($1)`, alertIDs(opened), now); err != nil {
 			return err
 		}
 	}
-	if len(resolved) > 0 {
-		if rule.SendRecovery {
-			if err := s.emitResolved(ctx, tx, scenarioID, name, rule, resolved); err != nil {
-				return err
-			}
-		}
-		// Marked when recoveries are off too: turning them on later does
-		// not send old ones.
-		if _, err := tx.Exec(ctx, `UPDATE synthetic_alerts SET resolved_notified_at = $2 WHERE id = ANY($1)`, alertIDs(resolved), now); err != nil {
-			return err
-		}
-	}
-	return nil
+	return resolve(blips)
 }
 
 // emitOpened writes the one message of the alerts that opened: critical
-// when the fleet alert is among them, else failing.
-func (s *Service) emitOpened(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUID, name string, rule AlertRule, opened []*pendingAlert) error {
+// when the fleet alert is among them, else failing. The critical message
+// names the fleet's clusters and every cluster alert it is sent for.
+func emitOpened(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUID, name string, rule AlertRule, opened []*pendingAlert,
+	emit func(notify.Event) error) error {
 	fleet, clusters := split(opened)
 	if fleet != nil {
-		names, err := clusterNames(ctx, tx, fleet.clusters)
+		ids := append([]string(nil), fleet.clusters...)
+		for _, a := range clusters {
+			if id := a.clusterID.String(); !slices.Contains(ids, id) {
+				ids = append(ids, id)
+			}
+		}
+		names, err := clusterNames(ctx, tx, ids)
 		if err != nil {
 			return err
 		}
@@ -147,41 +182,37 @@ func (s *Service) emitOpened(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUI
 		if ch == nil {
 			ch = rule.ChannelID
 		}
-		return notify.Emit(ctx, tx, s.alertEvent(notify.SyntheticCritical, ch, fleet, scenarioID,
+		return emit(alertEvent(notify.SyntheticCritical, ch, fleet, scenarioID,
 			fmt.Sprintf("Synthetic check critical: %s fails on %d clusters", name, len(names)), name, names, true, opened))
 	}
 	names := make([]string, len(clusters))
 	for i, a := range clusters {
 		names[i] = a.clusterName
 	}
-	return notify.Emit(ctx, tx, s.alertEvent(notify.SyntheticFailing, rule.ChannelID, clusters[0], scenarioID,
+	return emit(alertEvent(notify.SyntheticFailing, rule.ChannelID, clusters[0], scenarioID,
 		"Synthetic check failing: "+name+" on "+onClusters(names), name, names, true, opened))
 }
 
 // emitResolved writes the one message of the alerts that resolved, to the
-// critical channel when the fleet alert is among them.
-func (s *Service) emitResolved(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUID, name string, rule AlertRule, resolved []*pendingAlert) error {
+// critical channel when the fleet alert is among them, with the number of
+// cluster alerts that still fired when the fleet alert resolved.
+func emitResolved(scenarioID uuid.UUID, name string, rule AlertRule, resolved []*pendingAlert, emit func(notify.Event) error) error {
 	fleet, clusters := split(resolved)
 	names := make([]string, len(clusters))
 	for i, a := range clusters {
 		names[i] = a.clusterName
 	}
 	if fleet != nil {
-		var still int
-		if err := tx.QueryRow(ctx, `SELECT count(*) FROM synthetic_alerts WHERE scenario_id = $1 AND cluster_id IS NOT NULL AND state = 'firing'`,
-			scenarioID).Scan(&still); err != nil {
-			return err
-		}
 		ch := rule.CriticalChannelID
 		if ch == nil {
 			ch = rule.ChannelID
 		}
-		e := s.alertEvent(notify.SyntheticRecovered, ch, fleet, scenarioID, "Synthetic check no longer critical: "+name, name, names, false, resolved)
-		e.Fields["still failing"] = fmt.Sprintf("%d clusters", still)
-		e.Payload["still_failing"] = still
-		return notify.Emit(ctx, tx, e)
+		e := alertEvent(notify.SyntheticRecovered, ch, fleet, scenarioID, "Synthetic check no longer critical: "+name, name, names, false, resolved)
+		e.Fields["still failing"] = fmt.Sprintf("%d clusters", fleet.stillFailing)
+		e.Payload["still_failing"] = fleet.stillFailing
+		return emit(e)
 	}
-	return notify.Emit(ctx, tx, s.alertEvent(notify.SyntheticRecovered, rule.ChannelID, clusters[0], scenarioID,
+	return emit(alertEvent(notify.SyntheticRecovered, rule.ChannelID, clusters[0], scenarioID,
 		"Synthetic check recovered: "+name+" on "+onClusters(names), name, names, false, resolved))
 }
 
@@ -189,7 +220,7 @@ func (s *Service) emitResolved(ctx context.Context, tx pgx.Tx, scenarioID uuid.U
 // key, the link's run and, for an open, the failed step and reason. Only
 // names, counts, a step position and kind, and a redacted, shortened reason
 // go into it: never a credential or a response.
-func (s *Service) alertEvent(kind string, ch *uuid.UUID, lead *pendingAlert, scenarioID uuid.UUID, title, scenario string, clusters []string,
+func alertEvent(kind string, ch *uuid.UUID, lead *pendingAlert, scenarioID uuid.UUID, title, scenario string, clusters []string,
 	open bool, group []*pendingAlert) notify.Event {
 	link := "/monitoring?scenario=" + scenarioID.String()
 	payload := map[string]any{"scenario_id": scenarioID.String(), "alert_ids": idStrings(group), "cluster_count": len(clusters)}

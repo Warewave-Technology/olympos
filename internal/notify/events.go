@@ -75,6 +75,11 @@ type Event struct {
 	Link    string
 	Fields  map[string]string
 	Payload map[string]any
+	// Seq orders the events one transaction emits: the row's created_at
+	// and next_attempt_at are now() plus Seq microseconds, so that the
+	// dispatcher delivers them in that order (now() is the same for the
+	// whole transaction). Zero: now().
+	Seq int
 }
 
 // Emit writes the event to the outbox in the caller's transaction.
@@ -93,7 +98,8 @@ func Emit(ctx context.Context, q store.Querier, e Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO outbox (event_type, payload, channel_id, idempotency_key)
-		VALUES ($1, $2, $3, $4) ON CONFLICT (idempotency_key) DO NOTHING`, e.Type, b, e.ChannelID, e.Key)
+	_, err = q.Exec(ctx, `INSERT INTO outbox (event_type, payload, channel_id, idempotency_key, created_at, next_attempt_at)
+		VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), now() + make_interval(secs => $5))
+		ON CONFLICT (idempotency_key) DO NOTHING`, e.Type, b, e.ChannelID, e.Key, float64(e.Seq)/1e6)
 	return err
 }

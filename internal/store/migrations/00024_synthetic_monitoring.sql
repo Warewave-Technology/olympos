@@ -256,8 +256,10 @@ CREATE TABLE synthetic_step_results (
 -- ---------------------------------------------------------------- alerts
 
 -- cluster_id NULL is the fleet alert. clusters lists the clusters failing
--- when it opened. Only one alert per scenario and cluster (or fleet) is
--- firing; resolved ones stay as history.
+-- when it opened, still_failing how many cluster alerts still fired when it
+-- resolved. Only one alert per scenario and cluster (or fleet) is firing;
+-- resolved ones stay as history. An alert whose pair stopped being
+-- monitored resolves with reason no_longer_monitored and no message.
 CREATE TABLE synthetic_alerts (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   scenario_id          uuid NOT NULL REFERENCES scenarios(id) ON DELETE CASCADE,
@@ -265,6 +267,7 @@ CREATE TABLE synthetic_alerts (
   state                text NOT NULL CHECK (state IN ('firing','resolved')),
   reason               text NOT NULL DEFAULT '',
   clusters             text[] NOT NULL DEFAULT '{}',
+  still_failing        int,
   opened_at            timestamptz NOT NULL DEFAULT now(),
   resolved_at          timestamptz,
   last_run_id          uuid REFERENCES synthetic_runs(id) ON DELETE SET NULL,

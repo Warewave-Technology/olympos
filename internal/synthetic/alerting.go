@@ -177,21 +177,46 @@ func (s *Service) ApplyOutcome(ctx context.Context, tx pgx.Tx, o RunOutcome) err
 	default:
 		return nil
 	}
-	return s.applyFleet(ctx, tx, o, rule, finished)
+	return s.reevaluateFleet(ctx, tx, o.ScenarioID, rule, finished, &o.RunID)
 }
 
-// applyFleet opens the scenario's fleet alert when FleetCriticalClusters or
-// more cluster alerts fire, and resolves it when fewer do. clusters holds
-// the firing clusters' ids when it opened, oldest alert first.
-func (s *Service) applyFleet(ctx context.Context, tx pgx.Tx, o RunOutcome, rule AlertRule, at time.Time) error {
+// ReevaluateFleet opens or resolves a scenario's fleet alert from the
+// cluster alerts firing now and the current fleet_critical_clusters: after
+// an edit of scenario_alerts, or after cluster alerts went away without a
+// run (no longer monitored, or removed with their cluster). A scenario that
+// is gone is a no-op.
+func (s *Service) ReevaluateFleet(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUID) error {
+	var one int
+	err := tx.QueryRow(ctx, `SELECT 1 FROM scenarios WHERE id = $1 FOR NO KEY UPDATE`, scenarioID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rule, err := loadAlertRule(ctx, tx, scenarioID)
+	if err != nil {
+		return err
+	}
+	return s.reevaluateFleet(ctx, tx, scenarioID, rule, s.now(), nil)
+}
+
+// reevaluateFleet opens the fleet alert when FleetCriticalClusters or more
+// cluster alerts fire, and resolves it when fewer do (the caller holds the
+// scenario row). It opens with the reason and run of the newest firing
+// cluster alert (on the run path, the one that just opened), and clusters
+// holds the firing clusters' ids, oldest alert first. It resolves with
+// still_failing, the count at that moment, and the run that moved it when
+// there is one (runID nil: no run did).
+func (s *Service) reevaluateFleet(ctx context.Context, tx pgx.Tx, scenarioID uuid.UUID, rule AlertRule, at time.Time, runID *uuid.UUID) error {
 	var ids []string
 	if err := tx.QueryRow(ctx, `SELECT COALESCE(array_agg(cluster_id::text ORDER BY opened_at, cluster_id), '{}') FROM synthetic_alerts
-		WHERE scenario_id = $1 AND cluster_id IS NOT NULL AND state = 'firing'`, o.ScenarioID).Scan(&ids); err != nil {
+		WHERE scenario_id = $1 AND cluster_id IS NOT NULL AND state = 'firing'`, scenarioID).Scan(&ids); err != nil {
 		return err
 	}
 	var fleet *uuid.UUID
 	if err := tx.QueryRow(ctx, `SELECT id FROM synthetic_alerts WHERE scenario_id = $1 AND cluster_id IS NULL AND state = 'firing' FOR UPDATE`,
-		o.ScenarioID).Scan(&fleet); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		scenarioID).Scan(&fleet); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	critical := len(ids) >= max(rule.FleetCriticalClusters, 1)
@@ -199,9 +224,13 @@ func (s *Service) applyFleet(ctx context.Context, tx pgx.Tx, o RunOutcome, rule 
 	switch {
 	case critical && fleet == nil:
 		_, err = tx.Exec(ctx, `INSERT INTO synthetic_alerts (scenario_id, cluster_id, state, reason, clusters, opened_at, last_run_id)
-			VALUES ($1, NULL, 'firing', $2, $3, $4, $5) ON CONFLICT DO NOTHING`, o.ScenarioID, cut(o.Reason, maxReason), ids, at, o.RunID)
+			SELECT $1, NULL, 'firing', a.reason, $2, $3, a.last_run_id FROM synthetic_alerts a
+			WHERE a.scenario_id = $1 AND a.cluster_id IS NOT NULL AND a.state = 'firing'
+			ORDER BY a.opened_at DESC, a.cluster_id DESC LIMIT 1
+			ON CONFLICT DO NOTHING`, scenarioID, ids, at)
 	case !critical && fleet != nil:
-		_, err = tx.Exec(ctx, `UPDATE synthetic_alerts SET state = 'resolved', resolved_at = $2, last_run_id = $3 WHERE id = $1`, *fleet, at, o.RunID)
+		_, err = tx.Exec(ctx, `UPDATE synthetic_alerts SET state = 'resolved', resolved_at = $2, still_failing = $3,
+			last_run_id = COALESCE($4, last_run_id) WHERE id = $1`, *fleet, at, len(ids), runID)
 	}
 	return err
 }

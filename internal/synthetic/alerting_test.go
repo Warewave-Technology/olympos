@@ -659,10 +659,9 @@ func TestAlertPayloadsNoCanary(t *testing.T) {
 
 // The notifier redacts and cuts the reason itself, whatever the row holds.
 func TestAlertEventRedactsReason(t *testing.T) {
-	s := &Service{}
 	const token = "tok-9f8e7d6c5b4a"
 	a := &pendingAlert{id: uuid.New(), reason: "upstream said: Bearer " + token + " " + strings.Repeat("é", 400), failedStep: ptr(1), stepKind: "http"}
-	ev := s.alertEvent(notify.SyntheticFailing, nil, a, uuid.New(), "t", "s", []string{"c1"}, true, []*pendingAlert{a})
+	ev := alertEvent(notify.SyntheticFailing, nil, a, uuid.New(), "t", "s", []string{"c1"}, true, []*pendingAlert{a})
 	r := ev.Fields["reason"]
 	if strings.Contains(r, token) || !strings.Contains(r, secrets.Redacted) || len(r) > maxMessageReason || !utf8.ValidString(r) {
 		t.Fatalf("reason %q (%d bytes)", r, len(r))

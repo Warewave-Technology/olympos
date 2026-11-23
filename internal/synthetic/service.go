@@ -231,13 +231,15 @@ func (s *Service) RunDispatcher(ctx context.Context) {
 }
 
 // RunAlerts is the leader loop of LockSyntheticAlerts, every
-// AlertsInterval: probe state, then the alert messages (one loop per lock:
-// two loops on one key would exclude each other).
+// AlertsInterval: probe state, unmonitored alerts, then the alert messages
+// (one loop per lock: two loops on one key would exclude each other).
 func (s *Service) RunAlerts(ctx context.Context) {
 	schedule.RunLeader(ctx, s.DB, schedule.LockSyntheticAlerts, AlertsInterval, s.Log.With("loop", "alerts"), s.alertsTick)
 }
 
-// alertsTick runs both checks: one failing does not hold the other back.
+// alertsTick runs every check, one failing does not hold the others back:
+// probe state, the alerts of pairs no longer monitored (ruling P16), then
+// the messages.
 func (s *Service) alertsTick(ctx context.Context) error {
-	return errors.Join(s.CheckProbesOffline(ctx), s.Notify(ctx))
+	return errors.Join(s.CheckProbesOffline(ctx), s.ResolveUnmonitored(ctx), s.Notify(ctx))
 }
