@@ -53,9 +53,8 @@ jobs:
           ./scripts/check-release-binary.sh
       - name: Pinned tools in sync (image and packages)
         run: ./scripts/check-tool-versions.sh
-      - name: Migration ordering
-        if: github.event_name == 'pull_request'
-        run: ./scripts/check-migrations.sh origin/${{ github.base_ref }}
+      - name: Migrations (ordering, merged ones immutable)
+        run: ./scripts/check-migrations.sh origin/${{ github.base_ref || 'main' }}
       - name: systemd unit hardening (exposure ≤ 3.0)
         run: systemd-analyze security --offline=yes --threshold=30 deploy/systemd/olympos-server.service
       - name: Secret canary scan of test logs
