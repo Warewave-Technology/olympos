@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -196,6 +197,10 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 
 	checkNoCanary(t, canary, scenarioID)
 
+	// A credential that cannot be resolved: one alert, one attention item,
+	// one recovery, and no failing scenario (#54).
+	checkCredentialAlerts(t, admin, pair)
+
 	// lab-b's probe stops: its cells read "probe offline", and no run on
 	// lab-b fails or errors meanwhile (an offline probe is not a failure).
 	// A run the probe was running when it stopped ends skipped
@@ -226,6 +231,150 @@ func TestM9SyntheticMonitoring(t *testing.T) {
 	}
 	run(t, "kubectl", "-n", labBNS, "scale", "deploy/olympos-probe", "--replicas=1")
 	waitProbesOnline(t, admin, labB)
+}
+
+// kvWriterPod mounts the server's local Key Vault (the PVC of the lab's
+// "local" key vault provider), which the server image cannot write to from
+// outside: it has no shell. It runs as the server's user, so the files it
+// writes are readable by the server.
+const kvWriterPod = `apiVersion: v1
+kind: Pod
+metadata: {name: m9-kv-writer, namespace: olympos}
+spec:
+  securityContext: {runAsUser: 65532, runAsGroup: 65532, fsGroup: 65532}
+  containers:
+  - name: c
+    image: busybox:1.36
+    command: [sleep, "3600"]
+    volumeMounts: [{name: kv, mountPath: /kv}]
+  volumes:
+  - name: kv
+    persistentVolumeClaim: {claimName: olympos-localkv}
+`
+
+// checkCredentialAlerts points a credential at a local Key Vault secret that
+// does not exist and checks that, however many runs and clusters it takes:
+// the cells read "credential_error", the Dashboard has one Needs attention
+// item and the outbox one synthetic.credential_broken, no run counts as a
+// failure and no scenario alert opens. Then it writes the secret and checks
+// that the cells pass, the item goes and one synthetic.credential_restored
+// goes out (docs/design/credential-alerts.md).
+func checkCredentialAlerts(t *testing.T, admin *client, clusters []string) {
+	t.Helper()
+	applyStdin(t, kvWriterPod)
+	t.Cleanup(func() {
+		_, _ = runOK(t, "kubectl", "-n", "olympos", "delete", "pod/m9-kv-writer", "--ignore-not-found", "--wait=false")
+	})
+	run(t, "kubectl", "-n", "olympos", "wait", "--for=condition=Ready", "pod/m9-kv-writer", "--timeout=180s")
+	secretName := "m9-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12]
+	t.Cleanup(func() {
+		_, _ = runOK(t, "kubectl", "-n", "olympos", "exec", "m9-kv-writer", "--", "rm", "-f", "/kv/secrets/lab/"+secretName)
+	})
+
+	// A Key Vault reference to a secret that is not in the vault yet.
+	name := "m9-kv-" + uuid.NewString()[:6]
+	var cred struct {
+		ID string `json:"id"`
+	}
+	admin.must("POST", "/synthetic/credentials", map[string]any{
+		"name": name, "kind": "bearer",
+		"bound_hosts": []map[string]string{{"kind": "suffix", "pattern": labSuffix}},
+		"secret":      map[string]any{"source": "keyvault_ref", "ref": "kv://lab/" + secretName},
+	}, &cred, 201)
+	t.Cleanup(func() { admin.do("DELETE", "/synthetic/credentials/"+cred.ID, nil, nil) })
+	sc := m9Scenario("m9-kv-"+uuid.NewString()[:6], 2,
+		map[string]any{"kind": "http", "http": map[string]any{"method": "GET", "url": "http://shop." + labSuffix + "/api/items"},
+			"credential_id": cred.ID,
+			"assertions":    []map[string]string{{"subject": "status_code", "operator": "equals", "value": "200"}}})
+	var created struct {
+		ID string `json:"id"`
+	}
+	admin.must("POST", "/synthetic/scenarios", sc, &created, 201)
+	scenarioID := created.ID
+	t.Cleanup(func() { admin.do("DELETE", "/synthetic/scenarios/"+scenarioID, nil, nil) })
+
+	// Broken: the cell, the credential and the attention item.
+	waitCells(t, admin, scenarioID, clusters, 4*time.Minute, "credential_error")
+	credState := func() (state, cause string) {
+		var list struct {
+			Items []struct {
+				ID           string `json:"id"`
+				ResolveState string `json:"resolve_state"`
+				ResolveCause string `json:"resolve_cause"`
+			} `json:"items"`
+		}
+		admin.must("GET", "/synthetic/credentials", nil, &list, 200)
+		for _, c := range list.Items {
+			if c.ID == cred.ID {
+				return c.ResolveState, c.ResolveCause
+			}
+		}
+		return "", ""
+	}
+	if state, cause := credState(); state != "broken" || cause != "not_found" {
+		t.Errorf("credential state %q cause %q (want broken, not_found)", state, cause)
+	}
+	attention := func() int {
+		var dash struct {
+			Attention []struct{ Kind, Severity, Detail string } `json:"attention"`
+		}
+		admin.must("GET", "/dashboard", nil, &dash, 200)
+		n := 0
+		for _, a := range dash.Attention {
+			if a.Kind == "synthetic_credential_broken" && strings.Contains(a.Detail, "Credential "+name+" ") {
+				n++
+				if a.Severity != "crit" || !strings.Contains(a.Detail, "1 scenario affected") {
+					t.Errorf("attention item: %+v (want crit, 1 scenario affected)", a)
+				}
+			}
+		}
+		return n
+	}
+	if n := attention(); n != 1 {
+		t.Errorf("Needs attention items for the credential: %d (want 1)", n)
+	}
+
+	// Let a few more runs end on both clusters: still one message, and the
+	// runs are errors that count for nothing.
+	time.Sleep(70 * time.Second)
+	count := func(typ string) string {
+		return olymposSQL(t, fmt.Sprintf(`SELECT count(*) FROM outbox WHERE event_type = '%s' AND payload->>'credential_id' = '%s'`, typ, cred.ID))
+	}
+	if n := count("synthetic.credential_broken"); n != "1" {
+		t.Errorf("synthetic.credential_broken messages: %s (want 1)", n)
+	}
+	if n := count("synthetic.credential_restored"); n != "0" {
+		t.Errorf("synthetic.credential_restored messages while broken: %s (want 0)", n)
+	}
+	runs := olymposSQL(t, fmt.Sprintf(`SELECT count(*) FILTER (WHERE failure_reason = 'credential_broken' AND status = 'error') || ' ' ||
+		count(*) FILTER (WHERE status IN ('passed','failed','error') AND failure_reason IS DISTINCT FROM 'credential_broken')
+		FROM synthetic_runs WHERE scenario_id = '%s' AND NOT test`, scenarioID))
+	broken, other, _ := strings.Cut(runs, " ")
+	if b, _ := strconv.Atoi(broken); b < 2 || other != "0" {
+		t.Errorf("runs of the scenario: %s (want at least 2 credential_broken errors and no other counted run)", runs)
+	}
+	if n := olymposSQL(t, fmt.Sprintf(`SELECT (SELECT count(*) FROM synthetic_alerts WHERE scenario_id = '%s') || '/' ||
+		(SELECT count(*) FROM outbox WHERE event_type IN ('synthetic.failing','synthetic.critical') AND payload->>'scenario_id' = '%s')`, scenarioID, scenarioID)); n != "0/0" {
+		t.Errorf("scenario alerts and messages for a broken credential: %s (want 0/0)", n)
+	}
+
+	// Put the secret back (as the server's user, so that it can read it).
+	run(t, "kubectl", "-n", "olympos", "exec", "m9-kv-writer", "--", "sh", "-c",
+		"mkdir -p /kv/secrets/lab && printf %s m9-token > /kv/secrets/lab/"+secretName)
+	waitCells(t, admin, scenarioID, clusters, 4*time.Minute, "passing")
+	if state, cause := credState(); state != "ok" || cause != "" {
+		t.Errorf("credential state after the secret came back: %q %q (want ok)", state, cause)
+	}
+	eventually(t, time.Minute, "Needs attention item gone", func() (bool, string) {
+		n := attention()
+		return n == 0, fmt.Sprint(n)
+	})
+	if n := count("synthetic.credential_restored"); n != "1" {
+		t.Errorf("synthetic.credential_restored messages: %s (want 1)", n)
+	}
+	if n := count("synthetic.credential_broken"); n != "1" {
+		t.Errorf("synthetic.credential_broken messages after recovery: %s (want 1)", n)
+	}
 }
 
 // ensureLabB registers lab-b and installs its agent and probe in
