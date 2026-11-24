@@ -90,6 +90,9 @@ func (l *LocalKeyVault) GetSecret(_ context.Context, vault, name string) ([]byte
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrSecretNotFound
 	}
+	if errors.Is(err, os.ErrPermission) {
+		return nil, ErrSecretForbidden
+	}
 	return b, err
 }
 

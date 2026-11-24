@@ -215,6 +215,8 @@ var (
 	errCredential = errors.New("synthetic credential unusable")
 	// errCredentialExpired means a credential's expires_at has passed.
 	errCredentialExpired = errors.New("synthetic credential expired")
+	// errCredentialEmpty means the resolved secret has no content.
+	errCredentialEmpty = errors.New("synthetic credential empty")
 )
 
 // credentialReason maps a credential error to how the run ends.
@@ -222,7 +224,7 @@ func credentialReason(err error) (status, reason string) {
 	switch {
 	case errors.Is(err, errCredentialExpired):
 		return StatusError, ReasonCredentialExpired
-	case errors.Is(err, errCredential):
+	case errors.Is(err, errCredential), errors.Is(err, errCredentialEmpty):
 		return StatusError, ReasonCredentialError
 	}
 	return StatusSkipped, ReasonCredentialUnavailable
@@ -335,7 +337,7 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		out = append(out, rc)
 		if rc.Secret == nil {
-			return out, fmt.Errorf("%w: credential %s is empty", errCredential, c.id)
+			return out, fmt.Errorf("%w: credential %s is empty", errCredentialEmpty, c.id)
 		}
 	}
 	return out, nil
