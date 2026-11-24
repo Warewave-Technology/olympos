@@ -29,6 +29,7 @@ tags:
   - {name: audit}
   - {name: security}
   - {name: activity}
+  - {name: synthetic}
 
 paths:
   /me:
@@ -94,9 +95,36 @@ paths:
     parameters: [{$ref: "#/components/parameters/id"}]
     post:
       tags: [clusters]
-      summary: Issue a fresh bootstrap token / install command (invalidates unused ones).
+      summary: >-
+        Issue a fresh bootstrap token / install command (invalidates unused ones). The token enrolls the agent, and
+        the probe only when the cluster has none enrolled (probe_status not_installed or revoked); a probe is
+        replaced with probe-token (Install probe).
       responses:
         "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
+  /clusters/{id}/probe-token:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [clusters]
+      summary: >-
+        "Install probe" for a cluster whose agent runs without the probe (admin, scope all): a one-time probe-only
+        token (1 h) and the command `helm upgrade olympos-agent <chart> -n olympos-system --reuse-values [--set
+        <k=v> for each of the server's OLYMPOS_AGENT_INSTALL_SETS] --set probe.enabled=true --set
+        probe.bootstrapToken=<token>`. The agent enrolls the probe with it. Earlier
+        tokens lose their unused probe role (an install token keeps its agent role).
+      responses:
+        "200": {description: Install command, content: {application/json: {schema: {$ref: "#/components/schemas/InstallResponse"}}}}
+        "409": {description: "The cluster is revoked, or still pending: its add cluster command already installs the probe (ruling P24)"}
+  /clusters/{id}/probe:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    delete:
+      tags: [clusters]
+      summary: >-
+        Revoke the probe alone (admin on the cluster): its certificates are denied, its streams dropped, the
+        unused probe roles of the cluster's tokens withdrawn. The agent is untouched; "Install probe" enrolls a
+        new one.
+      responses:
+        "204": {description: Revoked}
+        "409": {description: "The cluster is revoked, or it has no probe (\"no probe installed\"; nothing changes)"}
   /clusters/{id}/nodes:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -116,6 +144,19 @@ paths:
           description: Discovered targets
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Target"}}}}}}
 
+  /targets/{id}/accept-tls-name:
+    parameters: [{name: id, in: path, required: true, schema: {type: string}, description: Target id}]
+    post:
+      tags: [clusters]
+      summary: >-
+        Accept a changed olympos.io/tls-server-name as the verified TLS name (admin on the target's cluster).
+        name must be the pending name the caller reviewed.
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [name], properties: {name: {type: string}}}}}
+      responses:
+        "204": {description: Accepted}
+        "409": {description: The name changed again; reload and review it}
+
   # ------------------------------------------------------------ access
   /grants:
     get:
@@ -126,7 +167,7 @@ paths:
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/Grant"}}}}}}
     post:
       tags: [identity]
-      summary: Grant roles to a person by Entra object ID (admin, scope all). vault-approver/admin refused for guests (422).
+      summary: Grant roles to a person by Entra object ID (admin, scope all). vault-approver, admin and synthetic-editor refused for guests (422).
       requestBody:
         content:
           application/json:
@@ -1125,12 +1166,283 @@ paths:
           description: Entries newest first
           content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/ActivityEntry"}}}}}}
 
+  # ------------------------------------------------------------ synthetic monitoring
+  # docs/design/synthetic-monitoring.md. A scenario is seen by readers with scope all and by anyone who reads a
+  # cluster it runs on now; results, runs and alerts only for the clusters the caller reads. Writes to scenarios
+  # need synthetic-editor (or admin): scope all for run_on all, otherwise the role on every cluster the selector
+  # matches now (and at least one). The allowlist and the credentials are admin (scope all) only; editors and
+  # readers with scope all see them. Every write is in the activity log.
+  /synthetic/overview:
+    get:
+      tags: [synthetic]
+      summary: Monitoring › Synthetic. KPIs, the scenario × cluster matrix over the clusters the caller reads, 24 h availability and p95.
+      responses:
+        "200": {description: Overview, content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticOverview"}}}}
+  /synthetic/scenarios:
+    get:
+      tags: [synthetic]
+      summary: Scenarios the caller sees, by name.
+      responses:
+        "200":
+          description: Scenarios
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/ScenarioSummary"}}}}}}
+    post:
+      tags: [synthetic]
+      summary: >-
+        Create a scenario. Step positions are numbered by the server in the order given. Checked: the model and
+        its limits (≤ 10 steps, interval ≥ 30 s, timeout ≤ 60 s and ≤ interval, ≤ 2 retries, body ≤ 64 KiB);
+        every host (URL, DNS name, TCP/TLS host, SNI) against the allowlist, never an IP literal, localhost or the
+        Kubernetes API; a step's credential bound to the step's host; a variable that carries a credential only
+        sent within that credential's bound hosts; the request caps (120 per minute per scenario per cluster,
+        600 per cluster, oldest scenarios first); the caller's scope (see above).
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}
+        "403": {description: "No synthetic-editor role, or the scenario would run on clusters outside it (run_on all needs scope all)"}
+        "422":
+          description: >-
+            Fields name what is refused. A host no rule matches: "Host X is not allowed. Add a rule in Settings ›
+            Synthetic monitoring." (admins) or "Host X is not allowed. Ask an admin to add it to the synthetic
+            allowlist." (others). A cap: interval_seconds, naming the clusters.
+          content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}
+  /synthetic/scenarios/preview:
+    post:
+      tags: [synthetic]
+      summary: >-
+        The editor's live line ("Runs on 9 of 10 clusters") and cap check for a draft, saving nothing. Only the
+        targeting must be valid. id: the scenario being edited (its stored version is not counted). Editors only.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              allOf:
+                - {$ref: "#/components/schemas/ScenarioInput"}
+                - {type: object, properties: {id: {type: string, format: uuid}}}
+      responses:
+        "200": {description: Preview, content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioPreview"}}}}
+        "422": {description: Invalid targeting, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+  /synthetic/scenarios/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [synthetic]
+      summary: >-
+        A scenario with its steps and alert rule. Without synthetic-editor, a step that uses a credential has
+        http.headers and http.body null and hidden true.
+      responses:
+        "200": {description: Scenario, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}
+        "404": {description: Not found or not seen}
+    put:
+      tags: [synthetic]
+      summary: >-
+        Replace a scenario (checked as on create; the caller must be allowed both the stored and the new
+        clusters). Omitted alerts, enabled and store_responses keep their stored values. A scenario read with
+        GET can be sent back as it is: its read-only fields (id, targets, requests_per_minute, can_edit,
+        created_by, created_by_name, created_at, updated_at, alerts.channel_name, alerts.critical_channel_name,
+        and each step's position, credential and hidden) are ignored.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}
+        "403": {description: Outside the caller's synthetic-editor scope}
+        "422": {description: Validation, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+    patch:
+      tags: [synthetic]
+      summary: Pause or resume a scenario. Resuming checks the request caps again.
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [enabled], properties: {enabled: {type: boolean}}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}
+        "403": {description: Outside the caller's synthetic-editor scope}
+        "422": {description: Over a request cap, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+    delete:
+      tags: [synthetic]
+      summary: Delete a scenario with its runs and alerts.
+      responses: {"204": {description: Deleted}, "403": {description: Outside the caller's scope}, "404": {description: Not found}}
+  /synthetic/scenarios/{id}/run:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    post:
+      tags: [synthetic]
+      summary: >-
+        Run now: one manual run on cluster_id, or on every cluster the scenario runs on now with an online
+        probe. Manual runs count toward alerting. Same permission as editing the scenario. The body is optional.
+        At most 6 requests per user per minute on each server replica; a request that makes no run does not count.
+      requestBody:
+        content: {application/json: {schema: {type: object, properties: {cluster_id: {type: string, format: uuid}}}}}
+      responses:
+        "202":
+          description: Runs queued
+          content: {application/json: {schema: {type: object, properties: {run_ids: {type: array, items: {type: string, format: uuid}}}}}}
+        "409": {description: "The scenario is paused, the cluster's probe is not online, or no cluster can run it now"}
+        "422": {description: "cluster_id unknown, or not a cluster the scenario runs on"}
+        "429": {description: "A request cap blocks the run, or more than 6 Run now requests in a minute"}
+  /synthetic/scenarios/{id}/clusters:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [synthetic]
+      summary: >-
+        The scenario on each cluster the caller reads: state, last counted run, p50/p95 and availability over
+        24 h, and a timeline of 48 buckets of 30 minutes (the last one holds now).
+      responses:
+        "200": {description: Clusters, content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioClusters"}}}}
+  /synthetic/scenarios/{id}/alerts:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [synthetic]
+      summary: Alert history, firing first, newest first. Cluster alerts of the clusters the caller reads, and fleet alerts.
+      parameters:
+        - {name: limit, in: query, schema: {type: integer, default: 100, maximum: 500}}
+      responses:
+        "200":
+          description: Alerts
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/SyntheticAlert"}}}}}}
+  /synthetic/test-runs:
+    post:
+      tags: [synthetic]
+      summary: >-
+        "Run once" from the editor: run a draft on one cluster. Never alerts. The draft is checked as a save
+        checks its steps, hosts and credentials (not the targeting or the caps). The caller needs synthetic-editor
+        on the cluster (and on the scenario, when scenario.id names a saved one). At most 6 per user per minute on each server replica.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scenario, cluster_id]
+              properties:
+                scenario:
+                  allOf:
+                    - {$ref: "#/components/schemas/ScenarioInput"}
+                    - {type: object, properties: {id: {type: string, format: uuid, description: The saved scenario the draft edits}}}
+                cluster_id: {type: string, format: uuid}
+      responses:
+        "202":
+          description: Queued
+          content: {application/json: {schema: {type: object, properties: {run_id: {type: string, format: uuid}}}}}
+        "403": {description: Not synthetic-editor on the cluster}
+        "409": {description: The cluster's probe is not online}
+        "422": {description: Validation (cluster_id unknown or not readable), content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+        "429": {description: Too many test runs}
+  /synthetic/runs:
+    get:
+      tags: [synthetic]
+      summary: Runs on the clusters the caller reads, newest first.
+      parameters:
+        - {name: scenario_id, in: query, schema: {type: string, format: uuid}}
+        - {name: cluster_id, in: query, schema: {type: string, format: uuid}}
+        - {name: status, in: query, schema: {type: string, enum: [scheduled, running, passed, failed, error, skipped]}}
+        - {name: test, in: query, schema: {type: boolean}}
+        - {name: before, in: query, schema: {type: string, format: date-time}, description: Cursor (scheduled_for of the last item)}
+        - {name: limit, in: query, schema: {type: integer, default: 50, maximum: 200}}
+      responses:
+        "200":
+          description: Runs
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/SyntheticRun"}}}}}}
+        "422": {description: Invalid filter, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+  /synthetic/runs/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    get:
+      tags: [synthetic]
+      summary: >-
+        Run detail: per-step timings, assertion results, the redacted response excerpt (kept 7 days), and the
+        requests for "Copy as curl" (hidden as in GET /synthetic/scenarios/{id}).
+      responses:
+        "200": {description: Run, content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticRunDetail"}}}}
+        "404": {description: Not found, or the cluster is not readable}
+  /synthetic/allowlist:
+    get:
+      tags: [synthetic]
+      summary: The host allowlist, with how many scenarios reach a host each rule matches.
+      responses:
+        "200":
+          description: Rules
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items: {type: array, items: {$ref: "#/components/schemas/AllowRule"}}
+                  version: {type: integer, description: Moves with every change; runs carry it to the probe}
+        "403": {description: Neither synthetic-editor nor a reader with scope all}
+    post:
+      tags: [synthetic]
+      summary: Add a rule (admin, scope all). Recorded, and announced as synthetic.allowlist_changed.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pattern, kind]
+              properties:
+                pattern: {type: string, example: "*.prod.wrw.com"}
+                kind: {type: string, enum: [exact, wildcard, suffix]}
+                note: {type: string, maxLength: 500}
+      responses:
+        "201": {description: Added, content: {application/json: {schema: {$ref: "#/components/schemas/AllowRule"}}}}
+        "422": {description: "Invalid pattern (IP literals, localhost and the Kubernetes API are refused; suffix and wildcard need two labels), or the rule exists", content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+  /synthetic/allowlist/check:
+    post:
+      tags: [synthetic]
+      summary: Check a host (or a URL's host) against the allowlist and the always-denied names. Editors only.
+      requestBody:
+        content: {application/json: {schema: {type: object, required: [host], properties: {host: {type: string}}}}}
+      responses:
+        "200": {description: Result, content: {application/json: {schema: {$ref: "#/components/schemas/HostCheck"}}}}
+  /synthetic/allowlist/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    delete:
+      tags: [synthetic]
+      summary: >-
+        Remove a rule (admin, scope all). Refused while a scenario reaches a host that only this rule allows, or a
+        credential's bound hosts or token URL need it. Recorded, and announced as synthetic.allowlist_changed.
+      responses:
+        "204": {description: Removed}
+        "404": {description: Not found}
+        "409": {description: Still needed, content: {application/json: {schema: {$ref: "#/components/schemas/InUse"}}}}
+  /synthetic/credentials:
+    get:
+      tags: [synthetic]
+      summary: Credentials scenarios may use. Never their secret.
+      responses:
+        "200":
+          description: Credentials
+          content: {application/json: {schema: {type: object, properties: {items: {type: array, items: {$ref: "#/components/schemas/SyntheticCredential"}}}}}}
+        "403": {description: Neither synthetic-editor nor a reader with scope all}
+    post:
+      tags: [synthetic]
+      summary: >-
+        Create a credential (admin, scope all). The secret is stored like a backup credential (envelope, or a Key
+        Vault reference) and never returned. Every bound host must be inside the allowlist; an OAuth2 token URL is
+        https, allowlisted and inside the bound hosts.
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticCredentialInput"}}}}
+      responses:
+        "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticCredential"}}}}
+        "422": {description: Validation, content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+  /synthetic/credentials/{id}:
+    parameters: [{$ref: "#/components/parameters/id"}]
+    put:
+      tags: [synthetic]
+      summary: >-
+        Replace a credential's metadata (admin, scope all); with secret, rotate it (rotated_at). The kind cannot
+        change. New bound hosts that would break a scenario using the credential are refused (409).
+      requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticCredentialInput"}}}}
+      responses:
+        "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/SyntheticCredential"}}}}
+        "404": {description: Not found}
+        "409": {description: Scenarios would break, content: {application/json: {schema: {$ref: "#/components/schemas/InUse"}}}}
+        "422": {description: "Validation (expires_at must be in the future, or null)", content: {application/json: {schema: {$ref: "#/components/schemas/FieldErrors"}}}}
+    delete:
+      tags: [synthetic]
+      summary: Delete a credential and its secret (admin, scope all). Refused while a scenario uses it.
+      responses:
+        "204": {description: Deleted}
+        "404": {description: Not found}
+        "409": {description: In use, content: {application/json: {schema: {$ref: "#/components/schemas/InUse"}}}}
+
 components:
   parameters:
     id: {name: id, in: path, required: true, schema: {type: string, format: uuid}}
 
   schemas:
-    Role: {type: string, enum: [viewer, operator, vault-maker, vault-approver, admin]}
+    Role: {type: string, enum: [viewer, operator, vault-maker, vault-approver, admin, synthetic-editor]}
 
     Principal:
       type: object
@@ -1161,6 +1473,8 @@ components:
             vault_approve: {type: boolean}
             admin: {type: boolean}
             admin_global: {type: boolean}
+            synthetic_edit: {type: boolean, description: "synthetic-editor or admin on some scope: show the scenario controls"}
+            synthetic_edit_global: {type: boolean, description: "the same with scope all: scenarios that run on all clusters"}
         csrf_token: {type: string}
         dev_mode: {type: boolean}
 
@@ -1206,6 +1520,9 @@ components:
         transfer_mode: {type: string, enum: [e2e-tls, compressed]}
         egress_rate_per_gb: {type: [number, "null"]}
         cert_expires_at: {type: [string, "null"], format: date-time}
+        probe_status: {type: string, enum: [not_installed, pending, online, offline, revoked], description: "The synthetic monitoring probe. pending: enrolled, not connected yet"}
+        probe_version: {type: string}
+        probe_last_seen_at: {type: [string, "null"], format: date-time}
         nodes: {type: integer}
         nodes_ready: {type: integer}
         cpu_milli: {type: integer}
@@ -2093,3 +2410,374 @@ components:
         object_id: {type: string}
         cluster_id: {type: [string, "null"]}
         details: {type: object}
+
+    # ------------------------------------------------------------ synthetic monitoring
+    SyntheticCellState:
+      type: string
+      enum: [failing, degraded, passing, probe_offline, not_installed, excluded, paused, no_data]
+      description: >-
+        failing: the cluster alert fires. degraded: the last counted run failed or errored, the alert does not
+        fire (yet). probe_offline: offline, or enrolled and not connected yet. not_installed: no probe (or revoked).
+        Excluded wins over paused, paused over the probe, the probe over the alert.
+    SyntheticStep:
+      type: object
+      description: "Exactly one of dns, http, tcp, tls, the one kind names. ${name} variables come from earlier extracts; never in a host."
+      required: [kind]
+      properties:
+        position: {type: integer, description: Ignored on input; the server numbers steps in order}
+        kind: {type: string, enum: [dns, http, tcp, tls]}
+        dns: {type: object, properties: {name: {type: string}, record_type: {type: string, enum: [A, AAAA, CNAME, TXT]}}}
+        http:
+          type: object
+          properties:
+            method: {type: string, enum: [GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS]}
+            url: {type: string, example: "https://api.prod.wrw.com/v1/items/${item}"}
+            headers: {type: [object, "null"], additionalProperties: {type: string}, description: "null when hidden"}
+            body: {type: [string, "null"], maxLength: 65536, description: "null when hidden"}
+            body_type: {type: string, enum: [text, json]}
+            follow_redirects: {type: boolean, description: At most 5}
+        tcp: {type: object, properties: {host: {type: string}, port: {type: integer}}}
+        tls: {type: object, properties: {host: {type: string}, port: {type: integer}, sni: {type: string}}}
+        credential_id: {type: string, format: uuid, description: HTTP steps only}
+        credential:
+          type: object
+          readOnly: true
+          description: The credential's name and kind, never its value (Copy as curl puts $TOKEN in its place)
+          properties: {id: {type: string, format: uuid}, name: {type: string}, kind: {type: string}, header_name: {type: string}}
+        assertions:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            properties:
+              subject: {type: string, description: "status_code, latency_ms, header:<Name>, body, json:<path>, tls_days_left, record_count, record, connects, chain_valid, hostname_matches, tls_version"}
+              operator: {type: string, enum: [equals, not_equals, contains, matches, less_than, greater_than, exists, length_greater_than]}
+              value: {type: string}
+        extracts:
+          type: array
+          maxItems: 10
+          items: {type: object, properties: {name: {type: string}, source: {type: string, enum: [json_path, header, regex]}, expr: {type: string}}}
+        hidden: {type: boolean, readOnly: true, description: "The caller may not see this step's headers and body (it uses a credential)"}
+    ScenarioAlertRule:
+      type: object
+      properties:
+        cluster_fail_after: {type: integer, minimum: 1, maximum: 1000, default: 3}
+        fleet_critical_clusters: {type: integer, minimum: 1, maximum: 1000, default: 3}
+        recovery_after: {type: integer, minimum: 1, maximum: 1000, default: 2}
+        send_recovery: {type: boolean, default: true}
+        channel_id: {type: [string, "null"], format: uuid, description: "null: the routes of the synthetic.* events decide"}
+        critical_channel_id: {type: [string, "null"], format: uuid, description: "null: channel_id"}
+        channel_name: {type: string, readOnly: true}
+        critical_channel_name: {type: string, readOnly: true}
+    ScenarioInput:
+      type: object
+      required: [name, type, interval_seconds, timeout_seconds, steps]
+      properties:
+        name: {type: string, maxLength: 200}
+        type: {type: string, enum: [http_flow, http, dns, tcp, tls], description: "A single-step type has exactly one step of its kind"}
+        owner_selector: {type: string, example: team=payments, description: "A display and filter label (key=value), not a scope"}
+        interval_seconds: {type: integer, minimum: 30}
+        timeout_seconds: {type: integer, minimum: 1, maximum: 60, description: "Deadline of the whole run; at most the interval"}
+        step_retries: {type: integer, minimum: 0, maximum: 2}
+        enabled: {type: boolean, default: true}
+        store_responses: {type: boolean, default: true}
+        run_on: {type: string, enum: [all, selector], default: all}
+        run_on_selector: {type: string, example: "env=prod", description: "Label selector over the cluster labels (olympos.io/cluster=<name> selects one)"}
+        exclude_selectors: {type: array, items: {type: string}}
+        steps: {type: array, maxItems: 10, items: {$ref: "#/components/schemas/SyntheticStep"}}
+        alerts: {$ref: "#/components/schemas/ScenarioAlertRule"}
+    ScenarioTargets:
+      type: object
+      description: Where the scenario runs, among the clusters the caller reads
+      properties:
+        runs_on: {type: integer}
+        of: {type: integer}
+        clusters: {type: array, items: {type: string}}
+        excluded: {type: array, items: {type: string}}
+    Scenario:
+      allOf:
+        - {$ref: "#/components/schemas/ScenarioInput"}
+        - type: object
+          properties:
+            id: {type: string, format: uuid}
+            alerts: {$ref: "#/components/schemas/ScenarioAlertRule"}
+            targets: {$ref: "#/components/schemas/ScenarioTargets"}
+            requests_per_minute: {type: number, description: Worst case per cluster}
+            can_edit: {type: boolean}
+            created_by: {type: [string, "null"], format: uuid}
+            created_by_name: {type: string}
+            created_at: {type: string, format: date-time}
+            updated_at: {type: string, format: date-time}
+    ScenarioSummary:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        type: {type: string}
+        owner_selector: {type: string}
+        interval_seconds: {type: integer}
+        timeout_seconds: {type: integer}
+        enabled: {type: boolean}
+        run_on: {type: string}
+        run_on_selector: {type: string}
+        exclude_selectors: {type: array, items: {type: string}}
+        steps: {type: integer}
+        targets: {$ref: "#/components/schemas/ScenarioTargets"}
+        can_edit: {type: boolean}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+    ScenarioPreview:
+      allOf:
+        - {$ref: "#/components/schemas/ScenarioTargets"}
+        - type: object
+          properties:
+            requests_per_minute: {type: number}
+            scenario_cap: {type: number}
+            cluster_cap: {type: number}
+            over_scenario_cap: {type: boolean}
+            over_limit:
+              type: array
+              description: Clusters where the per-cluster cap blocks the scenario, with what all scenarios there ask for
+              items: {type: object, properties: {cluster: {type: string}, requests_per_minute: {type: number}}}
+    SyntheticCell:
+      type: object
+      properties:
+        cluster_id: {type: string, format: uuid}
+        state: {$ref: "#/components/schemas/SyntheticCellState"}
+        last_run_id: {type: [string, "null"], format: uuid}
+        last_status: {type: [string, "null"], enum: [passed, failed, error, null]}
+        last_finished_at: {type: [string, "null"], format: date-time}
+        failed_step: {type: [integer, "null"]}
+        failure_reason: {type: string, description: "Probe codes (host_not_allowed, ip_denied, redirect_blocked, dns_error, connect_error, tls_error, timeout, assertion_failed, invalid_request, credential_error, runner_panic) or server codes (credential_expired, dispatch_error, no_result, invalid_result, ...)"}
+        consecutive_failures: {type: integer}
+        blocked_reason: {type: string, description: "rate_limit: a request cap keeps the scheduler from running it there"}
+    SyntheticOverview:
+      type: object
+      properties:
+        kpis:
+          type: object
+          properties:
+            scenarios: {type: integer}
+            active: {type: integer}
+            paused: {type: integer}
+            failing_scenarios: {type: integer}
+            failing_clusters: {type: integer}
+            degraded_scenarios: {type: integer}
+            degraded_clusters: {type: integer}
+            probes_online: {type: integer}
+            probes_total: {type: integer}
+            probes_offline: {type: array, items: {type: string}}
+            probes_not_installed: {type: array, items: {type: string}}
+        clusters:
+          type: array
+          description: The matrix columns, by name
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              name: {type: string}
+              probe_status: {type: string, enum: [not_installed, pending, online, offline, revoked]}
+              probe_version: {type: string}
+              probe_last_seen_at: {type: [string, "null"], format: date-time}
+        scenarios:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string, format: uuid}
+              name: {type: string}
+              type: {type: string}
+              owner_selector: {type: string}
+              interval_seconds: {type: integer}
+              enabled: {type: boolean}
+              steps: {type: integer}
+              status: {type: string, enum: [failing, degraded, passing, paused, no_data]}
+              failing_clusters: {type: integer}
+              degraded_clusters: {type: integer}
+              cells: {type: array, items: {$ref: "#/components/schemas/SyntheticCell"}}
+              runs_24h: {type: integer}
+              availability_24h: {type: [number, "null"], description: "Percent of counted runs that passed, two decimals"}
+              p95_ms_24h: {type: [integer, "null"]}
+              can_edit: {type: boolean}
+    ScenarioClusters:
+      type: object
+      properties:
+        window_start: {type: string, format: date-time}
+        bucket_minutes: {type: integer, example: 30}
+        buckets: {type: integer, example: 48}
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              cluster_id: {type: string, format: uuid}
+              cluster_name: {type: string}
+              probe_status: {type: string}
+              state: {$ref: "#/components/schemas/SyntheticCellState"}
+              last_run:
+                type: [object, "null"]
+                properties:
+                  id: {type: string, format: uuid}
+                  status: {type: string}
+                  finished_at: {type: string, format: date-time}
+                  failed_step: {type: [integer, "null"]}
+                  failure_reason: {type: string}
+              consecutive_failures: {type: integer}
+              consecutive_passes: {type: integer}
+              blocked_reason: {type: string}
+              runs_24h: {type: integer}
+              availability_24h: {type: [number, "null"]}
+              p50_ms: {type: [integer, "null"]}
+              p95_ms: {type: [integer, "null"]}
+              timeline:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    start: {type: string, format: date-time}
+                    runs: {type: integer}
+                    passed: {type: integer}
+                    failed: {type: integer}
+                    state: {type: string, enum: [passed, failed, no_data]}
+    SyntheticAlert:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        fleet: {type: boolean}
+        cluster_id: {type: [string, "null"], format: uuid}
+        cluster_name: {type: string}
+        state: {type: string, enum: [firing, resolved]}
+        reason: {type: string, description: "The failure reason of the run that opened it; no_longer_monitored when it resolved without a run"}
+        opened_at: {type: string, format: date-time}
+        resolved_at: {type: [string, "null"], format: date-time}
+        duration_seconds: {type: [integer, "null"]}
+        last_run_id: {type: [string, "null"], format: uuid}
+        failed_step: {type: [integer, "null"]}
+        clusters: {type: array, items: {type: string}, description: "Fleet alert: the failing clusters (that the caller reads) when it opened"}
+        clusters_total: {type: integer}
+        still_failing: {type: [integer, "null"]}
+        notified: {type: boolean}
+    SyntheticRun:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        scenario_id: {type: [string, "null"], format: uuid, description: "null for a test run of an unsaved draft"}
+        scenario_name: {type: string}
+        cluster_id: {type: string, format: uuid}
+        cluster_name: {type: string}
+        scheduled_for: {type: string, format: date-time}
+        started_at: {type: [string, "null"], format: date-time}
+        finished_at: {type: [string, "null"], format: date-time}
+        status: {type: string, enum: [scheduled, running, passed, failed, error, skipped]}
+        failed_step: {type: [integer, "null"]}
+        failure_reason: {type: string, description: "Skipped: probe_offline, probe_disconnected, ingest_failed, scenario_disabled, credential_unavailable, not_dispatched, probe_busy, allowlist_stale, credentials_unreadable, invalid_scenario, rejected"}
+        total_ms: {type: [integer, "null"]}
+        test: {type: boolean}
+        manual: {type: boolean}
+        probe_version: {type: string}
+    SyntheticRunDetail:
+      allOf:
+        - {$ref: "#/components/schemas/SyntheticRun"}
+        - type: object
+          properties:
+            scenario_type: {type: string}
+            remote_ip: {type: string}
+            probe_ip: {type: string, description: The probe's egress address}
+            allowlist_version: {type: integer}
+            requested_by_name: {type: string}
+            consecutive_failures: {type: integer, description: "Failed or errored run: how many in a row it ends"}
+            alert:
+              type: [object, "null"]
+              description: The cluster alert this run opened or resolved
+              properties:
+                id: {type: string, format: uuid}
+                state: {type: string}
+                opened_at: {type: string, format: date-time}
+                resolved_at: {type: [string, "null"], format: date-time}
+            definition: {type: string, enum: [test, saved, none], description: "Where the requests come from: the test run's draft, the scenario as saved now, or none (deleted)"}
+            steps:
+              type: array
+              items:
+                type: object
+                properties:
+                  position: {type: integer}
+                  status: {type: string, description: Empty when the probe reported nothing for the step}
+                  status_code: {type: [integer, "null"]}
+                  timings: {type: [object, "null"], properties: {dns_us: {type: integer}, connect_us: {type: integer}, tls_us: {type: integer}, ttfb_us: {type: integer}, download_us: {type: integer}, total_us: {type: integer}}}
+                  assertions:
+                    type: array
+                    items: {type: object, properties: {subject: {type: string}, operator: {type: string}, expected: {type: string}, actual: {type: string}, passed: {type: boolean}}}
+                  excerpt: {type: [string, "null"], description: "First 2 KiB of the response, redacted on the probe and the server"}
+                  extracted_names: {type: array, items: {type: string}, description: Names only; values are never stored}
+                  error: {type: string}
+                  request: {oneOf: [{$ref: "#/components/schemas/SyntheticStep"}, {type: "null"}]}
+    AllowRule:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        pattern: {type: string, description: "Normalized: lower case, IDNA, no trailing dot"}
+        kind: {type: string, enum: [exact, wildcard, suffix]}
+        note: {type: string}
+        scenarios: {type: integer, description: Scenarios that reach a host the rule matches}
+        created_by: {type: [string, "null"], format: uuid}
+        created_by_name: {type: string}
+        created_at: {type: string, format: date-time}
+    HostCheck:
+      type: object
+      properties:
+        host: {type: string, description: Normalized when it could be}
+        allowed: {type: boolean}
+        rule: {oneOf: [{$ref: "#/components/schemas/AllowRule"}, {type: "null"}], description: The first rule that matches}
+        also: {type: array, items: {$ref: "#/components/schemas/AllowRule"}, description: Other rules that match}
+        denied_reason: {type: string, enum: ["", ip_literal, always_denied, invalid_host, no_rule]}
+        message: {type: string}
+    InUse:
+      type: object
+      description: A 409 that names what still needs the object
+      properties:
+        error: {type: string}
+        scenarios: {type: array, items: {type: string}}
+        credentials: {type: array, items: {type: string}}
+    SyntheticCredentialInput:
+      type: object
+      required: [name, kind, bound_hosts]
+      properties:
+        name: {type: string, maxLength: 200}
+        kind: {type: string, enum: [bearer, basic, header, oauth2_client_credentials]}
+        bound_hosts:
+          type: array
+          minItems: 1
+          maxItems: 20
+          description: The only hosts the credential is attached to; each inside the allowlist
+          items: {type: object, required: [pattern, kind], properties: {pattern: {type: string}, kind: {type: string, enum: [exact, wildcard, suffix]}}}
+        secret:
+          allOf: [{$ref: "#/components/schemas/CredentialInput"}]
+          description: >-
+            Required on create; on update it rotates the secret. password is the token, password or client
+            secret. username: the login (basic) or the client id (oauth2_client_credentials); none for bearer and
+            header.
+        header_name: {type: string, example: X-Api-Key, description: "Header credentials only. Not Host, Content-Length, Transfer-Encoding, Connection, Cookie, Upgrade, TE, Trailer, Keep-Alive, Proxy-Connection, Content-Type, Accept-Encoding, Range or If-Range (422)."}
+        oauth_token_url: {type: string, description: "oauth2_client_credentials only: https, allowlisted, inside bound_hosts"}
+        oauth_scopes: {type: string}
+        expires_at: {type: [string, "null"], format: date-time, description: "In the future (create and update); null for none. synthetic.credential_expiring fires 14 and 3 days before"}
+    SyntheticCredential:
+      type: object
+      properties:
+        id: {type: string, format: uuid}
+        name: {type: string}
+        kind: {type: string}
+        bound_hosts: {type: array, items: {type: object, properties: {pattern: {type: string}, kind: {type: string}}}}
+        header_name: {type: string}
+        oauth_token_url: {type: string}
+        oauth_scopes: {type: string}
+        source: {type: string, enum: [stored, keyvault_ref]}
+        expires_at: {type: [string, "null"], format: date-time}
+        expired: {type: boolean}
+        rotated_at: {type: [string, "null"], format: date-time}
+        scenarios: {type: array, items: {type: object, properties: {id: {type: string, format: uuid}, name: {type: string}}}}
+        resolve_failures_24h: {type: integer, description: "Runs of the scenarios using it skipped in 24 h because the server could not resolve a credential (credential_unavailable); an upper bound when a scenario uses several"}
+        last_resolve_failed_at: {type: [string, "null"], format: date-time}
+        created_by: {type: [string, "null"], format: uuid}
+        created_by_name: {type: string}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}

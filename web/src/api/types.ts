@@ -1,7 +1,7 @@
 // Types mirror docs/openapi.yaml (components.schemas). Keep them in sync.
 
-export type Role = 'viewer' | 'operator' | 'vault-maker' | 'vault-approver' | 'admin';
-export const ROLES: Role[] = ['viewer', 'operator', 'vault-maker', 'vault-approver', 'admin'];
+export type Role = 'viewer' | 'operator' | 'vault-maker' | 'vault-approver' | 'synthetic-editor' | 'admin';
+export const ROLES: Role[] = ['viewer', 'operator', 'vault-maker', 'vault-approver', 'synthetic-editor', 'admin'];
 
 export interface ItemList<T> {
   items: T[];
@@ -25,6 +25,10 @@ export interface Permissions {
   vault_approve: boolean;
   admin: boolean;
   admin_global: boolean;
+  /** synthetic-editor (or admin) on at least one cluster: create and edit scenarios in scope. */
+  synthetic_edit: boolean;
+  /** synthetic-editor (or admin) with scope all: scenarios that run on all clusters. */
+  synthetic_edit_global: boolean;
 }
 export type Permission = keyof Permissions;
 
@@ -63,6 +67,7 @@ export interface DirectoryUser {
 export type Provider = '' | 'azure' | 'aws' | 'gcp' | 'oracle' | 'huawei' | 'onprem';
 export type ClusterStatus = 'pending' | 'online' | 'offline' | 'revoked';
 export type TransferMode = 'e2e-tls' | 'compressed';
+export type ProbeStatus = 'not_installed' | 'pending' | 'online' | 'offline' | 'revoked';
 
 export interface Cluster {
   id: string;
@@ -89,6 +94,10 @@ export interface Cluster {
   eol: boolean;
   inventory_at: string | null;
   created_at: string;
+  /** The synthetic probe next to the agent (docs/design/synthetic-monitoring.md §2). */
+  probe_status: ProbeStatus;
+  probe_version: string;
+  probe_last_seen_at: string | null;
   /** Optional (openapi extension): distinct node zones. */
   zones?: string[];
   /** Optional (openapi extension): node count per instance type. */
@@ -1052,4 +1061,382 @@ export interface ActivityEntry {
   object_id: string;
   cluster_id: string | null;
   details: Record<string, unknown> | null;
+}
+
+// ------------------------------------------------------------ synthetic monitoring (docs/design/synthetic-monitoring.md)
+
+export type ScenarioType = 'http_flow' | 'http' | 'dns' | 'tcp' | 'tls';
+export type StepKind = 'dns' | 'http' | 'tcp' | 'tls';
+export type HttpMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
+export type AssertionOperator = 'equals' | 'not_equals' | 'contains' | 'matches' | 'less_than' | 'greater_than' | 'exists' | 'length_greater_than';
+export type SyntheticCellState = 'failing' | 'degraded' | 'passing' | 'probe_offline' | 'not_installed' | 'excluded' | 'paused' | 'no_data';
+export type ScenarioStatus = 'failing' | 'degraded' | 'passing' | 'paused' | 'no_data';
+export type SyntheticRunStatus = 'scheduled' | 'running' | 'passed' | 'failed' | 'error' | 'skipped';
+export type CredentialKind = 'bearer' | 'basic' | 'header' | 'oauth2_client_credentials';
+export type AllowKind = 'exact' | 'wildcard' | 'suffix';
+
+export interface ScenarioAssertion {
+  /** status_code, latency_ms, header:<Name>, body, json:<path>, tls_days_left, record_count, record, connects, chain_valid, hostname_matches, tls_version */
+  subject: string;
+  operator: AssertionOperator;
+  value: string;
+}
+export interface ScenarioExtract {
+  name: string;
+  source: 'json_path' | 'header' | 'regex';
+  expr: string;
+}
+export interface HttpStepSpec {
+  method: HttpMethod;
+  url: string;
+  /** null when hidden (the caller may not see a credentialed step's headers). */
+  headers: Record<string, string> | null;
+  /** null when hidden. */
+  body: string | null;
+  body_type?: 'text' | 'json';
+  follow_redirects?: boolean;
+}
+/** The credential of a step: its name and kind, never its value. */
+export interface SyntheticCredentialRef {
+  id: string;
+  name: string;
+  kind: CredentialKind | string;
+  header_name?: string;
+}
+/** A step (openapi SyntheticStep). Exactly one of dns, http, tcp, tls: the one `kind` names. */
+export interface ScenarioStep {
+  /** Ignored on input; the server numbers steps in order. */
+  position?: number;
+  kind: StepKind;
+  dns?: { name: string; record_type: 'A' | 'AAAA' | 'CNAME' | 'TXT' } | null;
+  http?: HttpStepSpec | null;
+  tcp?: { host: string; port: number } | null;
+  tls?: { host: string; port: number; sni?: string } | null;
+  credential_id?: string | null;
+  /** Read-only. */
+  credential?: SyntheticCredentialRef | null;
+  assertions: ScenarioAssertion[];
+  extracts: ScenarioExtract[];
+  /** Read-only: headers and body are hidden from the caller (the step uses a credential). */
+  hidden?: boolean;
+}
+export type SyntheticStep = ScenarioStep;
+
+export interface ScenarioAlertRule {
+  cluster_fail_after: number;
+  fleet_critical_clusters: number;
+  recovery_after: number;
+  send_recovery: boolean;
+  /** null: the routes of the synthetic.* events decide. */
+  channel_id: string | null;
+  /** null: channel_id. */
+  critical_channel_id: string | null;
+  channel_name?: string;
+  critical_channel_name?: string;
+}
+
+export interface ScenarioInput {
+  name: string;
+  type: ScenarioType;
+  owner_selector: string;
+  interval_seconds: number;
+  timeout_seconds: number;
+  step_retries: number;
+  enabled?: boolean;
+  store_responses?: boolean;
+  run_on: 'all' | 'selector';
+  run_on_selector: string;
+  exclude_selectors: string[];
+  steps: ScenarioStep[];
+  alerts?: ScenarioAlertRule;
+}
+
+export interface ScenarioTargets {
+  runs_on: number;
+  of: number;
+  clusters: string[];
+  excluded: string[];
+}
+
+export interface Scenario extends ScenarioInput {
+  id: string;
+  enabled: boolean;
+  store_responses: boolean;
+  alerts: ScenarioAlertRule;
+  targets: ScenarioTargets;
+  requests_per_minute: number;
+  can_edit: boolean;
+  created_by: string | null;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScenarioSummary {
+  id: string;
+  name: string;
+  type: ScenarioType;
+  owner_selector: string;
+  interval_seconds: number;
+  timeout_seconds: number;
+  enabled: boolean;
+  run_on: 'all' | 'selector';
+  run_on_selector: string;
+  exclude_selectors: string[];
+  steps: number;
+  targets: ScenarioTargets;
+  can_edit: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScenarioPreview extends ScenarioTargets {
+  requests_per_minute: number;
+  scenario_cap: number;
+  cluster_cap: number;
+  over_scenario_cap: boolean;
+  over_limit: { cluster: string; requests_per_minute: number }[];
+}
+
+export interface SyntheticCell {
+  cluster_id: string;
+  state: SyntheticCellState;
+  last_run_id: string | null;
+  last_status: 'passed' | 'failed' | 'error' | null;
+  last_finished_at: string | null;
+  failed_step: number | null;
+  failure_reason: string;
+  consecutive_failures: number;
+  /** rate_limit: a request cap keeps the scheduler from running it there. */
+  blocked_reason: string;
+}
+
+export interface SyntheticOverviewCluster {
+  id: string;
+  name: string;
+  probe_status: ProbeStatus;
+  probe_version: string;
+  probe_last_seen_at: string | null;
+}
+
+export interface SyntheticOverviewScenario {
+  id: string;
+  name: string;
+  type: ScenarioType;
+  owner_selector: string;
+  interval_seconds: number;
+  enabled: boolean;
+  steps: number;
+  status: ScenarioStatus;
+  failing_clusters: number;
+  degraded_clusters: number;
+  /** One per column of `clusters`, same order. */
+  cells: SyntheticCell[];
+  runs_24h: number;
+  availability_24h: number | null;
+  p95_ms_24h: number | null;
+  can_edit: boolean;
+}
+
+export interface SyntheticOverview {
+  kpis: {
+    scenarios: number;
+    active: number;
+    paused: number;
+    failing_scenarios: number;
+    failing_clusters: number;
+    degraded_scenarios: number;
+    degraded_clusters: number;
+    probes_online: number;
+    probes_total: number;
+    probes_offline: string[];
+    probes_not_installed: string[];
+  };
+  clusters: SyntheticOverviewCluster[];
+  scenarios: SyntheticOverviewScenario[];
+}
+
+export interface TimelineBucket {
+  start: string;
+  runs: number;
+  passed: number;
+  failed: number;
+  state: 'passed' | 'failed' | 'no_data';
+}
+
+export interface ScenarioClusterRow {
+  cluster_id: string;
+  cluster_name: string;
+  probe_status: ProbeStatus | string;
+  state: SyntheticCellState;
+  last_run: { id: string; status: string; finished_at: string | null; failed_step: number | null; failure_reason: string } | null;
+  consecutive_failures: number;
+  consecutive_passes: number;
+  blocked_reason: string;
+  runs_24h: number;
+  availability_24h: number | null;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  timeline: TimelineBucket[];
+}
+
+export interface ScenarioClusters {
+  window_start: string;
+  bucket_minutes: number;
+  buckets: number;
+  items: ScenarioClusterRow[];
+}
+
+export interface SyntheticAlert {
+  id: string;
+  fleet: boolean;
+  cluster_id: string | null;
+  cluster_name: string;
+  state: 'firing' | 'resolved';
+  /** The failure reason of the run that opened it; no_longer_monitored when it resolved without a run. */
+  reason: string;
+  opened_at: string;
+  resolved_at: string | null;
+  duration_seconds: number | null;
+  last_run_id: string | null;
+  failed_step: number | null;
+  clusters: string[];
+  clusters_total: number;
+  still_failing: number | null;
+  notified: boolean;
+}
+
+export interface SyntheticRun {
+  id: string;
+  /** null for a test run of an unsaved draft. */
+  scenario_id: string | null;
+  scenario_name: string;
+  cluster_id: string;
+  cluster_name: string;
+  scheduled_for: string;
+  started_at: string | null;
+  finished_at: string | null;
+  status: SyntheticRunStatus;
+  failed_step: number | null;
+  failure_reason: string;
+  total_ms: number | null;
+  test: boolean;
+  manual: boolean;
+  probe_version: string;
+}
+
+export interface StepTimings {
+  dns_us: number;
+  connect_us: number;
+  tls_us: number;
+  /** From the start of the step to the first response byte, over every redirect hop: includes DNS, connect and TLS. */
+  ttfb_us: number;
+  download_us: number;
+  total_us: number;
+}
+
+export interface AssertionResult {
+  subject: string;
+  operator: AssertionOperator | string;
+  expected: string;
+  actual: string;
+  passed: boolean;
+}
+
+export interface SyntheticStepResult {
+  position: number;
+  /** Empty when the probe reported nothing for the step. */
+  status: 'passed' | 'failed' | 'error' | 'skipped' | '';
+  status_code: number | null;
+  timings: StepTimings | null;
+  assertions: AssertionResult[];
+  /** First 2 KiB of the response, redacted on the probe and the server. */
+  excerpt: string | null;
+  extracted_names: string[];
+  error: string;
+  request: ScenarioStep | null;
+}
+
+export interface SyntheticRunDetail extends SyntheticRun {
+  scenario_type: ScenarioType | string;
+  remote_ip: string;
+  probe_ip: string;
+  allowlist_version: number;
+  requested_by_name: string;
+  consecutive_failures: number;
+  alert: { id: string; state: string; opened_at: string; resolved_at: string | null } | null;
+  /** Where the requests come from: the test run's draft, the scenario as saved now, or none (deleted). */
+  definition: 'test' | 'saved' | 'none';
+  steps: SyntheticStepResult[];
+}
+
+export interface AllowRule {
+  id: string;
+  pattern: string;
+  kind: AllowKind;
+  note: string;
+  scenarios: number;
+  created_by: string | null;
+  created_by_name: string;
+  created_at: string;
+}
+
+export interface HostCheck {
+  host: string;
+  allowed: boolean;
+  rule: AllowRule | null;
+  also: AllowRule[];
+  denied_reason: '' | 'ip_literal' | 'always_denied' | 'invalid_host' | 'no_rule';
+  message: string;
+}
+
+export interface SyntheticCredential {
+  id: string;
+  name: string;
+  kind: CredentialKind;
+  bound_hosts: { pattern: string; kind: AllowKind }[];
+  header_name: string;
+  oauth_token_url: string;
+  oauth_scopes: string;
+  source: 'stored' | 'keyvault_ref';
+  expires_at: string | null;
+  expired: boolean;
+  rotated_at: string | null;
+  scenarios: { id: string; name: string }[];
+  resolve_failures_24h: number;
+  last_resolve_failed_at: string | null;
+  created_by: string | null;
+  created_by_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** POST /synthetic/allowlist. */
+export interface AllowRuleInput {
+  pattern: string;
+  kind: AllowKind;
+  note: string;
+}
+
+/**
+ * POST and PUT /synthetic/credentials. `secret` is write-only: required on create, on update it rotates the
+ * secret. password is the token, password, header value or client secret; username is the login (basic) or the
+ * client id (oauth2_client_credentials), none for bearer and header.
+ */
+export interface SyntheticCredentialInput {
+  name: string;
+  kind: CredentialKind;
+  bound_hosts: { pattern: string; kind: AllowKind }[];
+  secret?: { source: SecretSource; ref?: string; username?: string; password?: string };
+  header_name: string;
+  oauth_token_url: string;
+  oauth_scopes: string;
+  expires_at: string | null;
+}
+
+/** A 409 that names what still needs the object. */
+export interface InUse {
+  error: string;
+  scenarios: string[];
+  credentials: string[];
 }

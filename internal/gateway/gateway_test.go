@@ -20,7 +20,9 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/status"
 
 	"github.com/Warewave-Technology/olympos/internal/gateway"
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
@@ -83,13 +85,53 @@ func (e *env) dial(t *testing.T, cert *tls.Certificate) pb.AgentGatewayClient {
 }
 
 func enroll(t *testing.T, c pb.AgentGatewayClient, token string) (*tls.Certificate, *pb.EnrollResponse, error) {
+	return enrollAs(t, c, token, pb.EnrollRole_ENROLL_ROLE_AGENT)
+}
+
+func enrollAs(t *testing.T, c pb.AgentGatewayClient, token string, role pb.EnrollRole) (*tls.Certificate, *pb.EnrollResponse, error) {
+	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "spoofed-cluster"}}, key)
-	resp, err := c.Enroll(context.Background(), &pb.EnrollRequest{BootstrapToken: token, CsrDer: csr})
+	// The CSR asks for a probe identity of nobody: the server ignores it.
+	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "spoofed-cluster/probe"}}, key)
+	resp, err := c.Enroll(context.Background(), &pb.EnrollRequest{BootstrapToken: token, CsrDer: csr, Role: role})
 	if err != nil {
 		return nil, nil, err
 	}
 	return &tls.Certificate{Certificate: [][]byte{resp.CertDer}, PrivateKey: key}, resp, nil
+}
+
+// newToken adds a bootstrap token for id that may enroll roles.
+func (e *env) newToken(t *testing.T, id uuid.UUID, roles []string, ttl time.Duration) string {
+	t.Helper()
+	token := "olyb_" + uuid.NewString()
+	if _, err := e.gw.DB.Exec(context.Background(), `INSERT INTO enroll_tokens (cluster_id, token_hash, expires_at, roles) VALUES ($1, $2, $3, $4)`,
+		id, gateway.HashToken(token), time.Now().Add(ttl), roles); err != nil {
+		t.Fatal(err)
+	}
+	return token
+}
+
+// enrolled returns a cluster with an enrolled agent and probe.
+func (e *env) enrolled(t *testing.T) (id uuid.UUID, agent, probe *tls.Certificate) {
+	t.Helper()
+	id, token := e.newCluster(t)
+	c := e.dial(t, nil)
+	agent, _, err := enrollAs(t, c, token, pb.EnrollRole_ENROLL_ROLE_AGENT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe, _, err = enrollAs(t, c, token, pb.EnrollRole_ENROLL_ROLE_PROBE)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id, agent, probe
+}
+
+func wantCode(t *testing.T, what string, err error, want codes.Code) {
+	t.Helper()
+	if got := status.Code(err); got != want {
+		t.Fatalf("%s: got %v (%v), want %v", what, got, err, want)
+	}
 }
 
 // fakeAgent answers OpenTunnel for one known target by echoing bytes.
@@ -164,6 +206,104 @@ func TestEnrollIdentityAndSingleUseToken(t *testing.T) {
 	if _, _, err := enroll(t, c, "olyb_wrong"); err == nil {
 		t.Fatal("unknown token accepted")
 	}
+}
+
+// One token enrolls one agent and one probe, each once; a token enrolls
+// only the roles it lists.
+func TestEnrollAgentAndProbeOneTokenOnce(t *testing.T) {
+	e := start(t)
+	ctx := context.Background()
+	agentRole, probeRole := pb.EnrollRole_ENROLL_ROLE_AGENT, pb.EnrollRole_ENROLL_ROLE_PROBE
+	id, token := e.newCluster(t)
+	c := e.dial(t, nil)
+
+	agentCert, _, err := enrollAs(t, c, token, agentRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeCert, resp, err := enrollAs(t, c, token, probeRole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentLeaf, _ := x509.ParseCertificate(agentCert.Certificate[0])
+	leaf, _ := x509.ParseCertificate(probeCert.Certificate[0])
+	if resp.ClusterId != id.String() || leaf.Subject.CommonName != id.String()+"/probe" ||
+		len(leaf.Subject.Organization) != 1 || leaf.Subject.Organization[0] != "olympos-probe" {
+		t.Fatalf("probe identity must come from the server, got %v", leaf.Subject)
+	}
+	if d := leaf.NotAfter.Sub(leaf.NotBefore); d < 29*24*time.Hour || d > 31*24*time.Hour {
+		t.Fatalf("probe validity %v", d)
+	}
+	var serial, agentSerial, probeStatus string
+	var actions int
+	if err := e.gw.DB.QueryRow(ctx, `SELECT probe_cert_serial, cert_serial, probe_status,
+		(SELECT count(*) FROM activity_log WHERE cluster_id = $1 AND action = 'probe.enrolled') FROM clusters WHERE id = $1`, id).
+		Scan(&serial, &agentSerial, &probeStatus, &actions); err != nil {
+		t.Fatal(err)
+	}
+	if serial != pki.SerialHex(leaf.SerialNumber) || agentSerial != pki.SerialHex(agentLeaf.SerialNumber) || probeStatus != "pending" || actions != 1 {
+		t.Fatalf("cluster row: probe serial %q agent serial %q status %q probe.enrolled %d", serial, agentSerial, probeStatus, actions)
+	}
+
+	if _, _, err := enrollAs(t, c, token, agentRole); err == nil {
+		t.Fatal("token enrolled a second agent")
+	}
+	if _, _, err := enrollAs(t, c, token, probeRole); err == nil {
+		t.Fatal("token enrolled a second probe")
+	}
+
+	// A probe-only token ("Install probe" on an existing cluster) and an
+	// agent-only token (made before synthetic monitoring).
+	probeOnly := e.newToken(t, id, []string{"probe"}, time.Hour)
+	_, _, err = enrollAs(t, c, probeOnly, agentRole)
+	wantCode(t, "agent with a probe-only token", err, codes.PermissionDenied)
+	if _, _, err := enrollAs(t, c, probeOnly, probeRole); err != nil {
+		t.Fatalf("probe-only token refused the probe: %v", err)
+	}
+	agentOnly := e.newToken(t, id, []string{"agent"}, time.Hour)
+	_, _, err = enrollAs(t, c, agentOnly, probeRole)
+	wantCode(t, "probe with an agent-only token", err, codes.PermissionDenied)
+	if _, _, err := enrollAs(t, c, agentOnly, agentRole); err != nil {
+		t.Fatalf("agent-only token refused the agent: %v", err)
+	}
+
+	expired := e.newToken(t, id, []string{"agent", "probe"}, -time.Minute)
+	for _, r := range []pb.EnrollRole{agentRole, probeRole} {
+		_, _, err := enrollAs(t, c, expired, r)
+		wantCode(t, "expired token, "+r.String(), err, codes.PermissionDenied)
+	}
+	_, _, err = enrollAs(t, c, e.newToken(t, id, []string{"agent", "probe"}, time.Hour), pb.EnrollRole(7))
+	wantCode(t, "unknown role", err, codes.InvalidArgument)
+}
+
+// A probe identity reaches nothing of AgentGateway.
+func TestProbeIdentityRefusedByAgentRPCs(t *testing.T) {
+	e := start(t)
+	id, _, probe := e.enrolled(t)
+	c := e.dial(t, probe)
+	ctx := context.Background()
+
+	ctl, err := c.Control(ctx)
+	if err == nil {
+		_ = ctl.Send(&pb.AgentMessage{Msg: &pb.AgentMessage_Hello{Hello: &pb.Hello{ClusterId: id.String()}}})
+		_, err = ctl.Recv()
+	}
+	wantCode(t, "Control", err, codes.PermissionDenied)
+	if e.gw.Connected(id) {
+		t.Fatal("probe identity attached as the agent")
+	}
+
+	tun, err := c.Tunnel(ctx)
+	if err == nil {
+		_ = tun.Send(&pb.TunnelFrame{TunnelId: uuid.NewString()})
+		_, err = tun.Recv()
+	}
+	wantCode(t, "Tunnel", err, codes.PermissionDenied)
+
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	csr, _ := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{}, key)
+	_, err = c.RenewCert(ctx, &pb.RenewCertRequest{CsrDer: csr})
+	wantCode(t, "AgentGateway.RenewCert", err, codes.PermissionDenied)
 }
 
 func TestControlRequiresClientCert(t *testing.T) {

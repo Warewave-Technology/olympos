@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Olympos e2e lab on kind (SPEC §19): agent + server + Postgres + Vault +
-# OpenBao + ClickHouse + Azurite. Uses its OWN kubeconfig; never touches the
+# Olympos e2e lab on kind (SPEC §19): agent + probe + server + Postgres +
+# Vault + OpenBao + ClickHouse + Azurite + synth-web. Uses its OWN kubeconfig; never touches the
 # caller's current kube context.
 #
 #   ./test/e2e/run.sh            # create/reuse lab, build images, deploy, test
@@ -43,10 +43,12 @@ done
 if [ -z "${SKIP_BUILD:-}" ]; then
   log "building images"
   docker build -q -f deploy/docker/agent.Dockerfile -t olympos-agent:e2e . >/dev/null
+  docker build -q -f deploy/docker/probe.Dockerfile -t olympos-probe:e2e . >/dev/null
   docker build -q -f deploy/docker/server.Dockerfile -t olympos-server:e2e --build-arg PG_VERSIONS="16 17" --build-arg GO_TAGS=dev . >/dev/null
+  docker build -q -f test/e2e/cmd/synth-web/Dockerfile -t olympos-synth-web:e2e . >/dev/null
 fi
 log "loading images into kind"
-kind load docker-image olympos-agent:e2e olympos-server:e2e --name "$CLUSTER" >/dev/null
+kind load docker-image olympos-agent:e2e olympos-probe:e2e olympos-server:e2e olympos-synth-web:e2e --name "$CLUSTER" >/dev/null
 
 # Lab CA for target TLS (Postgres verify-full against orders-pg.lab.svc).
 if [ ! -f "$WORK/lab-ca.crt" ]; then
@@ -94,6 +96,9 @@ kubectl -n lab create secret tls restore-vault-tls --cert "$WORK/restore-vault.c
 kubectl -n lab create secret tls vault-tls --cert "$WORK/vault.crt" --key "$WORK/vault.key" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl -n olympos create configmap target-ca --from-file=ca.crt="$WORK/lab-ca.crt" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 kubectl apply -f test/e2e/manifests/targets.yaml >/dev/null
+# Synthetic monitoring: synth-web answers every *.olympos-lab.test name.
+kubectl apply -f test/e2e/manifests/synthetic.yaml >/dev/null
+patch_coredns
 
 # Every e2e run starts from an empty Olympos (it also removes clusters added
 # by hand in the browsable lab; run env.sh afterwards to get a clean one).
@@ -129,10 +134,16 @@ helm upgrade --install olympos deploy/helm/olympos-server --namespace olympos \
 kubectl -n olympos rollout restart deploy/olympos >/dev/null
 kubectl -n olympos rollout status deploy/olympos --timeout=180s >/dev/null
 if kubectl -n olympos-system get deploy olympos-agent >/dev/null 2>&1; then
-  # Pick up chart changes (RBAC) and the freshly loaded image.
-  helm upgrade olympos-agent deploy/helm/olympos-agent -n olympos-system --reuse-values --wait --timeout 3m >/dev/null
-  kubectl -n olympos-system rollout restart deploy/olympos-agent >/dev/null
-  kubectl -n olympos-system rollout status deploy/olympos-agent --timeout=180s >/dev/null
+  # Pick up chart changes (RBAC) and the freshly loaded images. A release
+  # from before the probe has no probe.image values to reuse.
+  helm upgrade olympos-agent deploy/helm/olympos-agent -n olympos-system --reuse-values \
+    --set probe.image.repository=olympos-probe --set probe.image.tag=e2e --set probe.image.pullPolicy=Never \
+    --wait --timeout 3m >/dev/null
+  for d in olympos-agent olympos-probe; do
+    kubectl -n olympos-system get "deploy/$d" >/dev/null 2>&1 || continue
+    kubectl -n olympos-system rollout restart "deploy/$d" >/dev/null
+    kubectl -n olympos-system rollout status "deploy/$d" --timeout=180s >/dev/null
+  done
 fi
 
 kubectl -n lab rollout status statefulset/orders-pg --timeout=180s >/dev/null
@@ -141,6 +152,7 @@ kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/metrics-ch --timeout=240s >/dev/null
 for d in restore-pg restore-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
 kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
+kubectl -n lab rollout status deploy/synth-web --timeout=120s >/dev/null
 
 # Vault and OpenBao run on raft storage with TLS (snapshots need raft):
 # init + unseal once per pod; keys in $WORK/<name>-init.json.

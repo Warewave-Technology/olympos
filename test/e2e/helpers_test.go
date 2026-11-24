@@ -173,11 +173,14 @@ func helmSets(cmd string) map[string]string {
 	return out
 }
 
-// installAgent installs the agent chart with values from an install command.
+// installAgent installs the agent chart, and with it the probe, with values
+// from an install command.
 func installAgent(t *testing.T, release, namespace string, sets map[string]string) {
 	t.Helper()
 	args := []string{"upgrade", "--install", release, "deploy/helm/olympos-agent", "--namespace", namespace, "--create-namespace",
-		"--set", "image.repository=olympos-agent", "--set", "image.tag=e2e", "--set", "image.pullPolicy=Never", "--wait", "--timeout", "3m"}
+		"--set", "image.repository=olympos-agent", "--set", "image.tag=e2e", "--set", "image.pullPolicy=Never",
+		"--set", "probe.image.repository=olympos-probe", "--set", "probe.image.tag=e2e", "--set", "probe.image.pullPolicy=Never",
+		"--wait", "--timeout", "3m"}
 	for k, v := range sets {
 		args = append(args, "--set", fmt.Sprintf("%s=%s", k, v))
 	}

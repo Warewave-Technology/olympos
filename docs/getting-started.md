@@ -2,8 +2,8 @@
 
 This guide runs Olympos in a local lab and walks through what a new installation does: add clusters, back
 up a database, write each backup to two destinations, change a Vault secret with a second person's
-approval, restore a backup into a new server, and run audits and image scans. It takes about 45 minutes and
-needs no Azure account.
+approval, restore a backup into a new server, run audits and image scans, and watch a service from every
+cluster. It takes about 45 minutes and needs no Azure account.
 
 The lab uses a **development build**: sign-in without Entra ID (dev login) and a local key vault instead of
 Azure Key Vault. Release builds have neither. To install Olympos for real, see
@@ -27,6 +27,9 @@ kind clusters, each with its own kubeconfig; your current kube context is not to
 |---|---|
 | `olympos-lab` | the Olympos server, its PostgreSQL, and targets to back up: PostgreSQL `orders-pg`, ClickHouse `metrics-ch`, HashiCorp Vault and OpenBao (TLS, raft), Azurite and MinIO as backup storage, Kyverno |
 | `olympos-edge` | shop workloads: a TLS PostgreSQL `payments-pg` and deliberately old `nginx`/`redis` images |
+
+Both also run `synth-web`, a small web service that answers every `*.olympos-lab.test` name, for synthetic
+monitoring (step 12).
 
 No agent is enrolled: adding the clusters is the first step below. When the script finishes it prints the
 sign-in links and the lab's generated values (Vault root tokens, the Azurite SAS) and writes them to
@@ -53,7 +56,8 @@ Each cluster gets an agent. The agent only dials out to the server, so the clust
    ![Add cluster](images/start-02-add-cluster.png)
 
 2. **Create install command** shows a Helm command with a one-time bootstrap token (valid for an hour,
-   usable once; the token is masked in the image below).
+   usable once; the token is masked in the image below). The command installs the agent and, next to it,
+   the probe that runs [synthetic monitoring](synthetic-monitoring.md) scenarios.
 
    ![The generated install command](images/start-03-install-command.png)
 
@@ -392,7 +396,33 @@ agent reported and explains which rule allowed or denied it.
 
 ![A Kyverno policy](images/security-kyverno-policy.png)
 
-## 12. Clean up
+## 12. Watch a service from every cluster
+
+**Monitoring › Synthetic** runs checks (HTTP requests and flows, DNS, TCP, TLS) from inside every cluster,
+through the probe each cluster got in step 3, and alerts when one keeps failing. In the lab, every
+`*.olympos-lab.test` name reaches `synth-web` in that cluster:
+
+1. **Settings › Synthetic monitoring › Add rule**: `olympos-lab.test`, kind *suffix*. Probes may only call
+   hosts on this allowlist.
+2. **New credential**: *Bearer token*, bound to the suffix `olympos-lab.test`, any value.
+3. **Monitoring › Synthetic › New scenario**: an HTTP flow, `GET http://shop.olympos-lab.test/health`, then
+   `GET http://shop.olympos-lab.test/api/items` with the credential, *status code equals 200*; interval
+   30 seconds. **Run once** tries it on one cluster; **Save scenario** runs it on both.
+
+To see a cluster fail, switch the edge cluster's `synth-web` to answering 500; after three runs its cell
+reads *failing*. `toggle ok` brings it back.
+
+```bash
+export KUBECONFIG=$PWD/test/e2e/.work/kubeconfig-env
+kubectl --context kind-olympos-edge -n lab exec deploy/synth-web -- /synth-web toggle 500
+```
+
+![Monitoring › Synthetic](images/monitoring-01-overview.png)
+
+`/api/items` echoes the token and sets a cookie: open a run to see both redacted. Everything else, from the
+allowlist to alerts and roles, is in [Synthetic monitoring](synthetic-monitoring.md).
+
+## 13. Clean up
 
 ```bash
 ./test/e2e/env.sh down    # deletes both kind clusters
@@ -406,4 +436,5 @@ agent reported and explains which rule allowed or denied it.
 - When something does not work: [Troubleshooting](troubleshooting.md).
 - How Olympos protects credentials and data: [Security model](security-model.md).
 - Restore a backup: [Restore](restore.md), and [Restoring Olympos](restore-olympos.md).
+- Check services from every cluster: [Synthetic monitoring](synthetic-monitoring.md).
 - Re-take these screenshots after a UI change: `./test/e2e/env.sh`, then `cd web && pnpm docs-tour`.

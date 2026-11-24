@@ -222,6 +222,22 @@ Alert debounce for agent connectivity. Zero or negative values use the default.
 | `security.systemNamespaces` | list of globs | `[kube-system, kube-public, kube-node-lease, olympos-system, olympos-bench]` | no | Namespaces excluded from the default-deny NetworkPolicy check, sensitive-data findings and Secret inventory findings. An explicit `[]` excludes nothing. |
 | `security.secretsInventory.reportUnmanaged` | bool | `true` | no | Raise `secret.unmanaged` (info) for Secrets not owned by External Secrets, Vault Secrets Operator, sealed-secrets or cert-manager. Needs the agent's opt-in Secret inventory. |
 
+### `synthetic`
+
+[Synthetic monitoring](synthetic-monitoring.md). Zero or unset values use the default; negative values are
+refused.
+
+| Key | Type | Default | Required | Description |
+|---|---|---|---|---|
+| `synthetic.runRetention` | duration | `720h` (30 days) | no | Keeps runs and their step results; older ones remain only as hourly aggregates (availability, p50, p95 per scenario and cluster). |
+| `synthetic.aggregateRetention` | duration | `9600h` (400 days) | no | Keeps the hourly aggregates. |
+| `synthetic.excerptRetention` | duration | `168h` (7 days) | no | Keeps response excerpts; the runs stay. |
+| `synthetic.maxRequestsPerMinutePerCluster` | int | `600` | no | What all scenarios together may make one cluster's probe send. A scenario that would go over is not scheduled there. |
+| `synthetic.maxRequestsPerMinutePerScenario` | int | `120` | no | What one scenario may send on one cluster. Counted as the worst case: every step at every retry, 6 requests per attempt for a step that follows redirects, and 1 per run for each distinct credential the scenario uses (an OAuth2 token request). |
+| `synthetic.probeOfflineAlertAfter` | duration | `5m` | no | `probe.offline` fires after a probe has been offline this long; one `probe.online` follows when it is back. |
+
+Test runs are kept for 7 days and alerts forever; neither is configurable.
+
 ### Validation errors
 
 Validation collects every problem and fails with `invalid config: <problem>; <problem>`. The problems are:
@@ -240,6 +256,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `gateway.tlsCertFile and gateway.tlsKeyFile must be set together` | Set both or neither. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
+| `synthetic.<key> must not be negative` | Use a positive value, or leave the key out for the default. |
 
 YAML errors appear as `parse <file>: ...`. Errors the server reports only at start include
 `unknown keyVault.provider`, `azure credential: ...`, `resolve database dsn: ...`,
@@ -354,7 +371,7 @@ variables that the chart renders; the chart has no `extraEnv`.
 | Value | Default | What it sets |
 |---|---|---|
 | `server` | `""` | **Required.** Gateway `host:port` (`OLYMPOS_SERVER`). |
-| `bootstrapToken` | `""` | **Required on first install.** One-time enrollment token (valid 1 h), stored in the Secret `olympos-agent-identity`. Once the agent has enrolled (the Secret holds `tls.crt`), upgrades keep the Secret and ignore this value. |
+| `bootstrapToken` | `""` | **Required on first install.** One-time enrollment token (valid 1 h), stored in the Secret `olympos-agent-identity` (and, while the probe has no certificate, in `olympos-probe-identity`: the same token enrolls the agent and the probe once each). A token issued again for a cluster that already has a probe (*Show install command*) enrolls only the agent; use *Install probe* for the probe. Once the agent has enrolled (the Secret holds `tls.crt`), upgrades keep the Secret and ignore this value. |
 | `serverCA` | `""` | **Required.** Base64-encoded PEM of the Olympos internal CA. Rendered into the ConfigMap `olympos-agent-ca` and mounted at `/etc/olympos/ca.crt`; the agent pins it. |
 | `serverName` | `""` | TLS server name override (`OLYMPOS_SERVER_NAME`). Empty: the host part of `server`. |
 | `clusterName` | `""` | Not used by any chart template. The agent's identity comes from its enrolled certificate. |
@@ -378,6 +395,18 @@ variables that the chart renders; the chart has no `extraEnv`.
 | `bench.kyverno.policyRefs` | `[]` | Render a `policies.kyverno.io/v1` PolicyException naming these policies (Kyverno CEL policies), e.g. `[{name: require-run-as-nonroot, kind: ValidatingPolicy}]`. |
 | `resources` | requests `50m`/`64Mi`, limit `256Mi` memory | |
 | `nodeSelector` / `tolerations` / `affinity` / `podAnnotations` | `{}` / `[]` / `{}` / `{}` | Agent pod. |
+| `probe.enabled` | `true` | Install `olympos-probe` (synthetic monitoring) next to the agent: the Deployment, ServiceAccount and Secret `olympos-probe-identity`, the agent's Role on that Secret, and `OLYMPOS_PROBE_ENABLED`. The probe's ServiceAccount has no RBAC and no token. `false`: none of these, and the cluster shows *Probe: not installed*. On a cluster that already had a probe, Olympos shows it *offline* and its alerts keep firing: also choose *Revoke probe* ([Synthetic monitoring](synthetic-monitoring.md#install-the-probe)). |
+| `probe.replicas` | `1` | Probe replicas. Runs are idempotent by run id. |
+| `probe.image.repository` | `ghcr.io/warewave-technology/olympos-probe` | |
+| `probe.image.tag` | `""` (chart `appVersion`) | |
+| `probe.image.digest` | `""` | When set, used instead of the tag. |
+| `probe.image.pullPolicy` | `IfNotPresent` | |
+| `probe.bootstrapToken` | `""` | One-time probe token from *Settings › Clusters & agents › Install probe*. The chart adds it to the Secret `olympos-probe-identity` and keeps what is there; the agent enrolls the probe with it. A new cluster does not need it: the agent enrolls the probe with `bootstrapToken`. Without either, the upgrade succeeds and the probe waits. The chart does not write the same token twice (it keeps the token's SHA-256 in the annotation `olympos.io/bootstrap-token-sha256`), so `--reuse-values` does not replay a spent token. |
+| `probe.maxConcurrency` | `20` | Runs one replica runs at once (`OLYMPOS_PROBE_MAX_CONCURRENCY`, 1 to 1000). |
+| `probe.networkPolicy.egressCIDRs` | `[]` | Non-empty: a NetworkPolicy lets the probe pods reach only these CIDRs, plus the cluster DNS (`probe.networkPolicy.dns`). Include the Olympos gateway (`server`) and the allowlisted hosts. The host allowlist in Olympos applies either way. |
+| `probe.networkPolicy.dns.namespaceSelector` / `.podSelector` / `.ports` | empty: `kubernetes.io/metadata.name: kube-system` / `k8s-app: kube-dns` / UDP and TCP 53 | The DNS pods the NetworkPolicy allows. A field you set replaces its default as a whole; an unset or empty one keeps it (the defaults are in the template, so Helm does not merge your labels into them). **OpenShift**: `namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}`, `podSelector: {matchLabels: {dns.operator.openshift.io/daemonset-dns: default}}`, `ports: [{protocol: UDP, port: 5353}, {protocol: TCP, port: 5353}]` (the DNS pods listen on 5353). **NodeLocal DNSCache**: the cache answers on the node, not in a DNS pod, so add the nameserver address from the pod's `/etc/resolv.conf` to `egressCIDRs` (usually `169.254.20.10/32`, or the `kube-dns` Service IP when the cache listens on it). |
+| `probe.resources` | requests `20m`/`32Mi`, limit `128Mi` memory | `GOMEMLIMIT` follows the memory limit. |
+| `probe.nodeSelector` / `probe.tolerations` / `probe.affinity` | `{}` / `[]` / `{}` | Probe pods. `imagePullSecrets` applies to them too. |
 
 ## Environment variables
 
@@ -422,10 +451,28 @@ defaults.
 | `OLYMPOS_SENSITIVE_DATA` | on | Off only when `false`. |
 | `OLYMPOS_SENSITIVE_DATA_EXCLUDE` | the five system namespaces | Comma-separated globs. Unset: the default list. Set but empty: nothing excluded. |
 | `OLYMPOS_SECRETS_INVENTORY` | off | On only when `true`. |
+| `OLYMPOS_PROBE_ENABLED` | off | On only when `true` (`probe.enabled`): the agent enrolls and renews the probe's identity. |
+| `OLYMPOS_PROBE_IDENTITY_SECRET` | `olympos-probe-identity` | Secret the agent keeps the probe's identity in. The chart's Role allows only the default name. |
 | `OLYMPOS_HEALTH_ADDR` | `127.0.0.1:8081` | Health endpoint used by `olympos-agent health` (the liveness probe). Must start with `127.0.0.1:` or `localhost:`. |
 
 A non-integer `OLYMPOS_MAX_TUNNELS` or `OLYMPOS_BENCH_MAX_PARALLEL`, a missing `OLYMPOS_SERVER`, or a
 non-local `OLYMPOS_HEALTH_ADDR` stops the agent at start.
+
+### Probe
+
+The chart sets all of these. The probe reads no Kubernetes API and gets no token.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OLYMPOS_SERVER` | — | **Required.** Gateway `host:port`, the agent's. |
+| `OLYMPOS_SERVER_NAME` | host of `OLYMPOS_SERVER` | TLS server name. |
+| `OLYMPOS_PROBE_IDENTITY_DIR` | `/etc/olympos-probe` | `tls.crt` and `tls.key` from `olympos-probe-identity` and `ca.crt` from `olympos-agent-ca`, in one projected volume. The probe reloads them when they change. |
+| `OLYMPOS_PROBE_MAX_CONCURRENCY` | `20` | Integer, 1 to 1000. |
+| `OLYMPOS_HEALTH_ADDR` | `127.0.0.1:8082` | Health endpoint used by `olympos-probe health` (the liveness probe). Loopback only. |
+| `GOMEMLIMIT` | the memory limit | Go runtime soft memory limit. |
+
+A missing `OLYMPOS_SERVER`, an out-of-range `OLYMPOS_PROBE_MAX_CONCURRENCY` or a non-loopback
+`OLYMPOS_HEALTH_ADDR` stops the probe at start.
 
 ## Examples
 

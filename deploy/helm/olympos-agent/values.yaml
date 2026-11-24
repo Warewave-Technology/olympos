@@ -62,6 +62,57 @@ bench:
     # name each policy, e.g. [{name: require-run-as-nonroot, kind: ValidatingPolicy}].
     policyRefs: []
 
+probe:
+  # olympos-probe runs synthetic monitoring scenarios from inside the cluster
+  # (docs/design/synthetic-monitoring.md). It dials out to the same gateway
+  # as the agent, has no RBAC and no Kubernetes API token: the agent keeps
+  # its identity in the Secret olympos-probe-identity. false opts out (the
+  # cluster shows "Probe: not installed" and scenarios skip it).
+  enabled: true
+  # Runs are idempotent by run id; more replicas share the runs.
+  replicas: 1
+  image:
+    repository: ghcr.io/warewave-technology/olympos-probe
+    tag: ""          # defaults to .Chart.AppVersion
+    digest: ""       # prefer pinning by digest
+    pullPolicy: IfNotPresent
+  # One-time probe token from Olympos "Install probe" (existing clusters).
+  # The chart writes it into olympos-probe-identity, keeping the identity
+  # there, and the agent enrolls the probe with it. A new cluster needs none:
+  # the agent enrolls the probe with bootstrapToken. Without either, the
+  # upgrade succeeds and the probe waits for an identity.
+  bootstrapToken: ""
+  # Runs this replica runs at once (OLYMPOS_PROBE_MAX_CONCURRENCY, 1-1000).
+  maxConcurrency: 20
+  networkPolicy:
+    # Non-empty: a NetworkPolicy lets the probe reach only these CIDRs (and
+    # the cluster DNS, below). Include the Olympos gateway (`server`) and every
+    # allowlisted host; the allowlist in Olympos still applies.
+    egressCIDRs: []
+    # The cluster DNS the policy allows (the probe asks the nameserver in
+    # the pod's resolv.conf). Unset or empty fields keep the defaults:
+    #   namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+    #   podSelector: {matchLabels: {k8s-app: kube-dns}}
+    #   ports: [{protocol: UDP, port: 53}, {protocol: TCP, port: 53}]
+    # A field you set replaces its default as a whole (the defaults are not
+    # here because Helm would merge your labels into them). OpenShift:
+    #   namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: openshift-dns}}
+    #   podSelector: {matchLabels: {dns.operator.openshift.io/daemonset-dns: default}}
+    #   ports: [{protocol: UDP, port: 5353}, {protocol: TCP, port: 5353}]
+    # NodeLocal DNSCache answers on the node, not in a kube-dns pod: add the
+    # nameserver address of the pod's resolv.conf to egressCIDRs (169.254.20.10/32,
+    # or the kube-dns Service IP when the cache listens on it).
+    dns:
+      namespaceSelector: {}
+      podSelector: {}
+      ports: []
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {memory: 128Mi}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
 resources:
   requests: {cpu: 50m, memory: 64Mi}
   limits: {memory: 256Mi}

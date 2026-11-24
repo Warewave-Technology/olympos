@@ -4,6 +4,7 @@ import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
 import { fleetRoutes } from './fleet';
+import { syntheticRoutes } from './synthetic';
 
 export interface MockReq {
   method: string;
@@ -35,9 +36,20 @@ function minor(v: string) {
   return m ? Number(m[1]) : 0;
 }
 
+/** Clusters whose probe got an "Install probe" token, and when: the probe connects 9 s later. */
+const probeEnrolling = new Map<string, number>();
+/** The server's OLYMPOS_AGENT_INSTALL_SETS in this mock (an image mirror). */
+const AGENT_SETS = ['probe.image.repository=registry.contoso.internal/mirror/olympos-probe'];
+
 function liveClusters(): Cluster[] {
   const now = Date.now();
   for (const c of db.clusters) {
+    // a probe token: the agent enrolls the probe after 3 s (pending), and it connects after 9 s
+    const pt = probeEnrolling.get(c.id);
+    if (pt && c.status !== 'revoked' && now - pt > 9000) {
+      probeEnrolling.delete(c.id);
+      Object.assign(c, { probe_status: 'online', probe_version: '0.3.1', probe_last_seen_at: new Date().toISOString() });
+    } else if (pt && c.status !== 'revoked' && now - pt > 3000) c.probe_status = 'pending';
     const t = db.enrolling.get(c.id);
     if (t && c.status === 'pending' && now - t > 9000) {
       Object.assign(c, {
@@ -52,6 +64,9 @@ function liveClusters(): Cluster[] {
         region: 'eu-frankfurt-1',
         agent_version: '0.4.2',
         inventory_at: new Date().toISOString(),
+        probe_status: 'online',
+        probe_version: '0.3.0',
+        probe_last_seen_at: new Date().toISOString(),
       });
     }
   }
@@ -364,6 +379,7 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
 
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
+  ...syntheticRoutes,
   ['GET', '/me', () => ok(db.me())],
   ['GET', '/dashboard', () => ok(dashboard())],
   ['GET', '/clusters', () => items(liveClusters())],
@@ -399,6 +415,10 @@ const routes: [string, string, Handler][] = [
         created_at: new Date().toISOString(),
         eol: false,
         version_skew: false,
+        // as the server: the probe enrolls with the agent, from the same token
+        probe_status: 'not_installed',
+        probe_version: '',
+        probe_last_seen_at: null,
       };
       db.clusters.push(c);
       db.enrolling.set(c.id, Date.now());
@@ -476,6 +496,41 @@ const routes: [string, string, Handler][] = [
       });
     },
   ],
+  [
+    'POST',
+    '/clusters/:id/probe-token',
+    (_r, p) => {
+      const c = db.clusters.find((x) => x.id === p.id);
+      if (!c) return notFound();
+      if (!perms().admin_global) return forbidden();
+      if (c.status === 'revoked') return { status: 409, body: { error: 'cluster is revoked; add it again as a new cluster' } };
+      // ruling P24: the add cluster command of a pending cluster already installs the probe
+      if (c.status === 'pending') return { status: 409, body: { error: 'the agent has not enrolled yet; its install command already installs the probe' } };
+      probeEnrolling.set(c.id, Date.now());
+      db.record('cluster.probe_token_issued', 'cluster', c.name, 'probe install command issued');
+      const sets = AGENT_SETS.map((kv) => ` --set ${kv}`).join('');
+      return ok({
+        cluster: c,
+        command: `helm upgrade olympos-agent oci://olympos.contoso.internal/charts/olympos-agent -n olympos-system --reuse-values${sets} --set probe.enabled=true --set probe.bootstrapToken=olyb_${Math.random().toString(36).slice(2, 12)}`,
+        expires_at: new Date(Date.now() + 3600_000).toISOString(),
+      });
+    },
+  ],
+  [
+    'DELETE',
+    '/clusters/:id/probe',
+    (_r, p) => {
+      const c = db.clusters.find((x) => x.id === p.id);
+      if (!c) return notFound();
+      if (!perms().admin) return forbidden();
+      if (c.status === 'revoked') return { status: 409, body: { error: 'cluster is revoked' } };
+      if (c.probe_status === 'not_installed') return { status: 409, body: { error: 'no probe installed' } };
+      probeEnrolling.delete(c.id);
+      db.record('cluster.probe_revoked', 'cluster', c.name, `probe was ${c.probe_status}`);
+      c.probe_status = 'revoked';
+      return { status: 204 };
+    },
+  ],
   ['GET', '/clusters/:id/nodes', () => items([])],
   [
     'GET',
@@ -514,6 +569,7 @@ const routes: [string, string, Handler][] = [
       const roles = (r.body.roles ?? []) as Role[];
       if (!roles.length) return invalid('invalid grant', { roles: 'Select at least one role.' });
       if (u.is_guest && roles.some((x) => x === 'vault-approver' || x === 'admin')) return invalid('invalid grant', { roles: 'vault-approver and admin cannot be granted to guest accounts' });
+      if (u.is_guest && roles.includes('synthetic-editor')) return invalid('invalid grant', { roles: 'synthetic-editor cannot be granted to guest accounts' });
       const p = { id: db.uuid(), tenant_id: db.people.yigit.tenant_id, object_id: u.object_id, upn: u.upn, display_name: u.display_name, user_type: u.user_type, account_enabled: true };
       const ids: string[] = [];
       for (const role of roles) {

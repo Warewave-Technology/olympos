@@ -50,6 +50,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		"vault_approve":  subj.CanAny(authz.PermVaultApprove),
 		"admin":          subj.CanAny(authz.PermAdmin),
 		"admin_global":   subj.CanGlobal(authz.PermAdmin),
+		// synthetic_edit shows the scenario controls; whether a scenario
+		// may be saved depends on the clusters it runs on (the API says).
+		"synthetic_edit":        subj.CanAny(authz.PermSyntheticEdit),
+		"synthetic_edit_global": subj.CanGlobal(authz.PermSyntheticEdit),
 	}
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.DB.QueryRow(r.Context(), `SELECT csrf_token FROM sessions WHERE id = $1`, hashSession(c.Value)).Scan(&me.CSRFToken)

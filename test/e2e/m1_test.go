@@ -183,6 +183,8 @@ func TestM1TunnelRealAgent(t *testing.T) {
 		"bootstrapToken": token,
 		"serverCA":       base64.StdEncoding.EncodeToString(caPEM),
 		"clusterName":    "lab-inproc",
+		// Only the agent is under test here.
+		"probe.enabled": "false",
 	})
 	defer func() {
 		_, _ = runOK(t, "helm", "uninstall", "olympos-agent-e2e", "-n", ns)

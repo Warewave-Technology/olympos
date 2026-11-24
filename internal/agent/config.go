@@ -36,6 +36,10 @@ type Config struct {
 	SensitiveDataExclude []string
 	// SecretsInventory: opt-in, metadata-only Secret inventory (F3).
 	SecretsInventory bool
+	// ProbeEnabled makes the agent enroll and renew the identity of
+	// olympos-probe (synthetic monitoring) and write it to ProbeIdentitySecret.
+	ProbeEnabled        bool
+	ProbeIdentitySecret string
 }
 
 // ConfigFromEnv reads OLYMPOS_* variables.
@@ -53,6 +57,8 @@ func ConfigFromEnv() (Config, error) {
 		HealthAddr:           envOr("OLYMPOS_HEALTH_ADDR", "127.0.0.1:8081"),
 		SensitiveData:        os.Getenv("OLYMPOS_SENSITIVE_DATA") != "false",
 		SecretsInventory:     os.Getenv("OLYMPOS_SECRETS_INVENTORY") == "true",
+		ProbeEnabled:         os.Getenv("OLYMPOS_PROBE_ENABLED") == "true",
+		ProbeIdentitySecret:  envOr("OLYMPOS_PROBE_IDENTITY_SECRET", "olympos-probe-identity"),
 	}
 	if v, ok := os.LookupEnv("OLYMPOS_SENSITIVE_DATA_EXCLUDE"); ok {
 		c.SensitiveDataExclude = []string{}

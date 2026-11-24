@@ -8,6 +8,8 @@
 # Clusters (own kubeconfigs; your current kube context is never touched):
 #   olympos-lab   server + Postgres/Vault/OpenBao/ClickHouse/Azurite targets
 #   olympos-edge  shop workloads (TLS Postgres, old nginx/redis images)
+# Both run synth-web, the synthetic monitoring target that CoreDNS answers
+# every *.olympos-lab.test name with (docs/synthetic-monitoring.md).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 WORK=$PWD/test/e2e/.work
@@ -32,7 +34,7 @@ if ! kind get clusters | grep -qx olympos-edge; then
   kind create cluster --config test/e2e/kind-edge.yaml --kubeconfig "$EDGE_KC"
 fi
 KUBECONFIG=$EDGE_KC kubectl wait --for=condition=Ready nodes --all --timeout=180s >/dev/null
-kind load docker-image olympos-agent:e2e --name olympos-edge >/dev/null
+kind load docker-image olympos-agent:e2e olympos-probe:e2e olympos-synth-web:e2e --name olympos-edge >/dev/null
 if [ ! -f "$WORK/payments-pg.crt" ]; then
   openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=payments-pg.shop.svc" \
     -keyout "$WORK/payments-pg.key" -out "$WORK/payments-pg.csr" 2>/dev/null
@@ -45,6 +47,9 @@ KUBECONFIG=$EDGE_KC kubectl create namespace shop --dry-run=client -o yaml | KUB
 KUBECONFIG=$EDGE_KC kubectl -n shop create secret tls payments-pg-tls --cert "$WORK/payments-pg.crt" --key "$WORK/payments-pg.key" \
   --dry-run=client -o yaml | KUBECONFIG=$EDGE_KC kubectl apply -f - >/dev/null
 KUBECONFIG=$EDGE_KC kubectl apply -f test/e2e/manifests/edge-targets.yaml >/dev/null
+KUBECONFIG=$EDGE_KC kubectl apply -f test/e2e/manifests/synthetic.yaml >/dev/null
+(export KUBECONFIG=$EDGE_KC; source test/e2e/lib.sh; patch_coredns)
+KUBECONFIG=$EDGE_KC kubectl -n lab rollout status deploy/synth-web --timeout=120s >/dev/null
 
 # 3. Reset Olympos to an empty installation (no clusters, no history).
 export KUBECONFIG=$LAB_KC
@@ -127,6 +132,15 @@ Restore targets (new, empty servers in lab; Backups > a run > Restore…, docs/r
   After a restore it holds lab/vault's data: unseal it with lab/vault's key ($WORK/vault-init.json):
     kubectl -n lab exec deploy/restore-vault -- vault operator unseal <unseal_keys_b64[0]>
   ./test/e2e/env.sh empties all three again (and resets Olympos).
+
+Synthetic monitoring (Monitoring > Synthetic; docs/synthetic-monitoring.md):
+- Settings > Synthetic monitoring: add the allowlist rule olympos-lab.test (suffix).
+- In both clusters every *.olympos-lab.test name reaches synth-web (lab namespace, plain HTTP, port 80):
+    /health, /api/items (any Authorization: Bearer token; echoes it and sets a cookie),
+    /redirect?to=<url>; only the probes may call it (NetworkPolicy).
+- Make one cluster fail, slow down or recover (in-memory, reset by env.sh):
+    kubectl --context kind-olympos-edge -n lab exec deploy/synth-web -- /synth-web toggle 500   # or slow, ok
+- metadata.olympos-lab.test resolves to 169.254.169.254: allowlisted by the rule above, still refused (ip_denied).
 EOF
 log "ready"
 cat "$WORK/ENV.md"

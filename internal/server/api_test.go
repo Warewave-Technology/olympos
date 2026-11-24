@@ -74,6 +74,12 @@ func TestGrantRules(t *testing.T) {
 	if code != http.StatusUnprocessableEntity || !strings.Contains(body, "guest") {
 		t.Fatalf("guest approver: %d %s", code, body)
 	}
+	// Ruling P18: a guest never edits synthetic scenarios (they attach
+	// admin-made credentials and see credentialed headers).
+	code, body = admin.Raw("POST", "/api/v1/grants", map[string]any{"object_id": guest.ObjectID, "roles": []string{"synthetic-editor"}, "scope": "env=dev"})
+	if code != http.StatusUnprocessableEntity || !strings.Contains(body, "synthetic-editor cannot be granted to guest accounts") {
+		t.Fatalf("guest synthetic-editor: %d %s", code, body)
+	}
 	if code := admin.Do("POST", "/api/v1/grants", map[string]any{"object_id": guest.ObjectID, "roles": []string{"viewer"}, "scope": "env=dev"}, nil); code != http.StatusCreated {
 		t.Fatalf("guest viewer: %d", code)
 	}

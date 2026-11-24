@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	pb "github.com/Warewave-Technology/olympos/internal/gen/olympos/v1"
+	"github.com/Warewave-Technology/olympos/internal/pki"
 	"github.com/Warewave-Technology/olympos/internal/tunnel"
 )
 
@@ -74,11 +75,14 @@ func (s *session) release(id string) {
 
 // Control handles the agent's long-lived control stream.
 func (g *Gateway) Control(stream pb.AgentGateway_ControlServer) error {
-	clusterID, _, err := g.authenticate(stream.Context())
+	clusterID, cert, err := g.authenticate(stream.Context(), pki.RoleAgent)
 	if err != nil {
 		return err
 	}
-	first, err := stream.Recv()
+	if h := g.testHooks.awaitingHello; h != nil {
+		h(pki.RoleAgent)
+	}
+	first, err := recvFirst(stream.Context(), g.helloTimeout, stream.Recv)
 	if err != nil {
 		return err
 	}
@@ -97,23 +101,47 @@ func (g *Gateway) Control(stream pb.AgentGateway_ControlServer) error {
 		s.caps = &pb.Capabilities{}
 	}
 
+	// Register first, then check the identity again: a revoke that
+	// committed while the agent was sending its hello is seen by the check,
+	// and one that commits later finds the session and cancels it.
 	g.mu.Lock()
 	if old := g.sessions[clusterID]; old != nil {
 		old.cancel() // a newer connection wins
 	}
 	g.sessions[clusterID] = s
 	g.mu.Unlock()
+	attached := false
 	defer func() {
 		g.mu.Lock()
 		if g.sessions[clusterID] == s {
 			delete(g.sessions, clusterID)
 		}
 		g.mu.Unlock()
-		if g.Hooks.Disconnected != nil {
+		// A session refused by the second check never attached.
+		if attached && g.Hooks.Disconnected != nil {
 			g.Hooks.Disconnected(clusterID)
 		}
 		g.Log.Info("agent disconnected", "cluster_id", clusterID)
 	}()
+	var ok bool
+	if err := g.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM clusters WHERE id = $1 AND status <> 'revoked')
+		AND NOT EXISTS(SELECT 1 FROM revoked_certs WHERE serial = $2)`, clusterID, pki.SerialHex(cert.SerialNumber)).Scan(&ok); err != nil {
+		if ctx.Err() != nil {
+			return status.Error(codes.Aborted, "session closed")
+		}
+		return status.Error(codes.Unavailable, "identity check failed")
+	}
+	if !ok {
+		g.Log.Warn("agent revoked before it attached", "cluster_id", clusterID)
+		return status.Error(codes.PermissionDenied, "cluster revoked")
+	}
+	if h := g.testHooks.attached; h != nil {
+		h(pki.RoleAgent)
+	}
+	if ctx.Err() != nil {
+		return status.Error(codes.Aborted, "session closed")
+	}
+	attached = true
 
 	if g.Hooks.Connected != nil {
 		if err := g.Hooks.Connected(ctx, clusterID, hello); err != nil {
@@ -271,7 +299,7 @@ func (g *Gateway) inOrder(s *session, gen uint64) bool {
 
 // Tunnel attaches an agent-opened tunnel stream to a pending Dial.
 func (g *Gateway) Tunnel(stream pb.AgentGateway_TunnelServer) error {
-	clusterID, _, err := g.authenticate(stream.Context())
+	clusterID, _, err := g.authenticate(stream.Context(), pki.RoleAgent)
 	if err != nil {
 		return err
 	}

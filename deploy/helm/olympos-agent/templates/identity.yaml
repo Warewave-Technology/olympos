@@ -1,5 +1,6 @@
-# The one Secret the agent may read/write (SPEC §4.4): its own identity.
-# Existing data (enrolled cert/key) is preserved across upgrades.
+# The Secrets the agent may read/write (SPEC §4.4): its own identity and,
+# with the probe enabled, the probe's (probe-identity.yaml), which it keeps
+# for the probe. Existing data (enrolled cert/key) is preserved across upgrades.
 {{- $existing := lookup "v1" "Secret" .Release.Namespace "olympos-agent-identity" }}
 apiVersion: v1
 kind: Secret
@@ -26,7 +27,11 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: [secrets]
+  {{- if eq (include "olympos-probe.enabled" .) "true" }}
+  resourceNames: [olympos-agent-identity, olympos-probe-identity]
+  {{- else }}
   resourceNames: [olympos-agent-identity]
+  {{- end }}
   verbs: [get, update, patch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

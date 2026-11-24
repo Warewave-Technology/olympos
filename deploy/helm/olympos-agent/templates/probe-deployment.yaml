@@ -1,0 +1,89 @@
+{{- if eq (include "olympos-probe.enabled" .) "true" }}
+{{- $p := .Values.probe | default dict }}
+{{- $img := $p.image | default dict }}
+{{- $defaultResources := dict "requests" (dict "cpu" "20m" "memory" "32Mi") "limits" (dict "memory" "128Mi") }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: olympos-probe
+  namespace: {{ .Release.Namespace }}
+  labels: {{- include "olympos-probe.labels" . | nindent 4 }}
+spec:
+  replicas: {{ hasKey $p "replicas" | ternary $p.replicas 1 }}
+  selector:
+    matchLabels: {{- include "olympos-probe.selector" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "olympos-probe.selector" . | nindent 8 }}
+      annotations:
+        checksum/ca: {{ .Values.serverCA | sha256sum }}
+    spec:
+      # No Kubernetes API access: no RBAC, no token (synthetic monitoring §2.1).
+      serviceAccountName: olympos-probe
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # The projected files belong to root; fsGroup gives them the probe's
+        # group, so the key can be 0440 instead of world-readable.
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: probe
+        image: {{ include "olympos-probe.image" . }}
+        imagePullPolicy: {{ $img.pullPolicy | default "IfNotPresent" }}
+        env:
+        - {name: OLYMPOS_SERVER, value: {{ required "server is required" .Values.server | quote }}}
+        - {name: OLYMPOS_SERVER_NAME, value: {{ .Values.serverName | quote }}}
+        - {name: OLYMPOS_PROBE_IDENTITY_DIR, value: /etc/olympos-probe}
+        - {name: OLYMPOS_PROBE_MAX_CONCURRENCY, value: {{ hasKey $p "maxConcurrency" | ternary $p.maxConcurrency 20 | quote }}}
+        - {name: OLYMPOS_HEALTH_ADDR, value: "127.0.0.1:8082"}
+        - name: GOMEMLIMIT
+          valueFrom: {resourceFieldRef: {containerName: probe, resource: limits.memory}}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}
+        # No ports: the probe only dials out. Health is localhost-only and
+        # probed by exec'ing the binary (distroless has no shell).
+        livenessProbe:
+          exec: {command: [/olympos-probe, health]}
+          initialDelaySeconds: 10
+          periodSeconds: 20
+        resources: {{- toYaml ($p.resources | default $defaultResources) | nindent 10 }}
+        volumeMounts:
+        - {name: identity, mountPath: /etc/olympos-probe, readOnly: true}
+      # The only volume. One projected volume, so tls.crt, tls.key and
+      # ca.crt change together through its ..data symlink, which the probe
+      # watches. The certificate is optional: until the agent has enrolled
+      # the probe, only ca.crt is there and the probe waits.
+      volumes:
+      - name: identity
+        projected:
+          defaultMode: 0440
+          sources:
+          - secret:
+              name: olympos-probe-identity
+              optional: true
+              items:
+              - {key: tls.crt, path: tls.crt}
+              - {key: tls.key, path: tls.key}
+          - configMap:
+              name: olympos-agent-ca
+              items:
+              - {key: ca.crt, path: ca.crt}
+      {{- with $p.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $p.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

@@ -9,7 +9,7 @@ function me(perms: Partial<Permissions>, oid = 'me-oid', roles: Me['roles'] = ['
     is_guest: false,
     roles,
     grants: [],
-    permissions: { read: true, operate: false, operate_global: false, vault_make: false, vault_approve: false, admin: false, admin_global: false, ...perms },
+    permissions: { read: true, operate: false, operate_global: false, vault_make: false, vault_approve: false, admin: false, admin_global: false, synthetic_edit: false, synthetic_edit_global: false, ...perms },
     dev_mode: false,
   };
 }
@@ -50,6 +50,8 @@ describe('permission gating', () => {
     // a restore checker granted operator next to vault-approver sees both
     expect(primaryRole(me({}, 'x', ['vault-approver', 'operator']))).toBe('operator, vault-approver');
     expect(primaryRole(me({}, 'x', ['viewer']))).toBe('viewer');
+    expect(primaryRole(me({}, 'x', ['viewer', 'synthetic-editor']))).toBe('synthetic-editor');
+    expect(primaryRole(me({}, 'x', ['synthetic-editor', 'operator']))).toBe('operator, synthetic-editor');
     expect(primaryRole(null)).toBe('no role');
   });
 

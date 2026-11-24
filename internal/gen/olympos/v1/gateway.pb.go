@@ -21,11 +21,63 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// EnrollRole is the identity an Enroll asks for. A bootstrap token enrolls
+// each role it lists at most once.
+type EnrollRole int32
+
+const (
+	// The agent: certificate CN = <cluster-uuid>.
+	EnrollRole_ENROLL_ROLE_AGENT EnrollRole = 0
+	// olympos-probe, enrolled by the agent on its behalf: CN =
+	// <cluster-uuid>/probe.
+	EnrollRole_ENROLL_ROLE_PROBE EnrollRole = 1
+)
+
+// Enum value maps for EnrollRole.
+var (
+	EnrollRole_name = map[int32]string{
+		0: "ENROLL_ROLE_AGENT",
+		1: "ENROLL_ROLE_PROBE",
+	}
+	EnrollRole_value = map[string]int32{
+		"ENROLL_ROLE_AGENT": 0,
+		"ENROLL_ROLE_PROBE": 1,
+	}
+)
+
+func (x EnrollRole) Enum() *EnrollRole {
+	p := new(EnrollRole)
+	*p = x
+	return p
+}
+
+func (x EnrollRole) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (EnrollRole) Descriptor() protoreflect.EnumDescriptor {
+	return file_olympos_v1_gateway_proto_enumTypes[0].Descriptor()
+}
+
+func (EnrollRole) Type() protoreflect.EnumType {
+	return &file_olympos_v1_gateway_proto_enumTypes[0]
+}
+
+func (x EnrollRole) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use EnrollRole.Descriptor instead.
+func (EnrollRole) EnumDescriptor() ([]byte, []int) {
+	return file_olympos_v1_gateway_proto_rawDescGZIP(), []int{0}
+}
+
 type EnrollRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	BootstrapToken string                 `protobuf:"bytes,1,opt,name=bootstrap_token,json=bootstrapToken,proto3" json:"bootstrap_token,omitempty"`
 	CsrDer         []byte                 `protobuf:"bytes,2,opt,name=csr_der,json=csrDer,proto3" json:"csr_der,omitempty"`
 	AgentVersion   string                 `protobuf:"bytes,3,opt,name=agent_version,json=agentVersion,proto3" json:"agent_version,omitempty"`
+	Role           EnrollRole             `protobuf:"varint,4,opt,name=role,proto3,enum=olympos.v1.EnrollRole" json:"role,omitempty"`
 	unknownFields  protoimpl.UnknownFields
 	sizeCache      protoimpl.SizeCache
 }
@@ -79,6 +131,13 @@ func (x *EnrollRequest) GetAgentVersion() string {
 		return x.AgentVersion
 	}
 	return ""
+}
+
+func (x *EnrollRequest) GetRole() EnrollRole {
+	if x != nil {
+		return x.Role
+	}
+	return EnrollRole_ENROLL_ROLE_AGENT
 }
 
 type EnrollResponse struct {
@@ -3021,11 +3080,12 @@ var File_olympos_v1_gateway_proto protoreflect.FileDescriptor
 const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\n" +
 	"\x18olympos/v1/gateway.proto\x12\n" +
-	"olympos.v1\"v\n" +
+	"olympos.v1\"\xa2\x01\n" +
 	"\rEnrollRequest\x12'\n" +
 	"\x0fbootstrap_token\x18\x01 \x01(\tR\x0ebootstrapToken\x12\x17\n" +
 	"\acsr_der\x18\x02 \x01(\fR\x06csrDer\x12#\n" +
-	"\ragent_version\x18\x03 \x01(\tR\fagentVersion\"a\n" +
+	"\ragent_version\x18\x03 \x01(\tR\fagentVersion\x12*\n" +
+	"\x04role\x18\x04 \x01(\x0e2\x16.olympos.v1.EnrollRoleR\x04role\"a\n" +
 	"\x0eEnrollResponse\x12\x1d\n" +
 	"\n" +
 	"cluster_id\x18\x01 \x01(\tR\tclusterId\x12\x19\n" +
@@ -3267,7 +3327,11 @@ const file_olympos_v1_gateway_proto_rawDesc = "" +
 	"\x04Ping\x12\x1b\n" +
 	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano\"#\n" +
 	"\x04Pong\x12\x1b\n" +
-	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano2\x9d\x02\n" +
+	"\tunix_nano\x18\x01 \x01(\x03R\bunixNano*:\n" +
+	"\n" +
+	"EnrollRole\x12\x15\n" +
+	"\x11ENROLL_ROLE_AGENT\x10\x00\x12\x15\n" +
+	"\x11ENROLL_ROLE_PROBE\x10\x012\x9d\x02\n" +
 	"\fAgentGateway\x12?\n" +
 	"\x06Enroll\x12\x19.olympos.v1.EnrollRequest\x1a\x1a.olympos.v1.EnrollResponse\x12B\n" +
 	"\aControl\x12\x18.olympos.v1.AgentMessage\x1a\x19.olympos.v1.ServerMessage(\x010\x01\x12>\n" +
@@ -3286,104 +3350,107 @@ func file_olympos_v1_gateway_proto_rawDescGZIP() []byte {
 	return file_olympos_v1_gateway_proto_rawDescData
 }
 
+var file_olympos_v1_gateway_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_olympos_v1_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 43)
 var file_olympos_v1_gateway_proto_goTypes = []any{
-	(*EnrollRequest)(nil),         // 0: olympos.v1.EnrollRequest
-	(*EnrollResponse)(nil),        // 1: olympos.v1.EnrollResponse
-	(*RenewCertRequest)(nil),      // 2: olympos.v1.RenewCertRequest
-	(*RenewCertResponse)(nil),     // 3: olympos.v1.RenewCertResponse
-	(*AgentMessage)(nil),          // 4: olympos.v1.AgentMessage
-	(*ServerMessage)(nil),         // 5: olympos.v1.ServerMessage
-	(*Hello)(nil),                 // 6: olympos.v1.Hello
-	(*Capabilities)(nil),          // 7: olympos.v1.Capabilities
-	(*Node)(nil),                  // 8: olympos.v1.Node
-	(*InventorySnapshot)(nil),     // 9: olympos.v1.InventorySnapshot
-	(*InventoryDiff)(nil),         // 10: olympos.v1.InventoryDiff
-	(*Target)(nil),                // 11: olympos.v1.Target
-	(*TargetUpsert)(nil),          // 12: olympos.v1.TargetUpsert
-	(*TargetDelete)(nil),          // 13: olympos.v1.TargetDelete
-	(*ResourceReport)(nil),        // 14: olympos.v1.ResourceReport
-	(*ObjectOwner)(nil),           // 15: olympos.v1.ObjectOwner
-	(*K8SSecret)(nil),             // 16: olympos.v1.K8sSecret
-	(*SecretInventoryReport)(nil), // 17: olympos.v1.SecretInventoryReport
-	(*SensitiveDataItem)(nil),     // 18: olympos.v1.SensitiveDataItem
-	(*SensitiveDataReport)(nil),   // 19: olympos.v1.SensitiveDataReport
-	(*KyvernoPolicy)(nil),         // 20: olympos.v1.KyvernoPolicy
-	(*KyvernoResult)(nil),         // 21: olympos.v1.KyvernoResult
-	(*KyvernoReport)(nil),         // 22: olympos.v1.KyvernoReport
-	(*NetworkPolicy)(nil),         // 23: olympos.v1.NetworkPolicy
-	(*NamespaceLabels)(nil),       // 24: olympos.v1.NamespaceLabels
-	(*Workload)(nil),              // 25: olympos.v1.Workload
-	(*NetworkPolicyReport)(nil),   // 26: olympos.v1.NetworkPolicyReport
-	(*ImageUse)(nil),              // 27: olympos.v1.ImageUse
-	(*ImageReport)(nil),           // 28: olympos.v1.ImageReport
-	(*OpenTunnel)(nil),            // 29: olympos.v1.OpenTunnel
-	(*OpenAPIProxy)(nil),          // 30: olympos.v1.OpenAPIProxy
-	(*TunnelAccepted)(nil),        // 31: olympos.v1.TunnelAccepted
-	(*TunnelRejected)(nil),        // 32: olympos.v1.TunnelRejected
-	(*TunnelFrame)(nil),           // 33: olympos.v1.TunnelFrame
-	(*RunBench)(nil),              // 34: olympos.v1.RunBench
-	(*BenchStatus)(nil),           // 35: olympos.v1.BenchStatus
-	(*BenchResultChunk)(nil),      // 36: olympos.v1.BenchResultChunk
-	(*RequestResync)(nil),         // 37: olympos.v1.RequestResync
-	(*Ping)(nil),                  // 38: olympos.v1.Ping
-	(*Pong)(nil),                  // 39: olympos.v1.Pong
-	nil,                           // 40: olympos.v1.K8sSecret.LabelsEntry
-	nil,                           // 41: olympos.v1.NamespaceLabels.LabelsEntry
-	nil,                           // 42: olympos.v1.Workload.LabelsEntry
+	(EnrollRole)(0),               // 0: olympos.v1.EnrollRole
+	(*EnrollRequest)(nil),         // 1: olympos.v1.EnrollRequest
+	(*EnrollResponse)(nil),        // 2: olympos.v1.EnrollResponse
+	(*RenewCertRequest)(nil),      // 3: olympos.v1.RenewCertRequest
+	(*RenewCertResponse)(nil),     // 4: olympos.v1.RenewCertResponse
+	(*AgentMessage)(nil),          // 5: olympos.v1.AgentMessage
+	(*ServerMessage)(nil),         // 6: olympos.v1.ServerMessage
+	(*Hello)(nil),                 // 7: olympos.v1.Hello
+	(*Capabilities)(nil),          // 8: olympos.v1.Capabilities
+	(*Node)(nil),                  // 9: olympos.v1.Node
+	(*InventorySnapshot)(nil),     // 10: olympos.v1.InventorySnapshot
+	(*InventoryDiff)(nil),         // 11: olympos.v1.InventoryDiff
+	(*Target)(nil),                // 12: olympos.v1.Target
+	(*TargetUpsert)(nil),          // 13: olympos.v1.TargetUpsert
+	(*TargetDelete)(nil),          // 14: olympos.v1.TargetDelete
+	(*ResourceReport)(nil),        // 15: olympos.v1.ResourceReport
+	(*ObjectOwner)(nil),           // 16: olympos.v1.ObjectOwner
+	(*K8SSecret)(nil),             // 17: olympos.v1.K8sSecret
+	(*SecretInventoryReport)(nil), // 18: olympos.v1.SecretInventoryReport
+	(*SensitiveDataItem)(nil),     // 19: olympos.v1.SensitiveDataItem
+	(*SensitiveDataReport)(nil),   // 20: olympos.v1.SensitiveDataReport
+	(*KyvernoPolicy)(nil),         // 21: olympos.v1.KyvernoPolicy
+	(*KyvernoResult)(nil),         // 22: olympos.v1.KyvernoResult
+	(*KyvernoReport)(nil),         // 23: olympos.v1.KyvernoReport
+	(*NetworkPolicy)(nil),         // 24: olympos.v1.NetworkPolicy
+	(*NamespaceLabels)(nil),       // 25: olympos.v1.NamespaceLabels
+	(*Workload)(nil),              // 26: olympos.v1.Workload
+	(*NetworkPolicyReport)(nil),   // 27: olympos.v1.NetworkPolicyReport
+	(*ImageUse)(nil),              // 28: olympos.v1.ImageUse
+	(*ImageReport)(nil),           // 29: olympos.v1.ImageReport
+	(*OpenTunnel)(nil),            // 30: olympos.v1.OpenTunnel
+	(*OpenAPIProxy)(nil),          // 31: olympos.v1.OpenAPIProxy
+	(*TunnelAccepted)(nil),        // 32: olympos.v1.TunnelAccepted
+	(*TunnelRejected)(nil),        // 33: olympos.v1.TunnelRejected
+	(*TunnelFrame)(nil),           // 34: olympos.v1.TunnelFrame
+	(*RunBench)(nil),              // 35: olympos.v1.RunBench
+	(*BenchStatus)(nil),           // 36: olympos.v1.BenchStatus
+	(*BenchResultChunk)(nil),      // 37: olympos.v1.BenchResultChunk
+	(*RequestResync)(nil),         // 38: olympos.v1.RequestResync
+	(*Ping)(nil),                  // 39: olympos.v1.Ping
+	(*Pong)(nil),                  // 40: olympos.v1.Pong
+	nil,                           // 41: olympos.v1.K8sSecret.LabelsEntry
+	nil,                           // 42: olympos.v1.NamespaceLabels.LabelsEntry
+	nil,                           // 43: olympos.v1.Workload.LabelsEntry
 }
 var file_olympos_v1_gateway_proto_depIdxs = []int32{
-	6,  // 0: olympos.v1.AgentMessage.hello:type_name -> olympos.v1.Hello
-	9,  // 1: olympos.v1.AgentMessage.inventory:type_name -> olympos.v1.InventorySnapshot
-	10, // 2: olympos.v1.AgentMessage.inventory_diff:type_name -> olympos.v1.InventoryDiff
-	12, // 3: olympos.v1.AgentMessage.target_upsert:type_name -> olympos.v1.TargetUpsert
-	13, // 4: olympos.v1.AgentMessage.target_delete:type_name -> olympos.v1.TargetDelete
-	14, // 5: olympos.v1.AgentMessage.report:type_name -> olympos.v1.ResourceReport
-	31, // 6: olympos.v1.AgentMessage.tunnel_accepted:type_name -> olympos.v1.TunnelAccepted
-	32, // 7: olympos.v1.AgentMessage.tunnel_rejected:type_name -> olympos.v1.TunnelRejected
-	35, // 8: olympos.v1.AgentMessage.bench_status:type_name -> olympos.v1.BenchStatus
-	36, // 9: olympos.v1.AgentMessage.bench_result:type_name -> olympos.v1.BenchResultChunk
-	39, // 10: olympos.v1.AgentMessage.pong:type_name -> olympos.v1.Pong
-	29, // 11: olympos.v1.ServerMessage.open_tunnel:type_name -> olympos.v1.OpenTunnel
-	30, // 12: olympos.v1.ServerMessage.open_api_proxy:type_name -> olympos.v1.OpenAPIProxy
-	34, // 13: olympos.v1.ServerMessage.run_bench:type_name -> olympos.v1.RunBench
-	37, // 14: olympos.v1.ServerMessage.resync:type_name -> olympos.v1.RequestResync
-	38, // 15: olympos.v1.ServerMessage.ping:type_name -> olympos.v1.Ping
-	7,  // 16: olympos.v1.Hello.capabilities:type_name -> olympos.v1.Capabilities
-	8,  // 17: olympos.v1.InventorySnapshot.nodes:type_name -> olympos.v1.Node
-	11, // 18: olympos.v1.InventorySnapshot.targets:type_name -> olympos.v1.Target
-	8,  // 19: olympos.v1.InventoryDiff.upserted_nodes:type_name -> olympos.v1.Node
-	11, // 20: olympos.v1.TargetUpsert.target:type_name -> olympos.v1.Target
-	22, // 21: olympos.v1.ResourceReport.kyverno:type_name -> olympos.v1.KyvernoReport
-	26, // 22: olympos.v1.ResourceReport.network_policies:type_name -> olympos.v1.NetworkPolicyReport
-	28, // 23: olympos.v1.ResourceReport.images:type_name -> olympos.v1.ImageReport
-	19, // 24: olympos.v1.ResourceReport.sensitive_data:type_name -> olympos.v1.SensitiveDataReport
-	17, // 25: olympos.v1.ResourceReport.secret_inventory:type_name -> olympos.v1.SecretInventoryReport
-	40, // 26: olympos.v1.K8sSecret.labels:type_name -> olympos.v1.K8sSecret.LabelsEntry
-	15, // 27: olympos.v1.K8sSecret.owners:type_name -> olympos.v1.ObjectOwner
-	16, // 28: olympos.v1.SecretInventoryReport.secrets:type_name -> olympos.v1.K8sSecret
-	18, // 29: olympos.v1.SensitiveDataReport.items:type_name -> olympos.v1.SensitiveDataItem
-	20, // 30: olympos.v1.KyvernoReport.policies:type_name -> olympos.v1.KyvernoPolicy
-	21, // 31: olympos.v1.KyvernoReport.results:type_name -> olympos.v1.KyvernoResult
-	41, // 32: olympos.v1.NamespaceLabels.labels:type_name -> olympos.v1.NamespaceLabels.LabelsEntry
-	42, // 33: olympos.v1.Workload.labels:type_name -> olympos.v1.Workload.LabelsEntry
-	23, // 34: olympos.v1.NetworkPolicyReport.policies:type_name -> olympos.v1.NetworkPolicy
-	24, // 35: olympos.v1.NetworkPolicyReport.namespace_labels:type_name -> olympos.v1.NamespaceLabels
-	25, // 36: olympos.v1.NetworkPolicyReport.workloads:type_name -> olympos.v1.Workload
-	27, // 37: olympos.v1.ImageReport.uses:type_name -> olympos.v1.ImageUse
-	0,  // 38: olympos.v1.AgentGateway.Enroll:input_type -> olympos.v1.EnrollRequest
-	4,  // 39: olympos.v1.AgentGateway.Control:input_type -> olympos.v1.AgentMessage
-	33, // 40: olympos.v1.AgentGateway.Tunnel:input_type -> olympos.v1.TunnelFrame
-	2,  // 41: olympos.v1.AgentGateway.RenewCert:input_type -> olympos.v1.RenewCertRequest
-	1,  // 42: olympos.v1.AgentGateway.Enroll:output_type -> olympos.v1.EnrollResponse
-	5,  // 43: olympos.v1.AgentGateway.Control:output_type -> olympos.v1.ServerMessage
-	33, // 44: olympos.v1.AgentGateway.Tunnel:output_type -> olympos.v1.TunnelFrame
-	3,  // 45: olympos.v1.AgentGateway.RenewCert:output_type -> olympos.v1.RenewCertResponse
-	42, // [42:46] is the sub-list for method output_type
-	38, // [38:42] is the sub-list for method input_type
-	38, // [38:38] is the sub-list for extension type_name
-	38, // [38:38] is the sub-list for extension extendee
-	0,  // [0:38] is the sub-list for field type_name
+	0,  // 0: olympos.v1.EnrollRequest.role:type_name -> olympos.v1.EnrollRole
+	7,  // 1: olympos.v1.AgentMessage.hello:type_name -> olympos.v1.Hello
+	10, // 2: olympos.v1.AgentMessage.inventory:type_name -> olympos.v1.InventorySnapshot
+	11, // 3: olympos.v1.AgentMessage.inventory_diff:type_name -> olympos.v1.InventoryDiff
+	13, // 4: olympos.v1.AgentMessage.target_upsert:type_name -> olympos.v1.TargetUpsert
+	14, // 5: olympos.v1.AgentMessage.target_delete:type_name -> olympos.v1.TargetDelete
+	15, // 6: olympos.v1.AgentMessage.report:type_name -> olympos.v1.ResourceReport
+	32, // 7: olympos.v1.AgentMessage.tunnel_accepted:type_name -> olympos.v1.TunnelAccepted
+	33, // 8: olympos.v1.AgentMessage.tunnel_rejected:type_name -> olympos.v1.TunnelRejected
+	36, // 9: olympos.v1.AgentMessage.bench_status:type_name -> olympos.v1.BenchStatus
+	37, // 10: olympos.v1.AgentMessage.bench_result:type_name -> olympos.v1.BenchResultChunk
+	40, // 11: olympos.v1.AgentMessage.pong:type_name -> olympos.v1.Pong
+	30, // 12: olympos.v1.ServerMessage.open_tunnel:type_name -> olympos.v1.OpenTunnel
+	31, // 13: olympos.v1.ServerMessage.open_api_proxy:type_name -> olympos.v1.OpenAPIProxy
+	35, // 14: olympos.v1.ServerMessage.run_bench:type_name -> olympos.v1.RunBench
+	38, // 15: olympos.v1.ServerMessage.resync:type_name -> olympos.v1.RequestResync
+	39, // 16: olympos.v1.ServerMessage.ping:type_name -> olympos.v1.Ping
+	8,  // 17: olympos.v1.Hello.capabilities:type_name -> olympos.v1.Capabilities
+	9,  // 18: olympos.v1.InventorySnapshot.nodes:type_name -> olympos.v1.Node
+	12, // 19: olympos.v1.InventorySnapshot.targets:type_name -> olympos.v1.Target
+	9,  // 20: olympos.v1.InventoryDiff.upserted_nodes:type_name -> olympos.v1.Node
+	12, // 21: olympos.v1.TargetUpsert.target:type_name -> olympos.v1.Target
+	23, // 22: olympos.v1.ResourceReport.kyverno:type_name -> olympos.v1.KyvernoReport
+	27, // 23: olympos.v1.ResourceReport.network_policies:type_name -> olympos.v1.NetworkPolicyReport
+	29, // 24: olympos.v1.ResourceReport.images:type_name -> olympos.v1.ImageReport
+	20, // 25: olympos.v1.ResourceReport.sensitive_data:type_name -> olympos.v1.SensitiveDataReport
+	18, // 26: olympos.v1.ResourceReport.secret_inventory:type_name -> olympos.v1.SecretInventoryReport
+	41, // 27: olympos.v1.K8sSecret.labels:type_name -> olympos.v1.K8sSecret.LabelsEntry
+	16, // 28: olympos.v1.K8sSecret.owners:type_name -> olympos.v1.ObjectOwner
+	17, // 29: olympos.v1.SecretInventoryReport.secrets:type_name -> olympos.v1.K8sSecret
+	19, // 30: olympos.v1.SensitiveDataReport.items:type_name -> olympos.v1.SensitiveDataItem
+	21, // 31: olympos.v1.KyvernoReport.policies:type_name -> olympos.v1.KyvernoPolicy
+	22, // 32: olympos.v1.KyvernoReport.results:type_name -> olympos.v1.KyvernoResult
+	42, // 33: olympos.v1.NamespaceLabels.labels:type_name -> olympos.v1.NamespaceLabels.LabelsEntry
+	43, // 34: olympos.v1.Workload.labels:type_name -> olympos.v1.Workload.LabelsEntry
+	24, // 35: olympos.v1.NetworkPolicyReport.policies:type_name -> olympos.v1.NetworkPolicy
+	25, // 36: olympos.v1.NetworkPolicyReport.namespace_labels:type_name -> olympos.v1.NamespaceLabels
+	26, // 37: olympos.v1.NetworkPolicyReport.workloads:type_name -> olympos.v1.Workload
+	28, // 38: olympos.v1.ImageReport.uses:type_name -> olympos.v1.ImageUse
+	1,  // 39: olympos.v1.AgentGateway.Enroll:input_type -> olympos.v1.EnrollRequest
+	5,  // 40: olympos.v1.AgentGateway.Control:input_type -> olympos.v1.AgentMessage
+	34, // 41: olympos.v1.AgentGateway.Tunnel:input_type -> olympos.v1.TunnelFrame
+	3,  // 42: olympos.v1.AgentGateway.RenewCert:input_type -> olympos.v1.RenewCertRequest
+	2,  // 43: olympos.v1.AgentGateway.Enroll:output_type -> olympos.v1.EnrollResponse
+	6,  // 44: olympos.v1.AgentGateway.Control:output_type -> olympos.v1.ServerMessage
+	34, // 45: olympos.v1.AgentGateway.Tunnel:output_type -> olympos.v1.TunnelFrame
+	4,  // 46: olympos.v1.AgentGateway.RenewCert:output_type -> olympos.v1.RenewCertResponse
+	43, // [43:47] is the sub-list for method output_type
+	39, // [39:43] is the sub-list for method input_type
+	39, // [39:39] is the sub-list for extension type_name
+	39, // [39:39] is the sub-list for extension extendee
+	0,  // [0:39] is the sub-list for field type_name
 }
 
 func init() { file_olympos_v1_gateway_proto_init() }
@@ -3423,13 +3490,14 @@ func file_olympos_v1_gateway_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_olympos_v1_gateway_proto_rawDesc), len(file_olympos_v1_gateway_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   43,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
 		GoTypes:           file_olympos_v1_gateway_proto_goTypes,
 		DependencyIndexes: file_olympos_v1_gateway_proto_depIdxs,
+		EnumInfos:         file_olympos_v1_gateway_proto_enumTypes,
 		MessageInfos:      file_olympos_v1_gateway_proto_msgTypes,
 	}.Build()
 	File_olympos_v1_gateway_proto = out.File

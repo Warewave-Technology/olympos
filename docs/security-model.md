@@ -15,7 +15,9 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 | Blob credentials (MI or SAS) | MI: none stored. SAS: Key Vault ref or envelope-encrypted | Server only |
 | Registry credentials | Key Vault ref or envelope-encrypted | Server (trivy child env) |
 | Backups | Azure Blob, immutable versions, lifecycle retention | Written by the server; deleted only by lifecycle rules |
+| Synthetic monitoring credentials (bearer, basic, header, OAuth2 client) | Key Vault ref, or a `credentials` row (envelope-encrypted) that `synthetic_credentials` names with its bound hosts | Server, per run; sealed to one probe connection for that run ([below](#synthetic-monitoring-credentials-in-the-cluster)) |
 | Agent identity | Client cert + key in the agent's own Secret | The agent |
+| Probe identity | Client cert + key in `olympos-probe-identity`, written and renewed by the agent | The probe (read-only mount) |
 | Internal CA key | Postgres, envelope-encrypted | Server |
 
 ## Trust boundaries
@@ -25,6 +27,8 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
                     ▲
                     │ gRPC, mTLS, agent dials out
                  agent (per cluster) ──TCP──▶ discovered Service only
+                    │ gRPC, mTLS, probe dials out (own identity)
+                 probe (per cluster) ──HTTP/DNS/TCP/TLS──▶ allowlisted hosts only
 ```
 
 1. **Cluster ↛ credentials.** No credential, SAS or Blob key is ever sent to an agent
@@ -33,7 +37,9 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
    agent sees ciphertext only. Exception: a PostgreSQL target without TLS is backed up with SCRAM-SHA-256
    only (no password crosses the agent), so the agent sees the data in the clear; the target gets the
    `tls.missing` finding. `compressed` mode trades that for egress cost; enabling it always opens
-   the `transfer.compressed_mode` finding.
+   the `transfer.compressed_mode` finding. Second exception: synthetic monitoring sends the credentials
+   a scenario uses to the cluster's probe for each run
+   ([below](#synthetic-monitoring-credentials-in-the-cluster)). The agent still never receives one.
 2. **Server ↛ arbitrary hosts in a cluster.** `OpenTunnel` carries a `target_id`, never `host:port`.
    The agent looks it up in its *own* discovered set (annotated Services) and refuses anything else.
    The server also recomputes target IDs and ignores agent-supplied IDs that do not match. Tested in unit
@@ -51,6 +57,15 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
    generated in memory → CSR → client cert with CN = cluster UUID chosen by the server (CSR subject
    ignored), 30-day validity, renewed at 2/3 lifetime. Revocation adds the serial to a deny list, marks
    the cluster revoked (every RPC re-checks) and drops open streams.
+6. **Probe identity.** The probe has no Kubernetes API access, so the agent enrolls it (after its own
+   identity exists, with the same one-time token, `probe` role, or a probe-only token from *Install
+   probe*) and keeps its certificate (CN `<cluster-uuid>/probe`) in `olympos-probe-identity`, the one
+   extra Secret name in the agent's Role. Its serial is stored apart from the agent's: only the current
+   probe certificate may connect, the previous one only to retry a renewal whose answer was lost. A probe
+   identity may only use `ProbeGateway` (no tunnel, inventory or API proxy) and an agent identity never
+   may. Revoking the cluster revokes both; *Revoke probe* revokes the probe alone and drops its stream.
+   The probe pod: distroless, non-root, read-only root FS, no capabilities, a ServiceAccount with no
+   bindings and no token, the key mounted 0440 for its group only.
 
 ## People
 
@@ -111,6 +126,62 @@ longest retention. *Test destination* verifies delete is refused and warns other
   Secret path and the server never reads Secrets. Prefer server-side apply (or `kubectl create`) for
   Secrets: client-side `kubectl apply` stores the values in an annotation that every metadata reader
   (not only Olympos) receives.
+
+## Synthetic monitoring: credentials in the cluster
+
+SPEC §0 principle 1 says credentials never enter a cluster. Synthetic monitoring is a **documented
+exception** (like the `compressed` transfer mode): a scenario that logs in to a service needs its
+credential where the request is made, inside the cluster. It is contained like this:
+
+- **Stored like backup credentials**: a Key Vault reference or envelope encryption, write-only in the API,
+  created and rotated by global admins only. Editors can use a credential, never read it.
+- **Sealed per run, per connection.** For each connection the probe makes an HPKE key pair (RFC 9180,
+  DHKEM(X25519)) in memory and sends the public key inside its mTLS stream. The server seals each run's
+  credentials (only those the scenario uses) to that key, with the run and the cluster as associated
+  data. Another probe, or the same probe after a reconnect, cannot open them, and a captured message
+  cannot be replayed elsewhere. The certificate key only signs; it never decrypts.
+- **In memory only on the probe**: never logged, never written to disk, zeroed after the run.
+- **Bound hosts.** A credential is attached only to requests whose host matches its bound hosts (each
+  inside the allowlist) and removed when a redirect leaves them. Values extracted from a credentialed
+  exchange, or from any response of a bound host, are tainted and may only be sent to that credential's
+  bound hosts (checked at save and at run time, on every redirect hop). A response that echoes the
+  credential in any encoding gives no extracts at all.
+- **Redaction before anything leaves the probe**: `Authorization`, `Proxy-Authorization`, `Cookie`,
+  `Set-Cookie`, `X-Api-Key`, the credential's own header, sensitive header and JSON field names (as for
+  ConfigMaps) and gitleaks matches; every form of the run's credentials and tainted values is scrubbed
+  from excerpts, assertion values and error messages. Excerpts are cut to 2 KiB after redaction and can
+  be switched off per scenario. Messages never carry a credential or a response body.
+
+### The SSRF boundary
+
+A probe makes requests from inside the cluster network, so where it may go is bounded:
+
+- **The allowlist** (global, admin only, every change notified): a host must match a rule by whole labels.
+- **Always denied**, whatever the rules: IP literals; the names `localhost` and `*.localhost`,
+  `kubernetes`, `kubernetes.default` and `kubernetes.default.svc*` (any name containing the labels
+  `kubernetes.default.svc`); and resolved addresses in loopback, link-local, cloud metadata
+  (`169.254.169.254`, `fd00:ec2::254`, Alibaba `100.100.100.200`, Oracle `192.0.0.192`), unspecified,
+  multicast, broadcast, and the Kubernetes API service IP.
+- **One resolution, the checked address dialled.** The probe resolves each name once with its own stub
+  resolver (it does not read `/etc/hosts` and uses no search list), checks every answer and connects to the
+  address it checked, so a second DNS answer cannot rebind the connection.
+- **Every redirect hop** is checked again the same way (`redirect_blocked`, `ip_denied`).
+- The allowlist travels with each run with its version; a probe refuses a run that carries an older one.
+
+### Residual risks
+
+- A **cooperating bound server** (one inside a credential's bound hosts) can transform a credential
+  (reverse, interleave) or echo part of it, so that redaction does not recognise it, and it then shows up
+  in a response excerpt of a step on a bound host. A DNS alias of a bound server is not tainted, because
+  taint follows names. Both need a server you already trust with the credential. `store_responses=false`
+  removes the excerpt path.
+- The **endpoint IPs** of the Kubernetes API server are not denied (only its service IP and names). The
+  probe has no ServiceAccount token, so it reaches them unauthenticated, like any pod.
+- A **compromised probe** sees the credentials of the runs sent to it while it is compromised. Revoke the
+  probe (or the cluster) and rotate the credentials.
+- The chart renders `olympos-probe-identity` with what is in it on every upgrade, so the probe's key ends up
+  in the Helm release history; `helm rollback` or a GitOps renderer without `lookup` can overwrite the
+  Secret. The agent's Secret has the same limitations.
 
 ## Residual risks / accepted trade-offs
 

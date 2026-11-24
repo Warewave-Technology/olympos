@@ -37,6 +37,14 @@ var descriptions = map[string]string{
 	GrantChanged:        "A role grant was added or revoked.",
 	GrantStale:          "A grant belongs to a disabled or deleted Entra account.",
 	SASExpiring:         "A destination SAS token expires soon (14 and 3 days before) or has expired.",
+
+	SyntheticFailing:            "A synthetic scenario failed on a cluster several runs in a row (one message per scenario, clusters grouped).",
+	SyntheticCritical:           "A synthetic scenario is failing on several clusters at the same time (fleet alert).",
+	SyntheticRecovered:          "A failing synthetic scenario passes again.",
+	ProbeOffline:                "A cluster's synthetic monitoring probe has been offline for 5 minutes (configurable: synthetic.probeOfflineAlertAfter).",
+	ProbeOnline:                 "A cluster's probe is back online after a probe.offline alert.",
+	SyntheticCredentialExpiring: "A synthetic monitoring credential expires soon (14 and 3 days before).",
+	SyntheticAllowlistChanged:   "The host allowlist of synthetic monitoring changed: what the probes may reach.",
 }
 
 // IsOptIn reports whether an event type is opt-in.

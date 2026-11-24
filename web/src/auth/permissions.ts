@@ -5,7 +5,7 @@ export function can(me: Me | null | undefined, perm: Permission): boolean {
   return Boolean(me?.permissions?.[perm]);
 }
 
-const ORDER: Role[] = ['admin', 'operator', 'vault-maker', 'vault-approver', 'viewer'];
+const ORDER: Role[] = ['admin', 'operator', 'vault-maker', 'vault-approver', 'synthetic-editor', 'viewer'];
 
 /**
  * The roles for the sidebar footer ("admin · Entra ID", "operator, vault-approver · Entra ID"). Roles are not
@@ -50,5 +50,8 @@ export function rejectControl(me: Me | null | undefined, cr: ChangeRequest): boo
   return can(me, 'vault_approve') && cr.can_approve;
 }
 
-/** Roles a guest account may never hold (SPEC §3.2; openapi: vault-approver/admin refused for guests). */
-export const GUEST_FORBIDDEN_ROLES: Role[] = ['vault-approver', 'admin'];
+/**
+ * Roles a guest account may never hold (SPEC §3.2; openapi: vault-approver, synthetic-editor and admin are refused
+ * for guests). A guest synthetic-editor could attach admin-made credentials and see credentialed headers.
+ */
+export const GUEST_FORBIDDEN_ROLES: Role[] = ['vault-approver', 'synthetic-editor', 'admin'];

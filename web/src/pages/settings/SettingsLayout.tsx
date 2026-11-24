@@ -8,6 +8,7 @@ const SECTIONS = [
   { to: '/settings/destinations', label: 'Destinations', key: 'destinations' },
   { to: '/settings/registries', label: 'Registries', key: 'registries' },
   { to: '/settings/clusters', label: 'Clusters & agents', key: 'clusters' },
+  { to: '/settings/synthetic', label: 'Synthetic monitoring', key: 'synthetic' },
 ] as const;
 
 export type SettingsSection = (typeof SECTIONS)[number]['key'];

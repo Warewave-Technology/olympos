@@ -41,6 +41,15 @@ const (
 	GrantChanged        = "grant.changed"
 	GrantStale          = "grant.stale"
 	SASExpiring         = "sas.expiring"
+
+	// Synthetic monitoring (docs/design/synthetic-monitoring.md §5, §6.1).
+	SyntheticFailing            = "synthetic.failing"
+	SyntheticCritical           = "synthetic.critical"
+	SyntheticRecovered          = "synthetic.recovered"
+	ProbeOffline                = "probe.offline"
+	ProbeOnline                 = "probe.online"
+	SyntheticCredentialExpiring = "synthetic.credential_expiring"
+	SyntheticAllowlistChanged   = "synthetic.allowlist_changed"
 )
 
 // Catalog lists every event type, in display order. backup.succeeded is
@@ -49,6 +58,7 @@ var Catalog = []string{
 	BackupFailed, BackupPartial, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
 	RestoreRequested, RestoreApproved, RestoreRejected, RestoreStarted, RestoreSucceeded, RestoreFailed, RestoreBreakGlass,
 	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, SecretFindings, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
+	SyntheticFailing, SyntheticCritical, SyntheticRecovered, ProbeOffline, ProbeOnline, SyntheticCredentialExpiring, SyntheticAllowlistChanged,
 }
 
 // Event is what modules emit. Payload MUST NOT contain secret values;
@@ -65,6 +75,11 @@ type Event struct {
 	Link    string
 	Fields  map[string]string
 	Payload map[string]any
+	// Seq orders the events one transaction emits: the row's created_at
+	// and next_attempt_at are now() plus Seq microseconds, so that the
+	// dispatcher delivers them in that order (now() is the same for the
+	// whole transaction). Zero: now().
+	Seq int
 }
 
 // Emit writes the event to the outbox in the caller's transaction.
@@ -83,7 +98,8 @@ func Emit(ctx context.Context, q store.Querier, e Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = q.Exec(ctx, `INSERT INTO outbox (event_type, payload, channel_id, idempotency_key)
-		VALUES ($1, $2, $3, $4) ON CONFLICT (idempotency_key) DO NOTHING`, e.Type, b, e.ChannelID, e.Key)
+	_, err = q.Exec(ctx, `INSERT INTO outbox (event_type, payload, channel_id, idempotency_key, created_at, next_attempt_at)
+		VALUES ($1, $2, $3, $4, now() + make_interval(secs => $5), now() + make_interval(secs => $5))
+		ON CONFLICT (idempotency_key) DO NOTHING`, e.Type, b, e.ChannelID, e.Key, float64(e.Seq)/1e6)
 	return err
 }

@@ -94,6 +94,50 @@ func (s *identityStore) save(ctx context.Context, clusterID string, certDER []by
 	return err
 }
 
+// saveMerged is save for a Secret somebody else also writes to (the probe's,
+// which the chart manages): it sets the three identity keys and leaves every
+// other key alone. The bootstrap token is deleted only if it is still the
+// one that was used (consumed): a newer token written meanwhile stays for the
+// next pass. consumed "" (a renewal) leaves the token alone.
+func (s *identityStore) saveMerged(ctx context.Context, clusterID string, certDER []byte, key *ecdsa.PrivateKey, consumed string) error {
+	sec, err := s.kube.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return err
+	}
+	data := make(map[string][]byte, len(sec.Data)+3)
+	for k, v := range sec.Data {
+		data[k] = v
+	}
+	data[keyCert] = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
+	data[keyKey] = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	data[keyClusterID] = []byte(clusterID)
+	if consumed != "" && string(data[keyBootstrap]) == consumed {
+		delete(data, keyBootstrap)
+	}
+	sec.Data = data
+	_, err = s.kube.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	return err
+}
+
+// dropToken removes the bootstrap token if it is still the given one, and
+// leaves the rest of the Secret.
+func (s *identityStore) dropToken(ctx context.Context, token string) error {
+	sec, err := s.kube.CoreV1().Secrets(s.namespace).Get(ctx, s.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if cur, ok := sec.Data[keyBootstrap]; !ok || string(cur) != token {
+		return nil
+	}
+	delete(sec.Data, keyBootstrap)
+	_, err = s.kube.CoreV1().Secrets(s.namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	return err
+}
+
 func parseStored(data map[string][]byte) ([]byte, *ecdsa.PrivateKey, error) {
 	cb, _ := pem.Decode(data[keyCert])
 	kb, _ := pem.Decode(data[keyKey])
@@ -112,12 +156,18 @@ func parseStored(data map[string][]byte) ([]byte, *ecdsa.PrivateKey, error) {
 }
 
 func newKeyAndCSR() (*ecdsa.PrivateKey, []byte, error) {
+	return newKeyAndCSRFor("olympos-agent")
+}
+
+// newKeyAndCSRFor makes a key and a CSR for cn. The server ignores the
+// subject and signs the identity it chose, so cn is only a label.
+func newKeyAndCSRFor(cn string) (*ecdsa.PrivateKey, []byte, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, err
 	}
 	csr, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
-		Subject: pkix.Name{CommonName: "olympos-agent"},
+		Subject: pkix.Name{CommonName: cn},
 	}, key)
 	return key, csr, err
 }
@@ -135,6 +185,7 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		_, leaf := a.id.get()
 		if time.Now().Before(leaf.NotAfter) {
 			a.log.Info("loaded stored identity", "cluster_id", leaf.Subject.CommonName, "expires", leaf.NotAfter)
+			a.own.set()
 			return nil
 		}
 		a.log.Warn("stored certificate expired; re-enrollment needed")
@@ -165,7 +216,25 @@ func (a *Agent) ensureIdentity(ctx context.Context) error {
 		return fmt.Errorf("persist identity: %w", err)
 	}
 	a.log.Info("enrolled", "cluster_id", resp.ClusterId)
+	a.own.set()
 	return nil
+}
+
+// ownIdentity is a one-shot signal: the agent has its own identity (loaded
+// or enrolled). Its zero value is ready to use.
+type ownIdentity struct {
+	init, done sync.Once
+	ch         chan struct{}
+}
+
+func (o *ownIdentity) ready() <-chan struct{} {
+	o.init.Do(func() { o.ch = make(chan struct{}) })
+	return o.ch
+}
+
+func (o *ownIdentity) set() {
+	o.ready()
+	o.done.Do(func() { close(o.ch) })
 }
 
 // renewLoop renews the certificate at 2/3 of its lifetime.

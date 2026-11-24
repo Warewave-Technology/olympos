@@ -102,6 +102,6 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - run: |
-          for c in server agent; do
+          for c in server agent probe; do
             docker buildx build --platform linux/amd64 -f deploy/docker/$c.Dockerfile -t olympos-$c:ci .
           done

@@ -51,6 +51,23 @@ func TestGuestNeverApproves(t *testing.T) {
 	}
 }
 
+func TestGuestNeverEditsSynthetic(t *testing.T) {
+	const guestUPN = "bob_contoso.com#EXT#@tenant.onmicrosoft.com"
+	for _, role := range []Role{RoleSyntheticEditor, RoleAdmin} {
+		g := &Subject{Principal: Principal{AccountEnabled: true, UPN: guestUPN}, Grants: []Grant{{Role: role, Scope: mustScope(t, "all")}}}
+		if g.CanAny(PermSyntheticEdit) {
+			t.Fatalf("guest with %s can edit synthetic scenarios", role)
+		}
+		if !g.CanAny(PermRead) {
+			t.Fatalf("guest with %s lost read", role)
+		}
+		m := &Subject{Principal: Principal{AccountEnabled: true, UPN: "alice@tenant.onmicrosoft.com"}, Grants: []Grant{{Role: role, Scope: mustScope(t, "all")}}}
+		if !m.CanAny(PermSyntheticEdit) {
+			t.Fatalf("member with %s cannot edit synthetic scenarios", role)
+		}
+	}
+}
+
 func TestParseScope(t *testing.T) {
 	if _, err := ParseScope("env in (prod,staging),team=payments"); err != nil {
 		t.Fatal(err)
@@ -60,5 +77,30 @@ func TestParseScope(t *testing.T) {
 	}
 	if !mustScope(t, "").All() {
 		t.Fatal("empty means all")
+	}
+}
+
+func TestSyntheticEditor(t *testing.T) {
+	if r, err := ParseRole("synthetic-editor"); err != nil || r != RoleSyntheticEditor {
+		t.Fatalf("ParseRole: %v %v", r, err)
+	}
+	prod := map[string]string{"env": "prod"}
+	dev := map[string]string{"env": "dev"}
+	ed := &Subject{Principal: Principal{AccountEnabled: true}, Grants: []Grant{{Role: RoleSyntheticEditor, Scope: mustScope(t, "env=dev")}}}
+	if !ed.Can(PermSyntheticEdit, dev) || ed.Can(PermSyntheticEdit, prod) || ed.CanGlobal(PermSyntheticEdit) {
+		t.Fatal("synthetic-editor scope not applied")
+	}
+	if !ed.Can(PermRead, dev) || ed.CanAny(PermOperate) || ed.CanAny(PermAdmin) {
+		t.Fatal("synthetic-editor has read only besides editing scenarios")
+	}
+	admin := &Subject{Principal: Principal{AccountEnabled: true}, Grants: []Grant{{Role: RoleAdmin, Scope: mustScope(t, "all")}}}
+	if !admin.CanGlobal(PermSyntheticEdit) {
+		t.Fatal("admin edits scenarios")
+	}
+	for _, r := range []Role{RoleViewer, RoleOperator, RoleVaultMaker, RoleVaultApprover} {
+		s := &Subject{Principal: Principal{AccountEnabled: true}, Grants: []Grant{{Role: r, Scope: mustScope(t, "all")}}}
+		if s.CanAny(PermSyntheticEdit) {
+			t.Fatalf("%s edits scenarios", r)
+		}
 	}
 }

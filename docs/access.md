@@ -11,7 +11,8 @@ stored by Entra object ID. Entra group membership is ignored.
 | `operator` | Everything a viewer can, plus configure and run backups, audits and image scans, route notifications, and open and approve restores ([maker and checker](#maker-and-checker)) |
 | `vault-maker` | Read, and open Vault change requests |
 | `vault-approver` | Read, and approve or reject change requests **opened by someone else** |
-| `admin` | All of the above, plus grants, clusters and agents, destinations, registries, Vault configuration, and accepting changed target TLS names |
+| `synthetic-editor` | Read, and create, edit, run, test and delete [synthetic monitoring](synthetic-monitoring.md) scenarios on the clusters in scope, using the existing credentials |
+| `admin` | All of the above, plus grants, clusters and agents (and their probes), destinations, registries, Vault configuration, the synthetic host allowlist and credentials, and accepting changed target TLS names |
 
 Nobody sees a secret value: not the maker, not the approver, not an admin. A change request shows the keys,
 the operation and an HMAC fingerprint of the new value.
@@ -36,7 +37,8 @@ Some objects belong to no cluster, so changing them needs a role with scope `all
 
 | Change | Needs |
 |---|---|
-| Grants, destinations, registries, cluster enrollment, where raw audit reports go, the Olympos database backup | `admin` with scope `all` |
+| Grants, destinations, registries, cluster enrollment and *Install probe*, where raw audit reports go, the Olympos database backup, the synthetic host allowlist and credentials | `admin` with scope `all` |
+| A synthetic scenario that runs on **all** clusters | `synthetic-editor` (or `admin`) with scope `all`; a scenario that runs on a label selector needs the role on every cluster the selector matches now |
 | Audit schedules, notification channels and routing | `operator` (or `admin`) with scope `all` |
 
 Destinations and notification channels are readable by every signed-in person (names, kinds, endpoints,
@@ -70,8 +72,10 @@ Find your object ID in the Entra admin center (*Users › your user › Object I
 
 ## Guests, disabled and deleted accounts
 
-- **Guests** (Entra B2B, `userType: Guest` or `#EXT#` in the UPN) cannot be given `vault-approver` or
-  `admin`, and can never approve a change request, whatever grant they hold.
+- **Guests** (Entra B2B, `userType: Guest` or `#EXT#` in the UPN) cannot be given `vault-approver`,
+  `synthetic-editor` or `admin`, can never approve a change request and can never edit a synthetic
+  scenario, whatever grant they hold. (An editor attaches credentials that admins created and sees the
+  headers and bodies of credentialed steps.)
 - **Disabled or deleted accounts**: once a day Olympos asks Microsoft Graph about every person with a grant.
   Grants of accounts that are disabled or gone become **stale** and stop authorizing immediately. They stay
   visible in *Settings › Access* until revoked.
@@ -91,3 +95,11 @@ must be another person with `operate` on **both** clusters, never a guest. An ad
 start a restore without a checker as **break-glass**, with a justification; it is recorded and sends the
 critical event `restore.break_glass`. Only people with `read` on the backup's cluster see a restore request
 ([Restore from the UI](restore.md#restore-from-the-ui)).
+
+## Synthetic monitoring
+
+Everyone sees the results of the scenarios that run on clusters in their scope. Without
+`synthetic-editor` (or `admin`), a step that uses a credential shows its URL and assertions but not its
+headers or body. A scenario of a scoped editor that no longer matches any cluster (for example after
+its clusters were relabelled or removed) can only be cleaned up by an admin. See
+[Who can do what](synthetic-monitoring.md#who-can-do-what).

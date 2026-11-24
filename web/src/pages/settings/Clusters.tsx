@@ -1,10 +1,10 @@
-import { useState } from 'react';
+import { useState, type ReactNode } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../../api/client';
 import type { Cluster, ItemList, Provider, TransferMode } from '../../api/types';
 import { useCan } from '../../auth/me';
-import { bytes, money, plural, shortDate } from '../../lib/format';
+import { ago, bytes, money, plural, shortDate } from '../../lib/format';
 import { formatLabels, userLabels } from '../../lib/labels';
 import { clustersSettingsRoute } from '../../router';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, TypeToConfirm, aria, fieldError, useNow, useToast } from '../../ui/kit';
@@ -12,6 +12,7 @@ import { ClusterStatusBadge } from '../../ui/status';
 import { Select } from '../../ui/Select';
 import { TagInput } from '../../ui/TagInput';
 import { AddClusterDialog } from '../AddClusterDialog';
+import { InstallProbeDialog, ProbeBadge, ProbeLine, probeState, probeVersion } from '../../ui/InstallProbeDialog';
 import { SettingsLayout } from './SettingsLayout';
 import { DataTable } from '../../ui/DataTable';
 
@@ -23,6 +24,48 @@ const PROVIDERS: { id: Provider; label: string }[] = [
   { id: 'huawei', label: 'Huawei Cloud' },
   { id: 'onprem', label: 'On-prem' },
 ];
+
+/** What the synthetic probe of a cluster is doing, for the cluster settings. */
+function probeText(c: Cluster, now: number): ReactNode {
+  if (c.status === 'pending')
+    return (
+      <>
+        The agent has not enrolled yet. The install command already installs the probe: the agent enrolls it with the same token.
+      </>
+    );
+  switch (c.probe_status) {
+    case 'online':
+      return (
+        <>
+          The synthetic probe is <b>installed</b> and connected{c.probe_version ? <> (version <span className="mono">{c.probe_version}</span>)</> : null}. It runs the scenarios that target this cluster, with its own identity and no Kubernetes API access.
+        </>
+      );
+    case 'offline':
+      return (
+        <>
+          The synthetic probe is <b>offline</b>{c.probe_last_seen_at ? ` (last seen ${ago(c.probe_last_seen_at, now)})` : ''}. Scenarios show this cluster as probe offline, never as failed.
+        </>
+      );
+    case 'pending':
+      return (
+        <>
+          The synthetic probe is <b>enrolling</b> and has not connected yet. Scenarios show this cluster as probe offline until it does.
+        </>
+      );
+    case 'revoked':
+      return (
+        <>
+          The synthetic probe was <b>revoked</b>: its certificate is denied and scenarios skip this cluster. Install probe enrolls a new one.
+        </>
+      );
+    default:
+      return (
+        <>
+          The synthetic probe is <b>not installed</b> on this cluster, so scenarios skip it. Install probe gives a one-time <span className="mono">helm upgrade</span> command that adds it to the agent release.
+        </>
+      );
+  }
+}
 
 export function ClustersSettingsPage() {
   const { cluster: selectedId } = clustersSettingsRoute.useSearch();
@@ -101,6 +144,8 @@ export function ClustersSettingsPage() {
               id: 'provider',
               header: 'Provider',
               sortValue: (c) => c.provider_label || null,
+              className: 'wrap',
+              style: { minWidth: 96 },
               cell: (c) => (
                 <>
                   {c.provider_label || (c.status === 'pending' ? <span className="muted">after enrollment</span> : 'On-prem')}
@@ -111,7 +156,19 @@ export function ClustersSettingsPage() {
             { id: 'agent', header: 'Agent', sortValue: (c) => c.agent_version || null, className: 'mono', cell: (c) => c.agent_version || '—' },
             { id: 'transfer', header: 'Transfer', sortValue: (c) => c.transfer_mode, cell: (c) => (c.transfer_mode === 'compressed' ? <Badge tone="warn">compressed</Badge> : <Badge tone="ok">e2e-tls</Badge>) },
             { id: 'bench', header: 'kube-bench', sortValue: (c) => c.bench_enabled, cell: (c) => (c.bench_enabled ? <Badge tone="ok">On</Badge> : <Badge tone="mute">Off</Badge>) },
-            { id: 'status', header: 'Status', sortValue: (c) => c.status, cell: (c) => <ClusterStatusBadge c={c} now={now} /> },
+            {
+              id: 'status',
+              header: 'Status',
+              sortValue: (c) => c.status,
+              searchText: (c) => `${c.status} probe ${probeState(c).text}`,
+              // the agent, and on a second line the synthetic probe (state, and its version when installed)
+              cell: (c) => (
+                <>
+                  <ClusterStatusBadge c={c} now={now} />
+                  <ProbeLine c={c} now={now} />
+                </>
+              ),
+            },
           ]}
         />
         <div className="card-spacer" />
@@ -134,7 +191,10 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
   const [rateErr, setRateErr] = useState<string | undefined>();
   const [revoking, setRevoking] = useState(false);
   const [installing, setInstalling] = useState(false);
+  const [installingProbe, setInstallingProbe] = useState(false);
+  const [revokingProbe, setRevokingProbe] = useState(false);
   const [confirmText, setConfirmText] = useState('');
+  const now = useNow(30_000);
 
   const save = useMutation({
     mutationFn: (body: object) => api.patch<Cluster>(`/clusters/${c.id}`, body),
@@ -152,6 +212,16 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
       toast(`${c.name} revoked. Its certificate is denied and open streams were dropped.`);
       void qc.invalidateQueries({ queryKey: ['clusters'] });
       void qc.invalidateQueries({ queryKey: ['dashboard'] });
+    },
+  });
+
+  const revokeProbe = useMutation({
+    mutationFn: () => api.del(`/clusters/${c.id}/probe`),
+    onSuccess: () => {
+      setRevokingProbe(false);
+      toast(`The probe of ${c.name} was revoked. Its certificate is denied; scenarios skip ${c.name} until a new probe is installed.`);
+      void qc.invalidateQueries({ queryKey: ['clusters'] });
+      void qc.invalidateQueries({ queryKey: ['synthetic'] });
     },
   });
 
@@ -210,6 +280,11 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           <dd>{c.egress_rate_per_gb != null ? `${c.egress_rate_per_gb} USD/GB` : 'not set'}</dd>
           <dt>kube-bench</dt>
           <dd>{c.bench_enabled ? 'on' : 'off'}</dd>
+          <dt>Synthetic probe</dt>
+          <dd className="inline-sm">
+            <ProbeBadge c={c} />
+            {probeVersion(c) && <span className="mono muted">{probeVersion(c)}</span>}
+          </dd>
         </dl>
         <p className="muted small" style={{ margin: 0 }}>Only admins with scope all can change cluster settings.</p>
       </section>
@@ -289,6 +364,37 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           <div className="note">
             kube-bench is <b>{c.bench_enabled ? 'on' : 'off'}</b> for this cluster. It is set by the agent Helm value <span className="mono">bench.enabled</span>, so the agent only has Job permissions where you allowed them. Change it with a Helm upgrade.
           </div>
+          <div className="note probe-note" role="group" aria-label="Synthetic probe">
+            <span>{probeText(c, now)}</span>
+            <span className="inline">
+              {c.status === 'pending' ? (
+                // Ruling P24: no probe token before the first agent; its add cluster command carries the probe.
+                <button type="button" className="btn sm" onClick={() => setInstalling(true)}>
+                  Show install command
+                </button>
+              ) : (
+                <>
+                  {c.probe_status !== 'not_installed' && c.probe_status !== 'revoked' && (
+                    <button
+                      type="button"
+                      className="btn sm danger"
+                      onClick={() => {
+                        revokeProbe.reset();
+                        setRevokingProbe(true);
+                      }}
+                    >
+                      Revoke probe
+                    </button>
+                  )}
+                  {c.probe_status !== 'online' && (
+                    <button type="button" className="btn sm" onClick={() => setInstallingProbe(true)}>
+                      Install probe
+                    </button>
+                  )}
+                </>
+              )}
+            </span>
+          </div>
           <FormError error={save.error} />
           <div className="foot-actions">
             <button type="button" className="btn danger" onClick={() => setRevoking(true)}>
@@ -328,6 +434,22 @@ function ClusterSettings({ c, canAdmin }: { c: Cluster; canAdmin: boolean }) {
           </form>
         </Modal>
       )}
+      {revokingProbe && (
+        <Modal open onClose={() => setRevokingProbe(false)} danger eyebrow="Synthetic probe" title={`Revoke the probe of ${c.name}?`} description="The probe’s certificate is denied and its streams are dropped. Scenarios skip this cluster until a new probe is installed. The agent is not affected.">
+          <div className="stack-sm" style={{ gap: 18 }}>
+            <FormError error={revokeProbe.error} />
+            <div className="end">
+              <button type="button" className="btn" onClick={() => setRevokingProbe(false)}>
+                Cancel
+              </button>
+              <button type="button" className="btn danger" onClick={() => revokeProbe.mutate()} disabled={revokeProbe.isPending}>
+                Revoke probe
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {installingProbe && <InstallProbeDialog cluster={c} onClose={() => setInstallingProbe(false)} />}
       <AddClusterDialog open={installing} onClose={() => setInstalling(false)} existing={c} />
     </section>
   );

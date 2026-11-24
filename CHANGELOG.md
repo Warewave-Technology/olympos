@@ -6,6 +6,54 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Synthetic monitoring** ([#46](https://github.com/Warewave-Technology/olympos/issues/46)): scenarios
+  (HTTP requests and flows, DNS, TCP, TLS, with assertions and extracts) defined once in Olympos run from
+  inside every cluster they target, and alert when they keep failing. New **Monitoring › Synthetic** area: a
+  scenario × cluster matrix with 24-hour availability and p95, scenario details with a 48 × 30-minute
+  timeline and alert history, run details with a per-step waterfall, assertions, redacted excerpts and *Copy
+  as curl*, and an editor with test runs on one cluster. *Run now* counts toward alerts, test runs never do;
+  each person can start 6 of each a minute. See `docs/synthetic-monitoring.md` and `docs/getting-started.md`
+  (step 12).
+  - **`olympos-probe`**, a new image and Deployment that the agent chart installs next to the agent
+    (`probe.enabled: true`; `false` opts out). The probe has no RBAC and no Kubernetes API token; it dials
+    out with its own identity (CN `<cluster-uuid>/probe`), which the agent enrolls with the same install
+    token, keeps in the Secret `olympos-probe-identity` and renews. Clusters added before: `helm upgrade`,
+    then *Settings › Clusters & agents › Install probe* (a probe-only token); the *Status* column shows the
+    probe and offers *Revoke probe*. Optional egress NetworkPolicy (`probe.networkPolicy.*`).
+  - **Host allowlist** (*Settings › Synthetic monitoring*, admins): exact, wildcard and suffix rules by whole
+    labels, *check a host*. IP literals, `localhost`, the Kubernetes API and loopback, link-local, cloud
+    metadata, multicast and broadcast addresses are always denied; the probe resolves each name once,
+    without the search list, dials the address it checked and checks every redirect hop.
+  - **Credentials for scenarios** (bearer, basic, header, OAuth2 client credentials), stored encrypted or as
+    Key Vault references, bound to hosts, with expiry. This is a documented exception to "credentials never
+    enter the cluster": each run's credentials are sealed with HPKE to the probe's connection, kept in memory,
+    attached only to bound hosts and removed on redirects; values derived from them may only go to those
+    hosts; responses are redacted on the probe. See `docs/security-model.md`. A header credential cannot use
+    a header the probe would never send it in (`Host`, `Cookie`, `Content-Type`, `Accept-Encoding`, `Range`,
+    the transport's headers, …): it is refused when saved.
+  - Alerts per cluster after N failed runs, a critical fleet alert at N failing clusters, recovery after N
+    passes, one message per open and resolve, a per-scenario channel. New events `synthetic.failing`,
+    `synthetic.critical`, `synthetic.recovered`, `probe.offline`, `probe.online`,
+    `synthetic.credential_expiring` and `synthetic.allowlist_changed`; on upgrade, every channel that gets
+    `grant.changed` is routed `synthetic.allowlist_changed` too.
+  - New role **`synthetic-editor`** (scenarios in its scope; not for guests). Admins manage the allowlist and
+    the credentials.
+  - Rate caps (600 requests a minute per cluster, 120 per scenario and cluster, worst case counted) and
+    retention (runs 30 days, hourly aggregates 400 days, excerpts and test runs 7 days, alerts forever).
+    New server keys `synthetic.runRetention`, `synthetic.aggregateRetention`, `synthetic.excerptRetention`,
+    `synthetic.maxRequestsPerMinutePerCluster`, `synthetic.maxRequestsPerMinutePerScenario` and
+    `synthetic.probeOfflineAlertAfter`.
+  - API `/api/v1/synthetic/*`, `POST /api/v1/clusters/{id}/probe-token` and `DELETE /api/v1/clusters/{id}/probe`
+    (OpenAPI updated). Migration `00024` (down refused while `synthetic-editor` grants exist).
+  - After a restore of the Olympos database, probes reconnect by themselves: the server moves the allowlist
+    version ahead at start-up. Probes whose certificate was renewed after the dump need *Install probe*, and
+    credentials rotated after it must be rotated again. See `docs/restore-olympos.md`
+    (*Synthetic monitoring after a restore*).
+- Lab: `synth-web` in both lab clusters, with CoreDNS answering every `*.olympos-lab.test` name with it and
+  `metadata.olympos-lab.test` with `169.254.169.254`; the e2e test `TestM9SyntheticMonitoring` (a second
+  Olympos cluster `lab-b` in the same kind cluster).
+
 ## [0.2.0] - 2026-11-23
 
 Restore from the UI, destination groups, a signed kube-bench image.

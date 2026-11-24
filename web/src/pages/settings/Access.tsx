@@ -35,6 +35,12 @@ function groupGrants(gs: Grant[]): PersonRow[] {
   return [...m.values()].map((r) => ({ ...r, grants: r.grants.sort((a, b) => order(b.role) - order(a.role)) })).sort((a, b) => personName(a.principal).localeCompare(personName(b.principal)));
 }
 
+/** "vault-approver, synthetic-editor and admin": the roles a guest account may not hold, in the role list's order. */
+export function guestRolesText(roles: readonly Role[]): string {
+  const r = ROLES.filter((x) => roles.includes(x));
+  return r.length > 1 ? `${r.slice(0, -1).join(', ')} and ${r[r.length - 1]}` : (r[0] ?? '');
+}
+
 function scopeLabel(scope: string) {
   return !scope || scope === 'all' ? 'All clusters' : <span className="mono">{scope}</span>;
 }
@@ -131,7 +137,7 @@ export function SettingsAccessPage() {
           initialSort={{ id: 'person', dir: 'asc' }}
           empty={<EmptyState title="No grants">Only the bootstrap admins from the server configuration can sign in until someone is granted access.</EmptyState>}
         />
-        <div className="card-foot">vault-approver and admin cannot be given to guest (#EXT#) accounts · Entra app requires assignment, so unassigned users get no token · stale grants do not authorize</div>
+        <div className="card-foot">{guestRolesText(GUEST_FORBIDDEN_ROLES)} cannot be given to guest (#EXT#) accounts · Entra app requires assignment, so unassigned users get no token · stale grants do not authorize</div>
       </section>
 
       {granting && <GrantDialog onClose={() => setGranting(false)} channelName={accessChannel} />}

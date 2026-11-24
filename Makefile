@@ -1,5 +1,5 @@
 GO ?= go
-PROTO := proto/olympos/v1/gateway.proto
+PROTO := proto/olympos/v1/gateway.proto proto/olympos/v1/probe.proto
 
 .PHONY: proto build test test-release lint web images e2e
 
@@ -25,6 +25,7 @@ web:
 images:
 	docker build -f deploy/docker/server.Dockerfile -t olympos-server:dev --build-arg GO_TAGS=dev .
 	docker build -f deploy/docker/agent.Dockerfile -t olympos-agent:dev .
+	docker build -f deploy/docker/probe.Dockerfile -t olympos-probe:dev .
 
 e2e:
 	./test/e2e/run.sh

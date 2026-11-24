@@ -12,11 +12,14 @@ import { ActivityPage } from './pages/Activity';
 import { SecurityPage } from './pages/Security';
 import { KyvernoPolicyPage } from './pages/KyvernoPolicy';
 import { NetpolNamespacePage } from './pages/NetpolNamespace';
+import { MonitoringPage } from './pages/monitoring/MonitoringPage';
+import { ScenarioEditorPage } from './pages/monitoring/ScenarioEditor';
 import { SettingsAccessPage } from './pages/settings/Access';
 import { SettingsNotificationsPage } from './pages/settings/Notifications';
 import { DestinationsPage } from './pages/settings/Destinations';
 import { RegistriesPage } from './pages/settings/Registries';
 import { ClustersSettingsPage } from './pages/settings/Clusters';
+import { SyntheticSettingsPage } from './pages/settings/Synthetic';
 
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : typeof v === 'number' ? String(v) : undefined);
 /** Search params are always optional, so links never need to pass them. */
@@ -117,6 +120,24 @@ export const netpolNamespaceRoute = createRoute({
   component: NetpolNamespacePage,
 });
 
+/** Matrix filter pills of Monitoring › Synthetic. */
+export const MONITORING_STATUS = ['failing', 'degraded', 'paused'] as const;
+export const monitoringRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/monitoring',
+  // tab: one of MONITORING_TABS (pages/monitoring/tabs.ts); scenario: its detail; run: the run dialog
+  validateSearch: opt((s) => ({ tab: str(s.tab), status: pick(s.status, MONITORING_STATUS), q: str(s.q), scenario: str(s.scenario), run: str(s.run) })),
+  component: MonitoringPage,
+});
+
+export const monitoringEditorRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/monitoring/editor',
+  // scenario: the one being edited (none: a new scenario); cluster: the test-run cluster
+  validateSearch: opt((s) => ({ scenario: str(s.scenario), cluster: str(s.cluster) })),
+  component: ScenarioEditorPage,
+});
+
 export const settingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings', component: SettingsAccessPage });
 export const notificationsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings/notifications', component: SettingsNotificationsPage });
 export const destinationsRoute = createRoute({
@@ -133,6 +154,8 @@ export const clustersSettingsRoute = createRoute({
   component: ClustersSettingsPage,
 });
 
+export const syntheticSettingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings/synthetic', component: SyntheticSettingsPage });
+
 export const routeTree = rootRoute.addChildren([
   loginRoute,
   appRoute.addChildren([
@@ -146,11 +169,14 @@ export const routeTree = rootRoute.addChildren([
     securityRoute,
     kyvernoPolicyRoute,
     netpolNamespaceRoute,
+    monitoringRoute,
+    monitoringEditorRoute,
     settingsRoute,
     notificationsRoute,
     destinationsRoute,
     registriesRoute,
     clustersSettingsRoute,
+    syntheticSettingsRoute,
   ]),
 ]);
 
