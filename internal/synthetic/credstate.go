@@ -41,8 +41,9 @@ const (
 )
 
 // resolveCause classifies an error from runCredentials. Anything not known
-// to be permanent is transient, the KEK failing to unwrap included: that
-// breaks every stored credential at once and is reported by the KEK watch.
+// to be permanent is transient, the KEK failing to unwrap included. Like any
+// transient failure it alerts only after UnavailableAlertAfter; if a KEK
+// outage lasts that long, every stored credential alerts once.
 func resolveCause(err error) (cause string, permanent bool) {
 	switch {
 	case errors.Is(err, secrets.ErrSecretNotFound):

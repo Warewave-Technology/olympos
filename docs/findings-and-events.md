@@ -62,8 +62,8 @@ are either `crit` (red) or `warn` (amber), and the `crit` ones come first.
 ## Needs attention
 
 The Dashboard shows only what you are allowed to see. Cluster items cover the clusters in your scope.
-The Olympos and Key Vault items need global read access. The synthetic credential item needs global read access or the `synthetic-editor` role. The approvals item needs approve rights on the
-vault's cluster.
+The Olympos and Key Vault items need global read access. The synthetic credential item needs global read
+access or the `synthetic-editor` role. The approvals item needs approve rights on the vault's cluster.
 
 | Item as shown | Severity | Why it appears | What to do | Links to |
 |---|---|---|---|---|

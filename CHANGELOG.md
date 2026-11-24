@@ -14,11 +14,12 @@ All notable changes to this project are documented here. The format follows
   clusters use it. A permanent failure alerts at once; a temporary one (Key Vault or the key encryption key
   does not answer) alerts when it lasts 30 minutes. See `docs/synthetic-monitoring.md`
   (*Credentials that cannot be resolved*).
-  - Behavior change (rulings P13 and P14): a stored value that does not decrypt, and a Key Vault secret that
-    is missing or forbidden, now end the run *error* (`credential_broken`) instead of *skipped*
-    (`credential_unavailable`). An expired credential still ends *error* (`credential_expired`). These two
-    reasons move no streak and are left out of availability, p95, the timeline and the hourly aggregates, so
-    expired credentials no longer open `synthetic.failing` per scenario.
+  - Behavior change (rulings P13 and P14): a stored value that does not decrypt, an empty secret, a Key Vault
+    secret that is missing or forbidden, and a reference the policy refuses, now end the run *error*
+    (`credential_broken`) instead of *skipped* (`credential_unavailable`). An expired credential still ends
+    *error* (`credential_expired`). These two reasons move no streak and are left out of availability, p95,
+    the timeline and the hourly aggregates, so expired credentials no longer open `synthetic.failing` per
+    scenario.
 
 ### Added
 - Events `synthetic.credential_broken` (one per credential and episode) and `synthetic.credential_restored`

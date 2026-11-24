@@ -195,7 +195,6 @@ Values that come from a credentialed exchange stay with that credential's hosts:
 - A response body that is not text, is compressed or contains NUL bytes gives no body extracts. Header
   extracts still work.
 
-
 ### Credentials that cannot be resolved
 
 Olympos resolves a credential each time it starts a run that uses it. When that fails, the cause decides what
@@ -217,10 +216,11 @@ happens:
   sends one `synthetic.credential_broken` (*has been unavailable for 30 minutes*) and the item shows in amber.
 - **These two reasons are not failures.** They move no streak, so no `synthetic.failing` opens for them, and
   they are left out of availability, p95, the timeline and the hourly aggregates.
-- **Where it shows.** The matrix reads *credential error* (⊘) for every cluster of a scenario that uses the
-  credential, and the scenario's page lists its credentials with their state. *Settings › Synthetic
-  monitoring › Credentials* shows a badge, for example *Cannot be resolved · not found in Key Vault · since
-  10:42*, or *Unavailable since 10:42*, next to the number of failed reads in 24 hours.
+- **Where it shows.** The matrix reads *credential error* (⊘) on every cluster that has an online probe and
+  that the scenario runs on, if the scenario uses the credential (*excluded*, *paused*, *probe not installed*
+  and *probe offline* keep their own state). The scenario's page lists its credentials with their state.
+  *Settings › Synthetic monitoring › Credentials* shows a badge, for example *Cannot be resolved · not found in
+  Key Vault · since 10:42*, or *Unavailable since 10:42*, next to the number of failed reads in 24 hours.
 - **Recovery.** At the next run that resolves the credential, the state goes back to *ok* and Olympos sends one
   `synthetic.credential_restored`, if the other message went out. Saving a new secret or a new expiry also resets
   the state, without a message: the next run decides.
@@ -229,7 +229,8 @@ happens:
 - **Where the messages go.** To the alert channel of each scenario that uses the credential, once per channel. A
   scenario with no channel of its own sends through the routes of the event. If no enabled scenario uses the
   credential, the message goes through the routes only.
-- **Who sees the item.** Whoever may read *Settings › Synthetic monitoring*: admins and `synthetic-editor`.
+- **Who sees the item.** Whoever may read *Settings › Synthetic monitoring*: anyone with global read access, and
+  `synthetic-editor`.
 
 Fix the cause (put the secret back, grant `get` on it, rotate the stored one), and the next run recovers it.
 The message names the cause in a fixed sentence, never Key Vault's own error text.
@@ -320,7 +321,7 @@ legend above the matrix names them, a cell's tooltip and screen-reader label say
 | ∅ probe not installed | The cluster has no probe (or it was revoked). |
 | – excluded | The scenario's targeting leaves the cluster out (hatched). |
 | ‖ paused | The scenario is disabled. |
-| ⊘ credential error | A credential the scenario uses [cannot be resolved](#credentials-that-cannot-be-resolved) for good. It shows on every cluster the scenario runs on, and wins over *failing*. Not a failure of the scenario. |
+| ⊘ credential error | A credential the scenario uses [cannot be resolved](#credentials-that-cannot-be-resolved) for good. It shows on every cluster with an online probe that the scenario runs on; *excluded*, *paused*, *probe not installed* and *probe offline* keep their own state. It wins over *failing*. Not a failure of the scenario. |
 | ○ no data yet | No counted run yet. |
 
 Hover a cell for the last run's reason; click it to open that run. When a [rate cap](#rate-caps) holds a
