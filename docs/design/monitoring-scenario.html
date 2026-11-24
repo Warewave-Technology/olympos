@@ -103,6 +103,18 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </div>
 </section>
 <section class="card">
+<div style="padding: 16px 20px 6px"><h2 style="margin: 0; font-size: 16px; font-weight: 600; color: #fbf1c7">Credentials</h2><div class="muted" style="font-size: 12px; margin-top: 4px">The credentials this scenario uses and whether the probes can resolve them.</div></div>
+<div style="overflow-x: auto">
+<table class="t">
+<thead><tr><th>Credential</th><th>Type</th><th>Used by</th><th>State</th></tr></thead>
+<tbody>
+<tr><td class="mono"><a href="settings-synthetic.html?credential=catalog-monitor">catalog-monitor</a></td><td>Bearer token</td><td>Steps 2, 3</td><td><span class="badge ok">OK</span></td></tr>
+<tr><td class="mono"><a href="settings-synthetic.html?credential=checkout-synthetic-user">checkout-synthetic-user</a></td><td>Basic</td><td>Step 4</td><td><span class="badge warn">Unavailable</span> <span class="muted" style="font-size: 12px; margin-left: 6px">since 11:31</span></td></tr>
+</tbody>
+</table>
+</div>
+</section>
+<section class="card">
 <div style="padding: 16px 20px 6px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; align-items: center"><h2 style="margin: 0; font-size: 16px; font-weight: 600; color: #fbf1c7">By cluster · last 24 h</h2><div class="legend"><span><i style="background: #5b6b1e"></i>passed</span><span><i style="background: #cc241d"></i>failed</span><span><i style="background: #d79921"></i>slow</span><span><i style="background: #3c3836"></i>no data</span></div></div>
 <div style="overflow-x: auto">
 <table class="t">

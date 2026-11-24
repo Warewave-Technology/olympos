@@ -9,6 +9,10 @@ import (
 	"fmt"
 )
 
+// ErrDecrypt means the DEK unwrapped but the stored value does not open: the
+// ciphertext or its binding is damaged. A KEK failure is not ErrDecrypt.
+var ErrDecrypt = errors.New("stored secret cannot be decrypted")
+
 // Sealed is an envelope-encrypted value as stored in the database.
 type Sealed struct {
 	Ciphertext []byte // nonce || AES-256-GCM(ciphertext+tag)
@@ -51,7 +55,11 @@ func (e *Envelope) Open(ctx context.Context, s Sealed, aad []byte) ([]byte, erro
 		return nil, fmt.Errorf("unwrap dek: %w", err)
 	}
 	defer Zero(dek)
-	return gcmOpen(dek, s.Ciphertext, aad)
+	b, err := gcmOpen(dek, s.Ciphertext, aad)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrDecrypt, err)
+	}
+	return b, nil
 }
 
 func gcmSeal(key, plaintext, aad []byte) ([]byte, error) {

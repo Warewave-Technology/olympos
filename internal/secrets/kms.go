@@ -27,6 +27,10 @@ type KeyVault interface {
 // ErrSecretNotFound is returned when a Key Vault secret does not exist.
 var ErrSecretNotFound = errors.New("key vault secret not found")
 
+// ErrSecretForbidden is returned when the vault refuses Olympos access to a
+// secret (HTTP 401 or 403, or an unreadable local file).
+var ErrSecretForbidden = errors.New("key vault secret access denied")
+
 // Ref is a parsed kv://<vault>/<secret> reference.
 type Ref struct {
 	Vault  string

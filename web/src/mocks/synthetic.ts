@@ -4,6 +4,7 @@ import type {
   AllowRule,
   AllowRuleInput,
   Cluster,
+  Dashboard,
   HostCheck,
   Scenario,
   ScenarioAlertRule,
@@ -75,6 +76,9 @@ function cred(name: string, kind: SyntheticCredential['kind'], bound: string[], 
     expired: false,
     rotated_at: null,
     scenarios: [],
+    resolve_state: 'ok',
+    resolve_cause: null,
+    resolve_failing_since: null,
     resolve_failures_24h: 0,
     last_resolve_failed_at: null,
     created_by: db.people.yigit.id,
@@ -86,9 +90,10 @@ function cred(name: string, kind: SyntheticCredential['kind'], bound: string[], 
 }
 export const credentials: SyntheticCredential[] = [
   cred('catalog-monitor', 'bearer', ['*.prod.wrw.com'], { rotated_at: db.iso(2 * D), updated_at: db.iso(2 * D) }),
-  // a Key Vault reference the server could not read lately (resolve_failures_24h)
-  cred('search-api-key', 'header', ['search.wrw.com'], { header_name: 'X-Api-Key', source: 'keyvault_ref', expires_at: null, resolve_failures_24h: 3, last_resolve_failed_at: db.iso(40 * MIN) }),
-  cred('reports-login', 'basic', ['reports.wrw.com'], { expires_at: db.isoIn(9 * D + H) }),
+  // a Key Vault reference whose secret is gone: cannot be resolved (docs/design/credential-alerts.md)
+  cred('search-api-key', 'header', ['search.wrw.com'], { header_name: 'X-Api-Key', source: 'keyvault_ref', expires_at: null, resolve_state: 'broken', resolve_cause: 'not_found', resolve_failing_since: db.iso(95 * MIN), resolve_failures_24h: 3, last_resolve_failed_at: db.iso(40 * MIN) }),
+  // Key Vault did not answer a few minutes ago: no alert yet (a message goes out after 30 minutes)
+  cred('reports-login', 'basic', ['reports.wrw.com'], { expires_at: db.isoIn(9 * D + H), resolve_state: 'unavailable', resolve_cause: 'unavailable', resolve_failing_since: db.iso(12 * MIN) }),
   cred('partner-oauth', 'oauth2_client_credentials', ['partner-sftp.acme.net', 'login.acme.net'], { oauth_token_url: 'https://login.acme.net/oauth2/token', oauth_scopes: 'sftp.read', expires_at: null, created_by: db.people.selin.id, created_by_name: db.people.selin.display_name, created_at: db.iso(D), updated_at: db.iso(D) }),
 ];
 const credRef = (name: string) => {
@@ -155,6 +160,7 @@ function scenario(name: string, p: Partial<Scenario> & Pick<Scenario, 'type' | '
     run_on_selector: '',
     exclude_selectors: [],
     alerts: ALERTS(),
+    credentials: [],
     targets: { runs_on: 0, of: 0, clusters: [], excluded: [] },
     requests_per_minute: 0,
     can_edit: true,
@@ -272,11 +278,26 @@ export function requestsPerMinute(s: Pick<ScenarioInput, 'steps' | 'interval_sec
   return Math.round(((perRun * 60) / s.interval_seconds) * 10) / 10;
 }
 
+/** The credentials the steps use, in order of first use, with their state (the view-only `credentials` of a scenario). */
+export function scenarioCredentials(s: Pick<Scenario, 'steps'>): Scenario['credentials'] {
+  const seen = new Set<string>();
+  const out: Scenario['credentials'] = [];
+  for (const st of s.steps) {
+    const c = st.credential_id && !seen.has(st.credential_id) ? credentials.find((x) => x.id === st.credential_id) : undefined;
+    if (!c) continue;
+    seen.add(c.id);
+    out.push({ id: c.id, name: c.name, resolve_state: c.resolve_state, resolve_cause: c.resolve_cause, resolve_failing_since: c.resolve_failing_since });
+  }
+  return out;
+}
+
 function cellState(s: Scenario, c: Cluster): SyntheticCellState {
   if (excluded(s, c)) return 'excluded';
   if (!s.enabled) return 'paused';
   if (c.probe_status === 'not_installed' || c.probe_status === 'revoked') return 'not_installed';
   if (c.probe_status === 'offline' || c.probe_status === 'pending') return 'probe_offline';
+  // after the probe, before the alert: a credential that cannot be resolved ends its runs before they start
+  if (scenarioCredentials(s).some((x) => x.resolve_state === 'broken')) return 'credential_error';
   const st = story[s.name];
   if (st?.failing?.[c.name]) return 'failing';
   if (st?.degraded?.[c.name]) return 'degraded';
@@ -310,6 +331,7 @@ function view(s: Scenario): Scenario {
   const ch = (id: string | null) => db.channels.find((c) => c.id === id)?.name ?? '';
   return {
     ...s,
+    credentials: scenarioCredentials(s),
     alerts: { ...s.alerts, channel_name: ch(s.alerts.channel_id), critical_channel_name: ch(s.alerts.critical_channel_id) },
     targets: targetsOf(s),
     requests_per_minute: requestsPerMinute(s),
@@ -798,6 +820,22 @@ function ruleView(r: AllowRule): AllowRule {
   return { ...r, scenarios: scenarios.filter((s) => hostsOf(s).some((h) => ruleMatches(r, h))).length };
 }
 
+/** The Needs attention items of the credentials that cannot be resolved (internal/synthetic/credstate.go). */
+export function credentialAttention(): Dashboard['attention'] {
+  return credentials
+    .filter((c) => c.resolve_state === 'broken' || (c.resolve_state === 'unavailable' && c.resolve_failing_since && Date.now() - new Date(c.resolve_failing_since).getTime() > 30 * MIN))
+    .map((c) => {
+      const n = credView(c).scenarios.length;
+      return {
+        kind: 'synthetic_credential_broken' as const,
+        severity: c.resolve_state === 'broken' ? ('crit' as const) : ('warn' as const),
+        label: 'Synthetic credential',
+        detail: `Credential ${c.name} cannot be resolved — ${n} ${n === 1 ? 'scenario' : 'scenarios'} affected`,
+        link: `/settings/synthetic?credential=${c.id}`,
+      };
+    });
+}
+
 function credView(c: SyntheticCredential): SyntheticCredential {
   return { ...c, expired: !!c.expires_at && new Date(c.expires_at).getTime() <= Date.now(), scenarios: scenarios.filter((s) => s.steps.some((st) => st.credential_id === c.id)).map((s) => ({ id: s.id, name: s.name })) };
 }
@@ -985,6 +1023,8 @@ function settingsRoutes(): [string, string, Handler][] {
           oauth_scopes: (b.oauth_scopes ?? '').trim(),
           expires_at: b.expires_at ?? null,
           updated_at: now,
+          // a new secret or a new expiry resets the state to ok
+          ...(b.secret || (b.expires_at ?? null) !== c.expires_at ? { resolve_state: 'ok', resolve_cause: null, resolve_failing_since: null } : {}),
           ...(b.secret ? { source: b.secret.source, rotated_at: now, resolve_failures_24h: 0, last_resolve_failed_at: null } : {}),
         });
         db.record(b.secret ? 'synthetic.credential_rotated' : 'synthetic.credential_updated', 'synthetic_credential', c.name, b.secret ? 'secret rotated' : 'metadata saved');

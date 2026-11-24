@@ -154,7 +154,12 @@ export const clustersSettingsRoute = createRoute({
   component: ClustersSettingsPage,
 });
 
-export const syntheticSettingsRoute = createRoute({ getParentRoute: () => appRoute, path: '/settings/synthetic', component: SyntheticSettingsPage });
+export const syntheticSettingsRoute = createRoute({
+  getParentRoute: () => appRoute,
+  path: '/settings/synthetic',
+  validateSearch: opt((s) => ({ credential: str(s.credential) })),
+  component: SyntheticSettingsPage,
+});
 
 export const routeTree = rootRoute.addChildren([
   loginRoute,

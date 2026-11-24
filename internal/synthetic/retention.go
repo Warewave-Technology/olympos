@@ -145,7 +145,7 @@ SELECT scenario_id, cluster_id, date_trunc('hour', finished_at, 'UTC') AS h,
        COALESCE(round(percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms))::int, 0),
        COALESCE(round(percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms))::int, 0)
 FROM synthetic_runs
-WHERE NOT test AND scenario_id IS NOT NULL AND status IN ('passed','failed','error') AND finished_at >= $1 AND finished_at < $2
+WHERE NOT test AND scenario_id IS NOT NULL AND ` + countedRunSQL + ` AND finished_at >= $1 AND finished_at < $2
 GROUP BY scenario_id, cluster_id, h
 ORDER BY scenario_id, cluster_id, h
 `

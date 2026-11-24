@@ -106,6 +106,9 @@ func (a *AzureKeyVault) GetSecret(ctx context.Context, vault, name string) ([]by
 		if errors.As(err, &re) && re.StatusCode == 404 {
 			return nil, ErrSecretNotFound
 		}
+		if errors.As(err, &re) && (re.StatusCode == 401 || re.StatusCode == 403) {
+			return nil, fmt.Errorf("get secret %s/%s: %s: %w", vault, name, statusOnly(err), ErrSecretForbidden)
+		}
 		return nil, fmt.Errorf("get secret %s/%s: %s", vault, name, statusOnly(err))
 	}
 	if resp.Value == nil {

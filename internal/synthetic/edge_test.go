@@ -1,6 +1,7 @@
 package synthetic
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -45,9 +46,10 @@ func TestDisabledScenarioAndExpiredCredential(t *testing.T) {
 	e.wantRun(fresh, StatusRunning, "")
 }
 
-// Ruling P14: a credential the server cannot resolve (here the envelope
-// does not open) skips the run: the fault is not the scenario's.
-func TestCredentialUnavailableSkipped(t *testing.T) {
+// A stored credential whose value does not decrypt cannot be resolved,
+// ever (#54, supersedes ruling P14 for this case): the run ends as an
+// error (credential_broken), before anything is sent.
+func TestCredentialDecryptBroken(t *testing.T) {
 	e := newEnv(t)
 	e.allow("suffix", "example.com")
 	cl := e.cluster("c1", ProbeOnlineState)
@@ -55,6 +57,27 @@ func TestCredentialUnavailableSkipped(t *testing.T) {
 	cred := e.credential("broken", spec.CredBearer, "x", "unopenable-secret-666", "suffix:example.com")
 	e.exec(`UPDATE credentials SET ciphertext = decode('00112233445566778899aabbccddeeff0011223344', 'hex')
 		WHERE id = (SELECT credential_id FROM synthetic_credentials WHERE id = $1)`, cred)
+	run := e.schedule(e.scenario("s", true, httpStep("https://api.example.com/", &cred)), cl, 0)
+	e.dispatch()
+	e.wantRun(run, StatusError, ReasonCredentialBroken)
+	if len(e.probes.messages()) != 0 || e.probes.inFlight(sess) != 0 {
+		t.Fatal("run sent or slot kept")
+	}
+	if o := e.results(); len(o) != 1 || o[0].Status != StatusError || o[0].Reason != ReasonCredentialBroken {
+		t.Fatalf("outcomes %+v", o)
+	}
+}
+
+// Ruling P14: a credential the server cannot resolve for now (here the KEK
+// does not unwrap the data key) skips the run: no failure, nothing sent,
+// and no slot kept.
+func TestCredentialUnavailableSkipped(t *testing.T) {
+	e := newEnv(t)
+	e.allow("suffix", "example.com")
+	cl := e.cluster("c1", ProbeOnlineState)
+	sess := e.probes.connect(t, cl, 8)
+	cred := e.credential("kek", spec.CredBearer, "x", "unwrappable-secret-667", "suffix:example.com")
+	e.kv.fail(nil, errors.New("kek unavailable"))
 	run := e.schedule(e.scenario("s", true, httpStep("https://api.example.com/", &cred)), cl, 0)
 	e.dispatch()
 	e.wantRun(run, StatusSkipped, ReasonCredentialUnavailable)

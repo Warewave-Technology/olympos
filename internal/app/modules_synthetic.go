@@ -39,6 +39,8 @@ func init() {
 			// the probes connected to it); the scheduler, the alert loop
 			// and maintenance on the leader of their locks.
 			Workers: []Worker{svc.RunDispatcher, svc.RunScheduler, svc.RunAlerts, svc.RunMaintenance},
+			// Credentials that cannot be resolved, in Needs attention.
+			Attention: svc.AttentionItems,
 		}, nil
 	})
 }

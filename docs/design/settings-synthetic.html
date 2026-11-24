@@ -108,9 +108,10 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <thead><tr><th>Name</th><th>Type</th><th>Bound to hosts</th><th style="text-align: right">Scenarios</th><th>Rotated</th><th>Expires</th></tr></thead>
 <tbody>
 <tr><td class="mono">catalog-monitor</td><td>Bearer token</td><td><span class="chip">*.prod.wrw.com</span></td><td style="text-align: right">2</td><td class="mono">Nov 21</td><td><span class="badge ok">in 88 days</span></td></tr>
-<tr><td class="mono">checkout-synthetic-user</td><td>Basic</td><td><span class="chip">checkout.prod.wrw.com</span></td><td style="text-align: right">1</td><td class="mono">Oct 30</td><td><span class="badge warn">in 9 days</span></td></tr>
+<tr><td style="white-space: normal"><span class="mono">checkout-synthetic-user</span><div style="margin-top: 6px"><span class="badge warn">Unavailable</span></div><div class="muted" style="font-size: 12px; margin-top: 4px; white-space: nowrap">since 11:31</div></td><td>Basic</td><td><span class="chip">api.prod.wrw.com</span></td><td style="text-align: right">1</td><td class="mono">Oct 30</td><td><span class="badge warn">in 9 days</span></td></tr>
 <tr><td class="mono">dev-api-key</td><td>Header <span class="mono muted">X-Api-Key</span></td><td><span class="chip">*.dev.wrw.com</span></td><td style="text-align: right">3</td><td class="mono">Nov 02</td><td class="muted">never</td></tr>
 <tr><td class="mono">partner-oauth</td><td>OAuth2 client credentials</td><td><span class="chip">partner-sftp.acme.net</span><span class="chip">login.acme.net</span></td><td style="text-align: right">1</td><td class="mono">Nov 22</td><td class="muted">token per run</td></tr>
+<tr class="sel"><td style="white-space: normal"><span class="mono">search-api-key</span><div style="margin-top: 6px"><span class="badge crit">Cannot be resolved</span></div><div class="muted" style="font-size: 12px; margin-top: 4px; white-space: nowrap">not found in Key Vault · since 10:42</div></td><td>Header <span class="mono muted">X-Api-Key</span></td><td><span class="chip">*.prod.wrw.com</span></td><td style="text-align: right">3</td><td class="mono">Oct 14</td><td class="muted">never</td></tr>
 </tbody>
 </table>
 </div>

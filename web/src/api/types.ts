@@ -152,7 +152,7 @@ export interface Target {
 }
 
 export interface AttentionItem {
-  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'backup_partial' | 'self_backup_unset' | 'self_backup_failed' | 'self_backup_partial' | 'kek_purgeable' | 'kek_recovery_unknown' | 'target_tls_changed';
+  kind: 'agent_offline' | 'backup_failed' | 'backup_missed' | 'approvals' | 'eol' | 'critical_cves' | 'backup_partial' | 'self_backup_unset' | 'self_backup_failed' | 'self_backup_partial' | 'kek_purgeable' | 'kek_recovery_unknown' | 'target_tls_changed' | 'synthetic_credential_broken';
   severity: 'crit' | 'warn';
   label: string;
   detail: string;
@@ -1069,7 +1069,7 @@ export type ScenarioType = 'http_flow' | 'http' | 'dns' | 'tcp' | 'tls';
 export type StepKind = 'dns' | 'http' | 'tcp' | 'tls';
 export type HttpMethod = 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS';
 export type AssertionOperator = 'equals' | 'not_equals' | 'contains' | 'matches' | 'less_than' | 'greater_than' | 'exists' | 'length_greater_than';
-export type SyntheticCellState = 'failing' | 'degraded' | 'passing' | 'probe_offline' | 'not_installed' | 'excluded' | 'paused' | 'no_data';
+export type SyntheticCellState = 'failing' | 'degraded' | 'passing' | 'probe_offline' | 'not_installed' | 'excluded' | 'paused' | 'credential_error' | 'no_data';
 export type ScenarioStatus = 'failing' | 'degraded' | 'passing' | 'paused' | 'no_data';
 export type SyntheticRunStatus = 'scheduled' | 'running' | 'passed' | 'failed' | 'error' | 'skipped';
 export type CredentialKind = 'bearer' | 'basic' | 'header' | 'oauth2_client_credentials';
@@ -1158,8 +1158,23 @@ export interface ScenarioTargets {
   excluded: string[];
 }
 
+/** What the last dispatch found for a credential: ok, broken (cannot be resolved for good) or unavailable (Key Vault did not answer). */
+export type CredentialResolveState = 'ok' | 'broken' | 'unavailable';
+export type CredentialResolveCause = 'not_found' | 'forbidden' | 'decrypt' | 'empty' | 'expired' | 'unavailable' | null;
+
+/** A credential a scenario uses, by name, with its state (view only: never part of a PUT body). */
+export interface ScenarioCredential {
+  id: string;
+  name: string;
+  resolve_state: CredentialResolveState;
+  resolve_cause: CredentialResolveCause;
+  resolve_failing_since: string | null;
+}
+
 export interface Scenario extends ScenarioInput {
   id: string;
+  /** Read-only: the credentials the steps use, in order of first use. */
+  credentials: ScenarioCredential[];
   enabled: boolean;
   store_responses: boolean;
   alerts: ScenarioAlertRule;
@@ -1403,6 +1418,10 @@ export interface SyntheticCredential {
   expired: boolean;
   rotated_at: string | null;
   scenarios: { id: string; name: string }[];
+  resolve_state: CredentialResolveState;
+  resolve_cause: CredentialResolveCause;
+  /** First failure of the current episode; null when ok. */
+  resolve_failing_since: string | null;
   resolve_failures_24h: number;
   last_resolve_failed_at: string | null;
   created_by: string | null;

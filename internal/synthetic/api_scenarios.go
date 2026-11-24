@@ -54,6 +54,7 @@ type scenarioInput struct {
 // as it is.
 type viewOnly struct {
 	ID                json.RawMessage `json:"id,omitempty"`
+	Credentials       json.RawMessage `json:"credentials,omitempty"`
 	Targets           json.RawMessage `json:"targets,omitempty"`
 	RequestsPerMinute json.RawMessage `json:"requests_per_minute,omitempty"`
 	CanEdit           json.RawMessage `json:"can_edit,omitempty"`
@@ -758,27 +759,53 @@ func loadAlertView(ctx context.Context, q store.Querier, id uuid.UUID) (alertVie
 
 // scenarioView is GET /scenarios/{id}.
 type scenarioView struct {
-	ID                uuid.UUID     `json:"id"`
-	Name              string        `json:"name"`
-	Type              string        `json:"type"`
-	OwnerSelector     string        `json:"owner_selector"`
-	IntervalSeconds   int           `json:"interval_seconds"`
-	TimeoutSeconds    int           `json:"timeout_seconds"`
-	StepRetries       int           `json:"step_retries"`
-	Enabled           bool          `json:"enabled"`
-	StoreResponses    bool          `json:"store_responses"`
-	RunOn             string        `json:"run_on"`
-	RunOnSelector     string        `json:"run_on_selector"`
-	ExcludeSelectors  []string      `json:"exclude_selectors"`
-	Steps             []stepView    `json:"steps"`
-	Alerts            alertView     `json:"alerts"`
-	Targets           targetSummary `json:"targets"`
-	RequestsPerMinute float64       `json:"requests_per_minute"`
-	CanEdit           bool          `json:"can_edit"`
-	CreatedBy         *uuid.UUID    `json:"created_by"`
-	CreatedByName     string        `json:"created_by_name"`
-	CreatedAt         time.Time     `json:"created_at"`
-	UpdatedAt         time.Time     `json:"updated_at"`
+	ID                uuid.UUID         `json:"id"`
+	Name              string            `json:"name"`
+	Type              string            `json:"type"`
+	OwnerSelector     string            `json:"owner_selector"`
+	IntervalSeconds   int               `json:"interval_seconds"`
+	TimeoutSeconds    int               `json:"timeout_seconds"`
+	StepRetries       int               `json:"step_retries"`
+	Enabled           bool              `json:"enabled"`
+	StoreResponses    bool              `json:"store_responses"`
+	RunOn             string            `json:"run_on"`
+	RunOnSelector     string            `json:"run_on_selector"`
+	ExcludeSelectors  []string          `json:"exclude_selectors"`
+	Steps             []stepView        `json:"steps"`
+	Credentials       []credentialState `json:"credentials"`
+	Alerts            alertView         `json:"alerts"`
+	Targets           targetSummary     `json:"targets"`
+	RequestsPerMinute float64           `json:"requests_per_minute"`
+	CanEdit           bool              `json:"can_edit"`
+	CreatedBy         *uuid.UUID        `json:"created_by"`
+	CreatedByName     string            `json:"created_by_name"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
+}
+
+// credentialState is a credential a scenario uses and what dispatch found.
+type credentialState struct {
+	ID                  uuid.UUID  `json:"id"`
+	Name                string     `json:"name"`
+	ResolveState        string     `json:"resolve_state"`
+	ResolveCause        *string    `json:"resolve_cause"`
+	ResolveFailingSince *time.Time `json:"resolve_failing_since"`
+}
+
+// scenarioCredentials reads the state of the credentials ids, by name.
+func scenarioCredentials(ctx context.Context, q store.Querier, ids []uuid.UUID) ([]credentialState, error) {
+	out := []credentialState{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := q.Query(ctx, `SELECT id, name, resolve_state, resolve_cause, resolve_failing_since FROM synthetic_credentials
+		WHERE id = ANY($1) ORDER BY name, id`, ids)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.AppendRows(out, rows, func(r pgx.CollectableRow) (c credentialState, err error) {
+		return c, r.Scan(&c.ID, &c.Name, &c.ResolveState, &c.ResolveCause, &c.ResolveFailingSince)
+	})
 }
 
 func (a *API) scenarioView(ctx context.Context, q store.Querier, sub *authz.Subject, f *fleet, s *scenarioRow) (*scenarioView, error) {
@@ -790,6 +817,10 @@ func (a *API) scenarioView(ctx context.Context, q store.Querier, sub *authz.Subj
 	if err != nil {
 		return nil, err
 	}
+	credStates, err := scenarioCredentials(ctx, q, CredentialIDs(sc))
+	if err != nil {
+		return nil, err
+	}
 	alerts, err := loadAlertView(ctx, q, s.ID)
 	if err != nil {
 		return nil, err
@@ -798,9 +829,10 @@ func (a *API) scenarioView(ctx context.Context, q store.Querier, sub *authz.Subj
 		ID: s.ID, Name: s.Name, Type: s.Type, OwnerSelector: s.OwnerSelector, IntervalSeconds: s.IntervalSeconds,
 		TimeoutSeconds: s.TimeoutSeconds, StepRetries: s.StepRetries, Enabled: s.Enabled, StoreResponses: s.StoreResponses,
 		RunOn: s.Target.RunOn, RunOnSelector: s.Target.RunOnSelector, ExcludeSelectors: s.Target.Exclude,
-		Steps:   viewSteps(sc.Steps, creds, sub.CanAny(authz.PermSyntheticEdit)),
-		Alerts:  alerts,
-		Targets: summarize(s.Target, f), RequestsPerMinute: spec.RequestsPerMinute(sc),
+		Steps:       viewSteps(sc.Steps, creds, sub.CanAny(authz.PermSyntheticEdit)),
+		Credentials: credStates,
+		Alerts:      alerts,
+		Targets:     summarize(s.Target, f), RequestsPerMinute: spec.RequestsPerMinute(sc),
 		CanEdit:   sub.CanAny(authz.PermSyntheticEdit) && editRefusal(sub, s.Target, f) == "",
 		CreatedBy: s.CreatedBy, CreatedByName: s.CreatedByName, CreatedAt: s.CreatedAt, UpdatedAt: s.UpdatedAt,
 	}, nil

@@ -5,7 +5,10 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -93,3 +96,54 @@ func (groupValuer) LogValue() slog.Value {
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+func TestEnvelopeOpenDecryptError(t *testing.T) {
+	ctx := context.Background()
+	e := &Envelope{KV: &LocalKeyVault{Dir: t.TempDir()}}
+	s, err := e.Seal(ctx, []byte("s3cr3t"), []byte("credential:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Ciphertext[len(s.Ciphertext)-1] ^= 0xff
+	if _, err := e.Open(ctx, s, []byte("credential:1")); !errors.Is(err, ErrDecrypt) {
+		t.Fatalf("corrupted ciphertext: want ErrDecrypt, got %v", err)
+	}
+}
+
+// failingUnwrapKV fails UnwrapKey like a KEK that cannot be reached.
+type failingUnwrapKV struct{ KeyVault }
+
+func (failingUnwrapKV) UnwrapKey(context.Context, []byte, string) ([]byte, error) {
+	return nil, errors.New("kek unreachable")
+}
+
+func TestEnvelopeOpenUnwrapErrorIsNotDecrypt(t *testing.T) {
+	ctx := context.Background()
+	kv := &LocalKeyVault{Dir: t.TempDir()}
+	s, err := (&Envelope{KV: kv}).Seal(ctx, []byte("s3cr3t"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&Envelope{KV: failingUnwrapKV{kv}}).Open(ctx, s, nil)
+	if err == nil || errors.Is(err, ErrDecrypt) {
+		t.Fatalf("unwrap failure must not be ErrDecrypt, got %v", err)
+	}
+}
+
+func TestLocalGetSecretForbidden(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any file")
+	}
+	kv := &LocalKeyVault{Dir: t.TempDir()}
+	ctx := context.Background()
+	if err := kv.SetSecret(ctx, "vault", "name", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(kv.Dir, "secrets", "vault", "name")
+	if err := os.Chmod(p, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := kv.GetSecret(ctx, "vault", "name"); !errors.Is(err, ErrSecretForbidden) {
+		t.Fatalf("unreadable file: want ErrSecretForbidden, got %v", err)
+	}
+}

@@ -62,8 +62,8 @@ are either `crit` (red) or `warn` (amber), and the `crit` ones come first.
 ## Needs attention
 
 The Dashboard shows only what you are allowed to see. Cluster items cover the clusters in your scope.
-The Olympos and Key Vault items need global read access. The approvals item needs approve rights on the
-vault's cluster.
+The Olympos and Key Vault items need global read access. The synthetic credential item needs global read
+access or the `synthetic-editor` role. The approvals item needs approve rights on the vault's cluster.
 
 | Item as shown | Severity | Why it appears | What to do | Links to |
 |---|---|---|---|---|
@@ -78,12 +78,13 @@ vault's cluster.
 | **Critical CVEs** · `N new in M images` | crit | A critical CVE was first seen in the last 24 hours in an image running in your clusters. | Open *Security › Images*, sort by *Critical*, and use *Fix* (fixed-in version) to plan an image update. | *Security* |
 | **Olympos backup** · `choose where the Olympos database is backed up` | warn | The built-in `olympos-self` job has no destination yet. | An admin picks a destination on the *Olympos database* card. It runs daily at 02:30 UTC by default. | *Backups* (*Olympos database* card) |
 | **Key Vault** · `could not check purge protection of the KEK (needs keys/get)` | warn | The last check failed, usually because the server's identity cannot read the key's properties. | Grant the server identity `keys/get` on the key (the *Key Vault Crypto User* role includes it). | *Backups* (*Olympos database* card) |
+| **Synthetic credential** · `Credential <name> cannot be resolved — N scenarios affected` | crit | A [synthetic credential](synthetic-monitoring.md#credentials-that-cannot-be-resolved) that an enabled scenario uses cannot be resolved for good (secret not found, access denied, does not decrypt, empty, expired). When Key Vault just does not answer, the item is amber (*has been unavailable since HH:MM UTC*) and appears after 30 minutes. One item per credential, however many scenarios and clusters use it. Shown to whoever may read *Settings › Synthetic monitoring*. | Put the secret back, grant the server `get` on it, or rotate the credential. The item goes away at the next run that resolves it. | *Settings › Synthetic monitoring* (that credential) |
 | **N approvals** · `waiting for you · oldest <time> left` | warn | Pending change requests you may approve and that you did not open yourself. *Time left* is the earliest expiry. | Review them under *Approvals* before they expire. | *Approvals* |
 | **End of life** · `N clusters on v1.x, …` | warn | At least one cluster runs a Kubernetes minor version past its upstream end of life. | Plan an upgrade. The *Version matrix* marks those versions *EOL*. | Dashboard, filtered to EOL clusters |
 
 The API names these kinds `agent_offline`, `backup_failed`, `backup_missed`, `backup_partial`,
 `target_tls_changed`, `self_backup_failed`, `self_backup_partial`, `kek_purgeable`, `critical_cves`,
-`self_backup_unset`, `kek_recovery_unknown`, `approvals` and `eol` (`GET /api/v1/dashboard`, field
+`self_backup_unset`, `kek_recovery_unknown`, `synthetic_credential_broken`, `approvals` and `eol` (`GET /api/v1/dashboard`, field
 `attention`).
 
 The server checks the two Key Vault items at start and then **every hour**. After you fix the vault, the
@@ -251,6 +252,8 @@ activity log still gets one row per item.
 | `probe.offline` | A cluster's probe has been offline for `synthetic.probeOfflineAlertAfter` (default 5 minutes). Its scenarios read *probe offline*, never failed, and keep any alert that fires. | *Probe offline: \<cluster\>* · cluster, offline for. | Once per outage |
 | `probe.online` | The probe is back, **only** after a `probe.offline` for the same outage. A reconnect after a certificate renewal sends nothing. | *Probe back online: \<cluster\>* · cluster. | Once per outage |
 | `synthetic.credential_expiring` | A synthetic credential with an expiry date expires within 14 days, or within 3 days. | *Synthetic credential X expires in N days* (*… within a day*) · credential, expires, used by (scenarios). | One per credential and threshold |
+| `synthetic.credential_broken` | A [synthetic credential cannot be resolved](synthetic-monitoring.md#credentials-that-cannot-be-resolved): the Key Vault secret is gone or forbidden, the stored value does not decrypt, the secret is empty or the credential expired (at once); or Key Vault or the key encryption key has not answered for 30 minutes. | *Synthetic credential X cannot be resolved* (*… has been unavailable for 30 minutes*) · credential, cause, since, used by (scenarios), impact (N scenarios affected). | One per credential and episode (per channel) |
+| `synthetic.credential_restored` | The credential resolves again, **only** after a `synthetic.credential_broken` for the same episode. Saving a new secret or expiry sends nothing. | *Synthetic credential X resolves again* · credential, failing since. | One per credential and episode (per channel) |
 | `synthetic.allowlist_changed` | An admin added or removed a rule of the synthetic host allowlist: what probes may reach changed. On the upgrade that adds it, every channel that gets `grant.changed` is routed this event too. | *Synthetic allowlist: added \<kind\> rule \<pattern\>* (or *removed*) · change, rule, kind, by. | No |
 
 Short agent blips send nothing. A cluster counts as offline after 60 seconds of silence, but
@@ -319,7 +322,9 @@ Nothing is routed by default. An event with no route and no channel override is 
 `no_route`). The one exception is an upgrade that adds an event type that must not go unnoticed: the
 upgrade to v0.2 routes the new `backup.partial`, `restore.failed` and `restore.break_glass` to every
 channel that already gets `backup.failed`. The upgrade to v0.3 routes the new `synthetic.allowlist_changed` to
-every channel that already gets `grant.changed`. To receive events:
+every channel that already gets `grant.changed`. The upgrade that adds `synthetic.credential_broken` and
+`synthetic.credential_restored` routes both to every channel that already gets `synthetic.credential_expiring`.
+To receive events:
 
 1. *Settings › Notifications › Slack channels*: *Add channel* with a name and the Slack channel ID
    (*Channel details › About*, e.g. `C0123ABCD`). Invite the Olympos Slack app to the channel first.

@@ -15,6 +15,8 @@ import { CheckIcon, IconClose } from '../../ui/icons';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, Spinner, aria, fieldError, sentence, useAction, useToast, type Tone } from '../../ui/kit';
 import { DataTable } from '../../ui/DataTable';
 import { Select } from '../../ui/Select';
+import { CRED_KIND_LABEL, credentialState } from '../../ui/synthetic';
+import { syntheticSettingsRoute } from '../../router';
 import { SettingsLayout } from './SettingsLayout';
 
 // ------------------------------------------------------------ shared text
@@ -43,13 +45,6 @@ export function boundLabel(b: { pattern: string; kind: string }): { text: string
   const k = (kind === 'wildcard' || kind === 'suffix' ? kind : 'exact') as AllowKind;
   return { text: k === 'suffix' ? `${pattern} (suffix)` : pattern, title: `${KIND_LABEL[k]}: ${matchesText(k, pattern)}` };
 }
-
-export const CRED_KIND_LABEL: Record<CredentialKind, string> = {
-  bearer: 'Bearer token',
-  basic: 'Basic',
-  header: 'Header',
-  oauth2_client_credentials: 'OAuth2 client credentials',
-};
 
 /** The secret field of each kind, and whether the kind has a user name (the login, or the OAuth2 client id). */
 const SECRET_OF: Record<CredentialKind, { label: string; user?: string; userPh?: string }> = {
@@ -404,12 +399,37 @@ function RemoveRuleDialog({ rule, onClose }: { rule: AllowRule; onClose: () => v
 
 // ------------------------------------------------------------ credentials
 
+/** Under the name: what the last dispatch found, only when it is not fine (docs/design/settings-synthetic.html). */
+function CredentialStateLines({ c }: { c: SyntheticCredential }) {
+  const st = credentialState(c);
+  if (!st) return null;
+  return (
+    <>
+      <div className="cred-state">
+        <Badge tone={st.tone}>{st.label}</Badge>
+      </div>
+      {st.note && <div className="muted small cred-state-note">{st.note}</div>}
+    </>
+  );
+}
+
 function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
+  const { credential: selected } = syntheticSettingsRoute.useSearch();
   const q = useQuery({ queryKey: ['synthetic', 'credentials'], queryFn: () => api.get<ItemList<SyntheticCredential>>('/synthetic/credentials') });
   // undefined: closed; null: a new credential
   const [editing, setEditing] = useState<SyntheticCredential | null | undefined>(undefined);
+  // A link with ?credential= brings its row into view, once the list is there.
+  const card = useRef<HTMLElement>(null);
+  const scrolled = useRef<string>();
+  useEffect(() => {
+    if (!selected || !q.data || scrolled.current === selected) return;
+    const row = card.current?.querySelector('tr[aria-current="true"]');
+    if (!row) return;
+    scrolled.current = selected;
+    row.scrollIntoView?.({ block: 'center' });
+  }, [selected, q.data]);
   return (
-    <section className="card" aria-labelledby="cr-t">
+    <section className="card" aria-labelledby="cr-t" ref={card}>
       <div className="card-head">
         <div className="head-text">
           <h2 id="cr-t">Credentials</h2>
@@ -433,6 +453,8 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
         initialSort={{ id: 'name', dir: 'asc' }}
         onRowClick={canAdmin ? (c) => setEditing(c) : undefined}
         rowLabel={(c) => `Edit credential ${c.name}`}
+        rowClassName={(c) => (c.id === selected ? 'sel' : undefined)}
+        rowCurrent={(c) => c.id === selected}
         empty={
           <EmptyState
             title="No credentials yet"
@@ -452,6 +474,7 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
             id: 'name',
             header: 'Name',
             sortValue: (c) => c.name,
+            className: 'wrap',
             cell: (c) => (
               <>
                 {canAdmin ? (
@@ -462,12 +485,7 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
                   <span className="mono">{c.name}</span>
                 )}
                 {c.source === 'keyvault_ref' && <div className="muted small">Key Vault reference</div>}
-                {c.resolve_failures_24h > 0 && (
-                  <div className="hint-line ico-warn cred-warn">
-                    <CheckIcon ok={false} warn label="Warning" />
-                    <span>Could not be read {plural(c.resolve_failures_24h, 'time')} in 24 h; check the Key Vault reference or secret</span>
-                  </div>
-                )}
+                <CredentialStateLines c={c} />
               </>
             ),
           },

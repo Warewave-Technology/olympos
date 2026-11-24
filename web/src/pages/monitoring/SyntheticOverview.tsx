@@ -7,7 +7,7 @@ import type { SyntheticCell, SyntheticOverview as Overview, SyntheticOverviewSce
 import { useCan } from '../../auth/me';
 import { clockTime, plural } from '../../lib/format';
 import { MONITORING_STATUS, monitoringRoute } from '../../router';
-import { EmptyState, QueryView } from '../../ui/kit';
+import { Badge, EmptyState, QueryView } from '../../ui/kit';
 import { CELL, CellLegend, MatrixCell, ScenarioStatusBadge, reasonText, scenarioLine } from '../../ui/synthetic';
 
 export const overviewQueryKey = ['synthetic', 'overview'] as const;
@@ -28,6 +28,9 @@ export const pct = (v: number | null | undefined) => (v === null || v === undefi
 export const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v} ms`);
 
 function cellDetail(c: SyntheticCell): string {
+  // its runs end before they start: the last counted run is old news, and the overview does not know which
+  // credential it is (the scenario page does)
+  if (c.state === 'credential_error') return '';
   const parts: string[] = [];
   if (c.last_finished_at) parts.push(`last run ${clockTime(c.last_finished_at)}`);
   if (c.failed_step !== null && (c.state === 'failing' || c.state === 'degraded')) parts.push(`step ${c.failed_step + 1}: ${reasonText(c.failure_reason)}`);
@@ -179,6 +182,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
                     <Link to="/monitoring" search={{ scenario: s.id }}>
                       {s.name}
                     </Link>
+                    {s.cells.some((x) => x.state === 'credential_error') && <Badge tone="crit" className="inline-badge">Credential error</Badge>}
                   </div>
                   <div className="muted small">
                     {scenarioLine(s)}
@@ -193,7 +197,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
                   const c = s.cells.find((x) => x.cluster_id === col.id);
                   return (
                     <td key={col.id} className="mx-cell">
-                      {c ? <MatrixCell cluster={col.name} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id ? () => openRun(c.last_run_id!) : undefined} /> : <MatrixCell cluster={col.name} state="no_data" />}
+                      {c ? <MatrixCell cluster={col.name} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id && c.state !== 'credential_error' ? () => openRun(c.last_run_id!) : undefined} /> : <MatrixCell cluster={col.name} state="no_data" />}
                     </td>
                   );
                 })}
@@ -205,7 +209,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
         </table>
       </div>
       <div className="card-foot">
-        Each cell is the latest run of the scenario in that cluster: {Object.values(CELL)[0].symbol} passing, {CELL.failing.symbol} failing (alert firing), {CELL.degraded.symbol} degraded (the last run failed, no alert yet). Hover for details, click a cell for its run, a scenario for its history.
+        Each cell is the latest run of the scenario in that cluster: {Object.values(CELL)[0].symbol} passing, {CELL.failing.symbol} failing (alert firing), {CELL.degraded.symbol} degraded (the last run failed, no alert yet), {CELL.credential_error.symbol} credential error (a credential the scenario uses cannot be resolved). Hover for details, click a cell for its run, a scenario for its history.
       </div>
     </section>
   );

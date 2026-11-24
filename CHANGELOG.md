@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **One alert per synthetic credential that cannot be resolved**
+  ([#54](https://github.com/Warewave-Technology/olympos/issues/54)). A credential that could not be read used
+  to skip every run of every scenario that used it, silently, and an expired one alerted once per scenario.
+  Now each credential sends one message and shows one *Needs attention* item, however many scenarios and
+  clusters use it. A permanent failure alerts at once; a temporary one (Key Vault or the key encryption key
+  does not answer) alerts when it lasts 30 minutes. See `docs/synthetic-monitoring.md`
+  (*Credentials that cannot be resolved*).
+  - Behavior change (rulings P13 and P14): a stored value that does not decrypt, an empty secret, a Key Vault
+    secret that is missing or forbidden, and a reference the policy refuses, now end the run *error*
+    (`credential_broken`) instead of *skipped* (`credential_unavailable`). An expired credential still ends
+    *error* (`credential_expired`). These two reasons move no streak and are left out of availability, p95,
+    the timeline and the hourly aggregates, so expired credentials no longer open `synthetic.failing` per
+    scenario.
+
+### Added
+- Events `synthetic.credential_broken` (one per credential and episode) and `synthetic.credential_restored`
+  (when it resolves again), a *Needs attention* item (*Synthetic credential*, API kind
+  `synthetic_credential_broken`), the matrix cell state *credential error*, and the credential's state on
+  *Settings › Synthetic monitoring › Credentials* and on the scenario page. The credential API gains
+  `resolve_state`, `resolve_cause` and `resolve_failing_since`.
+
 ### Fixed
 - Restoring the Olympos database by hand on Rocky / Alma failed at once with `unrecognized configuration
   parameter "transaction_timeout"`: `docs/restore-olympos.md` ran the `pg_restore` on `PATH`, which is 17 there,
@@ -13,6 +35,15 @@ All notable changes to this project are documented here. The format follows
   `docs/restore.md`, the *Restore commands* note and a run's restore hint now say to use the new server's
   `pg_restore` (at least the dump's `tool_version`), not any newer one.
 - A probe that the gateway refused or revoked before its hello went out logged `EOF` instead of the reason.
+
+### Upgrade notes
+Nothing needs action; the migration runs at start.
+- `resolve_failures_24h` of a credential now counts only temporary failures; permanent ones end the run as
+  `credential_broken` errors and are not counted.
+- A `synthetic.failing` that is firing because of an expired credential stays firing until runs pass: runs that
+  fail on an expired credential no longer move streaks. Fix the credential, and the next passing runs close it.
+- Migration `00025` adds the credential state and copies the routes of `synthetic.credential_expiring` to both
+  new events, so every channel that hears about an expiry also hears that a credential cannot be resolved.
 
 ## [0.3.0] - 2026-11-24
 

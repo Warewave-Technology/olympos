@@ -38,6 +38,10 @@ const (
 	CellExcluded = "excluded"
 	// CellPaused: the scenario is disabled.
 	CellPaused = "paused"
+	// CellCredentialError: a credential the scenario uses cannot be
+	// resolved (it is broken for good): its runs end before they start, on
+	// every cluster the probe could serve.
+	CellCredentialError = "credential_error"
 	// CellNoData: no run has counted yet.
 	CellNoData = "no_data"
 )
@@ -50,8 +54,9 @@ const (
 )
 
 // cellState is where a scenario stands on a cluster. Excluded wins, then
-// paused, then the probe, then the alert, then the last counted run.
-func cellState(enabled bool, target string, firing bool, lastStatus *string) string {
+// paused, then the probe, then a credential that cannot be resolved, then
+// the alert, then the last counted run.
+func cellState(enabled bool, target string, credentialBroken, firing bool, lastStatus *string) string {
 	switch {
 	case target == TargetExcluded:
 		return CellExcluded
@@ -61,6 +66,8 @@ func cellState(enabled bool, target string, firing bool, lastStatus *string) str
 		return CellNotInstalled
 	case target == TargetProbeOffline:
 		return CellProbeOffline
+	case credentialBroken:
+		return CellCredentialError
 	case firing:
 		return CellFailing
 	case lastStatus == nil:
@@ -98,6 +105,25 @@ func loadPairStates(ctx context.Context, q store.Querier, scenarios []uuid.UUID)
 		err := r.Scan(&p.scenario, &p.cluster, &s.failures, &s.passes, &s.lastRun, &s.lastStatus, &s.lastFinished, &s.blocked,
 			&s.failedStep, &s.reason)
 		out[p] = s
+		return struct{}{}, err
+	})
+	return out, err
+}
+
+// loadBrokenScenarios returns the scenarios among ids with a credential
+// that cannot be resolved for good (resolve_state broken).
+func loadBrokenScenarios(ctx context.Context, q store.Querier, scenarios []uuid.UUID) (map[uuid.UUID]bool, error) {
+	rows, err := q.Query(ctx, `SELECT DISTINCT st.scenario_id FROM scenario_steps st
+		JOIN synthetic_credentials c ON c.id = st.credential_id
+		WHERE c.resolve_state = 'broken' AND st.scenario_id = ANY($1)`, scenarios)
+	if err != nil {
+		return nil, err
+	}
+	out := map[uuid.UUID]bool{}
+	_, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (struct{}, error) {
+		var id uuid.UUID
+		err := r.Scan(&id)
+		out[id] = true
 		return struct{}{}, err
 	})
 	return out, err
@@ -154,7 +180,7 @@ func loadStats(ctx context.Context, q store.Querier, scenarios, clusters []uuid.
 	rows, err := q.Query(ctx, `SELECT `+cols+`, count(*), count(*) FILTER (WHERE status = 'passed'),
 			percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms), percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms)
 		FROM synthetic_runs WHERE scenario_id = ANY($1) AND cluster_id = ANY($2) AND NOT test
-		  AND status IN ('passed','failed','error') AND finished_at > $3
+		  AND `+countedRunSQL+` AND finished_at > $3
 		GROUP BY `+group, scenarios, clusters, since)
 	if err != nil {
 		return nil, err
@@ -296,6 +322,11 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	broken, err := loadBrokenScenarios(ctx, q, ids)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
 	visible := f.visible()
 	st, err := loadStats(ctx, q, ids, f.readableIDs(), a.now().Add(-statsWindow), false)
 	if err != nil {
@@ -334,7 +365,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 			}
 			p := pair{s.ID, tc.ID}
 			ps := states[p]
-			cell := cellView{ClusterID: tc.ID, State: cellState(s.Enabled, tc.State, firing[p], ps.lastStatus),
+			cell := cellView{ClusterID: tc.ID, State: cellState(s.Enabled, tc.State, broken[s.ID], firing[p], ps.lastStatus),
 				LastRunID: ps.lastRun, LastStatus: ps.lastStatus, LastFinishedAt: ps.lastFinished, FailedStep: ps.failedStep,
 				FailureReason: ps.reason, ConsecutiveFailures: ps.failures, BlockedReason: ps.blocked}
 			switch cell.State {
@@ -434,6 +465,11 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
+	broken, err := loadBrokenScenarios(ctx, q, ids)
+	if err != nil {
+		a.fail(w, r, err)
+		return
+	}
 	now := a.now()
 	readable := f.readableIDs()
 	st, err := loadStats(ctx, q, ids, readable, now.Add(-statsWindow), true)
@@ -449,7 +485,7 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 	buckets := map[key]bucketView{}
 	rows, err := q.Query(ctx, `SELECT cluster_id, floor(extract(epoch FROM finished_at - $3::timestamptz)::float8 / $5::float8)::int, count(*),
 			count(*) FILTER (WHERE status = 'passed')
-		FROM synthetic_runs WHERE scenario_id = $1 AND cluster_id = ANY($2) AND NOT test AND status IN ('passed','failed','error')
+		FROM synthetic_runs WHERE scenario_id = $1 AND cluster_id = ANY($2) AND NOT test AND `+countedRunSQL+`
 		  AND finished_at >= $3 AND finished_at < $4
 		GROUP BY 1, 2`, id, readable, start, start.Add(statsWindow), bucketWidth.Seconds())
 	if err != nil {
@@ -477,7 +513,7 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 		p := pair{id, tc.ID}
 		ps := states[p]
 		row := clusterRowView{ClusterID: tc.ID, ClusterName: tc.Name, ProbeStatus: tc.ProbeStatus,
-			State:               cellState(s.Enabled, tc.State, firing[p], ps.lastStatus),
+			State:               cellState(s.Enabled, tc.State, broken[id], firing[p], ps.lastStatus),
 			ConsecutiveFailures: ps.failures, ConsecutivePasses: ps.passes, BlockedReason: ps.blocked,
 			Timeline: make([]bucketView, timelineBucket)}
 		if ps.lastRun != nil && ps.lastStatus != nil {
@@ -840,8 +876,11 @@ func (a *API) getRun(w http.ResponseWriter, r *http.Request) {
 
 	if item.ScenarioID != nil && !item.Test && item.FinishedAt != nil {
 		if item.Status == StatusFailed || item.Status == StatusError {
+			// The runs a credential error ended move no streak: they are not
+			// counted (countedRunSQL, over x).
 			if err := q.QueryRow(ctx, `SELECT count(*) FROM synthetic_runs x
-				WHERE x.scenario_id = $1 AND x.cluster_id = $2 AND NOT x.test AND x.status IN ('failed','error') AND x.finished_at <= $3
+				WHERE x.scenario_id = $1 AND x.cluster_id = $2 AND NOT x.test AND x.status IN ('failed','error') AND `+countedRunSQL+`
+				  AND x.finished_at <= $3
 				  AND x.finished_at > COALESCE((SELECT max(p.finished_at) FROM synthetic_runs p WHERE p.scenario_id = $1
 				    AND p.cluster_id = $2 AND NOT p.test AND p.status = 'passed' AND p.finished_at <= $3), '-infinity')`,
 				*item.ScenarioID, item.ClusterID, *item.FinishedAt).Scan(&d.ConsecutiveFailures); err != nil {

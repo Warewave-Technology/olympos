@@ -4,12 +4,14 @@ package inventory_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/Warewave-Technology/olympos/internal/apitest"
+	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/inventory"
 )
 
@@ -174,5 +176,46 @@ func TestAttentionBackupPartialRemovedMember(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "shrunk · missing offsite" {
 		t.Fatalf("backup_partial items: %q", got)
+	}
+}
+
+// Another module adds items through the hook; a failing hook is logged and
+// its items are left out, the dashboard still answers.
+func TestAttentionMoreHook(t *testing.T) {
+	var hookErr error
+	var seen []string
+	e := apitest.New(t, apitest.Options{Inventory: func(a *inventory.API) {
+		a.MoreAttention = func(_ context.Context, s *authz.Subject) ([]inventory.AttentionItem, error) {
+			seen = append(seen, s.Principal.DisplayName)
+			if hookErr != nil {
+				return nil, hookErr
+			}
+			return []inventory.AttentionItem{{Kind: "more", Severity: "warn", Label: "More", Detail: "from the hook", Link: "/more"}}, nil
+		}
+	}})
+	admin := e.Login(e.Principal("admin", "Member", "admin"))
+	var d inventory.Dashboard
+	if code := admin.Do("GET", "/api/v1/dashboard", nil, &d); code != 200 {
+		t.Fatal(code)
+	}
+	var more []inventory.AttentionItem
+	for _, a := range d.Attention {
+		if a.Kind == "more" {
+			more = append(more, a)
+		}
+	}
+	if len(more) != 1 || more[0] != (inventory.AttentionItem{Kind: "more", Severity: "warn", Label: "More", Detail: "from the hook", Link: "/more"}) ||
+		len(seen) != 1 || seen[0] != "admin" {
+		t.Fatalf("attention %+v, hook called for %v", d.Attention, seen)
+	}
+	hookErr = errors.New("hook failed")
+	var after inventory.Dashboard
+	if code := admin.Do("GET", "/api/v1/dashboard", nil, &after); code != 200 {
+		t.Fatalf("a failing hook: %d", code)
+	}
+	for _, a := range after.Attention {
+		if a.Kind == "more" {
+			t.Fatalf("items of a failing hook: %+v", a)
+		}
 	}
 }

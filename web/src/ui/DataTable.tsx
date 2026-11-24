@@ -55,6 +55,8 @@ export interface DataTableProps<T> {
   /** Accessible name of a clickable row ("Open orders-pg"). */
   rowLabel?: (row: T) => string;
   rowClassName?: (row: T) => string | undefined;
+  /** Marks the row aria-current="true" (the row a link pointed at). */
+  rowCurrent?: (row: T) => boolean;
   /** Sticky header inside a scroll box (default on). */
   stickyHeader?: boolean;
   /** Extra footer content to the right of the range (e.g. "Load older"). */
@@ -97,7 +99,7 @@ const interactive = (el: EventTarget | null, row: HTMLElement): boolean => {
  * keep their own behaviour.
  */
 export function DataTable<T>(props: DataTableProps<T>) {
-  const { rows, columns: allColumns, rowKey, label, what = 'rows', loading, error, onRetry, empty, noMatch, filterText = '', filterFn, onRowClick, rowLabel, rowClassName, stickyHeader = true, footerExtra, countNoun, resetKey, className, onVisibleRows } = props;
+  const { rows, columns: allColumns, rowKey, label, what = 'rows', loading, error, onRetry, empty, noMatch, filterText = '', filterFn, onRowClick, rowLabel, rowClassName, rowCurrent, stickyHeader = true, footerExtra, countNoun, resetKey, className, onVisibleRows } = props;
   const columns = allColumns.filter((c) => !c.hidden);
   const sizes = props.pageSizes ?? DEFAULT_SIZES;
   const paged = props.pageSize !== false;
@@ -203,6 +205,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
                   <tr
                     key={rowKey(r)}
                     className={cls}
+                    aria-current={rowCurrent?.(r) ? 'true' : undefined}
                     tabIndex={onRowClick ? 0 : undefined}
                     aria-label={onRowClick && rowLabel ? rowLabel(r) : undefined}
                     onClick={

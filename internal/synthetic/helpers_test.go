@@ -26,12 +26,17 @@ import (
 )
 
 // testKV wraps data keys with a fixed key: enough for secrets.Envelope, and
-// no dev build needed.
-type testKV struct{}
+// no dev build needed. Its Key Vault holds the secrets set with setSecret;
+// getErr and unwrapErr, when set, fail every GetSecret and UnwrapKey.
+type testKV struct {
+	mu                sync.Mutex
+	secrets           map[string][]byte
+	getErr, unwrapErr error
+}
 
-func (testKV) mask() []byte { s := sha256.Sum256([]byte("synthetic-test-kek")); return s[:] }
+func (*testKV) mask() []byte { s := sha256.Sum256([]byte("synthetic-test-kek")); return s[:] }
 
-func (k testKV) WrapKey(_ context.Context, dek []byte) ([]byte, string, error) {
+func (k *testKV) WrapKey(_ context.Context, dek []byte) ([]byte, string, error) {
 	m := k.mask()
 	out := make([]byte, len(dek))
 	for i := range dek {
@@ -40,17 +45,50 @@ func (k testKV) WrapKey(_ context.Context, dek []byte) ([]byte, string, error) {
 	return out, "v1", nil
 }
 
-func (k testKV) UnwrapKey(ctx context.Context, wrapped []byte, _ string) ([]byte, error) {
+func (k *testKV) UnwrapKey(ctx context.Context, wrapped []byte, _ string) ([]byte, error) {
+	k.mu.Lock()
+	err := k.unwrapErr
+	k.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
 	b, _, err := k.WrapKey(ctx, wrapped)
 	return b, err
 }
 
-func (testKV) GetSecret(context.Context, string, string) ([]byte, error) {
-	return nil, secrets.ErrSecretNotFound
+// GetSecret returns a copy: the caller zeroes what it gets.
+func (k *testKV) GetSecret(_ context.Context, vault, name string) ([]byte, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.getErr != nil {
+		return nil, k.getErr
+	}
+	b, ok := k.secrets[vault+"/"+name]
+	if !ok {
+		return nil, secrets.ErrSecretNotFound
+	}
+	return bytes.Clone(b), nil
 }
 
-func (testKV) SetSecret(context.Context, string, string, []byte) error {
+func (*testKV) SetSecret(context.Context, string, string, []byte) error {
 	return errors.New("read only")
+}
+
+// setSecret puts a secret in the test Key Vault.
+func (k *testKV) setSecret(vault, name, value string) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.secrets == nil {
+		k.secrets = map[string][]byte{}
+	}
+	k.secrets[vault+"/"+name] = []byte(value)
+}
+
+// fail makes GetSecret and UnwrapKey fail with these errors (nil: work).
+func (k *testKV) fail(get, unwrap error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.getErr, k.unwrapErr = get, unwrap
 }
 
 // syncBuffer is a log buffer safe for concurrent writers.
@@ -249,6 +287,7 @@ type env struct {
 	ctx    context.Context
 	db     *store.DB
 	svc    *Service
+	kv     *testKV
 	probes *fakeProbes
 	clock  *clock
 	// LogBuf holds the service's log, redacted as in production.
@@ -274,8 +313,8 @@ func newEnv(t *testing.T) *env {
 		}
 		return serial
 	}
-	kv := testKV{}
-	e.svc = &Service{DB: e.db, Log: log, Probes: e.probes, Creds: &backup.Credentials{KV: kv, Envelope: &secrets.Envelope{KV: kv}},
+	e.kv = &testKV{}
+	e.svc = &Service{DB: e.db, Log: log, Probes: e.probes, Creds: &backup.Credentials{KV: e.kv, Envelope: &secrets.Envelope{KV: e.kv}},
 		Cfg: config.Synthetic{ProbeOfflineAlertAfter: 5 * time.Minute}, Now: e.clock.now,
 		OnResult: func(_ context.Context, _ pgx.Tx, o RunOutcome) error {
 			e.mu.Lock()
@@ -317,9 +356,21 @@ func (e *env) allow(kind, pattern string) {
 // credential stores a synthetic credential; boundHosts are stored as given.
 func (e *env) credential(name, kind, username, secret string, boundHosts ...string) uuid.UUID {
 	e.t.Helper()
+	return e.storeCredential(name, kind, backup.CredentialInput{Source: backup.SourceStored, Username: username, Password: secret}, boundHosts...)
+}
+
+// kvCredential stores a synthetic credential that is the Key Vault
+// reference ref (kv://<vault>/<secret>), resolved in e.kv.
+func (e *env) kvCredential(name, kind, ref string, boundHosts ...string) uuid.UUID {
+	e.t.Helper()
+	return e.storeCredential(name, kind, backup.CredentialInput{Source: backup.SourceKeyVault, Ref: ref, Username: "label"}, boundHosts...)
+}
+
+func (e *env) storeCredential(name, kind string, in backup.CredentialInput, boundHosts ...string) uuid.UUID {
+	e.t.Helper()
 	var id uuid.UUID
 	err := store.Tx(e.ctx, e.db, func(tx pgx.Tx) error {
-		cid, err := e.svc.Creds.Insert(e.ctx, tx, backup.CredentialInput{Source: backup.SourceStored, Username: username, Password: secret})
+		cid, err := e.svc.Creds.Insert(e.ctx, tx, in)
 		if err != nil {
 			return err
 		}

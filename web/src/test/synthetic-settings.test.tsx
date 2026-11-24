@@ -6,6 +6,8 @@ import { cleanup, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import * as db from '../mocks/db';
 import * as syn from '../mocks/synthetic';
+import { clockTime } from '../lib/format';
+import { CAUSE_TEXT } from '../ui/synthetic';
 import { match } from '../mocks/handlers';
 import { boundLabel, matchesText } from '../pages/settings/Synthetic';
 import { probeConnected } from '../ui/InstallProbeDialog';
@@ -161,7 +163,8 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     const search = rowOf(table, 'search-api-key');
     expect(search).toHaveTextContent('Header X-Api-Key');
     expect(search).toHaveTextContent('Key Vault reference');
-    expect(search).toHaveTextContent('Could not be read 3 times in 24 h; check the Key Vault reference or secret');
+    // the state replaces the "could not be read N times" sentence
+    expect(search).not.toHaveTextContent('Could not be read');
     expect(within(search).getByText('never')).toBeInTheDocument();
     const reports = rowOf(table, 'reports-login');
     expect(reports).toHaveTextContent('Basic');
@@ -175,6 +178,45 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     expect(screen.getByText(/This is an exception to “credentials never enter a cluster”/)).toHaveTextContent(
       'a credential is sent to the probe for one run, kept in memory only, and attached only to requests whose host matches the hosts it is bound to. It is dropped on redirects to other hosts and redacted from stored responses. Use dedicated, read-only monitoring accounts.',
     );
+  });
+
+  it('shows the state of a credential under its name: broken, unavailable, and nothing when it is fine', async () => {
+    await renderApp('/settings/synthetic');
+    const table = await screen.findByRole('table', { name: 'Credentials' }, T);
+    await within(table).findByText('catalog-monitor', {}, T);
+    const since = (name: string) => clockTime(syn.credentials.find((c) => c.name === name)!.resolve_failing_since);
+    const search = rowOf(table, 'search-api-key');
+    expect(within(search).getByText('Cannot be resolved')).toHaveClass('badge', 'crit');
+    expect(search).toHaveTextContent(`not found in Key Vault · since ${since('search-api-key')}`);
+    const reports = rowOf(table, 'reports-login');
+    expect(within(reports).getByText('Unavailable')).toHaveClass('badge', 'warn');
+    expect(reports).toHaveTextContent(`since ${since('reports-login')}`);
+    expect(reports).not.toHaveTextContent('not found');
+    for (const ok of ['catalog-monitor', 'partner-oauth']) {
+      expect(rowOf(table, ok)).not.toHaveTextContent(/Cannot be resolved|Unavailable|since/);
+    }
+  });
+
+  it('says what is wrong for each cause', () => {
+    expect(Object.fromEntries(Object.entries(CAUSE_TEXT))).toEqual({
+      not_found: 'not found in Key Vault',
+      forbidden: 'access denied',
+      decrypt: 'the stored value does not decrypt',
+      empty: 'the secret is empty',
+      expired: 'expired',
+      unavailable: 'Key Vault unavailable',
+    });
+  });
+
+  it('opens on the row of the credential an attention item links to', async () => {
+    const id = syn.credentials.find((c) => c.name === 'search-api-key')!.id;
+    await renderApp(`/settings/synthetic?credential=${id}`);
+    const table = await screen.findByRole('table', { name: 'Credentials' }, T);
+    await within(table).findByText('catalog-monitor', {}, T);
+    expect(rowOf(table, 'search-api-key')).toHaveClass('sel');
+    expect(rowOf(table, 'search-api-key')).toHaveAttribute('aria-current', 'true');
+    expect(rowOf(table, 'catalog-monitor')).not.toHaveClass('sel');
+    expect(rowOf(table, 'catalog-monitor')).not.toHaveAttribute('aria-current');
   });
 
   it('creates a credential: the secret is sent once, never kept in a cache or a URL, and never shown again', async () => {
