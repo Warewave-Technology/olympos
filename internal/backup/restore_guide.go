@@ -330,7 +330,7 @@ func buildRestoreGuide(in guideInput) *RestoreGuide {
 			b.WriteString("for f in restore/*.dump; do\n  db=$(basename \"$f\" .dump)\n  createdb -h <new-host> -U postgres \"$db\"\n  pg_restore -h <new-host> -U postgres -d \"$db\" --no-owner -j 4 \"$f\"\ndone\n")
 		}
 		g.Steps = append(g.Steps, RestoreStep{Title: "Restore into a new PostgreSQL", Commands: strings.TrimRight(b.String(), "\n"),
-			Note: "Use pg_restore with a major version ≥ tool_version in the manifest. Into the original server: --clean --if-exists, ideally into a new database first."})
+			Note: "Use the pg_restore of the new server's major version, at least tool_version in the manifest (pg_restore 17 fails against PostgreSQL 16). Into the original server: --clean --if-exists, ideally into a new database first."})
 	}
 	return g
 }

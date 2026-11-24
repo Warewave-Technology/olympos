@@ -295,7 +295,9 @@ from the mounted export for NFS. The run's details fill them in for the copy you
 | `<db>.dump` | `pg_dump -Fc` of one database (custom format, restore with `pg_restore`) |
 
 The manifest records the server version and the pg_dump version used (`server_version`, `tool_version`).
-Use `pg_restore` with a major version ≥ the dump's.
+Use the `pg_restore` of the new server's major version, which must be the dump's (`tool_version`) or newer.
+A newer `pg_restore` can fail against an older server: `pg_restore` 17 into PostgreSQL 16 stops with
+`unrecognized configuration parameter "transaction_timeout"`.
 
 ### Restore
 

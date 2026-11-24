@@ -46,15 +46,19 @@ If the latest run was *Partial*, its successful copies are still a complete dump
 
 ## 2. Restore into an empty database
 
-Use `pg_restore` with a major version ≥ `tool_version` in the manifest.
+Use the `pg_restore` of the PostgreSQL you restore into, whose major version must be at least `tool_version`
+in the manifest. A newer `pg_restore` can fail against an older server: `pg_restore` 17 into PostgreSQL 16
+stops at once with `unrecognized configuration parameter "transaction_timeout"`.
 
-**systemd host** (local PostgreSQL, Unix socket, peer auth):
+**systemd host** (local PostgreSQL, Unix socket, peer auth). The install guide adds the `postgresql-client-17`
+or `postgresql17` package for backups, so give the PostgreSQL 16 `pg_restore` by its path:
 
 ```bash
 sudo systemctl stop olympos-server
 sudo -u postgres createuser olympos 2>/dev/null || true
 sudo -u postgres createdb -O olympos olympos_restored
-sudo -u olympos pg_restore -d "host=/var/run/postgresql dbname=olympos_restored" --no-owner --exit-on-error olympos.dump
+PG_RESTORE=/usr/lib/postgresql/16/bin/pg_restore   # Ubuntu / Debian; Rocky / Alma: /usr/pgsql-16/bin/pg_restore
+sudo -u olympos "$PG_RESTORE" -d "host=/var/run/postgresql dbname=olympos_restored" --no-owner --exit-on-error olympos.dump
 ```
 
 **Helm (bundled PostgreSQL)**:
@@ -66,8 +70,8 @@ kubectl -n olympos exec -i statefulset/olympos-postgresql -- \
   pg_restore -U olympos -d olympos_restored --no-owner --exit-on-error < olympos.dump
 ```
 
-**External PostgreSQL**: create an empty database owned by the Olympos role and run the same
-`pg_restore` against it.
+**External PostgreSQL**: create an empty database owned by the Olympos role and run the `pg_restore` of
+that server's major version against it.
 
 ## 3. Point the server at it
 

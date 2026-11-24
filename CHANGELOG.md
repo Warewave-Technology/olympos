@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- Restoring the Olympos database by hand on Rocky / Alma failed at once with `unrecognized configuration
+  parameter "transaction_timeout"`: `docs/restore-olympos.md` ran the `pg_restore` on `PATH`, which is 17 there,
+  against PostgreSQL 16. The guide now names the PostgreSQL 16 `pg_restore` by its path, and the rule in
+  `docs/restore.md`, the *Restore commands* note and a run's restore hint now say to use the new server's
+  `pg_restore` (at least the dump's `tool_version`), not any newer one.
+- A probe that the gateway refused or revoked before its hello went out logged `EOF` instead of the reason.
+
 ## [0.3.0] - 2026-11-24
 
 Synthetic monitoring: scenarios defined once in Olympos run from a probe inside every cluster they target.
