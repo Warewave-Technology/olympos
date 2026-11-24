@@ -43,7 +43,10 @@ var runTimeoutSQL = fmt.Sprintf(`GREATEST(LEAST(COALESCE(
 //     each, with the allowlist and the scenario's credentials sealed to the
 //     stream's key. Only streams of the cluster's current probe
 //     certificate count: one that connected before a renewal gets nothing. An expired or invalid credential ends the run as an
-//     error; one the server cannot resolve skips it (credential_unavailable).
+//     error; one that cannot be resolved ends it as an error
+//     (credential_broken) when retrying cannot help, and skips it
+//     (credential_unavailable) when it can. Either way the credential's
+//     state is recorded and alerts once (recordCredentialFailure).
 //
 // It returns how many runs it sent.
 func (s *Service) Dispatch(ctx context.Context) (int, error) {
@@ -186,11 +189,14 @@ func (s *Service) send(ctx context.Context, clusterID uuid.UUID, certSerial stri
 
 	built := false
 	var credErr error
+	var resolved []uuid.UUID
 	info, err := s.Probes.SendRun(clusterID, certSerial, func(info gateway.ProbeInfo) (*pb.RunScenario, error) {
 		built = true
 		msg := &pb.RunScenario{RunId: runID.String(), ScenarioJson: body, Allowlist: snap, Test: test}
 		if len(credIDs) > 0 {
-			sealed, err := s.seal(ctx, info.PublicKey, runID, clusterID, credIDs)
+			var sealed *pb.SealedCredentials
+			var err error
+			sealed, resolved, err = s.seal(ctx, info.PublicKey, runID, clusterID, credIDs)
 			if err != nil {
 				credErr = err
 				return nil, err
@@ -202,13 +208,23 @@ func (s *Service) send(ctx context.Context, clusterID uuid.UUID, certSerial stri
 		s.track(runID, &sentRun{cluster: clusterID, session: info.SessionID, deadline: s.now().Add(timeout + ResultGrace)})
 		return msg, nil
 	})
+	s.recordCredentials(ctx, runID, resolved, credErr)
 	switch {
 	case err == nil:
 		s.Log.Debug("synthetic run sent", "run_id", runID, "cluster_id", clusterID, "session", info.SessionID)
 		return true, nil
 	case credErr != nil:
 		status, reason := credentialReason(credErr)
-		s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason, "err", credErr)
+		// A resolution failure is logged by its cause: Key Vault's own
+		// text may carry its response.
+		var f *credentialFailure
+		if errors.As(credErr, &f) {
+			cause, _ := resolveCause(f.Err)
+			s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason,
+				"credential_id", f.ID, "cause", cause)
+		} else {
+			s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason, "err", credErr)
+		}
 		return false, s.finishOne(ctx, runID, clusterID, status, reason)
 	case !built:
 		// No stream of the current certificate was free (ErrProbeBusy,
@@ -224,18 +240,36 @@ func (s *Service) send(ctx context.Context, clusterID uuid.UUID, certSerial stri
 }
 
 // seal resolves the credentials and seals them to the stream's key for this
-// run on this cluster. Every plaintext copy is zeroed before it returns.
-func (s *Service) seal(ctx context.Context, pub []byte, runID, clusterID uuid.UUID, ids []uuid.UUID) (*pb.SealedCredentials, error) {
-	creds, err := runCredentials(ctx, s.DB, s.Creds, ids, s.now())
+// run on this cluster, and returns the credentials that resolved (see
+// runCredentials). Every plaintext copy is zeroed before it returns.
+func (s *Service) seal(ctx context.Context, pub []byte, runID, clusterID uuid.UUID, ids []uuid.UUID) (*pb.SealedCredentials, []uuid.UUID, error) {
+	creds, resolved, err := runCredentials(ctx, s.DB, s.Creds, ids, s.now())
 	defer spec.ZeroCredentials(creds)
 	if err != nil {
-		return nil, err
+		return nil, resolved, err
 	}
 	enc, ct, err := spec.SealCredentials(pub, runID.String(), clusterID.String(), creds)
 	if err != nil {
-		return nil, err
+		return nil, resolved, err
 	}
-	return &pb.SealedCredentials{Enc: enc, Ciphertext: ct}, nil
+	return &pb.SealedCredentials{Enc: enc, Ciphertext: ct}, resolved, nil
+}
+
+// recordCredentials records on each credential what resolving a run's
+// credentials found: those in resolved are ok, the one err names is not.
+// A failure to record is logged and does not change how the run ends.
+func (s *Service) recordCredentials(ctx context.Context, runID uuid.UUID, resolved []uuid.UUID, err error) {
+	if rerr := s.recordCredentialOK(ctx, resolved); rerr != nil {
+		s.Log.Warn("record synthetic credential state", "run_id", runID, "err", rerr)
+	}
+	var f *credentialFailure
+	if !errors.As(err, &f) {
+		return
+	}
+	cause, permanent := resolveCause(f.Err)
+	if rerr := s.recordCredentialFailure(ctx, f.ID, cause, permanent); rerr != nil {
+		s.Log.Warn("record synthetic credential state", "run_id", runID, "credential_id", f.ID, "cause", cause, "err", rerr)
+	}
 }
 
 func (s *Service) track(runID uuid.UUID, r *sentRun) {

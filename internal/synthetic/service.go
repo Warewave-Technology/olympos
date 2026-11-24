@@ -69,16 +69,21 @@ const (
 	// ReasonInvalidScenario: the scenario could not be loaded, or the probe
 	// refused it (error).
 	ReasonInvalidScenario = "invalid_scenario"
-	// ReasonCredentialError: a credential of the scenario could not be
-	// resolved or its bound hosts do not parse (error). The probe uses the
-	// same code.
+	// ReasonCredentialError: a credential of the scenario is missing or its
+	// bound hosts do not parse (error). The probe uses the same code.
 	ReasonCredentialError = "credential_error"
 	// ReasonCredentialExpired: a credential of the scenario is past its
-	// expires_at (error, ruling P13).
+	// expires_at (error, ruling P13). Like credential_broken, it moves no
+	// streak and counts in no stat: the credential alerts, once (#54).
 	ReasonCredentialExpired = "credential_expired"
+	// ReasonCredentialBroken: a credential of the scenario cannot be
+	// resolved and will not be until someone changes it or the vault (error;
+	// not found, forbidden, does not decrypt, empty). It moves no streak and
+	// counts in no stat: the credential alerts, once (#54).
+	ReasonCredentialBroken = "credential_broken"
 	// ReasonCredentialUnavailable: the server could not resolve a
-	// credential (Key Vault, the envelope, the database): skipped, the
-	// fault is not the scenario's (ruling P14).
+	// credential for now (Key Vault did not answer, the KEK, the database):
+	// skipped, the fault is not the scenario's (ruling P14).
 	ReasonCredentialUnavailable = "credential_unavailable"
 	// ReasonScenarioDisabled: the run was due after its scenario was
 	// disabled (skipped, ruling P13).

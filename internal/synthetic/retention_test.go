@@ -92,8 +92,8 @@ func TestRollupValues(t *testing.T) {
 	prev := cur.Add(-hour)
 
 	// c1, previous hour: 3 passed (10, 20, 30 ms), 1 failed (40), 1 error
-	// (100). Never counted: a skipped run, a test run, and a run of the
-	// current hour (not finished yet).
+	// (100). Never counted: a skipped run, a test run, a run of the current
+	// hour (not finished yet), and the runs of a credential error.
 	for i, ms := range []int{10, 20, 30} {
 		e.finished(sc, c1, StatusPassed, prev.Add(time.Duration(i+1)*time.Minute), ms, false)
 	}
@@ -102,6 +102,11 @@ func TestRollupValues(t *testing.T) {
 	e.finished(sc, c1, StatusSkipped, prev.Add(20*time.Minute), 5000, false)
 	e.finished(sc, c1, StatusFailed, prev.Add(21*time.Minute), 7000, true)
 	e.finished(sc, c1, StatusPassed, cur.Add(5*time.Minute), 1, false)
+	for i, reason := range []string{ReasonCredentialBroken, ReasonCredentialExpired} {
+		at := prev.Add(time.Duration(30+i) * time.Minute)
+		e.exec(`INSERT INTO synthetic_runs (scenario_id, cluster_id, scheduled_for, started_at, finished_at, status, total_ms, failure_reason)
+			VALUES ($1, $2, $3, $3, $3, 'error', 3, $4)`, sc, c1, at, reason)
+	}
 	// c2, two hours ago: a passed run and an error without a duration.
 	e.finished(sc, c2, StatusPassed, prev.Add(-hour+time.Minute), 7, false)
 	e.finished(sc, c2, StatusError, prev.Add(-hour+2*time.Minute), -1, false)

@@ -154,7 +154,7 @@ func loadStats(ctx context.Context, q store.Querier, scenarios, clusters []uuid.
 	rows, err := q.Query(ctx, `SELECT `+cols+`, count(*), count(*) FILTER (WHERE status = 'passed'),
 			percentile_cont(0.5) WITHIN GROUP (ORDER BY total_ms), percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms)
 		FROM synthetic_runs WHERE scenario_id = ANY($1) AND cluster_id = ANY($2) AND NOT test
-		  AND status IN ('passed','failed','error') AND finished_at > $3
+		  AND `+countedRunSQL+` AND finished_at > $3
 		GROUP BY `+group, scenarios, clusters, since)
 	if err != nil {
 		return nil, err
@@ -449,7 +449,7 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 	buckets := map[key]bucketView{}
 	rows, err := q.Query(ctx, `SELECT cluster_id, floor(extract(epoch FROM finished_at - $3::timestamptz)::float8 / $5::float8)::int, count(*),
 			count(*) FILTER (WHERE status = 'passed')
-		FROM synthetic_runs WHERE scenario_id = $1 AND cluster_id = ANY($2) AND NOT test AND status IN ('passed','failed','error')
+		FROM synthetic_runs WHERE scenario_id = $1 AND cluster_id = ANY($2) AND NOT test AND `+countedRunSQL+`
 		  AND finished_at >= $3 AND finished_at < $4
 		GROUP BY 1, 2`, id, readable, start, start.Add(statsWindow), bucketWidth.Seconds())
 	if err != nil {

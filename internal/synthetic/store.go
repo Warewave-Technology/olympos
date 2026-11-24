@@ -206,10 +206,12 @@ type credentialRow struct {
 	bound                      []hostallow.Rule
 }
 
-// How a credential can fail a run (ruling P14). Invalid and expired are
-// the credential's fault and end the run as an error; anything else (Key
-// Vault, the envelope, the database) is the server's and must not count
-// as a failure of the scenario.
+// How a credential can fail a run (#54, superseding rulings P13 and P14
+// where they conflict). A credential that cannot be resolved for good, or
+// has expired, ends the run as an error that moves no streak: the
+// credential alerts, once. One the server cannot resolve for now (Key
+// Vault, the KEK, the database) skips the run. A missing row or bound host
+// that does not parse is the scenario's and ends the run as an error.
 var (
 	// errCredential means a credential is missing or its row is unusable.
 	errCredential = errors.New("synthetic credential unusable")
@@ -221,11 +223,18 @@ var (
 
 // credentialReason maps a credential error to how the run ends.
 func credentialReason(err error) (status, reason string) {
+	var f *credentialFailure
 	switch {
-	case errors.Is(err, errCredentialExpired):
-		return StatusError, ReasonCredentialExpired
-	case errors.Is(err, errCredential), errors.Is(err, errCredentialEmpty):
+	case errors.Is(err, errCredential):
 		return StatusError, ReasonCredentialError
+	case !errors.As(err, &f):
+		return StatusSkipped, ReasonCredentialUnavailable
+	}
+	switch cause, permanent := resolveCause(f.Err); {
+	case cause == CauseExpired:
+		return StatusError, ReasonCredentialExpired
+	case permanent:
+		return StatusError, ReasonCredentialBroken
 	}
 	return StatusSkipped, ReasonCredentialUnavailable
 }
@@ -298,21 +307,26 @@ func CredentialBounds(ctx context.Context, q store.Querier, ids []uuid.UUID) (ma
 // zeroes the result with spec.ZeroCredentials, whatever happens; on an
 // error, nothing is left to zero.
 //
+// A credential that is expired or does not resolve fails with a
+// *credentialFailure that names it; resolved lists the credentials that
+// resolved before it (all of ids on success), so that dispatch records the
+// state of each credential it actually tried (#54).
+//
 // Only basic and OAuth2 credentials carry a user name (the client id for
 // OAuth2): for the other kinds the stored user name is a label, and the
 // probe would scrub it from every result as if it were secret.
-func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID, now time.Time) (out []spec.RunCredential, err error) {
+func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID, now time.Time) (out []spec.RunCredential, resolved []uuid.UUID, err error) {
 	rows, err := loadCredentials(ctx, q, ids)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for _, c := range rows {
 		if c.expiresAt != nil && !now.Before(*c.expiresAt) {
-			return nil, fmt.Errorf("%w: credential %s expired at %s", errCredentialExpired, c.id, c.expiresAt.UTC().Format(time.RFC3339))
+			return nil, nil, &credentialFailure{c.id, fmt.Errorf("%w at %s", errCredentialExpired, c.expiresAt.UTC().Format(time.RFC3339))}
 		}
 	}
 	if len(rows) > 0 && creds == nil {
-		return nil, errors.New("no credential store")
+		return nil, nil, errors.New("no credential store")
 	}
 	defer func() {
 		if err != nil {
@@ -327,8 +341,7 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		login, err := creds.Resolve(ctx, q, c.credentialID)
 		if err != nil {
-			// Key Vault or the envelope: the server's side (P14).
-			return out, fmt.Errorf("resolve credential %s: %w", c.id, err)
+			return out, resolved, &credentialFailure{c.id, err}
 		}
 		// NewSecret takes the resolved buffer: ZeroCredentials reaches it.
 		rc.Secret = spec.NewSecret(login.Secret)
@@ -337,10 +350,11 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		out = append(out, rc)
 		if rc.Secret == nil {
-			return out, fmt.Errorf("%w: credential %s is empty", errCredentialEmpty, c.id)
+			return out, resolved, &credentialFailure{c.id, errCredentialEmpty}
 		}
+		resolved = append(resolved, c.id)
 	}
-	return out, nil
+	return out, resolved, nil
 }
 
 // loadAllowlist reads the allowlist and its version in one statement, so

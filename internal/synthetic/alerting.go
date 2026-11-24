@@ -24,7 +24,8 @@ import (
 // errored. A test run never counts. A skipped run (probe offline or
 // disconnected, scenario disabled, credential unavailable, not dispatched,
 // ...) neither counts nor resets a streak (Review Focus 4): the scenario was
-// not tried.
+// not tried. Nor does a run that ended because a credential cannot be
+// resolved or has expired: the credential alerts instead (counts).
 
 // AlertRule is a scenario's alert settings (scenario_alerts). A nil channel
 // means the event's routes decide.
@@ -83,10 +84,22 @@ func Step(st StreakState, status string, r AlertRule) (StreakState, Transition) 
 	return st, None
 }
 
-// counts reports whether a run of this status moves a streak.
-func counts(status string) bool {
+// counts reports whether a run of this status and reason moves a streak.
+// A credential that cannot be resolved (credential_broken) or has expired
+// says nothing about the scenario: it alerts once, for the credential, not
+// once per scenario and cluster (#54).
+func counts(status, reason string) bool {
+	if reason == ReasonCredentialBroken || reason == ReasonCredentialExpired {
+		return false
+	}
 	return status == StatusPassed || status == StatusFailed || status == StatusError
 }
+
+// countedRunSQL is counts in SQL, over synthetic_runs: the runs that the
+// stats (availability, percentiles, the timeline, the hourly rollups) are
+// made of.
+const countedRunSQL = "status IN ('passed','failed','error') AND COALESCE(failure_reason, '') NOT IN ('" +
+	ReasonCredentialBroken + "','" + ReasonCredentialExpired + "')"
 
 // loadAlertRule reads a scenario's alert settings, DefaultAlertRule when it
 // has none.
@@ -103,7 +116,8 @@ func loadAlertRule(ctx context.Context, q pgx.Tx, scenarioID uuid.UUID) (AlertRu
 
 // ApplyOutcome is the Service's OnResult: it moves the streak of the run's
 // scenario and cluster, opens or resolves the cluster alert, then the fleet
-// alert. Test runs and runs that do not count (skipped) return at once.
+// alert. Test runs and runs that do not count (skipped, a credential
+// error) return at once.
 // Nothing that is missing is an error: a scenario deleted meanwhile, or a
 // run already applied, is a no-op, so that a batch that finishes many runs
 // in one transaction is never rolled back by one of them.
@@ -113,7 +127,7 @@ func loadAlertRule(ctx context.Context, q pgx.Tx, scenarioID uuid.UUID) (AlertRu
 // their turn: two clusters that reach the fleet threshold at once must see
 // each other's alert.
 func (s *Service) ApplyOutcome(ctx context.Context, tx pgx.Tx, o RunOutcome) error {
-	if o.Test || o.ScenarioID == uuid.Nil || !counts(o.Status) {
+	if o.Test || o.ScenarioID == uuid.Nil || !counts(o.Status, o.Reason) {
 		return nil
 	}
 	var one int

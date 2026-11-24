@@ -17,9 +17,9 @@ import (
 const ExpiryInterval = 24 * time.Hour
 
 // ExpiryThresholds are the days before a credential's expires_at at which
-// synthetic.credential_expiring fires (§5). An expired credential gets no
-// message of its own: its runs end in error (credential_expired) and alert
-// like any failure.
+// synthetic.credential_expiring fires (§5). Once expired, the credential
+// is reported by dispatch, once: synthetic.credential_broken with cause
+// expired (recordCredentialFailure).
 var ExpiryThresholds = []int{14, 3}
 
 // expiryThreshold is the smallest threshold that remaining is within, or -1

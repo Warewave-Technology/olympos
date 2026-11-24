@@ -799,6 +799,12 @@ func TestOverviewCells(t *testing.T) {
 			VALUES ($1, $2, $3, $4, $5, now())`, id, c, map[string]int{"failed": 1, "passed": 0}[status], r, status)
 	}
 	x.exec(`INSERT INTO synthetic_alerts (scenario_id, cluster_id, state, reason, last_run_id) VALUES ($1, $2, 'firing', 'timeout', $3)`, id, x.clusters["dev-1"], r1)
+	// A credential that cannot be resolved or has expired says nothing about
+	// the scenario: these runs lower no availability.
+	for _, reason := range []string{"credential_broken", "credential_expired"} {
+		x.exec(`INSERT INTO synthetic_runs (scenario_id, cluster_id, status, started_at, finished_at, total_ms, probe_ip, failure_reason)
+			VALUES ($1, $2, 'error', now(), now(), 12, '', $3)`, id, x.clusters["prod-1"], reason)
+	}
 
 	var ov struct {
 		KPIs struct {
@@ -852,9 +858,10 @@ func TestOverviewCells(t *testing.T) {
 
 	var cl struct {
 		Items []struct {
-			ClusterName string `json:"cluster_name"`
-			State       string `json:"state"`
-			Timeline    []struct {
+			ClusterName     string   `json:"cluster_name"`
+			State           string   `json:"state"`
+			Availability24h *float64 `json:"availability_24h"`
+			Timeline        []struct {
 				State string `json:"state"`
 			} `json:"timeline"`
 			LastRun *struct {
@@ -871,6 +878,9 @@ func TestOverviewCells(t *testing.T) {
 		}
 		if it.ClusterName == "dev-1" && (it.State != "failing" || it.LastRun == nil || it.Timeline[47].State != "failed") {
 			t.Fatalf("dev-1 row: %+v", it)
+		}
+		if it.ClusterName == "prod-1" && (it.Availability24h == nil || *it.Availability24h != 100 || it.Timeline[47].State != "passed") {
+			t.Fatalf("prod-1 row: %+v", it)
 		}
 	}
 	var al struct {
