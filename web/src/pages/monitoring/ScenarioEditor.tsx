@@ -32,7 +32,8 @@ import { monitoringEditorRoute } from '../../router';
 import { CheckIcon, IconArrowDown, IconArrowUp, IconClose } from '../../ui/icons';
 import { ErrorState, ForbiddenState, Loading, Spinner, aria, sentence, useAction, useNow, useToast } from '../../ui/kit';
 import { PageHead } from '../../ui/status';
-import { TagInput } from '../../ui/TagInput';
+import { Select } from '../../ui/Select';
+import { ScopeInput, TagInput } from '../../ui/TagInput';
 import { HiddenNote, OPERATOR_LABEL, SUBJECT_LABEL, TYPE_LABEL, actualText, assertionText, reasonText, stepTitle, urlHost, withCredentialNames } from '../../ui/synthetic';
 import { POLL_MARGIN_MS, RunDialog, useSyntheticRun } from './RunDialog';
 import { CrumbLinks, scenarioKey } from './ScenarioDetail';
@@ -209,6 +210,7 @@ const argOf = (subject: string) => (subject.includes(':') ? subject.slice(subjec
 const INTERVALS = [30, 60, 300, 900, 3600];
 const INTERVAL_LABEL: Record<number, string> = { 30: '30 s', 60: '1 min', 300: '5 min', 900: '15 min', 3600: '1 h' };
 const METHODS: HttpMethod[] = ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'];
+const DNS_RECORDS = ['A', 'AAAA', 'CNAME', 'TXT'] as const;
 const KIND_LABEL: Record<StepKind, string> = { http: 'HTTP request', dns: 'DNS resolve', tcp: 'TCP connect', tls: 'TLS certificate' };
 const CRED_KIND: Record<string, string> = { bearer: 'Bearer token', basic: 'Basic auth', header: 'Header', oauth2_client_credentials: 'OAuth2 client credentials' };
 
@@ -658,11 +660,16 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
                 <label className="lbl" htmlFor="rt">
                   Retry a failed step
                 </label>
-                <select className="in" value={d.step_retries} onChange={(e) => set({ step_retries: Number(e.target.value) })} {...aria('rt', fields.step_retries)}>
-                  <option value={0}>No retry</option>
-                  <option value={1}>1 time</option>
-                  <option value={2}>2 times</option>
-                </select>
+                <Select
+                  value={String(d.step_retries)}
+                  onChange={(v) => set({ step_retries: Number(v) })}
+                  options={[
+                    { value: '0', label: 'No retry' },
+                    { value: '1', label: '1 time' },
+                    { value: '2', label: '2 times' },
+                  ]}
+                  {...aria('rt', fields.step_retries)}
+                />
                 <FieldMsg id="rt" text={fields.step_retries} admin={admin} />
               </div>
             </div>
@@ -716,14 +723,7 @@ function ChannelSelect({ id, label, value, none, channels, onChange, error, admi
       <label className="lbl" htmlFor={id}>
         {label}
       </label>
-      <select className="in" value={value ?? ''} onChange={(e) => onChange(e.target.value || null)} {...aria(id, error)}>
-        <option value="">{none}</option>
-        {channels.map((c) => (
-          <option key={c.id} value={c.id}>
-            {c.name}
-          </option>
-        ))}
-      </select>
+      <Select value={value ?? ''} onChange={(v) => onChange(v || null)} options={[{ value: '', label: none }, ...channels.map((c) => ({ value: c.id, label: c.name }))]} {...aria(id, error)} />
       <FieldMsg id={id} text={error} admin={admin} />
     </div>
   );
@@ -768,7 +768,7 @@ function RunsOn({ d, set, fields, admin, globalEditor }: { d: Draft; set: (p: Pa
           <label className="lbl" htmlFor="ros">
             Cluster labels
           </label>
-          <input className="in mono" value={d.run_on_selector} placeholder="env=prod" onChange={(e) => set({ run_on_selector: e.target.value })} {...aria('ros', fields.run_on_selector)} />
+          <ScopeInput id="ros" value={d.run_on_selector} onChange={(v) => set({ run_on_selector: v })} placeholder="add env=prod" hideCount error={fields.run_on_selector} hintId={fields.run_on_selector ? 'ros-err' : undefined} />
           <FieldMsg id="ros" text={fields.run_on_selector} admin={admin} />
         </div>
       )}
@@ -897,21 +897,14 @@ function StepEditor({
           {single ? (
             <b>{KIND_LABEL[st.kind]}</b>
           ) : (
-            <select
-              className="in compact"
+            <Select
+              size="sm"
+              inline
               aria-label={`Step ${n} type`}
               value={st.kind}
-              onChange={(e) => {
-                const k = e.target.value as StepKind;
-                onChange((s) => ({ ...s, step: newStep(k), headers: [] }));
-              }}
-            >
-              {(Object.keys(KIND_LABEL) as StepKind[]).map((k) => (
-                <option key={k} value={k}>
-                  {KIND_LABEL[k]}
-                </option>
-              ))}
-            </select>
+              onChange={(k) => onChange((s) => ({ ...s, step: newStep(k), headers: [] }))}
+              options={(Object.keys(KIND_LABEL) as StepKind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }))}
+            />
           )}
         </div>
         {!single && (
@@ -935,11 +928,7 @@ function StepEditor({
       {st.kind === 'http' && st.http && (
         <>
           <div className="method-url">
-            <select className="in" aria-label={`Step ${n} method`} value={st.http.method} onChange={(e) => setStep({ http: { ...st.http!, method: e.target.value as HttpMethod } })}>
-              {METHODS.map((m) => (
-                <option key={m}>{m}</option>
-              ))}
-            </select>
+            <Select mono aria-label={`Step ${n} method`} value={st.http.method} onChange={(m) => setStep({ http: { ...st.http!, method: m } })} options={METHODS.map((m) => ({ value: m, label: m }))} />
             <input className="in mono" aria-label={`Step ${n} URL`} value={st.http.url} onChange={(e) => setStep({ http: { ...st.http!, url: e.target.value } })} spellCheck={false} {...aria(`${id}-url`, f('http.url'))} />
           </div>
           <FieldMsg id={`${id}-url`} text={f('http.url')} admin={admin} />
@@ -951,10 +940,17 @@ function StepEditor({
                 <label className="lbl" htmlFor={`${id}-body`}>
                   Body
                 </label>
-                <select className="in compact" aria-label={`Step ${n} body type`} value={st.http.body_type ?? 'text'} onChange={(e) => setStep({ http: { ...st.http!, body_type: e.target.value as 'text' | 'json' } })}>
-                  <option value="text">Text</option>
-                  <option value="json">JSON</option>
-                </select>
+                <Select
+                  size="sm"
+                  inline
+                  aria-label={`Step ${n} body type`}
+                  value={st.http.body_type ?? 'text'}
+                  onChange={(t) => setStep({ http: { ...st.http!, body_type: t } })}
+                  options={[
+                    { value: 'text', label: 'Text' },
+                    { value: 'json', label: 'JSON' },
+                  ]}
+                />
               </div>
               <textarea className="in mono" rows={4} value={st.http.body ?? ''} onChange={(e) => setStep({ http: { ...st.http!, body: e.target.value } })} spellCheck={false} {...aria(`${id}-body`, f('http.body'))} />
               <FieldMsg id={`${id}-body`} text={f('http.body')} admin={admin} />
@@ -967,21 +963,23 @@ function StepEditor({
             <label className="lbl" htmlFor={`${id}-auth`}>
               Auth
             </label>
-            <select className="in" value={st.credential_id ?? ''} onChange={(e) => setStep({ credential_id: e.target.value || null })} {...aria(`${id}-auth`, f('credential_id'), true)}>
-              <option value="">None</option>
-              {creds.map((c) => {
-                const host = urlHost(st.http!.url);
-                const off = host && !bound(c, host);
-                return (
-                  <option key={c.id} value={c.id}>
-                    {c.name} · {CRED_KIND[c.kind] ?? c.kind}
-                    {c.kind === 'header' && c.header_name ? ` ${c.header_name}` : ''} · bound to {c.bound_hosts.map((b) => b.pattern).join(', ')}
-                    {off ? ' · not bound to this host' : ''}
-                    {c.expired ? ' · expired' : ''}
-                  </option>
-                );
-              })}
-            </select>
+            <Select
+              value={st.credential_id ?? ''}
+              onChange={(v) => setStep({ credential_id: v || null })}
+              options={[
+                { value: '', label: 'None' },
+                ...creds.map((c) => {
+                  const host = urlHost(st.http!.url);
+                  const off = host && !bound(c, host);
+                  return {
+                    value: c.id,
+                    label: `${c.name} · ${CRED_KIND[c.kind] ?? c.kind}${c.kind === 'header' && c.header_name ? ` ${c.header_name}` : ''}`,
+                    hint: `bound to ${c.bound_hosts.map((b) => b.pattern).join(', ')}${off ? ' · not bound to this host' : ''}${c.expired ? ' · expired' : ''}`,
+                  };
+                }),
+              ]}
+              {...aria(`${id}-auth`, f('credential_id'), true)}
+            />
             <FieldMsg id={`${id}-auth`} text={f('credential_id')} admin={admin} />
             <LoadError what="the credentials" q={credsQ} />
             {!f('credential_id') && (
@@ -1003,11 +1001,7 @@ function StepEditor({
 
       {st.kind === 'dns' && st.dns && (
         <div className="method-url">
-          <select className="in" aria-label={`Step ${n} record type`} value={st.dns.record_type} onChange={(e) => setStep({ dns: { ...st.dns!, record_type: e.target.value as 'A' } })}>
-            {['A', 'AAAA', 'CNAME', 'TXT'].map((r) => (
-              <option key={r}>{r}</option>
-            ))}
-          </select>
+          <Select mono aria-label={`Step ${n} record type`} value={st.dns.record_type} onChange={(r) => setStep({ dns: { ...st.dns!, record_type: r } })} options={DNS_RECORDS.map((r) => ({ value: r, label: r }))} />
           <div>
             <input className="in mono" aria-label={`Step ${n} name`} placeholder="api.prod.wrw.com" value={st.dns.name} onChange={(e) => setStep({ dns: { ...st.dns!, name: e.target.value } })} {...aria(`${id}-dns`, f('dns.name'))} />
             <FieldMsg id={`${id}-dns`} text={f('dns.name')} admin={admin} />
@@ -1129,34 +1123,26 @@ function AssertionsEditor({ n, kind, list, errorOf, onChange }: { n: number; kin
             <div key={i}>
               <div className="arow">
                 <div className="stack-xs">
-                  <select
-                    className="in"
+                  <Select
                     aria-label={`Step ${n} assertion ${i + 1} check`}
                     value={base}
-                    onChange={(e) => {
-                      const b = e.target.value;
+                    onChange={(b) => {
                       const subject = b === 'header' ? 'header:' : b === 'json' ? 'json:$' : b;
                       const op = (OPERATORS[b] ?? ['equals'])[0];
                       set(i, { subject, operator: op, value: b === 'connects' || b === 'chain_valid' || b === 'hostname_matches' ? 'true' : '' });
                     }}
-                  >
-                    {[...subjects, ...(subjects.includes(base) ? [] : [base])].map((s) => (
-                      <option key={s} value={s}>
-                        {BASE_LABEL[s] ?? s}
-                      </option>
-                    ))}
-                  </select>
+                    options={[...subjects, ...(subjects.includes(base) ? [] : [base])].map((s) => ({ value: s, label: BASE_LABEL[s] ?? s }))}
+                  />
                   {(base === 'header' || base === 'json') && (
                     <input className="in mono" aria-label={`Step ${n} assertion ${i + 1} ${base === 'header' ? 'header name' : 'JSON path'}`} placeholder={base === 'header' ? 'Content-Type' : '$.items'} value={argOf(a.subject)} onChange={(e) => set(i, { ...a, subject: `${base}:${e.target.value}` })} />
                   )}
                 </div>
-                <select className="in" aria-label={`Step ${n} assertion ${i + 1} operator`} value={a.operator} onChange={(e) => set(i, { ...a, operator: e.target.value as AssertionOperator })}>
-                  {[...ops, ...(ops.includes(a.operator) ? [] : [a.operator])].map((o) => (
-                    <option key={o} value={o}>
-                      {OPERATOR_LABEL[o] ?? o}
-                    </option>
-                  ))}
-                </select>
+                <Select
+                  aria-label={`Step ${n} assertion ${i + 1} operator`}
+                  value={a.operator}
+                  onChange={(o) => set(i, { ...a, operator: o })}
+                  options={[...ops, ...(ops.includes(a.operator) ? [] : [a.operator])].map((o) => ({ value: o, label: OPERATOR_LABEL[o] ?? o }))}
+                />
                 {a.operator === 'exists' ? (
                   <span />
                 ) : (
@@ -1191,11 +1177,16 @@ function ExtractsEditor({ n, list, onChange }: { n: number; list: ScenarioExtrac
         {list.map((e, i) => (
           <div key={i} className="xrow">
             <input className="in mono" aria-label={`Step ${n} variable ${i + 1} name`} placeholder="item" value={e.name} onChange={(ev) => set(i, { name: ev.target.value })} />
-            <select className="in" aria-label={`Step ${n} variable ${i + 1} source`} value={e.source} onChange={(ev) => set(i, { source: ev.target.value as ScenarioExtract['source'] })}>
-              <option value="json_path">JSON path</option>
-              <option value="header">Header</option>
-              <option value="regex">Regex</option>
-            </select>
+            <Select
+              aria-label={`Step ${n} variable ${i + 1} source`}
+              value={e.source}
+              onChange={(source) => set(i, { source })}
+              options={[
+                { value: 'json_path', label: 'JSON path' },
+                { value: 'header', label: 'Header' },
+                { value: 'regex', label: 'Regex' },
+              ]}
+            />
             <input className="in mono" aria-label={`Step ${n} variable ${i + 1} ${e.source === 'json_path' ? 'JSON path' : e.source === 'header' ? 'header name' : 'regex'}`} placeholder={e.source === 'json_path' ? '$.items[0].id' : e.source === 'header' ? 'Location' : 'id=(\\w+)'} value={e.expr} onChange={(ev) => set(i, { expr: ev.target.value })} />
             <button type="button" className="btn sm icon-sq" aria-label={`Remove variable ${i + 1} of step ${n}`} onClick={() => onChange(list.filter((_, j) => j !== i))}>
               <IconClose />
@@ -1269,15 +1260,18 @@ function TestRun({
     <section className="card pad-lg" aria-labelledby="test-h">
       <h2 id="test-h">Test run</h2>
       <div className="test-row">
-        <select className="in" aria-label="Cluster for test run" value={picked} onChange={(ev) => setCluster(ev.target.value)}>
-          {clusters.length === 0 && <option value="">{ov.isError ? 'Clusters not loaded' : 'Loading clusters…'}</option>}
-          {clusters.map((c) => (
-            <option key={c.id} value={c.id} disabled={c.probe_status !== 'online'}>
-              {c.name}
-              {c.probe_status !== 'online' ? ` · probe ${c.probe_status.replace('_', ' ')}` : ''}
-            </option>
-          ))}
-        </select>
+        <Select
+          aria-label="Cluster for test run"
+          value={picked}
+          onChange={setCluster}
+          placeholder={ov.isError ? 'Clusters not loaded' : 'Loading clusters…'}
+          options={clusters.map((c) => ({
+            value: c.id,
+            label: c.name,
+            hint: c.probe_status !== 'online' ? `probe ${c.probe_status.replace('_', ' ')}` : undefined,
+            disabled: c.probe_status !== 'online',
+          }))}
+        />
         <button type="button" className="btn" onClick={() => void go()} disabled={!picked || start.pending || running || disabled}>
           {start.pending || running ? 'Running…' : 'Run once'}
         </button>

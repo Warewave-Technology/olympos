@@ -192,7 +192,7 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     const dlg = screen.getByRole('dialog', { name: 'New credential' });
     await user.type(within(dlg).getByLabelText('Name'), 'qa-token');
     await user.type(within(dlg).getByLabelText('Bound host 1'), '*.dev.wrw.com');
-    expect(within(dlg).getByLabelText('Bound host 1 type')).toHaveValue('wildcard');
+    expect(within(dlg).getByRole('combobox', { name: 'Bound host 1 type' })).toHaveTextContent('Wildcard');
     await user.type(within(dlg).getByLabelText('Expires (optional)'), '2027-06-30');
     const tokenInput = within(dlg).getByLabelText('Token');
     expect(tokenInput).toHaveAttribute('type', 'password');
@@ -237,7 +237,8 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     await user.click(await screen.findByRole('button', { name: 'New credential' }, T));
     const dlg = screen.getByRole('dialog', { name: 'New credential' });
     await user.type(within(dlg).getByLabelText('Name'), 'other-oauth');
-    await user.selectOptions(within(dlg).getByLabelText('Type'), 'oauth2_client_credentials');
+    await user.click(within(dlg).getByRole('combobox', { name: 'Type' }));
+    await user.click(within(dlg).getByRole('option', { name: 'OAuth2 client credentials' }));
     await user.type(within(dlg).getByLabelText('Bound host 1'), 'api.other.io');
     await user.click(within(dlg).getByRole('button', { name: 'Add host' }));
     await user.type(within(dlg).getByLabelText('Bound host 2'), 'partner-sftp.acme.net');
