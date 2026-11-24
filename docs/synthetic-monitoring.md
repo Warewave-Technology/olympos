@@ -166,13 +166,14 @@ back.
 | Header | the value in a header you name (`X-Api-Key`, …) |
 | OAuth2 client credentials | a token fetched for the run from the token URL (`https://` only, and inside the allowlist and the credential's bound hosts), then `Authorization: Bearer` |
 
-- **Stored in Olympos** (envelope-encrypted, like backup passwords) or as a **Key Vault reference**. A Key
-  Vault reference that cannot be read shows a warning on the credential, and its runs are *skipped*
-  (`credential_unavailable`), not failed.
+- **Stored in Olympos** (envelope-encrypted, like backup passwords) or as a **Key Vault reference**.
+- **A credential that cannot be resolved** is reported once, not once per scenario. See
+  [Credentials that cannot be resolved](#credentials-that-cannot-be-resolved).
 - **Bound hosts** (allowlist-style rules, each inside the allowlist): the credential is attached only to
   requests to these hosts. On a redirect to another host it is removed from the request.
 - **Expires (optional)**: `synthetic.credential_expiring` fires 14 days and 3 days before; after the date,
-  runs that use it end *error* (`credential_expired`). To rotate, open the credential, tick **Rotate the
+  runs that use it end *error* (`credential_expired`) and the credential is reported as one that cannot be
+  resolved (below). To rotate, open the credential, tick **Rotate the
   secret** and enter the new one; otherwise the current secret is kept.
 - A credential that a scenario still uses cannot be deleted: *409*, with the scenarios.
 - A header credential cannot name `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Cookie`,
@@ -193,6 +194,45 @@ Values that come from a credentialed exchange stay with that credential's hosts:
   every extract of that step (`credential_error`).
 - A response body that is not text, is compressed or contains NUL bytes gives no body extracts. Header
   extracts still work.
+
+
+### Credentials that cannot be resolved
+
+Olympos resolves a credential each time it starts a run that uses it. When that fails, the cause decides what
+happens:
+
+| Cause | Meaning | Kind |
+|---|---|---|
+| `not_found` | The Key Vault secret, or the local vault file, does not exist. | Permanent |
+| `forbidden` | Key Vault refuses the server's identity (401 or 403), or the reference is not allowed. | Permanent |
+| `decrypt` | The stored value does not decrypt. | Permanent |
+| `empty` | The secret is empty. | Permanent |
+| `expired` | The credential's expiry date has passed. | Permanent |
+| `unavailable` | Anything else: Key Vault does not answer, throttling, the key encryption key cannot unwrap. | Temporary |
+
+- **Permanent.** The run ends *error* with the reason `credential_broken` (`credential_expired` for an expired
+  credential), and Olympos sends one `synthetic.credential_broken` for the credential, however many scenarios
+  and clusters use it. The Dashboard shows one *Needs attention* item, *Synthetic credential*, in red.
+- **Temporary.** The run is *skipped* (`credential_unavailable`), as before. After 30 minutes in a row, Olympos
+  sends one `synthetic.credential_broken` (*has been unavailable for 30 minutes*) and the item shows in amber.
+- **These two reasons are not failures.** They move no streak, so no `synthetic.failing` opens for them, and
+  they are left out of availability, p95, the timeline and the hourly aggregates.
+- **Where it shows.** The matrix reads *credential error* (⊘) for every cluster of a scenario that uses the
+  credential, and the scenario's page lists its credentials with their state. *Settings › Synthetic
+  monitoring › Credentials* shows a badge, for example *Cannot be resolved · not found in Key Vault · since
+  10:42*, or *Unavailable since 10:42*, next to the number of failed reads in 24 hours.
+- **Recovery.** At the next run that resolves the credential, the state goes back to *ok* and Olympos sends one
+  `synthetic.credential_restored`, if the other message went out. Saving a new secret or a new expiry also resets
+  the state, without a message: the next run decides.
+- **Which scenarios count.** Only credentials used by an enabled scenario are resolved. A credential that no
+  enabled scenario uses keeps its last state and is not listed in *Needs attention*.
+- **Where the messages go.** To the alert channel of each scenario that uses the credential, once per channel. A
+  scenario with no channel of its own sends through the routes of the event. If no enabled scenario uses the
+  credential, the message goes through the routes only.
+- **Who sees the item.** Whoever may read *Settings › Synthetic monitoring*: admins and `synthetic-editor`.
+
+Fix the cause (put the secret back, grant `get` on it, rotate the stored one), and the next run recovers it.
+The message names the cause in a fixed sentence, never Key Vault's own error text.
 
 ## Write a scenario
 
@@ -280,6 +320,7 @@ legend above the matrix names them, a cell's tooltip and screen-reader label say
 | ∅ probe not installed | The cluster has no probe (or it was revoked). |
 | – excluded | The scenario's targeting leaves the cluster out (hatched). |
 | ‖ paused | The scenario is disabled. |
+| ⊘ credential error | A credential the scenario uses [cannot be resolved](#credentials-that-cannot-be-resolved) for good. It shows on every cluster the scenario runs on, and wins over *failing*. Not a failure of the scenario. |
 | ○ no data yet | No counted run yet. |
 
 Hover a cell for the last run's reason; click it to open that run. When a [rate cap](#rate-caps) holds a
@@ -305,10 +346,11 @@ credential replaced by `$TOKEN`.
 |---|---|---|
 | Passed | | Yes |
 | Failed | An assertion did not hold: `assertion_failed`, with the assertion and the actual value | Yes |
-| Error | A step could not complete, with the probe's code: `host_not_allowed`, `ip_denied`, `redirect_blocked`, `dns_error`, `connect_error`, `tls_error`, `timeout`, `invalid_request`, `credential_error`, `runner_panic`. Or Olympos could not run it as defined: `credential_expired`, `credential_error`, `credentials_unreadable`, `invalid_scenario`, `dispatch_error`, `no_result`, `invalid_result`, `rejected` | Yes |
-| Skipped | Not the scenario's fault: `probe_offline`, `probe_disconnected`, `ingest_failed` (the result came but the server could not store it), `scenario_disabled`, `credential_unavailable` (Key Vault or envelope outage on the server), `not_dispatched`, and the probe's refusals `probe_busy` and `allowlist_stale` | Never |
+| Error | A step could not complete, with the probe's code: `host_not_allowed`, `ip_denied`, `redirect_blocked`, `dns_error`, `connect_error`, `tls_error`, `timeout`, `invalid_request`, `credential_error`, `runner_panic`. Or Olympos could not run it as defined: `credential_error`, `credentials_unreadable`, `invalid_scenario`, `dispatch_error`, `no_result`, `invalid_result`, `rejected` | Yes |
+| Error, credential | `credential_broken` or `credential_expired`: a credential of the scenario cannot be resolved for good. Reported once for the credential | Never |
+| Skipped | Not the scenario's fault: `probe_offline`, `probe_disconnected`, `ingest_failed` (the result came but the server could not store it), `scenario_disabled`, `credential_unavailable` (Key Vault or the key encryption key did not answer on the server; reported after 30 minutes), `not_dispatched`, and the probe's refusals `probe_busy` and `allowlist_stale` | Never |
 
-A skipped run neither counts as a failure nor breaks a streak.
+A skipped run neither counts as a failure nor breaks a streak. Neither does a `credential_broken` or `credential_expired` error.
 
 ## Alerts
 
@@ -326,6 +368,8 @@ A skipped run neither counts as a failure nor breaks a streak.
 - **Not monitored any more.** An alert whose scenario was disabled, whose cluster was excluded, or whose probe
   was removed or revoked resolves silently, without a recovery message. Deleting a scenario (or a cluster)
   deletes its alerts with it. An **offline** probe keeps its alert: offline is not a recovery.
+- **Credentials.** A credential that cannot be resolved has its own alert, one per credential, and never opens
+  `synthetic.failing`: see [Credentials that cannot be resolved](#credentials-that-cannot-be-resolved).
 - *Run now* counts; test runs never alert.
 
 Known limitation: when the number of failing clusters hovers around the critical threshold, the fleet alert
@@ -333,7 +377,7 @@ can open and resolve more than once. The cluster alerts' own thresholds (N failu
 resolve) bound how often.
 
 Probe outages have their own events: `probe.offline` after `synthetic.probeOfflineAlertAfter` (default
-5 minutes) and one `probe.online` when it comes back. All seven events are in
+5 minutes) and one `probe.online` when it comes back. All nine events are in
 [Findings and events](findings-and-events.md#events-and-notifications).
 
 ## Rate caps

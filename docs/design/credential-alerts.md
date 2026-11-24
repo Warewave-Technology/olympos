@@ -48,8 +48,9 @@ Anti-goal: a broken credential must not also open one `synthetic.failing` per sc
 | `expired` | `expires_at` has passed (checked before resolving) | permanent |
 | `unavailable` | anything else: network, 5xx, throttling, the KEK cannot unwrap the DEK | transient |
 
-A KEK failure is transient on purpose: it breaks every stored credential at once and is reported by the KEK watch;
-alerting per credential would repeat it N times. Unchanged: a missing `synthetic_credentials` row or a bound host
+A KEK unwrap failure is transient: it does not alert at once. If it lasts 30 minutes, every stored credential
+alerts once (Key Vault references are not affected). The KEK watch only checks purge protection, so it does not
+report this. Unchanged: a missing `synthetic_credentials` row or a bound host
 that does not parse stays `error` / `credential_error`.
 
 ### Run outcome
@@ -109,6 +110,17 @@ Kind `synthetic_credential_broken`: `crit` for `broken`, `warn` for `unavailable
 - Credentials page: a state badge replaces "could not be read N times in 24 h", e.g.
   `Cannot be resolved · not found in Key Vault · since 10:42`, or `Unavailable since 10:42` (warn).
 - API: `resolve_state`, `resolve_cause`, `resolve_failing_since` on the credential view; the 24-hour counter stays.
+
+### Decisions taken while implementing
+
+- Channels come from `scenario_alerts.channel_id` of the enabled scenarios that use the credential.
+- A credential that no enabled scenario uses still gets one message, through the routes of the event type.
+- The *unavailable* Needs-attention detail reads *since HH:MM UTC*, the same time as the message's `since`.
+- A scenario with a broken credential gets the cell state *Credential error* in the matrix. There is no new
+  scenario status.
+- The `consecutive_failures` count of the run detail also leaves out the two reasons, like the streaks.
+- The Needs-attention item counts only enabled scenarios, and is shown to users who may read the synthetic
+  settings (global read, or the `synthetic-editor` role).
 
 ## Tests
 
