@@ -234,7 +234,7 @@ describe('scenario editor', () => {
     expect(await screen.findByText('olympos.io/cluster=oke-fra-erp')).toBeInTheDocument();
     await waitFor(() => expect(line).toHaveTextContent('Runs on 9 of 12 clusters'), T);
     await user.click(screen.getByRole('radio', { name: /Clusters matching labels/ }));
-    await user.type(screen.getByLabelText('Cluster labels'), 'site=factory');
+    await user.type(screen.getByLabelText('Cluster labels'), 'site=factory{Enter}');
     await waitFor(() => expect(line).toHaveTextContent('Runs on 1 of 12 clusters: onprem-factory-01'), T);
   });
 
@@ -298,9 +298,12 @@ describe('scenario editor', () => {
     const panel = screen.getByRole('region', { name: 'Test run' });
     expect(panel).toHaveTextContent('Test runs never send alerts.');
     // ?cluster= picks the test-run cluster
-    await waitFor(() => expect((within(panel).getByLabelText('Cluster for test run') as HTMLSelectElement).selectedOptions[0]?.textContent).toBe('oke-fra-erp'), T);
+    const picker = within(panel).getByRole('combobox', { name: 'Cluster for test run' });
+    await waitFor(() => expect(picker).toHaveTextContent('oke-fra-erp'), T);
     // an offline probe cannot be picked
-    expect(within(panel).getByRole('option', { name: 'onprem-ist-lab · probe offline' })).toBeDisabled();
+    await user.click(picker);
+    expect(within(panel).getByRole('option', { name: /onprem-ist-lab.*probe offline/ })).toHaveAttribute('aria-disabled', 'true');
+    await user.keyboard('{Escape}');
     await user.click(within(panel).getByRole('button', { name: 'Run once' }));
     const result = await within(panel).findByLabelText('Test run result');
     await waitFor(() => expect(result).toHaveTextContent('3 GET /v1/catalog?limit=1 · 200 · 912 ms > 500 ms'), { timeout: 6000 });
@@ -383,7 +386,8 @@ describe('scenario editor, fix round 1', () => {
     await user.click(screen.getByRole('button', { name: 'Edit step 4' }));
     // ${item} comes from step 3 (catalog-monitor, bound to *.prod.wrw.com); send it to search.wrw.com
     await setUrl(user, 4, 'https://search.wrw.com/items/${item}');
-    await user.selectOptions(screen.getByLabelText('Step 4 method'), 'POST');
+    await user.click(screen.getByRole('combobox', { name: 'Step 4 method' }));
+    await user.click(screen.getByRole('option', { name: 'POST' }));
     await user.click(screen.getByRole('button', { name: '+ Add header' }));
     const rows = screen.getAllByLabelText(/^Step 4 header \d+ name$/);
     await user.type(rows[rows.length - 1], 'X-Item');
@@ -391,7 +395,8 @@ describe('scenario editor, fix round 1', () => {
     const body = screen.getByLabelText('Body');
     await user.type(body, '{{"id":"$' + '{{item}"}');
     // the step's own credential is bound to *.prod.wrw.com: take it off
-    await user.selectOptions(screen.getAllByLabelText('Auth').at(-1)!, '');
+    await user.click(screen.getAllByRole('combobox', { name: 'Auth' }).at(-1)!);
+    await user.click(screen.getByRole('option', { name: 'None' }));
     await user.click(screen.getByRole('button', { name: 'Save scenario' }));
     const msg = "comes from a step that uses credential catalog-monitor, so it may only be sent to that credential's bound hosts";
     await waitFor(() => expect(screen.getByLabelText('Step 4 URL')).toHaveAttribute('aria-invalid', 'true'), T);
@@ -465,7 +470,7 @@ describe('scenario editor, fix round 1', () => {
     await user.click(screen.getByRole('button', { name: 'Save scenario' }));
     expect(await screen.findByText('A scenario that runs on all clusters needs the synthetic-editor role with scope all. Choose clusters matching labels in your scope.', {}, T)).toBeInTheDocument();
     await user.click(screen.getByRole('radio', { name: /Clusters matching labels/ }));
-    await user.type(screen.getByLabelText('Cluster labels'), 'env=staging');
+    await user.type(screen.getByLabelText('Cluster labels'), 'env=staging{Enter}');
     await user.click(screen.getByRole('button', { name: 'Save scenario' }));
     await screen.findByRole('heading', { name: /Staging health/ }, T);
     syn.scenarios.splice(syn.scenarios.findIndex((s) => s.name === 'Staging health'), 1);

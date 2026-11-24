@@ -280,6 +280,8 @@ export function ScopeInput({
   hintId,
   onDraftError,
   locked,
+  placeholder = 'All clusters · add env=prod',
+  hideCount,
 }: {
   id: string;
   /** Label selector; "" or "all" means all clusters. */
@@ -291,6 +293,10 @@ export function ScopeInput({
   onDraftError?: (error: string | null) => void;
   /** Fixed scope (e.g. pinned to one cluster): shown as disabled chips, not editable. */
   locked?: ReactNode;
+  /** Chips placeholder; the default says that no chips means all clusters. */
+  placeholder?: string;
+  /** Leaves out the "matches N clusters" line, for a form that shows its own count. */
+  hideCount?: boolean;
 }) {
   const [advanced, setAdvanced] = useState(() => equalityTerms(value) === null);
   const chips = equalityTerms(value) ?? {};
@@ -328,7 +334,7 @@ export function ScopeInput({
           spellCheck={false}
         />
       ) : (
-        <TagInput id={id} value={chips} onChange={(m) => onChange(formatLabels(m, ','))} placeholder="All clusters · add env=prod" listLabel="Required labels" onDraftError={onDraftError} aria-invalid={!!error} aria-describedby={describedBy} />
+        <TagInput id={id} value={chips} onChange={(m) => onChange(formatLabels(m, ','))} placeholder={placeholder} listLabel="Required labels" onDraftError={onDraftError} aria-invalid={!!error} aria-describedby={describedBy} />
       )}
       {selErr && (
         <div className="field-error" role="alert">
@@ -337,13 +343,15 @@ export function ScopeInput({
       )}
       <div className="spread small">
         <span className="muted" id={countId} aria-live="polite">
-          {matching === null
-            ? all
-              ? 'All clusters'
-              : ''
-            : all
-              ? `All clusters · ${plural(clusters!.length, 'cluster')} today`
-              : `Matches ${plural(matching, 'cluster')} of ${clusters!.length} today`}
+          {hideCount
+            ? ''
+            : matching === null
+              ? all
+                ? 'All clusters'
+                : ''
+              : all
+                ? `All clusters · ${plural(clusters!.length, 'cluster')} today`
+                : `Matches ${plural(matching, 'cluster')} of ${clusters!.length} today`}
         </span>
         {advanced ? (
           <span className="inline-sm">

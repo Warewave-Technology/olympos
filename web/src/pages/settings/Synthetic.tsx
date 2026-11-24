@@ -14,6 +14,7 @@ import { daysUntil, plural, shortDate } from '../../lib/format';
 import { CheckIcon, IconClose } from '../../ui/icons';
 import { Badge, Chip, EmptyState, Field, FormError, Modal, Spinner, aria, fieldError, sentence, useAction, useToast, type Tone } from '../../ui/kit';
 import { DataTable } from '../../ui/DataTable';
+import { Select } from '../../ui/Select';
 import { SettingsLayout } from './SettingsLayout';
 
 // ------------------------------------------------------------ shared text
@@ -681,22 +682,16 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
             />
           </Field>
           <Field label="Type" htmlFor="cr-kind" error={fe('kind')} hint={editing ? 'The type of a credential cannot change.' : undefined}>
-            <select
-              className="in"
+            <Select
               {...aria('cr-kind', fe('kind'), editing)}
               value={kind}
               disabled={editing}
-              onChange={(e) => {
-                setKind(e.target.value as CredentialKind);
+              onChange={(k) => {
+                setKind(k);
                 touch();
               }}
-            >
-              {(Object.keys(CRED_KIND_LABEL) as CredentialKind[]).map((k) => (
-                <option key={k} value={k}>
-                  {CRED_KIND_LABEL[k]}
-                </option>
-              ))}
-            </select>
+              options={(Object.keys(CRED_KIND_LABEL) as CredentialKind[]).map((k) => ({ value: k, label: CRED_KIND_LABEL[k] }))}
+            />
           </Field>
         </div>
         {kind === 'header' && (
@@ -735,13 +730,7 @@ function CredentialDialog({ cred, onClose }: { cred?: SyntheticCredential; onClo
                       autoComplete="off"
                       spellCheck={false}
                     />
-                    <select className="in" aria-label={`Bound host ${i + 1} type`} value={b.kind} onChange={(e) => setRow(i, { kind: e.target.value as AllowKind })}>
-                      {(Object.keys(KIND_LABEL) as AllowKind[]).map((k) => (
-                        <option key={k} value={k}>
-                          {KIND_LABEL[k]}
-                        </option>
-                      ))}
-                    </select>
+                    <Select aria-label={`Bound host ${i + 1} type`} value={b.kind} onChange={(k) => setRow(i, { kind: k })} options={(Object.keys(KIND_LABEL) as AllowKind[]).map((k) => ({ value: k, label: KIND_LABEL[k] }))} />
                     <button
                       type="button"
                       className="btn icon"

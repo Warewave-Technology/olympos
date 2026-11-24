@@ -3384,9 +3384,6 @@ button.cell:focus-visible {
 .step-card.failed {
   border-color: var(--crit-border);
 }
-.step-card.open {
-  border-color: var(--accent-strong);
-}
 .step-card b {
   font-weight: 500;
 }
@@ -3461,11 +3458,6 @@ button.cell:focus-visible {
 }
 .nowrap {
   flex-wrap: nowrap;
-}
-.in.compact {
-  width: auto;
-  min-height: 32px;
-  padding: 4px 8px;
 }
 .in.tiny {
   width: 72px;
