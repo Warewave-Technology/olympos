@@ -44,6 +44,8 @@ var descriptions = map[string]string{
 	ProbeOffline:                "A cluster's synthetic monitoring probe has been offline for 5 minutes (configurable: synthetic.probeOfflineAlertAfter).",
 	ProbeOnline:                 "A cluster's probe is back online after a probe.offline alert.",
 	SyntheticCredentialExpiring: "A synthetic monitoring credential expires soon (14 and 3 days before).",
+	SyntheticCredentialBroken:   "A synthetic monitoring credential cannot be resolved (one message per credential; after 30 minutes when Key Vault is unavailable).",
+	SyntheticCredentialRestored: "A synthetic monitoring credential that could not be resolved resolves again.",
 	SyntheticAllowlistChanged:   "The host allowlist of synthetic monitoring changed: what the probes may reach.",
 }
 

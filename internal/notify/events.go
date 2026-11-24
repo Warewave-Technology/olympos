@@ -49,6 +49,8 @@ const (
 	ProbeOffline                = "probe.offline"
 	ProbeOnline                 = "probe.online"
 	SyntheticCredentialExpiring = "synthetic.credential_expiring"
+	SyntheticCredentialBroken   = "synthetic.credential_broken"
+	SyntheticCredentialRestored = "synthetic.credential_restored"
 	SyntheticAllowlistChanged   = "synthetic.allowlist_changed"
 )
 
@@ -58,7 +60,8 @@ var Catalog = []string{
 	BackupFailed, BackupPartial, BackupMissed, BackupSucceeded, CROpened, CRApproved, CRRejected, CRExpired, CRFailed,
 	RestoreRequested, RestoreApproved, RestoreRejected, RestoreStarted, RestoreSucceeded, RestoreFailed, RestoreBreakGlass,
 	VaultUnmanagedWrite, AuditNewFindings, VulnCritical, SensitiveDataFound, SecretFindings, AgentOffline, AgentOnline, AgentFlapping, GrantChanged, GrantStale, SASExpiring,
-	SyntheticFailing, SyntheticCritical, SyntheticRecovered, ProbeOffline, ProbeOnline, SyntheticCredentialExpiring, SyntheticAllowlistChanged,
+	SyntheticFailing, SyntheticCritical, SyntheticRecovered, ProbeOffline, ProbeOnline, SyntheticCredentialExpiring,
+	SyntheticCredentialBroken, SyntheticCredentialRestored, SyntheticAllowlistChanged,
 }
 
 // Event is what modules emit. Payload MUST NOT contain secret values;
