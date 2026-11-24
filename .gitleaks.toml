@@ -16,5 +16,15 @@ paths = [
 ]
 
 [[allowlists]]
+description = "Synthetic monitoring tests: fake credentials and canaries that redaction must catch"
+paths = [
+  '''internal/sensitive/sensitive_test\.go''',
+  '''internal/probe/client_test\.go''',
+  '''internal/synthetic/alerting_test\.go''',
+  '''internal/synthetic/expiry_test\.go''',
+  '''web/src/test/synthetic-settings\.test\.tsx''',
+]
+
+[[allowlists]]
 description = "Azurite's well-known public development account key (documented by Microsoft)"
 regexes = ['''Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==''']
