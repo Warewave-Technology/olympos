@@ -50,9 +50,14 @@ API with dev login: `e := apitest.New(t, apitest.Options{Modules: ...}); c := e.
 first release); renumbering is not needed. Rules:
 
 - A new migration takes a number **strictly greater** than the latest one on `main`
-  (`scripts/check-migrations.sh origin/main`, run in CI for pull requests). goose runs without
+  (`scripts/check-migrations.sh origin/main`, run in CI on pull requests and on `main`). goose runs without
   `allow-missing`: an older number added later would make `Up` fail on every database that is already past
   it ("missing migrations"), so a late, lower number is never silently skipped or applied out of order.
+- **A merged migration is immutable**: never edit, rename or delete it, even before it is released. A
+  database that already ran it never runs it again, so an edit reaches only new installs, and the two drift
+  apart (a lab server once failed to start this way). Fix a merged migration with a new one. The same
+  script fails when a file that exists on the base branch changed, or when a file of the latest `v*` tag
+  is not byte-identical on `HEAD`.
 - Every file has `-- +goose Up` and `-- +goose Down`. `Down` exists for development; production never
   migrates down.
 - The server refuses to start on a schema newer than the binary (no downgrades); restore the dump taken

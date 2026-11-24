@@ -27,6 +27,8 @@ All notable changes to this project are documented here. The format follows
   `synthetic_credential_broken`), the matrix cell state *credential error*, and the credential's state on
   *Settings › Synthetic monitoring › Credentials* and on the scenario page. The credential API gains
   `resolve_state`, `resolve_cause` and `resolve_failing_since`.
+- CI fails a pull request or a push to `main` that edits, renames or deletes a merged migration, or changes
+  one of the latest release (`scripts/check-migrations.sh`).
 
 ### Fixed
 - Restoring the Olympos database by hand on Rocky / Alma failed at once with `unrecognized configuration

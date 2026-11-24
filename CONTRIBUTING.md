@@ -32,7 +32,8 @@ Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`.
   API proxy, approvals) needs a test that fails without the change.
 - Changing a **MUST** in `SPEC.md` needs an entry in [docs/spec-changes.md](docs/spec-changes.md) and an owner
   decision.
-- New migrations take a number above the latest on `main`; never edit a released migration.
+- New migrations take a number above the latest on `main`. A merged migration is never edited, renamed or
+  deleted, released or not: add a new one instead (`scripts/check-migrations.sh` fails the build).
 - UI copy is short, specific and English; code, commits and docs are English.
 - Keep the agent narrow: no new RBAC, no write verbs, no listening ports without a spec change.
 - Add a line under *Unreleased* in [CHANGELOG.md](CHANGELOG.md).
