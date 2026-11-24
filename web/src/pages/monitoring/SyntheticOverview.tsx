@@ -28,6 +28,9 @@ export const pct = (v: number | null | undefined) => (v === null || v === undefi
 export const ms = (v: number | null | undefined) => (v === null || v === undefined ? '—' : `${v} ms`);
 
 function cellDetail(c: SyntheticCell): string {
+  // its runs end before they start: the last counted run is old news, and the overview does not know which
+  // credential it is (the scenario page does)
+  if (c.state === 'credential_error') return '';
   const parts: string[] = [];
   if (c.last_finished_at) parts.push(`last run ${clockTime(c.last_finished_at)}`);
   if (c.failed_step !== null && (c.state === 'failing' || c.state === 'degraded')) parts.push(`step ${c.failed_step + 1}: ${reasonText(c.failure_reason)}`);
@@ -194,7 +197,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
                   const c = s.cells.find((x) => x.cluster_id === col.id);
                   return (
                     <td key={col.id} className="mx-cell">
-                      {c ? <MatrixCell cluster={col.name} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id ? () => openRun(c.last_run_id!) : undefined} /> : <MatrixCell cluster={col.name} state="no_data" />}
+                      {c ? <MatrixCell cluster={col.name} state={c.state} detail={cellDetail(c)} onOpen={c.last_run_id && c.state !== 'credential_error' ? () => openRun(c.last_run_id!) : undefined} /> : <MatrixCell cluster={col.name} state="no_data" />}
                     </td>
                   );
                 })}

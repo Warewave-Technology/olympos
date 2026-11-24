@@ -89,6 +89,9 @@ describe('Monitoring › Synthetic overview', () => {
     const cells = within(row).getAllByLabelText(/credential error$/);
     expect(cells.length).toBeGreaterThan(5);
     expect(cells[0].getAttribute('title')).toContain('credential error');
+    // an old run says nothing about a credential: no "last run" detail, and nothing to open
+    expect(cells[0].getAttribute('title')).not.toContain('last run');
+    expect(cells.every((c) => c.tagName !== 'BUTTON')).toBe(true);
     // the cluster the probe is not on keeps its own state: the credential comes after excluded, paused and the probe
     expect(within(row).getByLabelText('onprem-ist-lab excluded')).toBeInTheDocument();
     // only that scenario gets the badge
@@ -181,6 +184,10 @@ describe('scenario detail: credentials', () => {
     const table = await screen.findByRole('table', { name: 'Scenario by cluster' }, T);
     const erp = within(table).getByText('oke-fra-erp').closest('tr')!;
     expect(within(erp).getByText('Credential error')).toHaveClass('badge', 'crit');
+    // the badge leads to the credential, not to an old run, and there is no last-run time
+    expect(within(erp).getByRole('link', { name: 'Credential error: search-api-key' })).toHaveAttribute('href', `/settings/synthetic?credential=${credOf('search-api-key').id}`);
+    expect(within(erp).queryByRole('button')).toBeNull();
+    expect(erp.querySelectorAll('td')[1]).toHaveTextContent('—');
     expect(within(table).getByText('onprem-ist-lab').closest('tr')).toHaveTextContent('Excluded');
     // not a failing run, and no streak
     expect(erp).not.toHaveTextContent('in a row');

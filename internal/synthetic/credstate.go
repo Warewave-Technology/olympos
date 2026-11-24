@@ -65,8 +65,9 @@ func resolveCause(err error) (cause string, permanent bool) {
 // credentialFailure names the synthetic credential a run could not
 // resolve, so that dispatch records it on that credential.
 type credentialFailure struct {
-	ID  uuid.UUID
-	Err error
+	ID      uuid.UUID
+	Backing uuid.UUID // the credentials row its secret was loaded from
+	Err     error
 }
 
 func (f *credentialFailure) Error() string {
@@ -89,9 +90,17 @@ var causeText = map[string]string{
 // credential that was failing is ok again, and synthetic.credential_restored
 // goes out when its episode was alerted. The usual case, every credential
 // ok already, changes nothing.
-func (s *Service) recordCredentialOK(ctx context.Context, ids []uuid.UUID) error {
-	if len(ids) == 0 {
+//
+// A result is recorded only if the credential still has the secret row the
+// run loaded (credential_id): a run that loaded the secret before a rotation
+// must not undo the reset the rotation made.
+func (s *Service) recordCredentialOK(ctx context.Context, resolved []resolvedCred) error {
+	if len(resolved) == 0 {
 		return nil
+	}
+	ids, backing := make([]uuid.UUID, len(resolved)), make([]uuid.UUID, len(resolved))
+	for i, r := range resolved {
+		ids[i], backing[i] = r.ID, r.Backing
 	}
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		// FOR UPDATE: of two passes that find a credential ok again, the
@@ -99,9 +108,10 @@ func (s *Service) recordCredentialOK(ctx context.Context, ids []uuid.UUID) error
 		rows, err := tx.Query(ctx, `UPDATE synthetic_credentials c SET resolve_state = 'ok', resolve_cause = NULL,
 				resolve_failing_since = NULL, resolve_alerted_at = NULL
 			FROM (SELECT id, resolve_failing_since, resolve_alerted_at FROM synthetic_credentials
-				WHERE id = ANY($1) AND resolve_state <> 'ok' FOR UPDATE) old
+				WHERE (id, credential_id) IN (SELECT * FROM unnest($1::uuid[], $2::uuid[])) AND resolve_state <> 'ok'
+				ORDER BY id FOR UPDATE) old
 			WHERE c.id = old.id
-			RETURNING c.id, c.name, old.resolve_failing_since, old.resolve_alerted_at IS NOT NULL`, ids)
+			RETURNING c.id, c.name, old.resolve_failing_since, old.resolve_alerted_at IS NOT NULL`, ids, backing)
 		if err != nil {
 			return err
 		}
@@ -146,15 +156,17 @@ func (s *Service) recordCredentialOK(ctx context.Context, ids []uuid.UUID) error
 // for cause; permanent says whether retrying can help. The episode keeps
 // its start, and a transient failure never downgrades a permanent one
 // within it. synthetic.credential_broken goes out once per episode: at
-// once when permanent, after UnavailableAlertAfter when transient.
-func (s *Service) recordCredentialFailure(ctx context.Context, id uuid.UUID, cause string, permanent bool) error {
+// once when permanent, after UnavailableAlertAfter when transient. backing
+// is the credentials row the failed run loaded: when the credential has a
+// new secret since (a rotation), the failure is stale and is ignored.
+func (s *Service) recordCredentialFailure(ctx context.Context, id, backing uuid.UUID, cause string, permanent bool) error {
 	now := s.now()
 	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		if _, err := tx.Exec(ctx, `UPDATE synthetic_credentials SET
 				resolve_cause = CASE WHEN $3 OR resolve_state <> 'broken' THEN $2 ELSE resolve_cause END,
 				resolve_state = CASE WHEN $3 OR resolve_state = 'broken' THEN 'broken' ELSE 'unavailable' END,
 				resolve_failing_since = COALESCE(resolve_failing_since, $4)
-			WHERE id = $1`, id, cause, permanent, now); err != nil {
+			WHERE id = $1 AND credential_id = $5`, id, cause, permanent, now, backing); err != nil {
 			return err
 		}
 		// The one-message mark, set where the message is written: of the
@@ -164,8 +176,8 @@ func (s *Service) recordCredentialFailure(ctx context.Context, id uuid.UUID, cau
 		var current *string
 		var since time.Time
 		err := tx.QueryRow(ctx, `UPDATE synthetic_credentials SET resolve_alerted_at = $2
-			WHERE id = $1 AND resolve_alerted_at IS NULL AND (resolve_state = 'broken' OR resolve_failing_since <= $3)
-			RETURNING name, resolve_state, resolve_cause, resolve_failing_since`, id, now, now.Add(-UnavailableAlertAfter)).
+			WHERE id = $1 AND credential_id = $4 AND resolve_alerted_at IS NULL AND (resolve_state = 'broken' OR resolve_failing_since <= $3)
+			RETURNING name, resolve_state, resolve_cause, resolve_failing_since`, id, now, now.Add(-UnavailableAlertAfter), backing).
 			Scan(&name, &state, &current, &since)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil

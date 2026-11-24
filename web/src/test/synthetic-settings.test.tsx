@@ -214,7 +214,9 @@ describe('Settings › Synthetic monitoring: credentials', () => {
     const table = await screen.findByRole('table', { name: 'Credentials' }, T);
     await within(table).findByText('catalog-monitor', {}, T);
     expect(rowOf(table, 'search-api-key')).toHaveClass('sel');
+    expect(rowOf(table, 'search-api-key')).toHaveAttribute('aria-current', 'true');
     expect(rowOf(table, 'catalog-monitor')).not.toHaveClass('sel');
+    expect(rowOf(table, 'catalog-monitor')).not.toHaveAttribute('aria-current');
   });
 
   it('creates a credential: the secret is sent once, never kept in a cache or a URL, and never shown again', async () => {

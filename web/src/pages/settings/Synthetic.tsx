@@ -408,7 +408,7 @@ function CredentialStateLines({ c }: { c: SyntheticCredential }) {
       <div className="cred-state">
         <Badge tone={st.tone}>{st.label}</Badge>
       </div>
-      {st.note && <div className="muted small nowrap cred-state-note">{st.note}</div>}
+      {st.note && <div className="muted small cred-state-note">{st.note}</div>}
     </>
   );
 }
@@ -418,8 +418,18 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
   const q = useQuery({ queryKey: ['synthetic', 'credentials'], queryFn: () => api.get<ItemList<SyntheticCredential>>('/synthetic/credentials') });
   // undefined: closed; null: a new credential
   const [editing, setEditing] = useState<SyntheticCredential | null | undefined>(undefined);
+  // A link with ?credential= brings its row into view, once the list is there.
+  const card = useRef<HTMLElement>(null);
+  const scrolled = useRef<string>();
+  useEffect(() => {
+    if (!selected || !q.data || scrolled.current === selected) return;
+    const row = card.current?.querySelector('tr[aria-current="true"]');
+    if (!row) return;
+    scrolled.current = selected;
+    row.scrollIntoView?.({ block: 'center' });
+  }, [selected, q.data]);
   return (
-    <section className="card" aria-labelledby="cr-t">
+    <section className="card" aria-labelledby="cr-t" ref={card}>
       <div className="card-head">
         <div className="head-text">
           <h2 id="cr-t">Credentials</h2>
@@ -444,6 +454,7 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
         onRowClick={canAdmin ? (c) => setEditing(c) : undefined}
         rowLabel={(c) => `Edit credential ${c.name}`}
         rowClassName={(c) => (c.id === selected ? 'sel' : undefined)}
+        rowCurrent={(c) => c.id === selected}
         empty={
           <EmptyState
             title="No credentials yet"

@@ -95,7 +95,7 @@ export function ScenarioDetail({ id }: { id: string }) {
         </ol>
       </section>
       <CredentialsCard s={s} />
-      <ClustersCard q={clustersQ} />
+      <ClustersCard q={clustersQ} broken={s.credentials?.find((c) => c.resolve_state === 'broken')} />
       <div className="cols-2">
         <AlertRuleCard s={s} />
         <AlertsCard id={id} />
@@ -276,7 +276,7 @@ function Strip({ row }: { row: ScenarioClusterRow }) {
   );
 }
 
-function ClustersCard({ q }: { q: UseQueryResult<ScenarioClusters> }) {
+function ClustersCard({ q, broken }: { q: UseQueryResult<ScenarioClusters>; broken?: { id: string; name: string } }) {
   const navigate = useNavigate({ from: '/monitoring' });
   const openRun = (id: string) => void navigate({ search: (s) => ({ ...s, run: id }) });
   return (
@@ -318,7 +318,9 @@ function ClustersCard({ q }: { q: UseQueryResult<ScenarioClusters> }) {
               <tbody>
                 {d.items.map((r) => {
                   const res = clusterResult(r);
-                  const last = r.last_run;
+                  // a credential error leaves the last counted run old news: no time, no link to it
+                  const credErr = r.state === 'credential_error';
+                  const last = credErr ? null : r.last_run;
                   const failed = last && last.failed_step !== null && last.status !== 'passed';
                   return (
                     <tr key={r.cluster_id}>
@@ -329,6 +331,10 @@ function ClustersCard({ q }: { q: UseQueryResult<ScenarioClusters> }) {
                           <button type="button" className={`badge ${res.tone} badge-btn`} onClick={() => openRun(last.id)} aria-label={`${res.text}: open the run on ${r.cluster_name}`}>
                             {res.text}
                           </button>
+                        ) : credErr && broken ? (
+                          <Link to="/settings/synthetic" search={{ credential: broken.id }} aria-label={`${res.text}: ${broken.name}`}>
+                            <Badge tone={res.tone}>{res.text}</Badge>
+                          </Link>
                         ) : (
                           <Badge tone={res.tone}>{res.text}</Badge>
                         )}

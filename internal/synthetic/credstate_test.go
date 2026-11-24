@@ -52,10 +52,10 @@ func TestCredentialReason(t *testing.T) {
 		err            error
 		status, reason string
 	}{
-		{"empty", &credentialFailure{id, fmt.Errorf("%w: credential c is empty", errCredentialEmpty)}, StatusError, ReasonCredentialBroken},
-		{"not found", &credentialFailure{id, fmt.Errorf("resolve: %w", secrets.ErrSecretNotFound)}, StatusError, ReasonCredentialBroken},
-		{"expired", &credentialFailure{id, fmt.Errorf("%w: credential c", errCredentialExpired)}, StatusError, ReasonCredentialExpired},
-		{"unavailable", &credentialFailure{id, errors.New("503")}, StatusSkipped, ReasonCredentialUnavailable},
+		{"empty", &credentialFailure{id, uuid.Nil, fmt.Errorf("%w: credential c is empty", errCredentialEmpty)}, StatusError, ReasonCredentialBroken},
+		{"not found", &credentialFailure{id, uuid.Nil, fmt.Errorf("resolve: %w", secrets.ErrSecretNotFound)}, StatusError, ReasonCredentialBroken},
+		{"expired", &credentialFailure{id, uuid.Nil, fmt.Errorf("%w: credential c", errCredentialExpired)}, StatusError, ReasonCredentialExpired},
+		{"unavailable", &credentialFailure{id, uuid.Nil, errors.New("503")}, StatusSkipped, ReasonCredentialUnavailable},
 		// The row itself: not a resolution failure, no state.
 		{"bad bounds", fmt.Errorf("%w: credential c has no bound hosts", errCredential), StatusError, ReasonCredentialError},
 		{"database", errors.New("conn reset"), StatusSkipped, ReasonCredentialUnavailable},
@@ -170,6 +170,18 @@ func newCredFixture(t *testing.T) *credFixture {
 	return f
 }
 
+// backing is the credentials row that holds the secret of f.cred.
+func (f *credFixture) backing() uuid.UUID { return f.e.backing(f.cred) }
+
+func (e *env) backing(id uuid.UUID) uuid.UUID {
+	e.t.Helper()
+	var b uuid.UUID
+	if err := e.db.QueryRow(e.ctx, `SELECT credential_id FROM synthetic_credentials WHERE id = $1`, id).Scan(&b); err != nil {
+		e.t.Fatal(err)
+	}
+	return b
+}
+
 func (f *credFixture) round() []uuid.UUID { return f.e.dispatchRound(f.scenarios, f.clusters) }
 
 // wantRouted checks that msgs went once to channel A and once through the
@@ -252,9 +264,9 @@ func TestCredentialConcurrentRecordsAlertOnce(t *testing.T) {
 			}
 		}
 	}
-	parallel(func() error { return e.svc.recordCredentialFailure(e.ctx, f.cred, CauseNotFound, true) })
+	parallel(func() error { return e.svc.recordCredentialFailure(e.ctx, f.cred, f.backing(), CauseNotFound, true) })
 	f.wantRouted(e.credMessages(notify.SyntheticCredentialBroken), notify.SyntheticCredentialBroken, at)
-	parallel(func() error { return e.svc.recordCredentialOK(e.ctx, []uuid.UUID{f.cred}) })
+	parallel(func() error { return e.svc.recordCredentialOK(e.ctx, []resolvedCred{{f.cred, f.backing()}}) })
 	f.wantRouted(e.credMessages(notify.SyntheticCredentialRestored), notify.SyntheticCredentialRestored, at)
 }
 
@@ -457,7 +469,60 @@ func TestCredentialFailureNoRawText(t *testing.T) {
 	if len(msgs) != 1 || msgs[0].Payload["cause"] != CauseForbidden || strings.Contains(msgs[0].Raw, raw) {
 		t.Fatalf("messages %+v", msgs)
 	}
-	if log := e.LogBuf.String(); strings.Contains(log, raw) || !strings.Contains(log, CauseForbidden) {
+	// The credential is named in the log by an id the redactor leaves alone.
+	if log := e.LogBuf.String(); strings.Contains(log, raw) || !strings.Contains(log, CauseForbidden) ||
+		!strings.Contains(log, `"synthetic_cred":"`+cred.String()+`"`) {
 		t.Fatalf("log %s", log)
+	}
+}
+
+// An editor test run tells the person testing (credential_broken in its
+// result) and records nothing: no state, no alert.
+func TestCredentialTestRunRecordsNothing(t *testing.T) {
+	e := newAlertEnv(t)
+	e.allow("suffix", "example.com")
+	cred := e.kvCredential("denied", spec.CredBearer, "kv://ops-vault/denied", "suffix:example.com")
+	sc := e.scenario("s", true, httpStep("https://api.example.com/", &cred))
+	cl := e.cluster("c1", ProbeOnlineState)
+	e.probes.connect(t, cl, 8)
+	run := e.testRun(cl, spec.Scenario{Name: "t", Type: spec.TypeHTTP, IntervalSeconds: 60, TimeoutSeconds: 5,
+		Steps: []spec.Step{httpStep("https://api.example.com/", &cred)}})
+	e.clock.add(time.Second)
+	e.dispatch()
+	e.notify()
+	e.wantRun(run, StatusError, ReasonCredentialBroken)
+	if st := e.credState(cred); st != (credRow{State: "ok"}) {
+		t.Fatalf("credential state %+v after a test run", st)
+	}
+	if msgs := e.credMessages(notify.SyntheticCredentialBroken); len(msgs) != 0 {
+		t.Fatalf("test run sent %+v", msgs)
+	}
+	// A scheduled run of the same scenario does record it.
+	e.wantRun(e.dispatchRound([]uuid.UUID{sc}, []uuid.UUID{cl})[0], StatusError, ReasonCredentialBroken)
+	if st := e.credState(cred); st.State != "broken" {
+		t.Fatalf("credential state %+v after a scheduled run", st)
+	}
+}
+
+// A result of a run that loaded the secret before a rotation names the old
+// row: it changes nothing (the rotation reset the state).
+func TestCredentialStaleResultIgnored(t *testing.T) {
+	f := newCredFixture(t)
+	e := f.e
+	stale := uuid.New() // not the row that holds the secret now
+	if err := e.svc.recordCredentialFailure(e.ctx, f.cred, stale, CauseNotFound, true); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.credState(f.cred); st != (credRow{State: "ok"}) || len(e.credMessages(notify.SyntheticCredentialBroken)) != 0 {
+		t.Fatalf("a stale failure was recorded: %+v", st)
+	}
+	if err := e.svc.recordCredentialFailure(e.ctx, f.cred, f.backing(), CauseNotFound, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.recordCredentialOK(e.ctx, []resolvedCred{{f.cred, stale}}); err != nil {
+		t.Fatal(err)
+	}
+	if st := e.credState(f.cred); st.State != "broken" {
+		t.Fatalf("a stale success cleared the failure: %+v", st)
 	}
 }

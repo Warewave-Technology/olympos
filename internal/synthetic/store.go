@@ -302,6 +302,12 @@ func CredentialBounds(ctx context.Context, q store.Querier, ids []uuid.UUID) (ma
 	return out, nil
 }
 
+// resolvedCred is a synthetic credential and the credentials row that backs
+// its secret when it was loaded. Recording a result checks the backing row
+// is still the same, so that a run that loaded a secret before a rotation
+// does not mark the rotated credential (credstate.go).
+type resolvedCred struct{ ID, Backing uuid.UUID }
+
 // runCredentials resolves the credentials of ids for one run at now. A
 // credential whose expires_at has passed is refused. The caller
 // zeroes the result with spec.ZeroCredentials, whatever happens; on an
@@ -315,14 +321,14 @@ func CredentialBounds(ctx context.Context, q store.Querier, ids []uuid.UUID) (ma
 // Only basic and OAuth2 credentials carry a user name (the client id for
 // OAuth2): for the other kinds the stored user name is a label, and the
 // probe would scrub it from every result as if it were secret.
-func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID, now time.Time) (out []spec.RunCredential, resolved []uuid.UUID, err error) {
+func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credentials, ids []uuid.UUID, now time.Time) (out []spec.RunCredential, resolved []resolvedCred, err error) {
 	rows, err := loadCredentials(ctx, q, ids)
 	if err != nil {
 		return nil, nil, err
 	}
 	for _, c := range rows {
 		if c.expiresAt != nil && !now.Before(*c.expiresAt) {
-			return nil, nil, &credentialFailure{c.id, fmt.Errorf("%w at %s", errCredentialExpired, c.expiresAt.UTC().Format(time.RFC3339))}
+			return nil, nil, &credentialFailure{c.id, c.credentialID, fmt.Errorf("%w at %s", errCredentialExpired, c.expiresAt.UTC().Format(time.RFC3339))}
 		}
 	}
 	if len(rows) > 0 && creds == nil {
@@ -341,7 +347,7 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		login, err := creds.Resolve(ctx, q, c.credentialID)
 		if err != nil {
-			return out, resolved, &credentialFailure{c.id, err}
+			return out, resolved, &credentialFailure{c.id, c.credentialID, err}
 		}
 		// NewSecret takes the resolved buffer: ZeroCredentials reaches it.
 		rc.Secret = spec.NewSecret(login.Secret)
@@ -350,9 +356,9 @@ func runCredentials(ctx context.Context, q store.Querier, creds *backup.Credenti
 		}
 		out = append(out, rc)
 		if rc.Secret == nil {
-			return out, resolved, &credentialFailure{c.id, errCredentialEmpty}
+			return out, resolved, &credentialFailure{c.id, c.credentialID, errCredentialEmpty}
 		}
-		resolved = append(resolved, c.id)
+		resolved = append(resolved, resolvedCred{c.id, c.credentialID})
 	}
 	return out, resolved, nil
 }

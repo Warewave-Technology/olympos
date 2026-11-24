@@ -3711,6 +3711,7 @@ button.cell:focus-visible {
 }
 .cred-state-note {
   margin-top: 4px;
+  white-space: nowrap;
 }
 .probe-note > span:first-child {
   flex: 1 1 360px;

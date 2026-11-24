@@ -38,6 +38,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Upgrade notes
 Nothing needs action; the migration runs at start.
+- `resolve_failures_24h` of a credential now counts only temporary failures; permanent ones end the run as
+  `credential_broken` errors and are not counted.
+- A `synthetic.failing` that is firing because of an expired credential stays firing until runs pass: runs that
+  fail on an expired credential no longer move streaks. Fix the credential, and the next passing runs close it.
 - Migration `00025` adds the credential state and copies the routes of `synthetic.credential_expiring` to both
   new events, so every channel that hears about an expiry also hears that a credential cannot be resolved.
 

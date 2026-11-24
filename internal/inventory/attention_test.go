@@ -179,8 +179,8 @@ func TestAttentionBackupPartialRemovedMember(t *testing.T) {
 	}
 }
 
-// Another module adds items through the hook; a failing hook fails the
-// dashboard, as every other source of items does.
+// Another module adds items through the hook; a failing hook is logged and
+// its items are left out, the dashboard still answers.
 func TestAttentionMoreHook(t *testing.T) {
 	var hookErr error
 	var seen []string
@@ -209,7 +209,13 @@ func TestAttentionMoreHook(t *testing.T) {
 		t.Fatalf("attention %+v, hook called for %v", d.Attention, seen)
 	}
 	hookErr = errors.New("hook failed")
-	if code := admin.Do("GET", "/api/v1/dashboard", nil, nil); code != 500 {
+	var after inventory.Dashboard
+	if code := admin.Do("GET", "/api/v1/dashboard", nil, &after); code != 200 {
 		t.Fatalf("a failing hook: %d", code)
+	}
+	for _, a := range after.Attention {
+		if a.Kind == "more" {
+			t.Fatalf("items of a failing hook: %+v", a)
+		}
 	}
 }

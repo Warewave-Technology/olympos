@@ -1209,11 +1209,15 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 			Detail: fmt.Sprintf("%d new in %d %s", cves, imgs, plural(imgs, "image", "images")), Link: "/security"})
 	}
 	if a.MoreAttention != nil {
-		more, err := a.MoreAttention(ctx, s)
-		if err != nil {
-			return nil, err
+		// Another module's items are extra: its failure does not take the
+		// dashboard down.
+		if more, err := a.MoreAttention(ctx, s); err != nil {
+			if a.Log != nil {
+				a.Log.Warn("dashboard: more attention items", "err", err)
+			}
+		} else {
+			out = append(out, more...)
 		}
-		out = append(out, more...)
 	}
 	return out, nil
 }

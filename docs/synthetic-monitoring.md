@@ -219,8 +219,10 @@ happens:
 - **Where it shows.** The matrix reads *credential error* (⊘) on every cluster that has an online probe and
   that the scenario runs on, if the scenario uses the credential (*excluded*, *paused*, *probe not installed*
   and *probe offline* keep their own state). The scenario's page lists its credentials with their state.
-  *Settings › Synthetic monitoring › Credentials* shows a badge, for example *Cannot be resolved · not found in
-  Key Vault · since 10:42*, or *Unavailable since 10:42*, next to the number of failed reads in 24 hours.
+  *Settings › Synthetic monitoring › Credentials* shows two lines under the credential's name: a red badge,
+  *Cannot be resolved*, or an amber one, *Unavailable*, and under it the cause and the time of the first failure,
+  for example *not found in Key Vault · since 10:42* (*since 10:42* alone when unavailable). A credential
+  that resolves shows nothing.
 - **Recovery.** At the next run that resolves the credential, the state goes back to *ok* and Olympos sends one
   `synthetic.credential_restored`, if the other message went out. Saving a new secret or a new expiry also resets
   the state, without a message: the next run decides.
@@ -234,6 +236,10 @@ happens:
 
 Fix the cause (put the secret back, grant `get` on it, rotate the stored one), and the next run recovers it.
 The message names the cause in a fixed sentence, never Key Vault's own error text.
+
+![Settings › Synthetic monitoring › Credentials: search-api-key cannot be resolved](images/monitoring-06-credential-broken.png)
+
+![The Needs attention strip with the synthetic credential](images/monitoring-07-attention.png)
 
 ## Write a scenario
 
