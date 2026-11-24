@@ -1,8 +1,8 @@
 // Shared pieces of Monitoring › Synthetic (docs/design/monitoring-*.html): matrix cells with text and a
 // symbol (never colour only), status badges, and readable text for the codes the API returns.
 import type { ReactNode } from 'react';
-import type { AssertionResult, ScenarioAssertion, ScenarioClusterRow, ScenarioStatus, ScenarioStep, ScenarioType, SyntheticCellState, SyntheticRun } from '../api/types';
-import { plural } from '../lib/format';
+import type { AssertionResult, CredentialKind, CredentialResolveCause, CredentialResolveState, ScenarioAssertion, ScenarioClusterRow, ScenarioStatus, ScenarioStep, ScenarioType, SyntheticCellState, SyntheticRun } from '../api/types';
+import { clockTime, plural } from '../lib/format';
 import { Badge, type Tone } from './kit';
 
 // ------------------------------------------------------------ matrix cells
@@ -15,11 +15,12 @@ export const CELL: Record<SyntheticCellState, { label: string; symbol: string; c
   not_installed: { label: 'probe not installed', symbol: '∅', cls: 'c-off' },
   excluded: { label: 'excluded', symbol: '–', cls: 'c-ex' },
   paused: { label: 'paused', symbol: '‖', cls: 'c-ex' },
+  credential_error: { label: 'credential error', symbol: '⊘', cls: 'c-cred' },
   no_data: { label: 'no data yet', symbol: '○', cls: 'c-off' },
 };
 
 /** The states the legend explains, in the mockup's order. */
-export const LEGEND_STATES: SyntheticCellState[] = ['passing', 'failing', 'degraded', 'probe_offline', 'not_installed', 'excluded', 'paused', 'no_data'];
+export const LEGEND_STATES: SyntheticCellState[] = ['passing', 'failing', 'degraded', 'probe_offline', 'not_installed', 'excluded', 'paused', 'credential_error', 'no_data'];
 
 /** A matrix cell: the symbol on screen, "<cluster> <state>" for assistive tech and the tooltip. */
 export function MatrixCell({ cluster, state, detail, onOpen }: { cluster: string; state: SyntheticCellState; detail?: string; onOpen?: () => void }) {
@@ -73,11 +74,13 @@ export function ScenarioStatusBadge({ status, failing, degraded, of }: { status:
   }
 }
 
-const CELL_TONE: Record<SyntheticCellState, Tone> = { passing: 'ok', failing: 'crit', degraded: 'warn', probe_offline: 'mute', not_installed: 'mute', excluded: 'mute', paused: 'mute', no_data: 'mute' };
+const CELL_TONE: Record<SyntheticCellState, Tone> = { passing: 'ok', failing: 'crit', degraded: 'warn', probe_offline: 'mute', not_installed: 'mute', excluded: 'mute', paused: 'mute', credential_error: 'crit', no_data: 'mute' };
 
 /** Result column of the per-cluster table ("Failed · 3rd in a row", "Excluded", "Probe offline"). */
 export function clusterResult(r: Pick<ScenarioClusterRow, 'state' | 'last_run' | 'consecutive_failures'>): { text: string; tone: Tone } {
   const last = r.last_run;
+  // its runs end before they start: not a failed run, so no streak
+  if (r.state === 'credential_error') return { text: 'Credential error', tone: 'crit' };
   if (r.state === 'excluded' || r.state === 'paused' || r.state === 'probe_offline' || r.state === 'not_installed' || !last) {
     const label = CELL[r.state]?.label ?? r.state;
     return { text: label.charAt(0).toUpperCase() + label.slice(1), tone: CELL_TONE[r.state] ?? 'mute' };
@@ -99,6 +102,37 @@ export function SyntheticRunBadge({ run }: { run: Pick<SyntheticRun, 'status'> }
   return <Badge tone={RUN_TONE[run.status] ?? 'mute'}>{label}</Badge>;
 }
 
+// ------------------------------------------------------------ credential state
+
+export const CRED_KIND_LABEL: Record<CredentialKind, string> = {
+  bearer: 'Bearer token',
+  basic: 'Basic',
+  header: 'Header',
+  oauth2_client_credentials: 'OAuth2 client credentials',
+};
+
+/** resolve_cause of a credential that cannot be resolved (broken) or reached (unavailable), as a phrase. */
+export const CAUSE_TEXT: Record<NonNullable<CredentialResolveCause>, string> = {
+  not_found: 'not found in Key Vault',
+  forbidden: 'access denied',
+  decrypt: 'the stored value does not decrypt',
+  empty: 'the secret is empty',
+  expired: 'expired',
+  unavailable: 'Key Vault unavailable',
+};
+
+/**
+ * The state of a credential as the badge and the muted line under it: broken "Cannot be resolved" with the cause and
+ * since when, unavailable "Unavailable" since when. null when it is fine (resolve_state ok, or an API that sends none).
+ */
+export function credentialState(c: { resolve_state?: CredentialResolveState; resolve_cause?: CredentialResolveCause; resolve_failing_since?: string | null }): { tone: Tone; label: string; note: string } | null {
+  if (c.resolve_state !== 'broken' && c.resolve_state !== 'unavailable') return null;
+  const since = c.resolve_failing_since ? `since ${clockTime(c.resolve_failing_since)}` : '';
+  if (c.resolve_state === 'unavailable') return { tone: 'warn', label: 'Unavailable', note: since };
+  const cause = c.resolve_cause ? CAUSE_TEXT[c.resolve_cause] ?? '' : '';
+  return { tone: 'crit', label: 'Cannot be resolved', note: [cause, since].filter(Boolean).join(' · ') };
+}
+
 // ------------------------------------------------------------ codes → readable text
 
 /** failure_reason prefixes of the probe, skip and error reasons of the server, blocked reasons (task-11 carries). */
@@ -114,6 +148,7 @@ export const REASON_TEXT: Record<string, string> = {
   assertion_failed: 'Assertion failed',
   invalid_request: 'The request is not valid',
   credential_error: 'The credential could not be used',
+  credential_broken: 'The credential cannot be resolved',
   runner_panic: 'The probe failed while running the step',
   // server: skipped
   probe_offline: 'Probe offline',

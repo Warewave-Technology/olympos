@@ -7,7 +7,7 @@ import type { SyntheticCell, SyntheticOverview as Overview, SyntheticOverviewSce
 import { useCan } from '../../auth/me';
 import { clockTime, plural } from '../../lib/format';
 import { MONITORING_STATUS, monitoringRoute } from '../../router';
-import { EmptyState, QueryView } from '../../ui/kit';
+import { Badge, EmptyState, QueryView } from '../../ui/kit';
 import { CELL, CellLegend, MatrixCell, ScenarioStatusBadge, reasonText, scenarioLine } from '../../ui/synthetic';
 
 export const overviewQueryKey = ['synthetic', 'overview'] as const;
@@ -179,6 +179,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
                     <Link to="/monitoring" search={{ scenario: s.id }}>
                       {s.name}
                     </Link>
+                    {s.cells.some((x) => x.state === 'credential_error') && <Badge tone="crit" className="inline-badge">Credential error</Badge>}
                   </div>
                   <div className="muted small">
                     {scenarioLine(s)}
@@ -205,7 +206,7 @@ function Matrix({ overview, rows }: { overview: Overview; rows: SyntheticOvervie
         </table>
       </div>
       <div className="card-foot">
-        Each cell is the latest run of the scenario in that cluster: {Object.values(CELL)[0].symbol} passing, {CELL.failing.symbol} failing (alert firing), {CELL.degraded.symbol} degraded (the last run failed, no alert yet). Hover for details, click a cell for its run, a scenario for its history.
+        Each cell is the latest run of the scenario in that cluster: {Object.values(CELL)[0].symbol} passing, {CELL.failing.symbol} failing (alert firing), {CELL.degraded.symbol} degraded (the last run failed, no alert yet), {CELL.credential_error.symbol} credential error (a credential the scenario uses cannot be resolved). Hover for details, click a cell for its run, a scenario for its history.
       </div>
     </section>
   );

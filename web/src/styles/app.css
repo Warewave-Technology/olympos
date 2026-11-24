@@ -1063,6 +1063,11 @@ mark {
   background: var(--bg-raised);
   color: var(--fg-soft);
 }
+.badge.inline-badge {
+  font-size: 11px;
+  padding: 2px 7px;
+  margin-left: 6px;
+}
 .chip {
   display: inline-block;
   padding: 2px 8px;
@@ -3282,6 +3287,11 @@ button.cell:focus-visible {
   background: var(--warn-bg);
   color: var(--warn-fg);
 }
+.c-cred {
+  background: var(--crit-bg);
+  color: var(--crit-fg);
+  outline: 1px dashed var(--crit-border);
+}
 .c-off {
   background: var(--bg-hover);
   color: var(--fg-muted);
@@ -3693,13 +3703,14 @@ button.cell:focus-visible {
   flex: 1 1 320px;
   min-width: 0;
 }
-.cred-warn {
+.cred-state {
+  margin-top: 6px;
+}
+.cred-note {
+  margin-left: 6px;
+}
+.cred-state-note {
   margin-top: 4px;
-  min-width: 200px;
-  max-width: 240px;
-  white-space: normal;
-  flex-wrap: nowrap;
-  align-items: flex-start;
 }
 .probe-note > span:first-child {
   flex: 1 1 360px;

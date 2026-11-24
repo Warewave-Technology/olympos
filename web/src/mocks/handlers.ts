@@ -4,7 +4,7 @@ import { describeCron, nextRuns, runsPerMonth } from '../lib/cron';
 import { parseSas } from '../lib/sas';
 import * as db from './db';
 import { fleetRoutes } from './fleet';
-import { syntheticRoutes } from './synthetic';
+import { credentialAttention, syntheticRoutes } from './synthetic';
 
 export interface MockReq {
   method: string;
@@ -110,6 +110,7 @@ function dashboard(): Dashboard {
   if (selfLast?.status === 'partial')
     attention.push({ kind: 'self_backup_partial', severity: 'warn', label: 'Olympos backup incomplete', detail: `missing ${(selfLast.copies ?? []).filter((c) => c.status === 'failed').map((c) => c.destination_name).join(', ')}`, link: '/backups?self=1' });
   if (!selfBackup.configured) attention.push({ kind: 'self_backup_unset', severity: 'warn', label: 'Olympos backup', detail: 'choose where the Olympos database is backed up', link: '/backups?self=1' });
+  attention.push(...credentialAttention());
   if (perms().vault_approve && waiting.length) attention.push({ kind: 'approvals', severity: 'warn', label: `${waiting.length} approvals`, detail: 'waiting for you · oldest 51 h left', link: '/approvals' });
   const eol = cs.filter((c) => c.eol);
   if (eol.length) attention.push({ kind: 'eol', severity: 'warn', label: 'End of life', detail: `${eol.length} cluster${eol.length > 1 ? 's' : ''} on v1.29`, link: '/?filter=eol' });

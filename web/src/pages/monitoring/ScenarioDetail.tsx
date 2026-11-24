@@ -8,7 +8,7 @@ import type { ItemList, Scenario, ScenarioClusterRow, ScenarioClusters, Syntheti
 import { clockTime, duration, plural } from '../../lib/format';
 import { Badge, ErrorState, FormError, Loading, Modal, QueryView, TypeToConfirm, useToast } from '../../ui/kit';
 import { PageHead } from '../../ui/status';
-import { HiddenNote, ScenarioStatusBadge, assertionsLine, clusterResult, intervalText, reasonText, stepTitle, TYPE_LABEL, variableSource } from '../../ui/synthetic';
+import { CRED_KIND_LABEL, HiddenNote, ScenarioStatusBadge, assertionsLine, clusterResult, credentialState, intervalText, reasonText, stepTitle, TYPE_LABEL, variableSource } from '../../ui/synthetic';
 import { ms, pct, useSyntheticOverview } from './SyntheticOverview';
 import { MonitoringTabs } from './MonitoringPage';
 
@@ -94,12 +94,68 @@ export function ScenarioDetail({ id }: { id: string }) {
           })}
         </ol>
       </section>
+      <CredentialsCard s={s} />
       <ClustersCard q={clustersQ} />
       <div className="cols-2">
         <AlertRuleCard s={s} />
         <AlertsCard id={id} />
       </div>
     </>
+  );
+}
+
+/** The credentials the steps use and whether the probes can resolve them (docs/design/monitoring-scenario.html). */
+function CredentialsCard({ s }: { s: Scenario }) {
+  const creds = s.credentials ?? [];
+  if (creds.length === 0) return null;
+  return (
+    <section className="card" aria-labelledby="creds-h">
+      <div className="card-head">
+        <div className="head-text">
+          <h2 id="creds-h">Credentials</h2>
+          <div className="desc">The credentials this scenario uses and whether the probes can resolve them.</div>
+        </div>
+      </div>
+      <div className="table-wrap">
+        <table className="t" aria-label="Scenario credentials">
+          <thead>
+            <tr>
+              <th scope="col">Credential</th>
+              <th scope="col">Type</th>
+              <th scope="col">Used by</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody>
+            {creds.map((c) => {
+              // type and steps come from the steps themselves: the view lists only the credential and its state
+              const steps = s.steps.flatMap((st, i) => (st.credential_id === c.id ? [i + 1] : []));
+              const ref = s.steps.find((st) => st.credential_id === c.id)?.credential;
+              const st = credentialState(c);
+              return (
+                <tr key={c.id}>
+                  <td className="mono">
+                    <Link to="/settings/synthetic" search={{ credential: c.id }}>
+                      {c.name}
+                    </Link>
+                  </td>
+                  <td>
+                    {ref ? (CRED_KIND_LABEL as Record<string, string>)[ref.kind] ?? ref.kind : '—'}
+                    {ref?.kind === 'header' && ref.header_name && <span className="mono muted"> {ref.header_name}</span>}
+                  </td>
+                  <td>{steps.length ? `${steps.length === 1 ? 'Step' : 'Steps'} ${steps.join(', ')}` : '—'}</td>
+                  <td>
+                    <Badge tone={st?.tone ?? 'ok'}>{st?.label ?? 'OK'}</Badge>
+                    {st?.note && <span className="muted small cred-note">{st.note}</span>}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="card-spacer" />
+    </section>
   );
 }
 

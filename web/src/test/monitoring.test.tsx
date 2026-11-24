@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import type { ScenarioStep } from '../api/types';
 import { toCurl } from '../lib/curl';
 import * as syn from '../mocks/synthetic';
+import { clockTime } from '../lib/format';
 import { REASON_TEXT, reasonText, withCredentialNames } from '../ui/synthetic';
 import { POLL_MARGIN_MS, shouldPoll, waterfallPhases } from '../pages/monitoring/RunDialog';
 import { MONITORING_TABS } from '../pages/monitoring/tabs';
@@ -48,6 +49,7 @@ describe('Monitoring › Synthetic overview', () => {
       ['aks-sea-apac probe not installed', '∅', 'c-off'],
       ['onprem-ist-lab excluded', '–', 'c-ex'],
       ['onprem-factory-01 paused', '‖', 'c-ex'],
+      ['prod-aks-weu-01 credential error', '⊘', 'c-cred'],
     ];
     for (const [label, symbol, cls] of cases) {
       const c = cell(label);
@@ -58,7 +60,7 @@ describe('Monitoring › Synthetic overview', () => {
     expect(cell('oke-fra-erp failing').getAttribute('title')).toContain('step 3: latency 912 ms > 500 ms');
     // the legend says what each symbol means
     const legend = screen.getByLabelText('Legend');
-    for (const t of ['passing', 'failing', 'degraded', 'probe offline', 'probe not installed', 'excluded', 'paused']) expect(legend).toHaveTextContent(t);
+    for (const t of ['passing', 'failing', 'degraded', 'probe offline', 'probe not installed', 'excluded', 'paused', 'credential error']) expect(legend).toHaveTextContent(t);
 
     const kpis = screen.getByRole('region', { name: 'Synthetic monitoring totals' });
     expect(within(kpis).getByText('Failing now').parentElement).toHaveTextContent('Checkout API flow · 1 cluster');
@@ -75,6 +77,22 @@ describe('Monitoring › Synthetic overview', () => {
     await user.click(screen.getByRole('button', { name: /^All · 7$/ }));
     await user.type(screen.getByLabelText('Search scenarios'), 'payments');
     await waitFor(() => expect(rows().map((r) => within(r).getByRole('link').textContent)).toEqual(['Checkout API flow', 'Payments gateway TLS']));
+  });
+
+  it('marks a scenario with a credential that cannot be resolved: a name badge, credential error cells, no status of its own', async () => {
+    await renderApp('/monitoring');
+    const matrix = await screen.findByRole('table', { name: 'Scenarios by cluster' }, T);
+    const row = (await within(matrix).findByRole('link', { name: 'Search API latency' }, T)).closest('tr')!;
+    // the scenario status is whatever the API says; the cells and a small badge on the name carry the cause
+    expect(within(row).getByText('Credential error', { selector: '.badge' })).toHaveClass('crit');
+    expect(within(row).getByText('No data yet')).toBeInTheDocument();
+    const cells = within(row).getAllByLabelText(/credential error$/);
+    expect(cells.length).toBeGreaterThan(5);
+    expect(cells[0].getAttribute('title')).toContain('credential error');
+    // the cluster the probe is not on keeps its own state: the credential comes after excluded, paused and the probe
+    expect(within(row).getByLabelText('onprem-ist-lab excluded')).toBeInTheDocument();
+    // only that scenario gets the badge
+    expect(within(matrix).getAllByText('Credential error', { selector: '.badge' })).toHaveLength(1);
   });
 
   it('opens the last run of a cell', async () => {
@@ -134,6 +152,64 @@ describe('scenario detail', () => {
     expect(cards[1]).not.toHaveTextContent('hidden');
     expect(screen.queryByRole('link', { name: 'Edit' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Run now' })).toBeNull();
+  });
+});
+
+describe('scenario detail: credentials', () => {
+  const credOf = (name: string) => syn.credentials.find((c) => c.name === name)!;
+
+  it('lists the credentials a scenario uses with their type, the steps and their state', async () => {
+    await renderApp(detailOf('Checkout API flow'));
+    const card = await screen.findByRole('region', { name: 'Credentials' }, T);
+    const rows = within(within(card).getByRole('table')).getAllByRole('row').slice(1);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toHaveTextContent('catalog-monitor');
+    expect(rows[0]).toHaveTextContent('Bearer token');
+    expect(rows[0]).toHaveTextContent('Steps 3, 4');
+    expect(within(rows[0]).getByText('OK')).toHaveClass('badge', 'ok');
+    expect(within(rows[0]).getByRole('link', { name: 'catalog-monitor' })).toHaveAttribute('href', `/settings/synthetic?credential=${credOf('catalog-monitor').id}`);
+  });
+
+  it('says a credential cannot be resolved, since when, and that every cluster has a credential error', async () => {
+    await renderApp(detailOf('Search API latency'));
+    const card = await screen.findByRole('region', { name: 'Credentials' }, T);
+    const row = within(card).getByText('search-api-key').closest('tr')!;
+    expect(row).toHaveTextContent('Header X-Api-Key');
+    expect(row).toHaveTextContent('Step 2');
+    expect(within(row).getByText('Cannot be resolved')).toHaveClass('badge', 'crit');
+    expect(row).toHaveTextContent(`not found in Key Vault · since ${clockTime(credOf('search-api-key').resolve_failing_since)}`);
+    const table = await screen.findByRole('table', { name: 'Scenario by cluster' }, T);
+    const erp = within(table).getByText('oke-fra-erp').closest('tr')!;
+    expect(within(erp).getByText('Credential error')).toHaveClass('badge', 'crit');
+    expect(within(table).getByText('onprem-ist-lab').closest('tr')).toHaveTextContent('Excluded');
+    // not a failing run, and no streak
+    expect(erp).not.toHaveTextContent('in a row');
+  });
+
+  it('shows an unavailable credential as a warning, and nothing for a scenario without credentials', async () => {
+    await renderApp(detailOf('Legacy reports portal'));
+    const card = await screen.findByRole('region', { name: 'Credentials' }, T);
+    const row = within(card).getByText('reports-login').closest('tr')!;
+    expect(within(row).getByText('Unavailable')).toHaveClass('badge', 'warn');
+    expect(row).toHaveTextContent(`since ${clockTime(credOf('reports-login').resolve_failing_since)}`);
+    expect(row).not.toHaveTextContent('Key Vault');
+    cleanup();
+    await renderApp(detailOf('Kafka brokers reachable'));
+    await screen.findByRole('heading', { name: 'Steps' }, T);
+    expect(screen.queryByRole('region', { name: 'Credentials' })).toBeNull();
+  });
+});
+
+describe('Needs attention: synthetic credential', () => {
+  it('links the credential that cannot be resolved to its row in Settings, with the scenarios it affects', async () => {
+    await renderApp('/');
+    const strip = await screen.findByRole('region', { name: 'Needs attention' }, T);
+    const item = within(strip).getByText('Synthetic credential').closest('a')!;
+    expect(item).toHaveClass('crit');
+    expect(item).toHaveTextContent('Credential search-api-key cannot be resolved — 1 scenario affected');
+    expect(item).toHaveAttribute('href', `/settings/synthetic?credential=${syn.credentials.find((c) => c.name === 'search-api-key')!.id}`);
+    // an unavailable credential younger than 30 minutes is not an attention item
+    expect(within(strip).getAllByText('Synthetic credential')).toHaveLength(1);
   });
 });
 
@@ -430,6 +506,8 @@ describe('scenario editor, fix round 1', () => {
     const body = syn.lastPut.body as Record<string, unknown> & { steps: ScenarioStep[] };
     expect('enabled' in body).toBe(false);
     expect('store_responses' in body).toBe(false);
+    // the credentials of the detail are a view: never sent back
+    expect('credentials' in body).toBe(false);
     const s = checkout();
     expect(s.steps[2].http?.headers).toEqual({ Accept: 'application/json' });
     expect(s.steps[2].credential_id).toBe(syn.credentials[0].id);
