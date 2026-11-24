@@ -19,7 +19,8 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 > **Status:** v0.3.0 is the latest release: synthetic monitoring from a probe in every cluster, on top of
 > v0.2's restore from the UI and destination groups, on one server instance with Microsoft Entra ID and
-> Azure Key Vault.
+> Azure Key Vault. v0.3.1-rc.1 is the release candidate for v0.3.1 (one alert per synthetic credential that
+> cannot be resolved).
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
@@ -108,11 +109,19 @@ Released in v0.2:
 - More than one destination per backup job, one dump stored in each ([#32](https://github.com/Warewave-Technology/olympos/issues/32))
 - Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
 
-Planned for v0.4:
+Planned for v0.4 ([milestone](https://github.com/Warewave-Technology/olympos/milestone/3)):
 
-- More than one approval for Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23))
-- S3 destinations with IAM roles instead of static keys ([#24](https://github.com/Warewave-Technology/olympos/issues/24))
-- Image scans from ACR with the server's managed identity ([#25](https://github.com/Warewave-Technology/olympos/issues/25))
+- ClickHouse backups with ClickHouse's own `BACKUP`/`RESTORE`, written through Olympos ([#62](https://github.com/Warewave-Technology/olympos/issues/62))
+- Runtime security: what running containers do, seen by Falco, detection only ([#63](https://github.com/Warewave-Technology/olympos/issues/63))
+- Before v0.4.0: an acceptance run on real Azure ([#58](https://github.com/Warewave-Technology/olympos/issues/58)), identity
+  Secrets that survive GitOps syncs ([#59](https://github.com/Warewave-Technology/olympos/issues/59)), a release candidate for
+  every security-model change ([#60](https://github.com/Warewave-Technology/olympos/issues/60)), and published recovery time
+  and data-loss figures ([#61](https://github.com/Warewave-Technology/olympos/issues/61))
+
+Later, not scheduled ([milestone](https://github.com/Warewave-Technology/olympos/milestone/4)): more than one approval for
+Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23)), S3 destinations with IAM roles
+([#24](https://github.com/Warewave-Technology/olympos/issues/24)), image scans from ACR with the server's managed identity
+([#25](https://github.com/Warewave-Technology/olympos/issues/25)).
 - Restore: an admin can cancel an approved request; an event when a request expires ([#42](https://github.com/Warewave-Technology/olympos/issues/42), [#43](https://github.com/Warewave-Technology/olympos/issues/43))
 
 Ideas and comments are welcome on the issues.

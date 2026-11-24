@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - unreleased
+
+One alert per synthetic credential that cannot be resolved, merged migrations that cannot change, a
+tighter secret scan, and a test for ClickHouse restores next to a shared Keeper. Release candidate:
+v0.3.1-rc.1.
+
 ### Changed
 - **One alert per synthetic credential that cannot be resolved**
   ([#54](https://github.com/Warewave-Technology/olympos/issues/54)). A credential that could not be read used
@@ -41,7 +47,7 @@ All notable changes to this project are documented here. The format follows
 - A probe that the gateway refused or revoked before its hello went out logged `EOF` instead of the reason.
 
 ### Upgrade notes
-Nothing needs action; the migration runs at start.
+From v0.3.0 nothing needs action; the migration runs at start.
 - `resolve_failures_24h` of a credential now counts only temporary failures; permanent ones end the run as
   `credential_broken` errors and are not counted.
 - A `synthetic.failing` that is firing because of an expired credential stays firing until runs pass: runs that
