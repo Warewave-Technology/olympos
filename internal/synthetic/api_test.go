@@ -16,8 +16,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Warewave-Technology/olympos/internal/apitest"
+	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
+	"github.com/Warewave-Technology/olympos/internal/inventory"
 	"github.com/Warewave-Technology/olympos/internal/server"
 	"github.com/Warewave-Technology/olympos/internal/synthetic"
 	"github.com/Warewave-Technology/olympos/internal/synthetic/spec"
@@ -38,11 +40,18 @@ type env struct {
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	var svc *synthetic.Service
-	e := apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
-		svc = &synthetic.Service{DB: e.DB, Log: e.Log, Probes: e.Gateway, Creds: &backup.Credentials{KV: e.KV, Envelope: e.Envelope}}
-		svc.OnResult = svc.ApplyOutcome
-		return []server.Module{&synthetic.API{Svc: svc, Log: e.Log, TestRunsPerMinute: 2}}
-	}})
+	e := apitest.New(t, apitest.Options{
+		// The dashboard asks the service, as the app wires it.
+		Inventory: func(a *inventory.API) {
+			a.MoreAttention = func(ctx context.Context, s *authz.Subject) ([]inventory.AttentionItem, error) {
+				return svc.AttentionItems(ctx, s)
+			}
+		},
+		Modules: func(e *apitest.Env) []server.Module {
+			svc = &synthetic.Service{DB: e.DB, Log: e.Log, Probes: e.Gateway, Creds: &backup.Credentials{KV: e.KV, Envelope: e.Envelope}}
+			svc.OnResult = svc.ApplyOutcome
+			return []server.Module{&synthetic.API{Svc: svc, Log: e.Log, TestRunsPerMinute: 2}}
+		}})
 	x := &env{Env: e, svc: svc, t: t, clusters: map[string]uuid.UUID{}}
 	for _, c := range []struct{ name, env, probe string }{{"dev-1", "dev", "online"}, {"dev-2", "dev", "online"}, {"prod-1", "prod", "online"}} {
 		x.clusters[c.name] = x.cluster(c.name, c.env, c.probe)
@@ -1170,5 +1179,374 @@ func TestProbeTokenAndRevoke(t *testing.T) {
 	editor.Do("GET", "/api/v1/me", nil, &me)
 	if !me.Permissions["synthetic_edit"] || !me.Permissions["synthetic_edit_global"] {
 		t.Fatalf("me: %+v", me.Permissions)
+	}
+}
+
+// ---------------------------------------------------------------- credential state (#54)
+
+// credStateEnv is an admin, a credential used by an enabled scenario, and
+// helpers to put the credential in a state.
+type credStateEnv struct {
+	x     *env
+	admin *apitest.Client
+	cred  uuid.UUID
+	sc    uuid.UUID
+}
+
+func newCredStateEnv(t *testing.T) *credStateEnv {
+	t.Helper()
+	x := newEnv(t)
+	admin := x.login("admin", "admin")
+	x.addRule(admin, "wrw.com", "suffix")
+	cred := x.addCredential(admin, bearer("billing", canary, "suffix:wrw.com"))
+	step := httpStep("https://api.wrw.com/")
+	step["credential_id"] = cred
+	sc := x.createScenario(admin, with(scenarioBody("pay", step), "exclude_selectors", []string{"env=lab"}))
+	return &credStateEnv{x: x, admin: admin, cred: cred, sc: sc}
+}
+
+// state puts the credential in a state, failing since ago.
+func (c *credStateEnv) state(state, cause string, ago time.Duration) {
+	c.x.t.Helper()
+	c.x.exec(`UPDATE synthetic_credentials SET resolve_state = $2, resolve_cause = $3, resolve_failing_since = now() - $4::interval,
+		resolve_alerted_at = now() WHERE id = $1`, c.cred, state, cause, fmt.Sprintf("%d seconds", int(ago.Seconds())))
+}
+
+type credStateView struct {
+	ID                  uuid.UUID  `json:"id"`
+	Name                string     `json:"name"`
+	ResolveState        string     `json:"resolve_state"`
+	ResolveCause        *string    `json:"resolve_cause"`
+	ResolveFailingSince *time.Time `json:"resolve_failing_since"`
+}
+
+// The credential view and the scenario detail say what the last dispatch
+// found, as codes: never the error.
+func TestCredentialStateInTheViews(t *testing.T) {
+	c := newCredStateEnv(t)
+	var list struct {
+		Items []credStateView `json:"items"`
+	}
+	var sc struct {
+		Credentials []credStateView `json:"credentials"`
+	}
+	read := func() (credStateView, []credStateView) {
+		t.Helper()
+		list.Items = nil
+		if code := c.admin.Do("GET", "/api/v1/synthetic/credentials", nil, &list); code != 200 || len(list.Items) != 1 {
+			t.Fatalf("credentials: %d %+v", code, list)
+		}
+		sc.Credentials = nil
+		if code := c.admin.Do("GET", "/api/v1/synthetic/scenarios/"+c.sc.String(), nil, &sc); code != 200 {
+			t.Fatalf("scenario: %d", code)
+		}
+		return list.Items[0], sc.Credentials
+	}
+	v, creds := read()
+	if v.ResolveState != "ok" || v.ResolveCause != nil || v.ResolveFailingSince != nil ||
+		len(creds) != 1 || creds[0].ID != c.cred || creds[0].Name != "billing" || creds[0].ResolveState != "ok" {
+		t.Fatalf("a new credential: %+v %+v", v, creds)
+	}
+	c.state("broken", "not_found", 10*time.Minute)
+	v, creds = read()
+	if v.ResolveState != "broken" || v.ResolveCause == nil || *v.ResolveCause != "not_found" || v.ResolveFailingSince == nil ||
+		time.Since(*v.ResolveFailingSince) < 9*time.Minute {
+		t.Fatalf("a broken credential: %+v", v)
+	}
+	if len(creds) != 1 || creds[0].ResolveState != "broken" || creds[0].ResolveCause == nil || *creds[0].ResolveCause != "not_found" ||
+		creds[0].ResolveFailingSince == nil {
+		t.Fatalf("the scenario's credentials: %+v", creds)
+	}
+	c.state("unavailable", "unavailable", time.Minute)
+	if v, _ = read(); v.ResolveState != "unavailable" || *v.ResolveCause != "unavailable" {
+		t.Fatalf("an unavailable credential: %+v", v)
+	}
+	// alerted_at is for the server: never in a response.
+	if _, raw := c.admin.Raw("GET", "/api/v1/synthetic/credentials", nil); strings.Contains(raw, "alerted") || strings.Contains(raw, canary) {
+		t.Fatalf("credentials: %s", raw)
+	}
+}
+
+// A scenario with a broken credential shows credential_error on every
+// cluster it would run on that is reachable: excluded, paused, probe
+// states come first, and the alert does not outrank it.
+func TestOverviewCredentialErrorCell(t *testing.T) {
+	c := newCredStateEnv(t)
+	x := c.x
+	offline := x.cluster("off-1", "dev", "offline")
+	notInstalled := x.cluster("none-1", "dev", "not_installed")
+	excluded := x.cluster("lab-1", "lab", "online")
+	step := httpStep("https://api.wrw.com/")
+	step["credential_id"] = c.cred
+	paused := x.createScenario(c.admin, with(scenarioBody("paused", step), "enabled", false))
+	plainID := x.createScenario(c.admin, scenarioBody("plain", httpStep("https://api.wrw.com/")))
+	// dev-1 has a firing alert: the broken credential is still the news.
+	r := x.finishedRun(c.sc, x.clusters["dev-1"], "failed", "")
+	x.exec(`INSERT INTO synthetic_state (scenario_id, cluster_id, consecutive_failures, last_run_id, last_status, last_finished_at)
+		VALUES ($1, $2, 3, $3, 'failed', now())`, c.sc, x.clusters["dev-1"], r)
+	x.exec(`INSERT INTO synthetic_alerts (scenario_id, cluster_id, state, reason, last_run_id) VALUES ($1, $2, 'firing', 'timeout', $3)`,
+		c.sc, x.clusters["dev-1"], r)
+
+	cells := func() (map[uuid.UUID]map[uuid.UUID]string, map[uuid.UUID]string) {
+		t.Helper()
+		var ov struct {
+			Scenarios []struct {
+				ID     uuid.UUID `json:"id"`
+				Status string    `json:"status"`
+				Cells  []struct {
+					ClusterID uuid.UUID `json:"cluster_id"`
+					State     string    `json:"state"`
+				} `json:"cells"`
+			} `json:"scenarios"`
+		}
+		if code := c.admin.Do("GET", "/api/v1/synthetic/overview", nil, &ov); code != 200 {
+			t.Fatal(code)
+		}
+		out, status := map[uuid.UUID]map[uuid.UUID]string{}, map[uuid.UUID]string{}
+		for _, s := range ov.Scenarios {
+			out[s.ID], status[s.ID] = map[uuid.UUID]string{}, s.Status
+			for _, cell := range s.Cells {
+				out[s.ID][cell.ClusterID] = cell.State
+			}
+		}
+		return out, status
+	}
+	got, _ := cells()
+	if got[c.sc][x.clusters["dev-1"]] != "failing" {
+		t.Fatalf("a healthy credential changes nothing: %v", got[c.sc])
+	}
+	// Transient: nothing changes in the matrix.
+	c.state("unavailable", "unavailable", time.Hour)
+	if got, _ = cells(); got[c.sc][x.clusters["dev-1"]] != "failing" {
+		t.Fatalf("an unavailable credential: %v", got[c.sc])
+	}
+	c.state("broken", "not_found", time.Minute)
+	got, _ = cells()
+	want := map[uuid.UUID]string{x.clusters["dev-1"]: "credential_error", x.clusters["dev-2"]: "credential_error",
+		x.clusters["prod-1"]: "credential_error", offline: "probe_offline", notInstalled: "not_installed", excluded: "excluded"}
+	for cl, w := range want {
+		if got[c.sc][cl] != w {
+			t.Errorf("cell %s: %s, want %s", cl, got[c.sc][cl], w)
+		}
+	}
+	for cl, s := range got[paused] {
+		if s != "paused" && s != "excluded" {
+			t.Errorf("paused scenario, cell %s: %s", cl, s)
+		}
+	}
+	for cl, s := range got[plainID] {
+		if s == "credential_error" {
+			t.Errorf("a scenario without the credential, cell %s: %s", cl, s)
+		}
+	}
+	// The per-cluster table agrees.
+	var cl struct {
+		Items []struct {
+			ClusterID uuid.UUID `json:"cluster_id"`
+			State     string    `json:"state"`
+		} `json:"items"`
+	}
+	if code := c.admin.Do("GET", "/api/v1/synthetic/scenarios/"+c.sc.String()+"/clusters", nil, &cl); code != 200 || len(cl.Items) != len(want) {
+		t.Fatalf("clusters: %d %+v", code, cl)
+	}
+	for _, it := range cl.Items {
+		if it.State != want[it.ClusterID] {
+			t.Errorf("row %s: %s, want %s", it.ClusterID, it.State, want[it.ClusterID])
+		}
+	}
+	// The credential comes back: the matrix too.
+	c.x.exec(`UPDATE synthetic_credentials SET resolve_state = 'ok', resolve_cause = NULL, resolve_failing_since = NULL WHERE id = $1`, c.cred)
+	if got, _ = cells(); got[c.sc][x.clusters["dev-1"]] != "failing" {
+		t.Fatalf("a restored credential: %v", got[c.sc])
+	}
+}
+
+// The run detail's streak leaves out the runs a credential error ended: no
+// move of the streak, here as in the alert state.
+func TestRunDetailStreakSkipsCredentialRuns(t *testing.T) {
+	c := newCredStateEnv(t)
+	x := c.x
+	dev1 := x.clusters["dev-1"]
+	run := func(status, reason string, ago time.Duration) uuid.UUID {
+		t.Helper()
+		var id uuid.UUID
+		if err := x.DB.QueryRow(context.Background(), `INSERT INTO synthetic_runs (scenario_id, cluster_id, status, started_at, finished_at, total_ms, probe_ip, failure_reason)
+			VALUES ($1, $2, $3, now() - $4::interval, now() - $4::interval, 12, '', $5) RETURNING id`,
+			c.sc, dev1, status, fmt.Sprintf("%d seconds", int(ago.Seconds())), reason).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	run("passed", "", 10*time.Minute)
+	run("failed", "timeout", 8*time.Minute)
+	run("error", "credential_broken", 6*time.Minute)
+	run("error", "credential_expired", 5*time.Minute)
+	last := run("failed", "timeout", 4*time.Minute)
+	var d struct {
+		ConsecutiveFailures int `json:"consecutive_failures"`
+	}
+	if code := c.admin.Do("GET", "/api/v1/synthetic/runs/"+last.String(), nil, &d); code != 200 || d.ConsecutiveFailures != 2 {
+		t.Fatalf("run detail: %d %+v, want 2 failures", code, d)
+	}
+	// A credential run is not a failure of its own either.
+	broken := run("error", "credential_broken", time.Minute)
+	if code := c.admin.Do("GET", "/api/v1/synthetic/runs/"+broken.String(), nil, &d); code != 200 || d.ConsecutiveFailures != 2 {
+		t.Fatalf("run detail of a credential run: %d %+v", code, d)
+	}
+}
+
+// Saving a new secret or a new expiry starts over: the next run decides,
+// and no synthetic.credential_restored goes out. Other edits keep the state.
+func TestUpdateCredentialResetsState(t *testing.T) {
+	c := newCredStateEnv(t)
+	x := c.x
+	path := "/api/v1/synthetic/credentials/" + c.cred.String()
+	row := func() (state string, cause *string, since, alerted *time.Time) {
+		t.Helper()
+		if err := x.DB.QueryRow(context.Background(), `SELECT resolve_state, resolve_cause, resolve_failing_since, resolve_alerted_at
+			FROM synthetic_credentials WHERE id = $1`, c.cred).Scan(&state, &cause, &since, &alerted); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	events := func() (n int) {
+		t.Helper()
+		if err := x.DB.QueryRow(context.Background(), `SELECT count(*) FROM outbox WHERE event_type LIKE 'synthetic.credential_%'`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	body := func(secret string) map[string]any {
+		b := bearer("billing", secret, "suffix:wrw.com")
+		if secret == "" {
+			delete(b, "secret")
+		}
+		return b
+	}
+	c.state("broken", "not_found", time.Hour)
+
+	// A rename keeps the state.
+	b := body("")
+	b["name"] = "billing-2"
+	if code, raw := c.admin.Raw("PUT", path, b); code != 200 {
+		t.Fatalf("rename: %d %s", code, raw)
+	}
+	if st, _, _, _ := row(); st != "broken" {
+		t.Fatalf("a rename resets the state: %s", st)
+	}
+	// A new expiry resets it.
+	b = body("")
+	b["name"] = "billing-2"
+	b["expires_at"] = time.Now().Add(48 * time.Hour).UTC().Format(time.RFC3339)
+	if code, raw := c.admin.Raw("PUT", path, b); code != 200 {
+		t.Fatalf("expiry: %d %s", code, raw)
+	}
+	if st, cause, since, alerted := row(); st != "ok" || cause != nil || since != nil || alerted != nil {
+		t.Fatalf("after a new expiry: %s %v %v %v", st, cause, since, alerted)
+	}
+	// Saving the same expiry again keeps an ok credential ok, and a broken
+	// one broken.
+	c.state("broken", "forbidden", time.Hour)
+	if code, raw := c.admin.Raw("PUT", path, b); code != 200 {
+		t.Fatalf("same expiry: %d %s", code, raw)
+	}
+	if st, _, _, _ := row(); st != "broken" {
+		t.Fatalf("the same expiry resets the state: %s", st)
+	}
+	// A new secret resets it.
+	b = body(canary + "-2")
+	b["name"] = "billing-2"
+	b["expires_at"] = nil
+	if code, raw := c.admin.Raw("PUT", path, b); code != 200 {
+		t.Fatalf("rotate: %d %s", code, raw)
+	}
+	if st, cause, since, alerted := row(); st != "ok" || cause != nil || since != nil || alerted != nil {
+		t.Fatalf("after a rotation: %s %v %v %v", st, cause, since, alerted)
+	}
+	if n := events(); n != 0 {
+		t.Fatalf("%d credential events written by a save: the next run decides", n)
+	}
+}
+
+// ---------------------------------------------------------------- Needs attention (#54)
+
+func (c *credStateEnv) attention(client *apitest.Client) []inventory.AttentionItem {
+	c.x.t.Helper()
+	var d inventory.Dashboard
+	if code := client.Do("GET", "/api/v1/dashboard", nil, &d); code != 200 {
+		c.x.t.Fatalf("dashboard: %d", code)
+	}
+	var out []inventory.AttentionItem
+	for _, a := range d.Attention {
+		if a.Kind == "synthetic_credential_broken" {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func TestAttentionBrokenCredential(t *testing.T) {
+	c := newCredStateEnv(t)
+	x := c.x
+	step := httpStep("https://api.wrw.com/other")
+	step["credential_id"] = c.cred
+	x.createScenario(c.admin, scenarioBody("refund", step))
+	// A disabled scenario is not affected: nothing runs it.
+	x.createScenario(c.admin, with(scenarioBody("old", step), "enabled", false))
+	devViewer := x.login("dev-viewer", "viewer@env=dev")
+	editor := x.login("editor", "synthetic-editor")
+	globalViewer := x.login("global-viewer", "viewer")
+
+	if got := c.attention(c.admin); len(got) != 0 {
+		t.Fatalf("a healthy credential: %+v", got)
+	}
+	c.state("broken", "not_found", time.Minute)
+	want := inventory.AttentionItem{Kind: "synthetic_credential_broken", Severity: "crit", Label: "Synthetic credential",
+		Detail: "Credential billing cannot be resolved \u2014 2 scenarios affected", Link: "/settings/synthetic?credential=" + c.cred.String()}
+	if got := c.attention(c.admin); len(got) != 1 || got[0] != want {
+		t.Fatalf("admin: %+v, want %+v", got, want)
+	}
+	// Who reads the settings sees it; a viewer scoped to a label does not.
+	for name, client := range map[string]*apitest.Client{"editor": editor, "global viewer": globalViewer} {
+		if got := c.attention(client); len(got) != 1 {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	if got := c.attention(devViewer); len(got) != 0 {
+		t.Fatalf("a scoped viewer: %+v", got)
+	}
+	if _, raw := c.admin.Raw("GET", "/api/v1/dashboard", nil); strings.Contains(raw, canary) {
+		t.Fatalf("dashboard: %s", raw)
+	}
+
+	// A credential nothing enabled uses is never resolved: its old state is
+	// no news.
+	x.exec(`UPDATE scenarios SET enabled = false`)
+	if got := c.attention(c.admin); len(got) != 0 {
+		t.Fatalf("a credential no enabled scenario uses: %+v", got)
+	}
+	x.exec(`UPDATE scenarios SET enabled = true WHERE name = 'pay'`)
+	want.Detail = "Credential billing cannot be resolved \u2014 1 scenario affected"
+	if got := c.attention(c.admin); len(got) != 1 || got[0] != want {
+		t.Fatalf("one scenario: %+v", got)
+	}
+
+	// Unavailable: nothing for 10 minutes, a warning after 30.
+	c.state("unavailable", "unavailable", 10*time.Minute)
+	if got := c.attention(c.admin); len(got) != 0 {
+		t.Fatalf("unavailable for 10 minutes: %+v", got)
+	}
+	c.state("unavailable", "unavailable", 31*time.Minute)
+	got := c.attention(c.admin)
+	since := time.Now().Add(-31 * time.Minute).UTC().Format("15:04")
+	if len(got) != 1 || got[0].Severity != "warn" || got[0].Link != want.Link || got[0].Label != "Synthetic credential" ||
+		!strings.HasPrefix(got[0].Detail, "Credential billing has been unavailable since "+since) ||
+		!strings.HasSuffix(got[0].Detail, "1 scenario affected") {
+		t.Fatalf("unavailable for 31 minutes: %+v", got)
+	}
+	c.state("ok", "", 0)
+	x.exec(`UPDATE synthetic_credentials SET resolve_cause = NULL, resolve_failing_since = NULL, resolve_alerted_at = NULL WHERE id = $1`, c.cred)
+	if got := c.attention(c.admin); len(got) != 0 {
+		t.Fatalf("a credential that resolves again: %+v", got)
 	}
 }

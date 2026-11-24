@@ -27,6 +27,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/go-chi/chi/v5"
 
+	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/config"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
 	"github.com/Warewave-Technology/olympos/internal/inventory"
@@ -61,6 +62,9 @@ type Worker func(ctx context.Context)
 type Wiring struct {
 	Modules []server.Module
 	Workers []Worker
+	// Attention adds items to the Needs-attention strip of the dashboard,
+	// for the subject asking (inventory.API.MoreAttention). Optional.
+	Attention func(ctx context.Context, s *authz.Subject) ([]inventory.AttentionItem, error)
 }
 
 // moduleFactories are registered by modules.go (one per milestone module).
@@ -351,9 +355,23 @@ func Run(cfgPath string) error {
 	srv.SPA = sub
 	kek := newKEKWatch(d.KV, d.Log)
 	kek.check(ctx)
+	moreAttention := func(ctx context.Context, s *authz.Subject) ([]inventory.AttentionItem, error) {
+		var out []inventory.AttentionItem
+		for _, w := range wiring {
+			if w.Attention == nil {
+				continue
+			}
+			items, err := w.Attention(ctx, s)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, items...)
+		}
+		return out, nil
+	}
 	srv.Modules = append(srv.Modules, &inventory.API{DB: d.DB, Log: log.With("component", "inventory"), Gateway: d.Gateway, CA: d.CA,
 		GatewayURL: cfg.AgentGatewayURL, AgentChart: os.Getenv("OLYMPOS_AGENT_CHART"), AgentSets: agentSets(),
-		OfflineAlertAfter: cfg.Agents.OfflineAlertAfter, SystemWarnings: kek.Items})
+		OfflineAlertAfter: cfg.Agents.OfflineAlertAfter, SystemWarnings: kek.Items, MoreAttention: moreAttention})
 	for _, w := range wiring {
 		srv.Modules = append(srv.Modules, w.Modules...)
 	}

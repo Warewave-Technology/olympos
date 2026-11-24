@@ -660,18 +660,25 @@ func validateSecret(kind, name string, in *backup.CredentialInput, fields map[st
 
 // credentialView is a credential as the API shows it: never its secret.
 type credentialView struct {
-	ID            uuid.UUID      `json:"id"`
-	Name          string         `json:"name"`
-	Kind          string         `json:"kind"`
-	BoundHosts    []ruleInput    `json:"bound_hosts"`
-	HeaderName    string         `json:"header_name"`
-	OAuthTokenURL string         `json:"oauth_token_url"`
-	OAuthScopes   string         `json:"oauth_scopes"`
-	Source        string         `json:"source"`
-	ExpiresAt     *time.Time     `json:"expires_at"`
-	Expired       bool           `json:"expired"`
-	RotatedAt     *time.Time     `json:"rotated_at"`
-	Scenarios     []scenarioName `json:"scenarios"`
+	ID            uuid.UUID   `json:"id"`
+	Name          string      `json:"name"`
+	Kind          string      `json:"kind"`
+	BoundHosts    []ruleInput `json:"bound_hosts"`
+	HeaderName    string      `json:"header_name"`
+	OAuthTokenURL string      `json:"oauth_token_url"`
+	OAuthScopes   string      `json:"oauth_scopes"`
+	Source        string      `json:"source"`
+	ExpiresAt     *time.Time  `json:"expires_at"`
+	Expired       bool        `json:"expired"`
+	RotatedAt     *time.Time  `json:"rotated_at"`
+	// ResolveState is what the last dispatch found (docs/design/credential-alerts.md):
+	// ok, broken (cannot be resolved for good) or unavailable (Key Vault or
+	// the key encryption key did not answer). ResolveCause is a code, never
+	// the error; ResolveFailingSince starts the episode.
+	ResolveState        string         `json:"resolve_state"`
+	ResolveCause        *string        `json:"resolve_cause"`
+	ResolveFailingSince *time.Time     `json:"resolve_failing_since"`
+	Scenarios           []scenarioName `json:"scenarios"`
 	// ResolveFailures24h counts the runs of the scenarios that use the
 	// credential skipped in the last 24 hours because the server could not
 	// resolve a credential (credential_unavailable: Key Vault, the
@@ -694,7 +701,7 @@ type scenarioName struct {
 // which scenarios the caller sees; the others are left out of Scenarios.
 func loadCredentialViews(ctx context.Context, q store.Querier, only *uuid.UUID, now time.Time, seen func(uuid.UUID) bool) ([]credentialView, error) {
 	rows, err := q.Query(ctx, `SELECT c.id, c.name, c.kind, c.bound_hosts, COALESCE(c.header_name, ''), COALESCE(c.oauth_token_url, ''),
-			c.oauth_scopes, k.kind, c.expires_at, c.rotated_at, c.created_by, COALESCE(p.display_name_snapshot, ''), c.created_at, c.updated_at,
+			c.oauth_scopes, k.kind, c.expires_at, c.rotated_at, c.resolve_state, c.resolve_cause, c.resolve_failing_since, c.created_by, COALESCE(p.display_name_snapshot, ''), c.created_at, c.updated_at,
 			COALESCE(f.n, 0), f.last
 		FROM synthetic_credentials c JOIN credentials k ON k.id = c.credential_id
 		LEFT JOIN principals p ON p.id = c.created_by
@@ -709,7 +716,7 @@ func loadCredentialViews(ctx context.Context, q store.Querier, only *uuid.UUID, 
 		var c credentialView
 		var hosts []string
 		if err := r.Scan(&c.ID, &c.Name, &c.Kind, &hosts, &c.HeaderName, &c.OAuthTokenURL, &c.OAuthScopes, &c.Source,
-			&c.ExpiresAt, &c.RotatedAt, &c.CreatedBy, &c.CreatedByName, &c.CreatedAt, &c.UpdatedAt,
+			&c.ExpiresAt, &c.RotatedAt, &c.ResolveState, &c.ResolveCause, &c.ResolveFailingSince, &c.CreatedBy, &c.CreatedByName, &c.CreatedAt, &c.UpdatedAt,
 			&c.ResolveFailures24h, &c.LastResolveFailedAt); err != nil {
 			return c, err
 		}
@@ -942,8 +949,14 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request) {
 			return &apiError{code: http.StatusConflict, extra: map[string]any{"scenarios": broken, "credentials": []string{}},
 				msg: "These bound hosts would break scenarios that use this credential: " + strings.Join(broken, ", ") + ". Change them first."}
 		}
+		// A new expiry starts the credential over (resolve_*: the next run
+		// decides, no message); so does a new secret, below.
 		if _, err := tx.Exec(ctx, `UPDATE synthetic_credentials SET name = $2, bound_hosts = $3, header_name = NULLIF($4, ''),
-				oauth_token_url = NULLIF($5, ''), oauth_scopes = $6, expires_at = $7 WHERE id = $1`,
+				oauth_token_url = NULLIF($5, ''), oauth_scopes = $6, expires_at = $7,
+				resolve_state = CASE WHEN expires_at IS DISTINCT FROM $7 THEN 'ok' ELSE resolve_state END,
+				resolve_cause = CASE WHEN expires_at IS DISTINCT FROM $7 THEN NULL ELSE resolve_cause END,
+				resolve_failing_since = CASE WHEN expires_at IS DISTINCT FROM $7 THEN NULL ELSE resolve_failing_since END,
+				resolve_alerted_at = CASE WHEN expires_at IS DISTINCT FROM $7 THEN NULL ELSE resolve_alerted_at END WHERE id = $1`,
 			id, v.name, v.boundStrings(), v.header, v.tokenURL, v.scopes, v.expiresAt); err != nil {
 			return err
 		}
@@ -953,7 +966,8 @@ func (a *API) updateCredential(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, `UPDATE synthetic_credentials SET credential_id = $2, rotated_at = $3 WHERE id = $1`, id, newCred, a.now()); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE synthetic_credentials SET credential_id = $2, rotated_at = $3, resolve_state = 'ok',
+					resolve_cause = NULL, resolve_failing_since = NULL, resolve_alerted_at = NULL WHERE id = $1`, id, newCred, a.now()); err != nil {
 				return err
 			}
 			if err := a.Svc.Creds.Delete(ctx, tx, oldCred); err != nil {

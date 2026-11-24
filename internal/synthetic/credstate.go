@@ -9,6 +9,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/Warewave-Technology/olympos/internal/authz"
+	"github.com/Warewave-Technology/olympos/internal/inventory"
 	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/secrets"
 	"github.com/Warewave-Technology/olympos/internal/store"
@@ -259,4 +261,46 @@ func emitCredential(ctx context.Context, tx pgx.Tx, channels []*uuid.UUID, e not
 	}
 	e.Key = base + ":default"
 	return notify.Emit(ctx, tx, e)
+}
+
+// AttentionItems are the credentials that cannot be resolved, for the
+// Needs-attention strip of whoever may read the settings: crit when broken,
+// warn when unavailable for longer than UnavailableAlertAfter (as the
+// message). Only credentials an enabled scenario uses count: nothing else
+// resolves them, so their state is old news.
+func (s *Service) AttentionItems(ctx context.Context, sub *authz.Subject) ([]inventory.AttentionItem, error) {
+	if !mayReadSettings(sub) {
+		return nil, nil
+	}
+	rows, err := s.DB.Query(ctx, `SELECT c.id, c.name, c.resolve_state, c.resolve_failing_since,
+			(SELECT count(*) FROM scenarios sc WHERE sc.enabled
+				AND EXISTS (SELECT 1 FROM scenario_steps st WHERE st.scenario_id = sc.id AND st.credential_id = c.id))
+		FROM synthetic_credentials c
+		WHERE (c.resolve_state = 'broken' OR c.resolve_state = 'unavailable' AND c.resolve_failing_since <= $1)
+		  AND EXISTS (SELECT 1 FROM scenarios sc JOIN scenario_steps st ON st.scenario_id = sc.id
+			WHERE sc.enabled AND st.credential_id = c.id)
+		ORDER BY c.resolve_state, c.name, c.id`, s.now().Add(-UnavailableAlertAfter))
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(r pgx.CollectableRow) (inventory.AttentionItem, error) {
+		var id uuid.UUID
+		var name, state string
+		var since *time.Time
+		var n int
+		if err := r.Scan(&id, &name, &state, &since, &n); err != nil {
+			return inventory.AttentionItem{}, err
+		}
+		affected := fmt.Sprintf("%d scenarios affected", n)
+		if n == 1 {
+			affected = "1 scenario affected"
+		}
+		item := inventory.AttentionItem{Kind: "synthetic_credential_broken", Severity: "crit", Label: "Synthetic credential",
+			Detail: fmt.Sprintf("Credential %s cannot be resolved \u2014 %s", name, affected), Link: credentialLink(id)}
+		if state != "broken" {
+			item.Severity = "warn"
+			item.Detail = fmt.Sprintf("Credential %s has been unavailable since %s UTC \u2014 %s", name, since.UTC().Format("15:04"), affected)
+		}
+		return item, nil
+	})
 }

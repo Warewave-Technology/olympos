@@ -49,6 +49,10 @@ type API struct {
 	// SystemWarnings returns setup problems of the server itself (e.g. Key
 	// Vault purge protection off) for the Needs-attention strip. Optional.
 	SystemWarnings func() []AttentionItem
+	// MoreAttention returns items of other modules for the Needs-attention
+	// strip (e.g. synthetic credentials that cannot be resolved). It decides
+	// by the subject what that subject may see. Optional.
+	MoreAttention func(ctx context.Context, s *authz.Subject) ([]AttentionItem, error)
 }
 
 // Routes mounts the module under /api/v1.
@@ -913,7 +917,7 @@ var errConflict = errors.New("conflict")
 
 // AttentionItem is one entry of the Needs-attention strip.
 type AttentionItem struct {
-	Kind     string `json:"kind"`     // agent_offline | backup_failed | backup_missed | backup_partial | target_tls_changed | self_backup_failed | self_backup_partial | self_backup_unset | kek_purgeable | kek_recovery_unknown | critical_cves | approvals | eol (docs/findings-and-events.md)
+	Kind     string `json:"kind"`     // agent_offline | backup_failed | backup_missed | backup_partial | target_tls_changed | self_backup_failed | self_backup_partial | self_backup_unset | kek_purgeable | kek_recovery_unknown | synthetic_credential_broken | critical_cves | approvals | eol (docs/findings-and-events.md)
 	Severity string `json:"severity"` // crit | warn
 	Label    string `json:"label"`
 	Detail   string `json:"detail"`
@@ -1203,6 +1207,13 @@ func (a *API) attention(ctx context.Context, s *authz.Subject, clusterIDs []uuid
 	if cves > 0 {
 		out = append(out, AttentionItem{Kind: "critical_cves", Severity: "crit", Label: "Critical CVEs",
 			Detail: fmt.Sprintf("%d new in %d %s", cves, imgs, plural(imgs, "image", "images")), Link: "/security"})
+	}
+	if a.MoreAttention != nil {
+		more, err := a.MoreAttention(ctx, s)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, more...)
 	}
 	return out, nil
 }

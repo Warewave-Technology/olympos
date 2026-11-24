@@ -1237,8 +1237,8 @@ paths:
         Replace a scenario (checked as on create; the caller must be allowed both the stored and the new
         clusters). Omitted alerts, enabled and store_responses keep their stored values. A scenario read with
         GET can be sent back as it is: its read-only fields (id, targets, requests_per_minute, can_edit,
-        created_by, created_by_name, created_at, updated_at, alerts.channel_name, alerts.critical_channel_name,
-        and each step's position, credential and hidden) are ignored.
+        credentials, created_by, created_by_name, created_at, updated_at, alerts.channel_name,
+        alerts.critical_channel_name, and each step's position, credential and hidden) are ignored.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/ScenarioInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/Scenario"}}}}
@@ -1587,11 +1587,15 @@ components:
       properties:
         attention:
           type: array
-          description: Needs-attention strip; hide the section when empty.
+          description: >-
+            Needs-attention strip; hide the section when empty. synthetic_credential_broken: a synthetic
+            credential that cannot be resolved (crit), or has been unavailable for 30 minutes (warn), with the
+            number of enabled scenarios affected; shown to whoever may read the synthetic settings, link
+            /settings/synthetic?credential=<id>.
           items:
             type: object
             properties:
-              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, backup_partial, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, self_backup_partial, kek_purgeable, kek_recovery_unknown]}
+              kind: {type: string, enum: [agent_offline, backup_failed, backup_missed, backup_partial, approvals, eol, critical_cves, self_backup_unset, self_backup_failed, self_backup_partial, kek_purgeable, kek_recovery_unknown, synthetic_credential_broken]}
               severity: {type: string, enum: [crit, warn]}
               label: {type: string}
               detail: {type: string}
@@ -2414,11 +2418,14 @@ components:
     # ------------------------------------------------------------ synthetic monitoring
     SyntheticCellState:
       type: string
-      enum: [failing, degraded, passing, probe_offline, not_installed, excluded, paused, no_data]
+      enum: [failing, degraded, passing, probe_offline, not_installed, excluded, paused, credential_error, no_data]
       description: >-
         failing: the cluster alert fires. degraded: the last counted run failed or errored, the alert does not
         fire (yet). probe_offline: offline, or enrolled and not connected yet. not_installed: no probe (or revoked).
-        Excluded wins over paused, paused over the probe, the probe over the alert.
+        credential_error: a credential the scenario uses cannot be resolved (resolve_state broken), on every
+        cluster its probe is online on; its runs end before they start and move no streak.
+        Excluded wins over paused, paused over the probe, the probe over a credential error, a credential error
+        over the alert.
     SyntheticStep:
       type: object
       description: "Exactly one of dns, http, tcp, tls, the one kind names. ${name} variables come from earlier extracts; never in a host."
@@ -2501,6 +2508,17 @@ components:
           properties:
             id: {type: string, format: uuid}
             alerts: {$ref: "#/components/schemas/ScenarioAlertRule"}
+            credentials:
+              type: array
+              description: The credentials the steps use, by name, with what the last dispatch found (never a secret or an error text)
+              items:
+                type: object
+                properties:
+                  id: {type: string, format: uuid}
+                  name: {type: string}
+                  resolve_state: {$ref: "#/components/schemas/SyntheticCredentialResolveState"}
+                  resolve_cause: {$ref: "#/components/schemas/SyntheticCredentialResolveCause"}
+                  resolve_failing_since: {type: [string, "null"], format: date-time}
             targets: {$ref: "#/components/schemas/ScenarioTargets"}
             requests_per_minute: {type: number, description: Worst case per cluster}
             can_edit: {type: boolean}
@@ -2670,7 +2688,7 @@ components:
         finished_at: {type: [string, "null"], format: date-time}
         status: {type: string, enum: [scheduled, running, passed, failed, error, skipped]}
         failed_step: {type: [integer, "null"]}
-        failure_reason: {type: string, description: "Skipped: probe_offline, probe_disconnected, ingest_failed, scenario_disabled, credential_unavailable, not_dispatched, probe_busy, allowlist_stale, credentials_unreadable, invalid_scenario, rejected"}
+        failure_reason: {type: string, description: "Error: credential_broken, credential_expired (not counted in availability, percentiles or streaks). Skipped: probe_offline, probe_disconnected, ingest_failed, scenario_disabled, credential_unavailable, not_dispatched, probe_busy, allowlist_stale, credentials_unreadable, invalid_scenario, rejected"}
         total_ms: {type: [integer, "null"]}
         test: {type: boolean}
         manual: {type: boolean}
@@ -2760,6 +2778,18 @@ components:
         oauth_token_url: {type: string, description: "oauth2_client_credentials only: https, allowlisted, inside bound_hosts"}
         oauth_scopes: {type: string}
         expires_at: {type: [string, "null"], format: date-time, description: "In the future (create and update); null for none. synthetic.credential_expiring fires 14 and 3 days before"}
+    SyntheticCredentialResolveState:
+      type: string
+      enum: [ok, broken, unavailable]
+      description: >-
+        What the last dispatch found. broken: cannot be resolved for good (see resolve_cause), its runs end
+        error / credential_broken (credential_expired when expired) and are not counted. unavailable: Key Vault or
+        the key encryption key did not answer; its runs are skipped (credential_unavailable) and a message goes out
+        after 30 minutes.
+    SyntheticCredentialResolveCause:
+      type: [string, "null"]
+      enum: [not_found, forbidden, decrypt, empty, expired, unavailable, null]
+      description: "A code, never the error: null when ok. not_found, forbidden, decrypt, empty and expired belong to broken, unavailable to unavailable."
     SyntheticCredential:
       type: object
       properties:
@@ -2774,6 +2804,9 @@ components:
         expires_at: {type: [string, "null"], format: date-time}
         expired: {type: boolean}
         rotated_at: {type: [string, "null"], format: date-time}
+        resolve_state: {$ref: "#/components/schemas/SyntheticCredentialResolveState"}
+        resolve_cause: {$ref: "#/components/schemas/SyntheticCredentialResolveCause"}
+        resolve_failing_since: {type: [string, "null"], format: date-time, description: "First failure of the current episode; null when ok. Saving a new secret or a new expires_at resets the state to ok"}
         scenarios: {type: array, items: {type: object, properties: {id: {type: string, format: uuid}, name: {type: string}}}}
         resolve_failures_24h: {type: integer, description: "Runs of the scenarios using it skipped in 24 h because the server could not resolve a credential (credential_unavailable); an upper bound when a scenario uses several"}
         last_resolve_failed_at: {type: [string, "null"], format: date-time}
