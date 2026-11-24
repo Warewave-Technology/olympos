@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"maps"
 	"math/rand/v2"
@@ -229,6 +230,11 @@ func (c *Client) stream(ctx context.Context, snap *identitySnapshot, changed <-c
 		MaxConcurrency:   int32(c.cfg.MaxConcurrency),
 		AllowlistVersion: c.allowMax.Load(),
 	}}}); err != nil {
+		if errors.Is(err, io.EOF) {
+			// The gateway ended the stream first (a refused or revoked
+			// identity): its status comes with Recv.
+			_, err = st.Recv()
+		}
 		return err
 	}
 	// Ready only once the server has spoken: Connect returns before the
