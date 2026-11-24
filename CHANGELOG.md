@@ -20,6 +20,8 @@ All notable changes to this project are documented here. The format follows
     *error* (`credential_expired`). These two reasons move no streak and are left out of availability, p95,
     the timeline and the hourly aggregates, so expired credentials no longer open `synthetic.failing` per
     scenario.
+- gitleaks allowlists the exact fake values of the tests instead of nine whole test files, so a real secret
+  added to one of those files is caught. New fixtures mark their line with `gitleaks:allow`.
 
 ### Added
 - Events `synthetic.credential_broken` (one per credential and episode) and `synthetic.credential_restored`

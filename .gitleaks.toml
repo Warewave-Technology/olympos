@@ -1,28 +1,37 @@
-# gitleaks configuration (F12): the default rules plus an allowlist for test
-# fixtures that are not secrets. Full-history scan of 2026-11-19: 10 matches,
-# all listed here; nothing to rotate, no history rewrite needed.
+# gitleaks configuration (F12): the default rules plus an allowlist of exact
+# fake values that tests use on purpose. Values, not files (#56): a real secret
+# added to one of these test files is still caught. CI scans the full history,
+# so a value stays listed for as long as an old commit holds it.
+#
+# A new fixture gets `gitleaks:allow` in a comment on its line instead (the
+# marker is in the line, so it survives the squash merge), see
+# docs/development.md › Fake secrets in tests.
 title = "olympos"
 
 [extend]
 useDefault = true
 
 [[allowlists]]
-description = "Test fixtures: intentional canaries (fake AWS key, PEM, JWT) and MinIO test credentials"
-paths = [
-  '''internal/agent/sensitive_test\.go''',
-  '''test/e2e/m5_sensitive_test\.go''',
-  '''internal/audit/testdata/kubescape-failure\.log''',
-  '''internal/blob/s3_test\.go''',
-]
-
-[[allowlists]]
-description = "Synthetic monitoring tests: fake credentials and canaries that redaction must catch"
-paths = [
-  '''internal/sensitive/sensitive_test\.go''',
-  '''internal/probe/client_test\.go''',
-  '''internal/synthetic/alerting_test\.go''',
-  '''internal/synthetic/expiry_test\.go''',
-  '''web/src/test/synthetic-settings\.test\.tsx''',
+description = "Fake values of tests: canaries that redaction and the scanners must catch, and test credentials"
+regexes = [
+  # internal/agent/sensitive_test.go, internal/sensitive/sensitive_test.go, test/e2e/m5_sensitive_test.go
+  '''^AKIAQ3VZ7RMXK2JWDTPL$''',
+  # internal/sensitive/sensitive_test.go
+  '''^ghp_R4nd0mCanaryT0kenV4lue0123456789abXy$''',
+  # internal/agent/sensitive_test.go, test/e2e/m5_sensitive_test.go: a PEM canary
+  '''^-----BEGIN RSA PRIVATE KEY-----(\\n|\n)MIIEpAIBAAKCAQEA3Tz2mr7SZiAMfQyuvBjM2''',
+  # internal/audit/testdata/kubescape-failure.log
+  '''^eyJhbGciOiJSUzI1NiJ9\.eyJzdWIiOiJsb2ctY2FuYXJ5In0\.c2lnbmF0dXJlc2ln''',
+  # internal/synthetic/expiry_test.go
+  '''^olympos-canary-expiry-4c1d9e$''',
+  # internal/synthetic/alerting_test.go
+  '''^tok-9f8e7d6c5b4a$''',
+  # internal/probe/client_test.go
+  '''^tok-9f3a7c1e5b2d4e6f8a0b$''',
+  # web/src/test/synthetic-settings.test.tsx
+  '''^tok-7f3c-very-secret$''',
+  # internal/blob/s3_test.go: a wrong MinIO secret
+  '''^WRONG-SECRET-123$''',
 ]
 
 [[allowlists]]

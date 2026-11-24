@@ -43,6 +43,14 @@ untagged tests and `scripts/check-release-binary.sh` (symbol and string check).
 API with dev login: `e := apitest.New(t, apitest.Options{Modules: ...}); c := e.Login(e.Principal("ada", "Member", "operator@env=prod"))`.
 `e.LogBuf` holds redacted logs for canary-secret checks.
 
+### Fake secrets in tests
+
+CI runs gitleaks over the full history (`.gitleaks.toml`, job `hygiene`). A test that needs a value that
+looks like a secret (a canary that redaction must catch, a fake credential) marks its line with
+`gitleaks:allow` in a comment, for example `"AKIA…", // gitleaks:allow`. The marker is in the line, so it
+survives the squash merge. Do not allowlist a test file by path: a real secret added to it later would go
+unnoticed. The values that older commits hold without the marker are listed one by one in `.gitleaks.toml`.
+
 ## Migrations
 
 `internal/store/migrations/NNNNN_name.sql` (goose, embedded in the binary, applied at start-up and by

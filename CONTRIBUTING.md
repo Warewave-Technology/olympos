@@ -24,7 +24,8 @@ packages, charts, the release notes and the checks a user's verification would d
 command, package versions), without pushing or signing anything. Behaviour changes an upgrading user must
 act on go under *Upgrade notes* in the version's CHANGELOG section; a release without them fails.
 
-Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`.
+Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`. A fake secret in a test gets
+`gitleaks:allow` on its line ([development guide](docs/development.md#fake-secrets-in-tests)).
 
 ## Pull requests
 
