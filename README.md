@@ -17,8 +17,9 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
-> **Status:** v0.2.0 is the latest release: restore from the UI, destination groups and a signed kube-bench
-> image, on one server instance with Microsoft Entra ID and Azure Key Vault.
+> **Status:** v0.3.0 is the latest release: synthetic monitoring from a probe in every cluster, on top of
+> v0.2's restore from the UI and destination groups, on one server instance with Microsoft Entra ID and
+> Azure Key Vault.
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
@@ -97,15 +98,15 @@ scans, with a screenshot for every step. `./test/e2e/env.sh down` removes the la
 
 ## Roadmap
 
-Released in v0.2 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+Released in v0.3 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+
+- Synthetic monitoring: scenarios that run from every cluster, with alerts ([#46](https://github.com/Warewave-Technology/olympos/issues/46))
+
+Released in v0.2:
 
 - Restore from the UI into a new target, with approval ([#22](https://github.com/Warewave-Technology/olympos/issues/22))
 - More than one destination per backup job, one dump stored in each ([#32](https://github.com/Warewave-Technology/olympos/issues/32))
 - Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
-
-Planned for v0.3:
-
-- Synthetic monitoring: scenarios that run from every cluster, with alerts ([#46](https://github.com/Warewave-Technology/olympos/issues/46))
 
 Planned for v0.4:
 
