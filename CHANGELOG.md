@@ -6,6 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-24
+
+Synthetic monitoring: scenarios defined once in Olympos run from a probe inside every cluster they target.
+
 ### Added
 - **Synthetic monitoring** ([#46](https://github.com/Warewave-Technology/olympos/issues/46)): scenarios
   (HTTP requests and flows, DNS, TCP, TLS, with assertions and extracts) defined once in Olympos run from
@@ -53,6 +57,17 @@ All notable changes to this project are documented here. The format follows
 - Lab: `synth-web` in both lab clusters, with CoreDNS answering every `*.olympos-lab.test` name with it and
   `metadata.olympos-lab.test` with `169.254.169.254`; the e2e test `TestM9SyntheticMonitoring` (a second
   Olympos cluster `lab-b` in the same kind cluster).
+
+### Upgrade notes
+From v0.2.0 nothing needs action on the server; the migrations run at start.
+- Migration `00024` adds synthetic monitoring and the `synthetic-editor` role. Every Slack channel that
+  receives `grant.changed` is routed `synthetic.allowlist_changed` too (the migration adds those routes).
+  The other new events get no route: add them under *Settings › Notifications › Routing*.
+- The agent chart installs the probe by default (`probe.enabled: true`). A `helm upgrade` of an agent adds
+  the probe Deployment, which waits until *Settings › Clusters & agents › Install probe* gives it a token.
+  Set `probe.enabled=false` to leave it out.
+- Mirrored or air-gapped registries need the new image `olympos-probe` next to `olympos-agent`; verify it
+  with cosign as described in `docs/install.md`.
 
 ## [0.2.0] - 2026-11-23
 
@@ -279,5 +294,7 @@ For anyone testing the release candidates. Nothing here needs action when upgrad
   referenceable.
 - Findings of the independent review fixed or accepted: [docs/security-review-v0.1.md](docs/security-review-v0.1.md).
 
-[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.0
+[0.2.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.1.0
