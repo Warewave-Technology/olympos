@@ -26,7 +26,7 @@ import type {
 } from '../../api/types';
 import { useMe } from '../../auth/me';
 import { can } from '../../auth/permissions';
-import { parseSelector } from '../../lib/labels';
+import { equalityTerms, formatLabels, parseSelector } from '../../lib/labels';
 import { plural } from '../../lib/format';
 import { monitoringEditorRoute } from '../../router';
 import { CheckIcon, IconArrowDown, IconArrowUp, IconClose } from '../../ui/icons';
@@ -534,7 +534,16 @@ function Editor({ initial, testCluster }: { initial: Draft; testCluster?: string
                 <label className="lbl" htmlFor="so">
                   Owner label
                 </label>
-                <input className="in mono" value={d.owner_selector} placeholder="team=payments" onChange={(e) => set({ owner_selector: e.target.value })} {...aria('so', fields.owner_selector, true)} />
+                <TagInput
+                  id="so"
+                  max={1}
+                  listLabel="Owner label"
+                  placeholder="team=payments"
+                  value={equalityTerms(d.owner_selector) ?? {}}
+                  onChange={(m) => set({ owner_selector: formatLabels(m, ',') })}
+                  aria-invalid={!!fields.owner_selector}
+                  aria-describedby={fields.owner_selector ? 'so-err' : 'so-hint'}
+                />
                 <FieldMsg id="so" text={fields.owner_selector} admin={admin} />
                 {!fields.owner_selector && (
                   <div className="field-hint" id="so-hint">
