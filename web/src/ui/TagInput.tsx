@@ -15,6 +15,8 @@ interface TagInputCommon {
   emptyText?: ReactNode;
   /** Reports text that was typed but not accepted (so a form can block submit). */
   onDraftError?: (error: string | null) => void;
+  /** Most chips accepted; once there are that many the text field goes until one is removed. */
+  max?: number;
   'aria-invalid'?: boolean | 'true' | 'false';
   'aria-describedby'?: string;
 }
@@ -64,7 +66,7 @@ type Parsed = { ok: true; key: string; label: string } | { ok: false; error: str
  * message. Backspace in the empty field removes the last chip.
  */
 export function TagInput(props: TagInputProps) {
-  const { id, readOnly, disabled, onDraftError, ...rest } = props;
+  const { id, readOnly, disabled, onDraftError, max, ...rest } = props;
   const values = props.mode === 'values';
   const placeholder = props.placeholder ?? (values ? 'name' : 'key=value');
   const listLabel = props.listLabel ?? (values ? 'Values added' : 'Labels added');
@@ -78,6 +80,9 @@ export function TagInput(props: TagInputProps) {
   const items: { key: string; label: string; locked?: boolean }[] =
     props.mode === 'values' ? props.value.map((v) => ({ key: v, label: v })) : Object.entries(props.value).map(([k, v]) => ({ key: k, label: `${k}=${v}`, locked: isLocked(k) }));
   const removable = items.filter((i) => !i.locked);
+  const full = max !== undefined && items.length >= max;
+  const noun = values ? 'value' : 'label';
+  const tooMany = `Enter at most ${max === 1 ? `one ${noun}` : `${max} ${noun}s`}.`;
   const errId = `${id}-tagerr`;
 
   const setError = (e: string | null) => {
@@ -109,6 +114,11 @@ export function TagInput(props: TagInputProps) {
           continue;
         }
         if (next.includes(t.key)) continue; // already there: nothing to add
+        if (max !== undefined && next.length >= max) {
+          restTerms.push(raw);
+          err ??= tooMany;
+          continue;
+        }
         next.push(t.key);
         added.push(t.label);
       }
@@ -130,6 +140,11 @@ export function TagInput(props: TagInputProps) {
         if (t.key in next && next[t.key] !== t.value) {
           restTerms.push(raw);
           err ??= `${t.key} is already set to "${next[t.key]}". Remove that tag first.`;
+          continue;
+        }
+        if (max !== undefined && !(t.key in next) && Object.keys(next).length >= max) {
+          restTerms.push(raw);
+          err ??= tooMany;
           continue;
         }
         next[t.key] = t.value;
@@ -163,7 +178,9 @@ export function TagInput(props: TagInputProps) {
       props.onChange(next);
     }
     setAnnounce(`Removed ${item?.label ?? key}`);
-    inputRef.current?.focus();
+    // a full field has no text field until the next render
+    if (inputRef.current) inputRef.current.focus();
+    else setTimeout(() => inputRef.current?.focus());
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -208,7 +225,7 @@ export function TagInput(props: TagInputProps) {
         }}
       >
         {items.length > 0 ? (
-          <ul className="tags" aria-label={listLabel} id={readOnly ? id : undefined}>
+          <ul className="tags" aria-label={listLabel} id={readOnly || full ? id : undefined}>
             {items.map((it) => (
               <li key={it.key} className={`tag${it.locked ? ' locked' : ''}`} title={it.locked ? 'Set by Olympos, read-only' : undefined}>
                 <span className="mono">{it.label}</span>
@@ -228,7 +245,7 @@ export function TagInput(props: TagInputProps) {
             </span>
           )
         )}
-        {!readOnly && (
+        {!readOnly && !full && (
           <input
             ref={inputRef}
             id={id}

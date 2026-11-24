@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { afterEach, describe, expect, it } from 'vitest';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { equalityTerms, matchesSelector, parseLabelTerm, parseSelector, validateLabelKey, validateLabelValue } from '../lib/labels';
 import { Field } from '../ui/kit';
@@ -38,12 +38,12 @@ describe('label syntax', () => {
   });
 });
 
-function Harness({ initial = {} as Record<string, string>, lockedPrefix }: { initial?: Record<string, string>; lockedPrefix?: string }) {
+function Harness({ initial = {} as Record<string, string>, lockedPrefix, max }: { initial?: Record<string, string>; lockedPrefix?: string; max?: number }) {
   const [v, setV] = useState(initial);
   return (
     <>
       <Field label="Labels" htmlFor="lbl">
-        <TagInput id="lbl" value={v} onChange={setV} lockedPrefix={lockedPrefix} />
+        <TagInput id="lbl" value={v} onChange={setV} lockedPrefix={lockedPrefix} max={max} />
       </Field>
       <output data-testid="value">{JSON.stringify(v)}</output>
     </>
@@ -120,6 +120,24 @@ describe('TagInput', () => {
     expect(value()).toEqual({ a: 'b', c: 'd', e: 'f' });
     expect(input).toHaveValue('bad');
     expect(screen.getByRole('alert')).toHaveTextContent('"bad" is not key=value');
+  });
+
+  it('takes at most max chips: the field goes when full and comes back when one is removed', async () => {
+    const user = userEvent.setup();
+    render(<Harness max={1} />);
+    fireEvent.paste(screen.getByLabelText('Labels'), { clipboardData: { getData: () => 'team=a,env=b' } });
+    expect(value()).toEqual({ team: 'a' });
+    expect(screen.getByRole('alert')).toHaveTextContent('Enter at most one label.');
+    await user.click(screen.getByRole('button', { name: 'Remove team=a' }));
+    const input = screen.getByLabelText('Labels');
+    await user.clear(input);
+    await user.type(input, 'team=payments');
+    await user.tab();
+    expect(value()).toEqual({ team: 'payments' });
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(screen.getByRole('list', { name: 'Labels added' })).toHaveTextContent('team=payments');
+    await user.click(screen.getByRole('button', { name: 'Remove team=payments' }));
+    await waitFor(() => expect(screen.getByLabelText('Labels')).toHaveFocus());
   });
 
   it('shows chips without remove buttons when read-only', () => {
