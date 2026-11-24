@@ -411,7 +411,7 @@ func (e *Engine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer) 
 	res.Details["globals"] = globalsMode
 	res.Details["schema_only"] = ec.Test
 	res.Details["pg_dump_major"] = tool.Major
-	res.Details["restore"] = "unzip; psql -f globals.sql postgres; for each <db>.dump: pg_restore --create -d postgres <db>.dump (pg_restore >= " +
+	res.Details["restore"] = "unzip; psql -f globals.sql postgres; for each <db>.dump: pg_restore --create -d postgres <db>.dump (the new server's pg_restore, major >= " +
 		strconv.Itoa(tool.Major) + ")"
 	return res, nil
 }
