@@ -799,6 +799,79 @@ const stages = {
       synthWeb('edge', 'ok');
     }
   },
+
+  // A credential that cannot be resolved (docs/synthetic-monitoring.md, "Credentials that cannot be
+  // resolved"): a Key Vault reference to a secret that the lab's local Key Vault does not have. Needs the
+  // probes online and the olympos-lab.test allowlist rule (monitoring stage). Removes what it creates.
+  async monitoringCredential() {
+    const admin = await signIn('admin');
+    await until(admin, 180_000, 'both probes online', async () => {
+      const cs = (await apiCall(admin, 'GET', '/clusters')).items;
+      return ['lab', 'edge'].every((n) => cs.find((c) => c.name === n)?.probe_status === 'online');
+    });
+    const NAME = 'search-api-key';
+    const SCENARIO = 'Search API';
+    // A rerun after a failed one: scenario first, a credential in use cannot be deleted.
+    const cleanup = async () => {
+      for (const sc of (await apiCall(admin, 'GET', '/synthetic/scenarios')).items.filter((x) => x.name === SCENARIO)) {
+        await apiCall(admin, 'DELETE', `/synthetic/scenarios/${sc.id}`, undefined, [200, 204, 404]);
+      }
+      for (const c of (await apiCall(admin, 'GET', '/synthetic/credentials')).items.filter((x) => x.name === NAME)) {
+        await apiCall(admin, 'DELETE', `/synthetic/credentials/${c.id}`, undefined, [200, 204, 404]);
+      }
+    };
+    try {
+      await cleanup();
+      const rules = (await apiCall(admin, 'GET', '/synthetic/allowlist')).items;
+      if (!rules.some((x) => x.pattern === 'olympos-lab.test' && x.kind === 'suffix')) {
+        await apiCall(admin, 'POST', '/synthetic/allowlist', { pattern: 'olympos-lab.test', kind: 'suffix', note: 'Lab: synth-web answers every name in every cluster' });
+      }
+      const cred = await apiCall(admin, 'POST', '/synthetic/credentials', {
+        name: NAME,
+        kind: 'header',
+        header_name: 'X-Api-Key',
+        bound_hosts: [{ kind: 'suffix', pattern: 'olympos-lab.test' }],
+        secret: { source: 'keyvault_ref', ref: 'kv://lab/search-api-key' }, // not in the lab's Key Vault
+      });
+      await apiCall(admin, 'POST', '/synthetic/scenarios', {
+        name: SCENARIO,
+        type: 'http',
+        owner_selector: 'team=shop',
+        interval_seconds: 30,
+        timeout_seconds: 10,
+        run_on: 'all',
+        store_responses: true,
+        alerts: { cluster_fail_after: 3, fleet_critical_clusters: 2, recovery_after: 2, send_recovery: true },
+        steps: [
+          {
+            kind: 'http',
+            http: { method: 'GET', url: 'http://shop.olympos-lab.test/api/items' },
+            credential_id: cred.id,
+            assertions: [{ subject: 'status_code', operator: 'equals', value: '200' }],
+          },
+        ],
+      });
+
+      // The first run that reaches the credential finds the secret missing.
+      await until(admin, 180_000, 'the credential to be reported as cannot be resolved', async () => {
+        const c = (await apiCall(admin, 'GET', '/synthetic/credentials')).items.find((x) => x.id === cred.id);
+        return c?.resolve_state === 'broken';
+      });
+      await admin.goto(`${URL}/settings/synthetic?credential=${cred.id}`);
+      const card = admin.getByRole('region', { name: 'Credentials' });
+      await card.getByText('Cannot be resolved').waitFor({ timeout: 180_000 });
+      await dump(admin, 'credential that cannot be resolved');
+      await shot(admin, 'monitoring-06-credential-broken', card);
+
+      await admin.goto(URL);
+      const strip = admin.getByRole('region', { name: 'Needs attention' });
+      await strip.getByText('Synthetic credential').waitFor({ timeout: 60_000 });
+      await dump(admin, 'dashboard');
+      await shot(admin, 'monitoring-07-attention', strip);
+    } finally {
+      await cleanup();
+    }
+  },
 };
 
 /** Switches a lab cluster's synth-web (test/e2e/cmd/synth-web) to ok, 500 or slow. */
