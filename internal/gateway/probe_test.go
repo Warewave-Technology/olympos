@@ -11,6 +11,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,6 +63,11 @@ func connectProbe(t *testing.T, ctx context.Context, c pb.ProbeGatewayClient, cl
 	}
 	if err := st.Send(&pb.ProbeMessage{Msg: &pb.ProbeMessage_Hello{Hello: &pb.ProbeHello{ProbeVersion: "test", ClusterId: clusterID,
 		HpkePublicKey: pub, MaxConcurrency: maxConc}}}); err != nil {
+		if errors.Is(err, io.EOF) {
+			// The server ended the stream first (a refused identity):
+			// its status comes with Recv.
+			_, err = st.Recv()
+		}
 		return nil, err
 	}
 	p := &fakeProbe{key: key, pub: pub, runs: make(chan *pb.RunScenario, 8), done: make(chan error, 1)}

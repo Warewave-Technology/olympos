@@ -197,8 +197,16 @@ func TestRestoreIntegration(t *testing.T) {
 			if err := src.admin.Sys().MountWithContext(ctx, "secret", &vaultapi.MountInput{Type: "kv", Options: map[string]string{"version": "2"}}); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := src.admin.KVv2("secret").Put(ctx, "app/db", map[string]any{"password": itCanary}); err != nil {
-				t.Fatal(err)
+			// A fresh KV v2 mount upgrades its storage in the background: retry.
+			for i := 0; ; i++ {
+				_, err := src.admin.KVv2("secret").Put(ctx, "app/db", map[string]any{"password": itCanary})
+				if err == nil {
+					break
+				}
+				if i > 100 {
+					t.Fatal(err)
+				}
+				time.Sleep(200 * time.Millisecond)
 			}
 			var snap bytes.Buffer
 			if err := src.admin.Sys().RaftSnapshotWithContext(ctx, &snap); err != nil {
