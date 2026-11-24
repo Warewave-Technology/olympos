@@ -660,44 +660,40 @@ const keeperXML = `<clickhouse>
   <macros><shard>s1</shard><replica>r1</replica></macros>
 </clickhouse>`
 
-// TestRestoreReplicatedIntegration restores Replicated tables (SHOW
-// CREATE's default {uuid} path, and an explicit one) into a server whose
-// Keeper still holds the source tables: the restored tables live under
-// /olympos-restore/<request id>/ and the source's are untouched.
-func TestRestoreReplicatedIntegration(t *testing.T) {
-	startClickHouse(t) // skips without Docker, like the other tests
-	bin := restoreClientBin(t)
-	SetClientBin(bin)
-	t.Cleanup(func() { SetClientBin("") })
-
-	var rnd [4]byte
-	_, _ = rand.Read(rnd[:])
-	keeperContainer := "olympos-t8-keeper-" + hex.EncodeToString(rnd[:])
+// startKeeperServer starts a ClickHouse server with xml in config.d (on
+// network unless empty) and waits until it reaches its Keeper. q runs a
+// query in the container.
+func startKeeperServer(t *testing.T, name, xml, network string) (*chEnv, func(string) string) {
+	t.Helper()
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "keeper.xml"), []byte(keeperXML), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "keeper.xml"), []byte(xml), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, _ = docker("rm", "-f", keeperContainer)
-	if out, err := docker("create", "--name", keeperContainer,
-		"-e", "CLICKHOUSE_USER="+chUser, "-e", "CLICKHOUSE_PASSWORD="+chPassword, "-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
-		"-p", "127.0.0.1::9000", chImage); err != nil {
+	args := []string{"create", "--name", name,
+		"-e", "CLICKHOUSE_USER=" + chUser, "-e", "CLICKHOUSE_PASSWORD=" + chPassword, "-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
+		"-p", "127.0.0.1::9000"}
+	if network != "" {
+		args = append(args, "--network", network)
+	}
+	_, _ = docker("rm", "-f", name)
+	if out, err := docker(append(args, chImage)...); err != nil {
 		t.Fatalf("docker create: %v %s", err, out)
 	}
-	t.Cleanup(func() { _, _ = docker("rm", "-f", keeperContainer) })
-	if out, err := docker("cp", filepath.Join(dir, "keeper.xml"), keeperContainer+":/etc/clickhouse-server/config.d/keeper.xml"); err != nil {
+	t.Cleanup(func() { _, _ = docker("rm", "-f", name) })
+	if out, err := docker("cp", filepath.Join(dir, "keeper.xml"), name+":/etc/clickhouse-server/config.d/keeper.xml"); err != nil {
 		t.Fatalf("docker cp: %v %s", err, out)
 	}
-	if out, err := docker("start", keeperContainer); err != nil {
+	if out, err := docker("start", name); err != nil {
 		t.Fatalf("docker start: %v %s", err, out)
 	}
-	port, err := docker("port", keeperContainer, "9000/tcp")
+	port, err := docker("port", name, "9000/tcp")
 	if err != nil {
 		t.Fatalf("docker port: %v %s", err, port)
 	}
 	env := &chEnv{native: strings.Split(port, "\n")[0]}
 	q := func(query string) string {
 		t.Helper()
-		cmd := exec.Command("docker", "exec", "-i", keeperContainer, "clickhouse-client", "-u", chUser, "--password", chPassword, "-n", "-q", query)
+		cmd := exec.Command("docker", "exec", "-i", name, "clickhouse-client", "-u", chUser, "--password", chPassword, "-n", "-q", query)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("%s: %v\n%s", query, err, out)
@@ -715,14 +711,30 @@ func TestRestoreReplicatedIntegration(t *testing.T) {
 		}
 		cancel()
 		if err == nil {
-			break
+			return env, q
 		}
 		if time.Now().After(deadline) {
-			logs, _ := docker("logs", "--tail", "50", keeperContainer)
+			logs, _ := docker("logs", "--tail", "50", name)
 			t.Fatalf("clickhouse with keeper not ready: %v\n%s", err, logs)
 		}
 		time.Sleep(time.Second)
 	}
+}
+
+// TestRestoreReplicatedIntegration restores Replicated tables (SHOW
+// CREATE's default {uuid} path, and an explicit one) into a server whose
+// Keeper still holds the source tables: the restored tables live under
+// /olympos-restore/<request id>/ and the source's are untouched.
+func TestRestoreReplicatedIntegration(t *testing.T) {
+	startClickHouse(t) // skips without Docker, like the other tests
+	bin := restoreClientBin(t)
+	SetClientBin(bin)
+	t.Cleanup(func() { SetClientBin("") })
+
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	env, q := startKeeperServer(t, "olympos-t8-keeper-"+hex.EncodeToString(rnd[:]), keeperXML, "")
+	ctx := context.Background()
 
 	q(`CREATE DATABASE rp;
 CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
@@ -762,5 +774,92 @@ INSERT INTO rp.a SELECT number % 4, uniqState(number) FROM numbers(100) GROUP BY
 	}
 	if !strings.Contains(strings.Join(res.Notes, "\n"), "rp.t: its Keeper path is /olympos-restore/"+id+"/rp/t (replica {replica})") {
 		t.Fatalf("notes: %v", res.Notes)
+	}
+}
+
+// sharedKeeperXML points a server at the Keeper of host, as replica r2 of
+// the same shard: what a second ClickHouse of the same cluster sees.
+func sharedKeeperXML(host string) string {
+	return `<clickhouse>
+  <zookeeper><node><host>` + host + `</host><port>9181</port></node></zookeeper>
+  <macros><shard>s1</shard><replica>r2</replica></macros>
+</clickhouse>`
+}
+
+// TestRestoreReplicatedSharedKeeper restores Replicated tables into another
+// server that shares the source's Keeper (#57). Had the restore kept the
+// source's Keeper paths, the restored tables would join the source tables'
+// replica set as r2, with no error, and the two would copy each other's
+// data. The source tables keep their one replica and their rows.
+func TestRestoreReplicatedSharedKeeper(t *testing.T) {
+	startClickHouse(t) // skips without Docker, like the other tests
+	bin := restoreClientBin(t)
+	SetClientBin(bin)
+	t.Cleanup(func() { SetClientBin("") })
+
+	var rnd [4]byte
+	_, _ = rand.Read(rnd[:])
+	suffix := hex.EncodeToString(rnd[:])
+	network := "olympos-t8-net-" + suffix
+	if out, err := docker("network", "create", network); err != nil {
+		t.Fatalf("docker network create: %v %s", err, out)
+	}
+	// Registered first: runs after the containers are removed.
+	t.Cleanup(func() { _, _ = docker("network", "rm", network) })
+	srcName := "olympos-t8-src-" + suffix
+	src, qs := startKeeperServer(t, srcName, keeperXML, network)
+	dst, qd := startKeeperServer(t, "olympos-t8-dst-"+suffix, sharedKeeperXML(srcName), network)
+	ctx := context.Background()
+
+	qs(`CREATE DATABASE rp;
+CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
+CREATE TABLE rp.e (x UInt64, v UInt8) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{shard}/rp_e', '{replica}', v) ORDER BY x;
+CREATE TABLE rp.a (k UInt8, u AggregateFunction(uniq, UInt64)) ENGINE = ReplicatedAggregatingMergeTree('/clickhouse/tables/{shard}/rp_a', '{replica}') ORDER BY k;
+INSERT INTO rp.t SELECT number FROM numbers(1000);
+INSERT INTO rp.e SELECT number, 1 FROM numbers(10);
+INSERT INTO rp.a SELECT number % 4, uniqState(number) FROM numbers(100) GROUP BY number % 4;`)
+	var buf bytes.Buffer
+	if _, err := (Engine{}).Run(ctx, src.ec(false, map[string]any{"databases": []string{"rp"}}), &buf); err != nil {
+		t.Fatal(err)
+	}
+
+	const id = "5c2e8a1f-0b3d-4e6f-9a7b-1c2d3e4f5a6b"
+	rc := backup.RestoreContext{EngineContext: dst.ec(false, nil), RequestID: id, Archive: memObject{bytes.NewReader(buf.Bytes())},
+		Databases: []string{"rp"}, Progress: func(backup.Progress) {}}
+	res, err := Engine{}.Restore(ctx, rc)
+	if err != nil || len(res.Items) != 1 || res.Items[0].Status != "succeeded" || res.Items[0].Rows != 1014 || res.Items[0].Tables != 3 {
+		t.Fatalf("restore: %v %+v", err, res)
+	}
+
+	// The target: its own paths, as r2, with the backup's rows.
+	paths := qd("SELECT arrayStringConcat(groupArray(concat(table, '=', zookeeper_path, '@', replica_name)), ',') FROM (SELECT table, zookeeper_path, replica_name FROM system.replicas WHERE database = 'rp' ORDER BY table)")
+	want := "a=/olympos-restore/" + id + "/rp/a@r2,e=/olympos-restore/" + id + "/rp/e@r2,t=/olympos-restore/" + id + "/rp/t@r2"
+	if paths != want {
+		t.Fatalf("restored Keeper paths: %s, want %s", paths, want)
+	}
+	if got := qd("SELECT count() FROM rp.t") + "," + qd("SELECT count() FROM rp.e") + "," + qd("SELECT sum(finalizeAggregation(u)) FROM rp.a"); got != "1000,10,100" {
+		t.Fatalf("restored rows: %s", got)
+	}
+
+	// The source: one replica per table, r1 alone under its Keeper paths.
+	if got := qs("SELECT arrayStringConcat(groupArray(concat(table, '=', toString(total_replicas))), ',') FROM (SELECT table, total_replicas FROM system.replicas WHERE database = 'rp' ORDER BY table)"); got != "a=1,e=1,t=1" {
+		t.Fatalf("source replicas: %s, want a=1,e=1,t=1", got)
+	}
+	for _, p := range []string{"/clickhouse/tables/3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b/s1/replicas", "/clickhouse/tables/s1/rp_e/replicas", "/clickhouse/tables/s1/rp_a/replicas"} {
+		if got := qs("SELECT arrayStringConcat(groupArray(name), ',') FROM system.zookeeper WHERE path = '" + p + "'"); got != "r1" {
+			t.Fatalf("replicas under %s: %q, want r1", p, got)
+		}
+	}
+
+	// Writes stay on their side: a new row on each, then both sync.
+	qd("INSERT INTO rp.e VALUES (100, 2)")
+	qs("INSERT INTO rp.t SELECT number FROM numbers(1000, 5)")
+	qs("SYSTEM SYNC REPLICA rp.e")
+	qd("SYSTEM SYNC REPLICA rp.t")
+	if got := qs("SELECT count() FROM rp.e") + "," + qd("SELECT count() FROM rp.t"); got != "10,1000" {
+		t.Fatalf("source rp.e, target rp.t after writes on the other side: %s, want 10,1000", got)
+	}
+	if got := qs("SELECT count() FROM rp.t") + "," + qd("SELECT count() FROM rp.e"); got != "1005,11" {
+		t.Fatalf("source rp.t, target rp.e after their own writes: %s, want 1005,11", got)
 	}
 }
