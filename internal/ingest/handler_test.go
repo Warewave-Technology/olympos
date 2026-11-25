@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -373,9 +374,9 @@ func TestHandlerRefusesAddressing(t *testing.T) {
 		{"wrong bucket", "/other/" + a.prefix + "x", nil},
 		{"bucket name prefix", "/olymposx/" + a.prefix + "x", nil},
 		{"root", "/", nil},
-		{"virtual host", "/" + a.prefix + "x", []func(*http.Request){func(r *http.Request) { r.Host = "olympos.ingest.test" }}},
-		{"virtual host with path bucket", "/olympos/" + a.prefix + "x",
-			[]func(*http.Request){func(r *http.Request) { r.Host = "olympos.ingest.test:9444" }}},
+		// A virtual-host request has no /olympos/ in its path; the path rule
+		// refuses it.
+		{"virtual host", "/" + a.prefix + "x", []func(*http.Request){func(r *http.Request) { r.Host = "olympos.example.test" }}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -384,6 +385,16 @@ func TestHandlerRefusesAddressing(t *testing.T) {
 	}
 	if p := a.sink.all(); len(p) != 0 {
 		t.Errorf("the sink got %d puts", len(p))
+	}
+
+	// The Host is not looked at: a server named olympos.<domain> serves path
+	// style.
+	for _, host := range []string{"olympos.example.test", "olympos.example.test:9444"} {
+		key := a.prefix + "data/" + host + ".bin"
+		wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+key, "body", func(r *http.Request) { r.Host = host }), http.StatusOK)
+		if p := a.sink.all(); len(p) == 0 || p[len(p)-1].key != key {
+			t.Errorf("Host %s: the sink did not get %s", host, key)
+		}
 	}
 }
 
@@ -1370,4 +1381,126 @@ func TestHandlerMetricsAndLogs(t *testing.T) {
 	if !strings.Contains(logs, a.s.RunID().String()) || !strings.Contains(logs, a.prefix+"data/x.bin") {
 		t.Errorf("the log lacks the run or the key:\n%s", logs)
 	}
+}
+
+// waitNoSpill waits until the spill directory is empty.
+func waitNoSpill(t *testing.T, dir string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for spillFiles(t, dir) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := spillFiles(t, dir); n != 0 {
+		t.Errorf("%d spill files left", n)
+	}
+}
+
+// waitNoUploads waits until the handler has no open upload.
+func waitNoUploads(t *testing.T, e *env) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for ingest.OpenUploads(e.handler) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := ingest.OpenUploads(e.handler); n != 0 {
+		t.Errorf("%d uploads open", n)
+	}
+}
+
+// TestHandlerExpiryEndsUploads: when a session expires no request can end
+// its uploads, so expiry itself does. The session stops with "expired", the
+// put of an open upload fails, its waiting parts leave the disk, and the
+// handler forgets it.
+func TestHandlerExpiryEndsUploads(t *testing.T) {
+	check := func(t *testing.T, e *env, a *run) {
+		t.Helper()
+		if got := stopReason(t, a.s); got != ingest.ReasonExpired {
+			t.Errorf("stop reason %q, want %q", got, ingest.ReasonExpired)
+		}
+		if puts := a.sink.waitPuts(t, 1); puts[0].err == nil {
+			t.Error("the put of the open upload did not fail")
+		}
+		waitNoSpill(t, e.spillDir)
+		waitNoUploads(t, e)
+		if n := ingest.Spilled(a.s); n != 0 {
+			t.Errorf("%d bytes counted as spilled", n)
+		}
+	}
+	start := func(t *testing.T, e *env, ttl time.Duration) *run {
+		t.Helper()
+		a := e.backup(t, func(o *ingest.OpenOptions) { o.TTL = ttl })
+		m := e.createUpload(t, a, a.prefix+"data/big.bin")
+		etagOf(t, m.part(t, 1, "first"))
+		etagOf(t, m.part(t, 3, "waits on disk"))
+		if n := spillFiles(t, e.spillDir); n != 1 {
+			t.Fatalf("%d spill files, want 1", n)
+		}
+		return a
+	}
+
+	t.Run("the TTL passes", func(t *testing.T) {
+		e := newEnv(t)
+		// A real timer: the TTL passes with no request to notice it.
+		check(t, e, start(t, e, time.Second))
+	})
+	t.Run("an Open drops the expired session", func(t *testing.T) {
+		e := newEnv(t)
+		a := start(t, e, time.Hour)
+		e.clock.add(2 * time.Hour)
+		e.backup(t) // reserve drops the expired session
+		check(t, e, a)
+	})
+}
+
+// TestHandlerConcurrentParts: ClickHouse uploads parts in parallel. Parts
+// sent at once, in random order, become one put of the whole body, and leave
+// nothing on disk.
+func TestHandlerConcurrentParts(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	m := e.createUpload(t, a, a.prefix+"data/big.bin")
+	const n = 10
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = strings.Repeat(string(rune('a'+i)), 40<<10+i*1000)
+	}
+	tags := make([]string, n)
+	var wg sync.WaitGroup
+	for _, i := range rand.Perm(n) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r := m.part(t, i+1, parts[i])
+			if r.status != http.StatusOK {
+				t.Errorf("part %d: %s", i+1, r)
+				return
+			}
+			tags[i] = r.header.Get("ETag")
+		}()
+	}
+	wg.Wait()
+	if t.Failed() {
+		return
+	}
+	r := m.complete(t, tags...)
+	wantStatus(t, r, http.StatusOK)
+	whole := strings.Join(parts, "")
+	puts := a.sink.all()
+	if len(puts) != 1 || puts[0].err != nil || string(puts[0].body) != whole {
+		t.Fatalf("sink puts: %d", len(puts))
+	}
+	var res struct{ ETag string }
+	if err := xml.Unmarshal([]byte(r.body), &res); err != nil || res.ETag != multipartETag(parts...) {
+		t.Errorf("complete %s: %v", r.body, err)
+	}
+	if n := spillFiles(t, e.spillDir); n != 0 {
+		t.Errorf("%d spill files left", n)
+	}
+	if n := ingest.Spilled(a.s); n != 0 {
+		t.Errorf("%d bytes counted as spilled", n)
+	}
+	if n := ingest.OpenUploads(e.handler); n != 0 {
+		t.Errorf("%d uploads open", n)
+	}
+	notStopped(t, a.s)
 }

@@ -14,7 +14,6 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"slices"
@@ -342,13 +341,9 @@ func (q *request) stop(reason string) {
 // bucket, an operation outside the table, and a key that is not plain.
 func (q *request) classify() *s3Error {
 	r := q.r
-	host := r.Host
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
-	}
-	if strings.HasPrefix(strings.ToLower(host), bucket+".") {
-		return denied("Virtual-host style requests are not served; use path style.")
-	}
+	// Path style is the path rule below: a virtual-host request has no
+	// /olympos/ in its path. The Host is not looked at, so a server named
+	// olympos.<domain> works.
 	query, err := url.ParseQuery(r.URL.RawQuery)
 	if err != nil {
 		return denied("The query string is malformed.")

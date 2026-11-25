@@ -38,6 +38,10 @@ const (
 	// ReasonCaptureLimit: a body the manifest needs was over its capture
 	// limit, or the kept bodies together were.
 	ReasonCaptureLimit = "capture limit"
+	// ReasonExpired: the credential's TTL passed before the run revoked it.
+	// Expiry ends the session like any stop, so that what still streams, and
+	// every open multipart upload, is aborted.
+	ReasonExpired = "expired"
 )
 
 const (
@@ -216,14 +220,22 @@ func (r *Registry) Open(ctx context.Context, o OpenOptions) (*Session, Credentia
 	return s, cred, nil
 }
 
-// reserve takes a slot, first dropping the sessions that have expired.
+// reserve takes a slot, first dropping the sessions that have expired. A
+// dropped session is stopped with ReasonExpired, which ends its streams.
 func (r *Registry) reserve() error {
 	now := r.now()
+	var dropped []*Session
+	defer func() {
+		for _, s := range dropped {
+			s.Stop(ReasonExpired)
+		}
+	}()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for key, s := range r.sessions {
 		if s.expired(now) {
 			delete(r.sessions, key)
+			dropped = append(dropped, s)
 		}
 	}
 	if len(r.sessions)+r.opening >= r.maxRuns {
@@ -252,6 +264,8 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		r.fp.Fingerprint([]byte(cred.Secret)), now, s.expires); err != nil {
 		return nil, Credential{}, fmt.Errorf("ingest: record credential: %w", err)
 	}
+	// The TTL ends the session even when no request comes to notice it.
+	s.expiry = time.AfterFunc(o.TTL, func() { s.Stop(ReasonExpired) })
 	return s, cred, nil
 }
 
@@ -341,6 +355,9 @@ type Session struct {
 	// goroutine can wait for it.
 	ended   chan struct{}
 	endOnce sync.Once
+	// expiry stops the session with ReasonExpired when the TTL passes; Revoke
+	// cancels it. Set once in open.
+	expiry *time.Timer
 
 	mu         sync.Mutex
 	secret     string // dropped on Revoke
@@ -391,6 +408,9 @@ func (s *Session) Revoke(reason string) {
 	s.revoked = true
 	s.secret = ""
 	s.mu.Unlock()
+	if s.expiry != nil {
+		s.expiry.Stop()
+	}
 	s.end()
 	s.reg.forget(s.accessKey)
 
