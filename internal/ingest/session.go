@@ -90,7 +90,8 @@ type Sink interface {
 }
 
 // Source serves the objects a run may read, by bucket-relative key and
-// prefix.
+// prefix. Open returns an error that wraps fs.ErrNotExist for a key that does
+// not exist.
 type Source interface {
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectRecord, error)
 	List(ctx context.Context, prefix string) ([]ObjectRecord, error)
@@ -245,6 +246,7 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		source:   o.Source,
 		maxBytes: o.MaxBytes, accessKey: cred.AccessKey, expires: now.Add(o.TTL),
 		secret: cred.Secret, stopped: make(chan string, 1), captured: map[string][]byte{},
+		ended: make(chan struct{}), rate: rateBucket{tokens: maxRate, last: now},
 	}
 	if err := insertCredential(ctx, r.db, cred.AccessKey, o.RunID, o.Kind, s.scope,
 		r.fp.Fingerprint([]byte(cred.Secret)), now, s.expires); err != nil {
@@ -296,6 +298,20 @@ func (r *Registry) MarkInterrupted(ctx context.Context) error {
 	return nil
 }
 
+// openRuns counts the sessions that hold a slot: not revoked, not expired.
+func (r *Registry) openRuns() int {
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, s := range r.sessions {
+		if !s.expired(now) {
+			n++
+		}
+	}
+	return n
+}
+
 func (r *Registry) forget(accessKey string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -320,6 +336,11 @@ type Session struct {
 	accessKey string
 	expires   time.Time
 	stopped   chan string // buffered: the one stop reason
+	// ended is closed when the session is stopped or revoked, so that the
+	// handler aborts what is still streaming. Unlike stopped, every
+	// goroutine can wait for it.
+	ended   chan struct{}
+	endOnce sync.Once
 
 	mu         sync.Mutex
 	secret     string // dropped on Revoke
@@ -332,6 +353,10 @@ type Session struct {
 	capturedBytes int64
 	lock          []byte
 	hasLock       bool
+	// rate limits the session's requests; spilled is how many bytes of
+	// out-of-order parts it holds on disk. Both are the handler's.
+	rate    rateBucket
+	spilled int64
 }
 
 // RunID is the run the session was opened for.
@@ -366,6 +391,7 @@ func (s *Session) Revoke(reason string) {
 	s.revoked = true
 	s.secret = ""
 	s.mu.Unlock()
+	s.end()
 	s.reg.forget(s.accessKey)
 
 	ctx, cancel := context.WithTimeout(context.Background(), revokeTimeout)
@@ -395,6 +421,43 @@ func (s *Session) Stop(reason string) {
 	}
 	s.stopReason = reason
 	s.stopped <- reason // never blocks: the buffer holds the one reason
+	s.end()
+}
+
+func (s *Session) end() { s.endOnce.Do(func() { close(s.ended) }) }
+
+// live reports whether the session still serves requests at now: it is not
+// stopped, revoked or expired. The handler checks it before every write.
+func (s *Session) live(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.revoked && s.stopReason == "" && !s.expired(now)
+}
+
+// allow takes one request from the session's rate bucket.
+func (s *Session) allow(now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.rate.take(now)
+}
+
+// reserveSpill counts n more bytes held on disk and reports whether they fit
+// under limit; when they do not, nothing is counted.
+func (s *Session) reserveSpill(n, limit int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.spilled+n > limit {
+		return false
+	}
+	s.spilled += n
+	return true
+}
+
+// releaseSpill uncounts n bytes that left the disk.
+func (s *Session) releaseSpill(n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.spilled -= n
 }
 
 // AddBytes counts n more bytes written by the run. Past MaxBytes it stops
