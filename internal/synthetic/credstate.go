@@ -102,7 +102,14 @@ func (s *Service) recordCredentialOK(ctx context.Context, resolved []resolvedCre
 	for i, r := range resolved {
 		ids[i], backing[i] = r.ID, r.Backing
 	}
-	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+	type restored struct {
+		id      uuid.UUID
+		name    string
+		since   *time.Time
+		alerted bool
+	}
+	var list []restored
+	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
 		// FOR UPDATE: of two passes that find a credential ok again, the
 		// second finds it ok already and sends nothing.
 		rows, err := tx.Query(ctx, `UPDATE synthetic_credentials c SET resolve_state = 'ok', resolve_cause = NULL,
@@ -115,13 +122,7 @@ func (s *Service) recordCredentialOK(ctx context.Context, resolved []resolvedCre
 		if err != nil {
 			return err
 		}
-		type restored struct {
-			id      uuid.UUID
-			name    string
-			since   *time.Time
-			alerted bool
-		}
-		list, err := pgx.CollectRows(rows, func(r pgx.CollectableRow) (restored, error) {
+		list, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (restored, error) {
 			var x restored
 			return x, r.Scan(&x.id, &x.name, &x.since, &x.alerted)
 		})
@@ -150,6 +151,17 @@ func (s *Service) recordCredentialOK(ctx context.Context, resolved []resolvedCre
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	for _, x := range list {
+		args := []any{"synthetic_cred", x.id, "name", x.name}
+		if x.since != nil {
+			args = append(args, "failing_since", x.since.UTC().Format(time.RFC3339))
+		}
+		s.Log.Info("synthetic credential resolves again", args...)
+	}
+	return nil
 }
 
 // recordCredentialFailure records that credential id could not be resolved,
@@ -161,13 +173,33 @@ func (s *Service) recordCredentialOK(ctx context.Context, resolved []resolvedCre
 // new secret since (a rotation), the failure is stale and is ignored.
 func (s *Service) recordCredentialFailure(ctx context.Context, id, backing uuid.UUID, cause string, permanent bool) error {
 	now := s.now()
-	return store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE synthetic_credentials SET
-				resolve_cause = CASE WHEN $3 OR resolve_state <> 'broken' THEN $2 ELSE resolve_cause END,
-				resolve_state = CASE WHEN $3 OR resolve_state = 'broken' THEN 'broken' ELSE 'unavailable' END,
-				resolve_failing_since = COALESCE(resolve_failing_since, $4)
-			WHERE id = $1 AND credential_id = $5`, id, cause, permanent, now, backing); err != nil {
+	// What the update changed, logged once it commits (#69): a WARN per
+	// state change, not per run.
+	var changed bool
+	var logName, logState, logCause string
+	var logSince time.Time
+	err := store.Tx(ctx, s.DB, func(tx pgx.Tx) error {
+		var oldState, newState string
+		var oldCause, newCause *string
+		err := tx.QueryRow(ctx, `UPDATE synthetic_credentials c SET
+				resolve_cause = CASE WHEN $3 OR old.resolve_state <> 'broken' THEN $2 ELSE old.resolve_cause END,
+				resolve_state = CASE WHEN $3 OR old.resolve_state = 'broken' THEN 'broken' ELSE 'unavailable' END,
+				resolve_failing_since = COALESCE(old.resolve_failing_since, $4)
+			FROM (SELECT id, resolve_state, resolve_cause, resolve_failing_since FROM synthetic_credentials
+				WHERE id = $1 AND credential_id = $5 FOR UPDATE) old
+			WHERE c.id = old.id
+			RETURNING c.name, old.resolve_state, old.resolve_cause, c.resolve_state, c.resolve_cause, c.resolve_failing_since`,
+			id, cause, permanent, now, backing).Scan(&logName, &oldState, &oldCause, &newState, &newCause, &logSince)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil // a stale failure: the credential has a new secret since
+		}
+		if err != nil {
 			return err
+		}
+		changed = oldState != newState || (oldCause == nil) != (newCause == nil) || oldCause != nil && *oldCause != *newCause
+		logState = newState
+		if newCause != nil {
+			logCause = *newCause
 		}
 		// The one-message mark, set where the message is written: of the
 		// runs that fail at once, here or on other replicas, one passes
@@ -175,7 +207,7 @@ func (s *Service) recordCredentialFailure(ctx context.Context, id, backing uuid.
 		var name, state string
 		var current *string
 		var since time.Time
-		err := tx.QueryRow(ctx, `UPDATE synthetic_credentials SET resolve_alerted_at = $2
+		err = tx.QueryRow(ctx, `UPDATE synthetic_credentials SET resolve_alerted_at = $2
 			WHERE id = $1 AND credential_id = $4 AND resolve_alerted_at IS NULL AND (resolve_state = 'broken' OR resolve_failing_since <= $3)
 			RETURNING name, resolve_state, resolve_cause, resolve_failing_since`, id, now, now.Add(-UnavailableAlertAfter), backing).
 			Scan(&name, &state, &current, &since)
@@ -217,6 +249,11 @@ func (s *Service) recordCredentialFailure(ctx context.Context, id, backing uuid.
 				"scenario_count": len(scenarios)},
 		})
 	})
+	if err == nil && changed {
+		s.Log.Warn("synthetic credential cannot be resolved", "synthetic_cred", id, "name", logName, "state", logState,
+			"cause", logCause, "failing_since", logSince.UTC().Format(time.RFC3339))
+	}
+	return err
 }
 
 func credentialLink(id uuid.UUID) string { return "/settings/synthetic?credential=" + id.String() }

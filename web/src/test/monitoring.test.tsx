@@ -50,6 +50,7 @@ describe('Monitoring › Synthetic overview', () => {
       ['onprem-ist-lab excluded', '–', 'c-ex'],
       ['onprem-factory-01 paused', '‖', 'c-ex'],
       ['prod-aks-weu-01 credential error', '⊘', 'c-cred'],
+      ['prod-aks-weu-01 credential unavailable', '◷', 'c-credu'],
     ];
     for (const [label, symbol, cls] of cases) {
       const c = cell(label);
@@ -60,7 +61,7 @@ describe('Monitoring › Synthetic overview', () => {
     expect(cell('oke-fra-erp failing').getAttribute('title')).toContain('step 3: latency 912 ms > 500 ms');
     // the legend says what each symbol means
     const legend = screen.getByLabelText('Legend');
-    for (const t of ['passing', 'failing', 'degraded', 'probe offline', 'probe not installed', 'excluded', 'paused', 'credential error']) expect(legend).toHaveTextContent(t);
+    for (const t of ['passing', 'failing', 'degraded', 'probe offline', 'probe not installed', 'excluded', 'paused', 'credential error', 'credential unavailable']) expect(legend).toHaveTextContent(t);
 
     const kpis = screen.getByRole('region', { name: 'Synthetic monitoring totals' });
     expect(within(kpis).getByText('Failing now').parentElement).toHaveTextContent('Checkout API flow · 1 cluster');
@@ -68,15 +69,31 @@ describe('Monitoring › Synthetic overview', () => {
     expect(within(kpis).getByText('Probes').parentElement).toHaveTextContent('onprem-ist-lab probe offline');
 
     const rows = () => within(matrix).getAllByRole('row').slice(1);
-    expect(rows()).toHaveLength(7);
+    expect(rows()).toHaveLength(8);
     await user.click(screen.getByRole('button', { name: /^Failing · 1$/ }));
     expect(rows().map((r) => within(r).getByRole('link').textContent)).toEqual(['Checkout API flow']);
     expect(within(rows()[0]).getByText('Failing · 1 cluster')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /^Paused · 1$/ }));
     expect(rows().map((r) => within(r).getByRole('link').textContent)).toEqual(['Legacy reports portal']);
-    await user.click(screen.getByRole('button', { name: /^All · 7$/ }));
+    await user.click(screen.getByRole('button', { name: /^All · 8$/ }));
     await user.type(screen.getByLabelText('Search scenarios'), 'payments');
-    await waitFor(() => expect(rows().map((r) => within(r).getByRole('link').textContent)).toEqual(['Checkout API flow', 'Payments gateway TLS']));
+    await waitFor(() => expect(rows().map((r) => within(r).getByRole('link').textContent)).toEqual(['Checkout API flow', 'Payments gateway TLS', 'Orders API']));
+  });
+
+  it('marks a scenario whose credential is unavailable from the first failure: a warning badge, cells that open nothing (#69)', async () => {
+    await renderApp('/monitoring');
+    const matrix = await screen.findByRole('table', { name: 'Scenarios by cluster' }, T);
+    const row = (await within(matrix).findByRole('link', { name: 'Orders API' }, T)).closest('tr')!;
+    expect(within(row).getByText('Credential unavailable', { selector: '.badge' })).toHaveClass('warn');
+    const cells = within(row).getAllByLabelText(/credential unavailable$/);
+    expect(cells.length).toBeGreaterThan(5);
+    // its runs are skipped: the last counted run says nothing, and there is nothing to open
+    expect(cells[0].getAttribute('title')).not.toContain('last run');
+    expect(cells.every((c) => c.tagName !== 'BUTTON')).toBe(true);
+    expect(within(row).getByLabelText('onprem-ist-lab excluded')).toBeInTheDocument();
+    expect(within(matrix).getAllByText('Credential unavailable', { selector: '.badge' })).toHaveLength(1);
+    // the footnote no longer promises a run behind every cell
+    expect(screen.getByText(/credential cells have none/)).toBeInTheDocument();
   });
 
   it('marks a scenario with a credential that cannot be resolved: a name badge, credential error cells, no status of its own', async () => {
@@ -191,6 +208,16 @@ describe('scenario detail: credentials', () => {
     expect(within(table).getByText('onprem-ist-lab').closest('tr')).toHaveTextContent('Excluded');
     // not a failing run, and no streak
     expect(erp).not.toHaveTextContent('in a row');
+  });
+
+  it('says on every cluster that an unavailable credential stops the runs, and links to it (#69)', async () => {
+    await renderApp(detailOf('Orders API'));
+    const table = await screen.findByRole('table', { name: 'Scenario by cluster' }, T);
+    const erp = within(table).getByText('oke-fra-erp').closest('tr')!;
+    expect(within(erp).getByText('Credential unavailable')).toHaveClass('badge', 'warn');
+    expect(within(erp).getByRole('link', { name: 'Credential unavailable: orders-api-key' })).toHaveAttribute('href', `/settings/synthetic?credential=${credOf('orders-api-key').id}`);
+    expect(within(erp).queryByRole('button')).toBeNull();
+    expect(erp.querySelectorAll('td')[1]).toHaveTextContent('—');
   });
 
   it('shows an unavailable credential as a warning, and nothing for a scenario without credentials', async () => {

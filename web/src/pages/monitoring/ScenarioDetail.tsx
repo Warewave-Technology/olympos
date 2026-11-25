@@ -4,11 +4,11 @@ import { useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useMutation, useQuery, useQueryClient, type UseQueryResult } from '@tanstack/react-query';
 import { api, errorMessage } from '../../api/client';
-import type { ItemList, Scenario, ScenarioClusterRow, ScenarioClusters, SyntheticAlert, TimelineBucket } from '../../api/types';
+import type { CredentialResolveState, ItemList, Scenario, ScenarioClusterRow, ScenarioClusters, SyntheticAlert, TimelineBucket } from '../../api/types';
 import { clockTime, duration, plural } from '../../lib/format';
 import { Badge, ErrorState, FormError, Loading, Modal, QueryView, TypeToConfirm, useToast } from '../../ui/kit';
 import { PageHead } from '../../ui/status';
-import { CRED_KIND_LABEL, HiddenNote, ScenarioStatusBadge, assertionsLine, clusterResult, credentialState, intervalText, reasonText, stepTitle, TYPE_LABEL, variableSource } from '../../ui/synthetic';
+import { CRED_KIND_LABEL, HiddenNote, ScenarioStatusBadge, assertionsLine, clusterResult, credentialState, intervalText, isCredentialCell, reasonText, stepTitle, TYPE_LABEL, variableSource } from '../../ui/synthetic';
 import { ms, pct, useSyntheticOverview } from './SyntheticOverview';
 import { MonitoringTabs } from './MonitoringPage';
 
@@ -95,7 +95,7 @@ export function ScenarioDetail({ id }: { id: string }) {
         </ol>
       </section>
       <CredentialsCard s={s} />
-      <ClustersCard q={clustersQ} broken={s.credentials?.find((c) => c.resolve_state === 'broken')} />
+      <ClustersCard q={clustersQ} credentials={s.credentials ?? []} />
       <div className="cols-2">
         <AlertRuleCard s={s} />
         <AlertsCard id={id} />
@@ -276,7 +276,7 @@ function Strip({ row }: { row: ScenarioClusterRow }) {
   );
 }
 
-function ClustersCard({ q, broken }: { q: UseQueryResult<ScenarioClusters>; broken?: { id: string; name: string } }) {
+function ClustersCard({ q, credentials }: { q: UseQueryResult<ScenarioClusters>; credentials: { id: string; name: string; resolve_state?: CredentialResolveState }[] }) {
   const navigate = useNavigate({ from: '/monitoring' });
   const openRun = (id: string) => void navigate({ search: (s) => ({ ...s, run: id }) });
   return (
@@ -318,9 +318,10 @@ function ClustersCard({ q, broken }: { q: UseQueryResult<ScenarioClusters>; brok
               <tbody>
                 {d.items.map((r) => {
                   const res = clusterResult(r);
-                  // a credential error leaves the last counted run old news: no time, no link to it
-                  const credErr = r.state === 'credential_error';
-                  const last = credErr ? null : r.last_run;
+                  // a credential that stops the runs leaves the last counted run old news: no time, no link to it, a link to
+                  // the credential instead
+                  const cred = isCredentialCell(r.state) ? credentials.find((c) => c.resolve_state === (r.state === 'credential_error' ? 'broken' : 'unavailable')) : undefined;
+                  const last = isCredentialCell(r.state) ? null : r.last_run;
                   const failed = last && last.failed_step !== null && last.status !== 'passed';
                   return (
                     <tr key={r.cluster_id}>
@@ -331,8 +332,8 @@ function ClustersCard({ q, broken }: { q: UseQueryResult<ScenarioClusters>; brok
                           <button type="button" className={`badge ${res.tone} badge-btn`} onClick={() => openRun(last.id)} aria-label={`${res.text}: open the run on ${r.cluster_name}`}>
                             {res.text}
                           </button>
-                        ) : credErr && broken ? (
-                          <Link to="/settings/synthetic" search={{ credential: broken.id }} aria-label={`${res.text}: ${broken.name}`}>
+                        ) : cred ? (
+                          <Link to="/settings/synthetic" search={{ credential: cred.id }} aria-label={`${res.text}: ${cred.name}`}>
                             <Badge tone={res.tone}>{res.text}</Badge>
                           </Link>
                         ) : (

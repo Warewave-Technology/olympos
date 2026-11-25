@@ -3292,6 +3292,11 @@ button.cell:focus-visible {
   color: var(--crit-fg);
   outline: 1px dashed var(--crit-border);
 }
+.c-credu {
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  outline: 1px dashed var(--warn-fg);
+}
 .c-off {
   background: var(--bg-hover);
   color: var(--fg-muted);

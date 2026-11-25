@@ -106,6 +106,9 @@ Kind `synthetic_credential_broken`: `crit` for `broken`, `warn` for `unavailable
 - Matrix and the per-cluster table: new cell state `credential_error` ("Credential error"), after excluded, paused,
   not installed and probe offline, before failing: a scenario with a `broken` credential shows it on every cluster
   it would run on.
+  A scenario with an `unavailable` credential shows `credential_unavailable` ("Credential unavailable", warn) in
+  the same place, from the first transient failure (#69): its runs are skipped, so the last counted run is old
+  news. The alert still waits 30 minutes; the matrix is a status view, not an alert.
 - Scenario page: the credentials it uses, each with its state.
 - Credentials page: a state badge replaces "could not be read N times in 24 h", e.g.
   `Cannot be resolved · not found in Key Vault · since 10:42`, or `Unavailable since 10:42` (warn).
@@ -119,6 +122,9 @@ Kind `synthetic_credential_broken`: `crit` for `broken`, `warn` for `unavailable
 - A scenario with a broken credential gets the cell state *Credential error* in the matrix. There is no new
   scenario status.
 - The `consecutive_failures` count of the run detail also leaves out the two reasons, like the streaks.
+- Logs (#69): the dispatch logs a credential that cannot be resolved at WARN only when its state changes (a new
+  episode, another cause, transient to permanent) and at INFO once when it resolves again; each run's line is
+  DEBUG. Errors that are not a resolution failure (sealing, the database) stay WARN on every run.
 - The Needs-attention item counts only enabled scenarios, and is shown to users who may read the synthetic
   settings (global read, or the `synthetic-editor` role).
 

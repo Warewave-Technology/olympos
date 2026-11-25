@@ -220,11 +220,12 @@ func (s *Service) send(ctx context.Context, clusterID uuid.UUID, certSerial stri
 	case credErr != nil:
 		status, reason := credentialReason(credErr)
 		// A resolution failure is logged by its cause: Key Vault's own
-		// text may carry its response.
+		// text may carry its response. Per run at DEBUG: the credential's
+		// state changes are the WARN lines (recordCredentialFailure).
 		var f *credentialFailure
 		if errors.As(credErr, &f) {
 			cause, _ := resolveCause(f.Err)
-			s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason,
+			s.Log.Debug("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason,
 				"synthetic_cred", f.ID, "cause", cause)
 		} else {
 			s.Log.Warn("synthetic run credentials", "run_id", runID, "cluster_id", clusterID, "reason", reason, "err", credErr)

@@ -218,7 +218,9 @@ happens:
   they are left out of availability, p95, the timeline and the hourly aggregates.
 - **Where it shows.** The matrix reads *credential error* (⊘) on every cluster that has an online probe and
   that the scenario runs on, if the scenario uses the credential (*excluded*, *paused*, *probe not installed*
-  and *probe offline* keep their own state). The scenario's page lists its credentials with their state.
+  and *probe offline* keep their own state). A temporary failure reads *credential unavailable* (◷) in the same
+  places from the first failure, before the 30-minute alert: its runs are skipped, so the last run's result is
+  old news. The scenario's page lists its credentials with their state.
   *Settings › Synthetic monitoring › Credentials* shows two lines under the credential's name: a red badge,
   *Cannot be resolved*, or an amber one, *Unavailable*, and under it the cause and the time of the first failure,
   for example *not found in Key Vault · since 10:42* (*since 10:42* alone when unavailable). A credential
@@ -328,9 +330,10 @@ legend above the matrix names them, a cell's tooltip and screen-reader label say
 | – excluded | The scenario's targeting leaves the cluster out (hatched). |
 | ‖ paused | The scenario is disabled. |
 | ⊘ credential error | A credential the scenario uses [cannot be resolved](#credentials-that-cannot-be-resolved) for good. It shows on every cluster with an online probe that the scenario runs on; *excluded*, *paused*, *probe not installed* and *probe offline* keep their own state. It wins over *failing*. Not a failure of the scenario. |
+| ◷ credential unavailable | A credential the scenario uses [cannot be read for now](#credentials-that-cannot-be-resolved) (Key Vault does not answer), from the first failure; its runs are skipped. Shown in the same places as *credential error*, which wins over it. |
 | ○ no data yet | No counted run yet. |
 
-Hover a cell for the last run's reason; click it to open that run. When a [rate cap](#rate-caps) holds a
+Hover a cell for the last run's reason; click it to open that run (a credential cell has no run to open). When a [rate cap](#rate-caps) holds a
 scenario back on a cluster, the cell and the scenario's cluster table say *Held back by a request cap*.
 
 Open a scenario for its steps (the failed one marked), a table per cluster with the last result, the failed

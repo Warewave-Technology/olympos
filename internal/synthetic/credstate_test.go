@@ -1,6 +1,7 @@
 package synthetic
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -450,6 +451,58 @@ func TestExpiredCredentialOneAlert(t *testing.T) {
 	}
 	if st := e.credState(cred); st.State != "broken" || *st.Cause != CauseExpired {
 		t.Fatalf("credential state %+v", st)
+	}
+}
+
+// #69: a credential that cannot be resolved logs at WARN when its state
+// changes (a new episode, transient to permanent), at INFO once when it
+// resolves again, and each run's line at DEBUG: 27 runs, not 27 warnings.
+func TestCredentialLogsOncePerStateChange(t *testing.T) {
+	f := newCredFixture(t)
+	e := f.e
+	e.kv.fail(errors.New("get secret ops-vault/billing-token: 503 ServiceUnavailable"), nil)
+	f.round()
+	f.round()
+	e.kv.fail(nil, nil) // the secret is still missing: not found
+	f.round()
+	f.round()
+	e.kv.setSecret("ops-vault", "billing-token", "tok-restored")
+	f.round()
+
+	type line struct{ Level, Msg, Cause, State string }
+	var got []line
+	runs := 0
+	for _, l := range strings.Split(strings.TrimSpace(e.LogBuf.String()), "\n") {
+		var x struct {
+			Level, Msg, Cause, State string
+			Cred                     string `json:"synthetic_cred"`
+		}
+		if err := json.Unmarshal([]byte(l), &x); err != nil {
+			t.Fatalf("log line %q: %v", l, err)
+		}
+		switch {
+		case x.Msg == "synthetic run credentials":
+			if x.Level != "DEBUG" {
+				t.Fatalf("a run's credential line at %s: %s", x.Level, l)
+			}
+			runs++
+		case strings.HasPrefix(x.Msg, "synthetic credential"):
+			if x.Cred != f.cred.String() {
+				t.Fatalf("credential line without the credential: %s", l)
+			}
+			got = append(got, line{x.Level, x.Msg, x.Cause, x.State})
+		}
+	}
+	want := []line{
+		{"WARN", "synthetic credential cannot be resolved", CauseUnavailable, "unavailable"},
+		{"WARN", "synthetic credential cannot be resolved", CauseNotFound, "broken"},
+		{"INFO", "synthetic credential resolves again", "", ""},
+	}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("credential lines\n got %v\nwant %v", got, want)
+	}
+	if runs != 36 {
+		t.Fatalf("%d run lines, want 36 (4 passes of 9 runs that did not go out)", runs)
 	}
 }
 
