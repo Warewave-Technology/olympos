@@ -380,9 +380,10 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		live = append(live, &nativeDest{i: i, ref: d, w: bw, tier: n.tiers[d.ID],
 			dir: RunDir(bw.Prefix(), job.Target.ClusterName, job.Target.Namespace, job.Target.Service, n.eng.Name(), r.startedAt, r.id)})
 	}
+	stored := 0 // objects the session stored, set when the engine returned
 	finish := func(total int64, engErr error) outcome {
 		o := copiesOutcome(ctx, copies, total, n.wire(), tier, engErr, n.scrub)
-		o.native = true
+		o.native, o.objects = true, stored
 		return o
 	}
 	if len(live) == 0 {
@@ -424,6 +425,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	sink.close()
 
 	objects := sess.Objects()
+	stored = len(objects)
 	var total int64
 	for _, o := range objects {
 		total += o.Size

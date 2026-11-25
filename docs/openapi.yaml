@@ -1961,6 +1961,8 @@ components:
         repair_of: {type: [string, "null"], format: uuid, description: "The run whose missing copies this run completes"}
         not_before: {type: [string, "null"], format: date-time, description: "A queued run is not started before then; set on repairs (5 min after the partial run, 30 min after the first repair, 2 h after the second), null = as soon as a worker is free"}
         destination_name: {type: string, description: "The destination the run wrote to when it wrote to exactly one, else the job's destination or group name"}
+        method: {type: string, enum: [native, logical], description: "native: a ClickHouse native run (BACKUP through the ingest endpoint; its copies' blob_path is the run's directory and their sha256 the signed manifest's; it is never repaired). A finished run is native when it recorded objects; a queued or running one has its job's method. logical for every other run."}
+        objects: {type: [integer, "null"], description: "How many objects a native run stored (0 when it failed before ClickHouse stored any); null for logical runs and for a native run that has not finished"}
         copies:
           type: array
           description: "One result per destination, in the order the run wrote them; empty for runs from before destination groups."

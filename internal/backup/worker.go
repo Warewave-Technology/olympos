@@ -276,7 +276,10 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 	var done []finished
 	err := store.Tx(ctx, w.DB, func(tx pgx.Tx) error {
 		// The olympos-self runner settles its own runs (SelfBackup).
-		rows, err := tx.Query(ctx, `SELECT id, EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2)
+		// A run with an ingest credential is a native run (restart: one that
+		// start-up recovery revoked).
+		rows, err := tx.Query(ctx, `SELECT id, EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2),
+			EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup')
 			FROM backup_runs r WHERE status = 'running'
 			AND (updated_at < now() - $1::interval OR EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2))
 			AND job_id NOT IN (SELECT id FROM backup_jobs WHERE system <> '')
@@ -285,13 +288,13 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 			return err
 		}
 		type reaped struct {
-			id      uuid.UUID
-			restart bool
+			id              uuid.UUID
+			restart, native bool
 		}
 		var ids []reaped
 		for rows.Next() {
 			var r reaped
-			if err := rows.Scan(&r.id, &r.restart); err != nil {
+			if err := rows.Scan(&r.id, &r.restart, &r.native); err != nil {
 				rows.Close()
 				return err
 			}
@@ -299,7 +302,7 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 		}
 		rows.Close()
 		for _, r := range ids {
-			o := outcome{status: "failed", err: "interrupted: the worker running this backup stopped"}
+			o := outcome{status: "failed", err: "interrupted: the worker running this backup stopped", native: r.native}
 			if r.restart {
 				o = outcome{status: "failed", err: errNativeRestart, native: true}
 			}
@@ -338,6 +341,9 @@ type outcome struct {
 	// native: a native run, which is never repaired (design §7): the next
 	// run is a full backup.
 	native bool
+	// objects: how many objects a native run stored (backup_runs.objects,
+	// NULL for other runs).
+	objects int
 }
 
 // fromFirstCopy fills the run's blob columns from its first succeeded copy
@@ -406,9 +412,13 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	}
 	o.fromFirstCopy()
 	steps, _ := json.Marshal(nonNilSteps(o.steps))
+	var objects *int
+	if o.native {
+		objects = &o.objects
+	}
 	tag, err := tx.Exec(ctx, `UPDATE backup_runs SET status = $2, finished_at = now(), bytes = $3, wire_bytes = $4, blob_path = $5,
-		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9 WHERE id = $1 AND finished_at IS NULL`,
-		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier, steps)
+		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9, objects = $10 WHERE id = $1 AND finished_at IS NULL`,
+		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier, steps, objects)
 	if err != nil {
 		return finished{}, err
 	}

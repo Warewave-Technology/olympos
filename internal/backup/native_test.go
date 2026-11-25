@@ -631,3 +631,79 @@ func setOptions(t *testing.T, db *store.DB, job uuid.UUID, opts string) {
 		t.Fatal(err)
 	}
 }
+
+// runMethod is what the run API says of a run: its method and its objects
+// as JSON (null for a logical run).
+func runMethod(t *testing.T, db *store.DB, id uuid.UUID) (string, string) {
+	t.Helper()
+	r, err := backup.LoadRun(context.Background(), db, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var v struct {
+		Method  string          `json:"method"`
+		Objects json.RawMessage `json:"objects"`
+	}
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatal(err)
+	}
+	return v.Method, string(v.Objects)
+}
+
+// The run API tells a native run (method, the objects it stored) from a
+// logical one: the run page shows the Native badge and the object count,
+// and no logical restore commands.
+func TestNativeRunMethodAndObjects(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedNative(t, db)
+	check := func(what string, id uuid.UUID, method, objects string) {
+		t.Helper()
+		if m, o := runMethod(t, db, id); m != method || o != objects {
+			t.Fatalf("%s: method %q objects %s, want %q %s", what, m, o, method, objects)
+		}
+	}
+
+	run := queue(t, db, e.Job, "manual", nil)
+	check("queued, by the job's method", run, "native", "null")
+	claimAndRun(t, e.W, run)
+	check("succeeded", run, "native", fmt.Sprint(len(nativeBackup())))
+
+	// Failed before ClickHouse stored anything.
+	e.W.Native = nil
+	off := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, off)
+	check("endpoint off", off, "native", "0")
+
+	// A worker that stopped in the middle of a native run: reaped by its
+	// heartbeat, still a native run.
+	var stale uuid.UUID
+	if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, updated_at)
+		VALUES ($1, 'manual', 'running', now() - interval '1 hour', now() - interval '1 hour') RETURNING id`, e.Job).Scan(&stale); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.reg.Open(ctx, ingest.OpenOptions{RunID: stale, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: stale.String() + "/"},
+		TTL: time.Hour, Sink: discardSink{}, MaxBytes: 1 << 20}); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.W.ReapStale(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := loadRun(t, db, stale); r.Status != "failed" {
+		t.Fatalf("stale run: %+v", r)
+	}
+	check("reaped", stale, "native", "0")
+
+	// The job is logical now: its earlier runs keep their method.
+	if _, err := db.Exec(ctx, `UPDATE backup_jobs SET engine_options = '{"databases":["shop"]}' WHERE id = $1`, e.Job); err != nil {
+		t.Fatal(err)
+	}
+	check("after the job changed", run, "native", fmt.Sprint(len(nativeBackup())))
+	check("queued logical", queue(t, db, e.Job, "manual", nil), "logical", "null")
+	// A finished run of a logical job.
+	check("logical", insertFinishedRun(t, db, e.Job, "succeeded", time.Now().Add(-time.Hour), e.DestID), "logical", "null")
+}
