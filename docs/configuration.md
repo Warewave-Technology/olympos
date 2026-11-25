@@ -88,7 +88,7 @@ built with `-tags dev`; release binaries and images reject them.
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `experimental.multiReplica` | bool | `false` | no | Allows more than one server instance on the same database. Unsupported. When `false`, a second live instance reports `/readyz` not ready. |
+| `experimental.multiReplica` | bool | `false` | no | Allows more than one server instance on the same database. Unsupported. When `false`, a second live instance reports `/readyz` not ready. Cannot be combined with `ingest.url`. |
 
 ### `listen`
 
@@ -97,7 +97,7 @@ built with `-tags dev`; release binaries and images reject them.
 | `listen.http` | string | `:8080` | no | UI and REST API listener. |
 | `listen.gateway` | string | `:8443` | no | Agent gateway listener (gRPC, mTLS). Do not terminate TLS in front of it. |
 | `listen.ingest` | string | `:9444` | no | Address of the ingest listener: the S3 endpoint native ClickHouse backups write to and read from (HTTPS; each run signs with its own short-lived credential). Used only when `ingest.url` is set; without it there is no listener. |
-| `listen.metrics` | string | `:9090` | no | `/metrics`, `/healthz`, `/readyz`. The ingest endpoint adds `olympos_ingest_requests_total`, `olympos_ingest_bytes_total`, `olympos_ingest_refused_total` and `olympos_ingest_runs`. |
+| `listen.metrics` | string | `:9090` | no | `/metrics`, `/healthz`, `/readyz`. The ingest endpoint adds `olympos_ingest_requests_total`, `olympos_ingest_bytes_total`, `olympos_ingest_refused_total`, `olympos_ingest_stops_total` (sessions stopped before their run ended, by reason) and `olympos_ingest_runs`. |
 | `listen.tlsCertFile` | path | — | no | Serve the UI over HTTPS directly (no ingress or proxy). Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. |
 | `listen.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 
@@ -156,9 +156,16 @@ At start the server retries the connection for up to two minutes.
 
 ### `ingest`
 
+> **In development ([#62](https://github.com/Warewave-Technology/olympos/issues/62)): native ClickHouse backups
+> are not available yet.** The endpoint and its keys below exist, but no backup method uses them, so leave
+> `ingest.url` unset in production.
+
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
-listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS.
-**To turn on native ClickHouse backups, set `ingest.url`.** Without it the server opens no ingest port.
+listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS
+(HTTP/1.1).
+**To turn on native ClickHouse backups, set `ingest.url`.** Without it the server opens no ingest port. The
+endpoint needs a single server instance: `ingest.url` is refused while `experimental.multiReplica` is `true`,
+because a run's session and its credential live in the one process that opened them.
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
@@ -167,7 +174,7 @@ listener (`listen.ingest`), and the server stores them in the backup destination
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
 | `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. |
-| `ingest.spillDir` | path | operating system's temporary directory | no | Where parts that arrive out of order wait for their turn: up to 1 GiB per run, so size the volume for `maxRuns` × 1 GiB. The Helm chart mounts a volume for it. |
+| `ingest.spillDir` | path | operating system's temporary directory | no | Where parts that arrive out of order wait for their turn: up to 1 GiB per run, so size the volume for `maxRuns` × 1 GiB. When a run's parts fill its 1 GiB, ClickHouse is told to send the next early part again later (`503 SlowDown`); the run goes on. Files a crash left here (`olympos-ingest-*.part`) are removed when the server starts. The Helm chart mounts a volume for it. |
 
 ### `targetTLS`
 
@@ -277,6 +284,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `ingest.url must be https unless devMode is on` | Use an `https` URL. Plain HTTP is for a lab on a dev build (`devMode`). |
 | `ingest.tlsCertFile needs an https ingest.url` / `listen.ingest must not be empty while ingest.url is set` | Use an `https` URL with certificate files; set `listen.ingest` to an address or leave it out for `:9444`. |
 | `ingest.maxRuns must be positive` / `ingest.maxRunDuration must be positive` | Use a positive value, or leave the key out for the default. |
+| `ingest.url cannot be set while experimental.multiReplica is true: ingest sessions live in one server process` | Run one server instance for native ClickHouse backups, or leave `ingest.url` unset. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
 | `synthetic.<key> must not be negative` | Use a positive value, or leave the key out for the default. |
@@ -336,7 +344,7 @@ managedIdentityClientID: ""}`, `database.dsnRef: ""`, `slack.botTokenRef: ""`, `
 `backup: {globalConcurrency: 4, perClusterConcurrency: 2}`, `changeRequests.ttl: 72h`,
 `ingest: {url: "", maxRuns: 4, maxRunDuration: 6h}`. Native ClickHouse backups are off until you set
 `olympos.ingest.url`, for example the in-cluster Service,
-`https://<release>-ingest.<namespace>.svc:9444`. You must at least
+`https://<release>-ingest.<namespace>.svc:9444` (in development, see [`ingest`](#ingest): not available yet). You must at least
 set `publicURL`, `agentGatewayURL`, `entra.tenantID`, `entra.clientID` and `keyVault.name`.
 
 ### What the chart sets for you

@@ -6,10 +6,13 @@
 
 -- access_key is the SigV4 access key ID (OLY plus 17 base32 characters). run_id
 -- is the backup run, or the restore request, the credential belongs to. scope
--- is {"write": "<run-id>/", "read": ["<run-id>/", ...]}, prefixes relative to
--- the endpoint's bucket. fingerprint is the hm: HMAC fingerprint of the
--- secret. revoked_at and reason are set when the run ends, and by start-up
--- recovery ('server restart') for credentials a restart left open.
+-- holds prefixes relative to the endpoint's bucket: "write" is a backup's own
+-- prefix and "read" the other runs' prefixes it reads, for example a backup
+-- {"write": "<run-id>/", "read": ["<base-run-id>/", ...]} (its base chain) or a
+-- restore {"read": ["<run-id>/", "<base-run-id>/", ...]} (the chain it
+-- restores). fingerprint is the hm: HMAC fingerprint of the secret. revoked_at
+-- and reason are set when the run ends, and by start-up recovery ('server
+-- restart') for credentials a restart left open.
 CREATE TABLE ingest_credentials (
   access_key  text PRIMARY KEY,
   run_id      uuid NOT NULL,
