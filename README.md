@@ -111,11 +111,14 @@ Released in v0.2:
 Planned for v0.4 ([milestone](https://github.com/Warewave-Technology/olympos/milestone/3)):
 
 - ClickHouse backups with ClickHouse's own `BACKUP`/`RESTORE`, written through Olympos ([#62](https://github.com/Warewave-Technology/olympos/issues/62))
-- Runtime security: what running containers do, seen by Falco, detection only ([#63](https://github.com/Warewave-Technology/olympos/issues/63))
 - Before v0.4.0: an acceptance run on real Azure ([#58](https://github.com/Warewave-Technology/olympos/issues/58)), identity
   Secrets that survive GitOps syncs ([#59](https://github.com/Warewave-Technology/olympos/issues/59)), a release candidate for
   every security-model change ([#60](https://github.com/Warewave-Technology/olympos/issues/60)), and published recovery time
   and data-loss figures ([#61](https://github.com/Warewave-Technology/olympos/issues/61))
+
+Planned for v0.5 ([milestone](https://github.com/Warewave-Technology/olympos/milestone/6)):
+
+- Runtime security: what running containers do, seen by Falco, detection only ([#63](https://github.com/Warewave-Technology/olympos/issues/63))
 
 Later, not scheduled ([milestone](https://github.com/Warewave-Technology/olympos/milestone/4)): more than one approval for
 Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23)), S3 destinations with IAM roles
