@@ -272,7 +272,8 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		source:   o.Source,
 		maxBytes: o.MaxBytes, accessKey: cred.AccessKey, expires: now.Add(o.TTL),
 		secret: cred.Secret, stopped: make(chan string, 1), captured: map[string][]byte{},
-		ended: make(chan struct{}),
+		ended: make(chan struct{}), stored: map[string]int{}, writing: map[string]chan struct{}{},
+		completed: map[string]completedUpload{},
 	}
 	if err := insertCredential(ctx, r.db, cred.AccessKey, o.RunID, o.Kind, s.scope,
 		r.fp.Fingerprint([]byte(cred.Secret)), now, s.expires); err != nil {
@@ -391,7 +392,14 @@ type Session struct {
 	stopReason string
 	written    int64
 	objects    []ObjectRecord
-	captured   map[string][]byte
+	// stored indexes objects by key; writing holds the keys a PutObject is
+	// writing, each closed when that write ends (claim). completed are the
+	// multipart uploads that completed, by upload ID, for a repeated
+	// CompleteMultipartUpload.
+	stored    map[string]int
+	writing   map[string]chan struct{}
+	completed map[string]completedUpload
+	captured  map[string][]byte
 	// capturedBytes is the size of all captured bodies.
 	capturedBytes int64
 	lock          []byte
@@ -541,7 +549,62 @@ func (s *Session) AddBytes(n int64) error {
 func (s *Session) RecordObject(rec ObjectRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stored[rec.Key] = len(s.objects)
 	s.objects = append(s.objects, rec)
+}
+
+// claim reserves key for one PutObject. An object is written once: when key
+// is stored already, claim returns its record and stored, and nothing is to
+// be written. When another PutObject of key is still writing (a client that
+// sent it again before it saw the answer), claim waits for that one to end.
+// Otherwise the caller writes key and calls release when it is done,
+// recorded or not. It fails with errRunStopped once the session has ended.
+func (s *Session) claim(key string) (rec ObjectRecord, stored bool, release func(), err error) {
+	for {
+		s.mu.Lock()
+		if i, ok := s.stored[key]; ok {
+			rec := s.objects[i]
+			s.mu.Unlock()
+			return rec, true, nil, nil
+		}
+		busy, ok := s.writing[key]
+		if !ok {
+			done := make(chan struct{})
+			s.writing[key] = done
+			s.mu.Unlock()
+			return ObjectRecord{}, false, func() {
+				s.mu.Lock()
+				delete(s.writing, key)
+				s.mu.Unlock()
+				close(done)
+			}, nil
+		}
+		s.mu.Unlock()
+		select {
+		case <-busy:
+		case <-s.ended:
+			return ObjectRecord{}, false, nil, errRunStopped
+		}
+	}
+}
+
+// completedUpload is a multipart upload that completed: its key, the SHA-256
+// of the part list it completed with, and its answer's ETag.
+type completedUpload struct {
+	key, listSHA256, etag string
+}
+
+func (s *Session) completeUpload(id string, c completedUpload) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completed[id] = c
+}
+
+func (s *Session) completedUpload(id string) (completedUpload, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.completed[id]
+	return c, ok
 }
 
 // Objects returns the recorded objects, in the order they were stored.

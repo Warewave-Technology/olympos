@@ -50,6 +50,10 @@ const (
 	// ReasonMultipart: a multipart upload broke the protocol: a part sent
 	// again with another body, or a part list that does not match.
 	ReasonMultipart = "multipart"
+	// ReasonRewrite: the run sent another body for an object it had stored,
+	// or another part list for an upload it had completed. Objects are never
+	// overwritten, so the client broke the protocol.
+	ReasonRewrite = "object rewritten"
 	// ReasonUploadAborted: the run aborted a multipart upload. Its object is
 	// partly on the destinations and cannot be written again under its name,
 	// so the run cannot succeed.
@@ -743,6 +747,14 @@ func (q *request) put() *s3Error {
 	if q.key == s.LockKey() {
 		return q.putLock(wantMD5)
 	}
+	stored, ok, release, err := s.claim(q.key)
+	switch {
+	case err != nil:
+		return errStopped
+	case ok:
+		return q.repeatPut(stored, wantMD5)
+	}
+	defer release()
 	obj := q.h.newObject(q.r.Context(), s, q.key, nil)
 	d, err := q.copyBody(obj, true)
 	if err != nil {
@@ -761,6 +773,34 @@ func (q *request) put() *s3Error {
 		return e
 	}
 	q.w.Header().Set("ETag", etag(rec.SHA256))
+	q.w.WriteHeader(http.StatusOK)
+	return nil
+}
+
+// repeatPut answers a PutObject of a key the run stored already. ClickHouse's
+// S3 client sends a PUT again when it did not see the answer (its connection
+// dropped after the body): the same body is read, nothing is written (every
+// destination would refuse to overwrite), and the stored object is the
+// answer. Another body would overwrite a stored object: the run is stopped.
+func (q *request) repeatPut(stored ObjectRecord, wantMD5 []byte) *s3Error {
+	d, err := q.copyBody(io.Discard, false)
+	switch {
+	case errors.Is(err, errRunStopped):
+		return errStopped
+	case err != nil:
+		q.stop(ReasonIncompleteBody)
+		return errIncomplete
+	}
+	if e := q.checkDigest(d, wantMD5); e != nil {
+		q.stop(ReasonBadDigest)
+		return e
+	}
+	if d.n != stored.Size || hex.EncodeToString(d.sha.Sum(nil)) != stored.SHA256 {
+		q.h.log.Warn("ingest: the run sent another body for a stored object", "run", q.s.RunID().String(), "key", q.key)
+		q.stop(ReasonRewrite)
+		return denied("The object is stored with other content; objects are not overwritten.")
+	}
+	q.w.Header().Set("ETag", etag(stored.SHA256))
 	q.w.WriteHeader(http.StatusOK)
 	return nil
 }

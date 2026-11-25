@@ -304,25 +304,44 @@ func TestFSSetTagsNativeRun(t *testing.T) {
 		t.Fatalf("left behind: %v", ents)
 	}
 
-	logical := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".zip")
-	if _, err := w.Upload(ctx, logical, strings.NewReader("zip"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+	// The run's manifest, next to its directory, is tagged complete last.
+	manifest := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".manifest.json")
+	if _, err := w.Upload(ctx, manifest, strings.NewReader("{}"), "application/json", incomplete); err != nil {
 		t.Fatal(err)
+	}
+	if err := w.SetTags(ctx, manifest, complete); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := w.GetTags(ctx, manifest); got["olympos-state"] != "complete" {
+		t.Fatalf("manifest tags: %v", got)
+	}
+
+	const other = "7c2e9d14-3b6a-4e8f-a1d5-9f0b4c7e2a61"
+	logical := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+other+".zip")
+	logicalManifest := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+other+".manifest.json")
+	for _, p := range []string{logical, logicalManifest} {
+		if _, err := w.Upload(ctx, p, strings.NewReader("zip"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for name, p := range map[string]string{
 		"a logical backup":            logical,
-		"a manifest":                  blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".manifest.json"),
+		"a logical run's manifest":    logicalManifest,
+		"a native manifest missing":   blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/27/"+run+".manifest.json"),
 		"an object that is missing":   dir + "/data/sales/orders/all_1_1_0/missing.bin",
 		"the run's directory":         dir,
 		"under a name that is no run": blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/run-1/data.bin"),
 		"under an upper-case run":     blob.Join(w.Prefix(), "x/"+strings.ToUpper(run)+"/data.bin"),
 		"a tags sidecar":              obj + blob.TagsSuffix,
-		"climbing out":                dir + "/../" + run + ".zip",
+		"climbing out":                dir + "/../" + other + ".zip",
 	} {
 		if err := w.SetTags(ctx, p, complete); err == nil {
 			t.Errorf("SetTags on %s (%s)", name, p)
 		}
 	}
-	if got, _ := w.GetTags(ctx, logical); got["olympos-state"] != "" {
-		t.Fatalf("the logical backup's tags changed: %v", got)
+	for _, p := range []string{logical, logicalManifest} {
+		if got, _ := w.GetTags(ctx, p); got["olympos-state"] != "" {
+			t.Fatalf("a logical run's tags changed: %v", got)
+		}
 	}
 }

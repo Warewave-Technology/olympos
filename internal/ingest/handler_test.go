@@ -271,6 +271,9 @@ type fakeSink struct {
 	// first, when not nil, is closed once the first bytes arrived.
 	first     chan struct{}
 	firstOnce sync.Once
+	// hold, when not nil, keeps a Put that read its body from returning
+	// until it is closed.
+	hold chan struct{}
 
 	mu      sync.Mutex
 	puts    []sinkPut
@@ -312,6 +315,9 @@ func (f *fakeSink) Put(ctx context.Context, key string, r io.Reader) (ingest.Obj
 			err = rerr
 			break
 		}
+	}
+	if err == nil && f.hold != nil {
+		<-f.hold
 	}
 	f.record(sinkPut{key: key, body: buf.Bytes(), err: err})
 	if err != nil {
@@ -574,6 +580,79 @@ func TestHandlerPutObject(t *testing.T) {
 	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+".backup", backup), http.StatusOK)
 	if b, ok := a.s.Captured(a.prefix + ".backup"); !ok || string(b) != backup {
 		t.Errorf("captured .backup %q %v", b, ok)
+	}
+	notStopped(t, a.s)
+}
+
+// An object is written once (task 10 round 2). A client that did not see
+// the answer to its PUT sends it again: the same body is answered as stored,
+// nothing is written twice. Another body for a stored key stops the run as a
+// client that broke the protocol, never as a failed destination.
+func TestHandlerRepeatedPut(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	body := "a part's bytes"
+	key := a.prefix + "data/all_1_1_0/data.bin"
+	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+key, body), http.StatusOK)
+	r := e.do(t, a.cred, http.MethodPut, "/olympos/"+key, body, md5Header(body))
+	wantStatus(t, r, http.StatusOK)
+	if got := r.header.Get("ETag"); got != shaTag(body) {
+		t.Errorf("ETag %s", got)
+	}
+	if puts := a.sink.all(); len(puts) != 1 {
+		t.Fatalf("sink puts %d, want 1", len(puts))
+	}
+	if got := a.s.Objects(); len(got) != 1 {
+		t.Fatalf("objects %+v", got)
+	}
+	notStopped(t, a.s)
+
+	r = e.do(t, a.cred, http.MethodPut, "/olympos/"+key, "other bytes")
+	wantStatus(t, r, http.StatusForbidden)
+	if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+		t.Fatalf("stop reason %q, want %q", got, ingest.ReasonRewrite)
+	}
+	if puts := a.sink.all(); len(puts) != 1 {
+		t.Fatalf("sink puts %d, want 1", len(puts))
+	}
+}
+
+// A PUT sent again while the first one is still being stored waits for it,
+// then gets the stored object as its answer.
+func TestHandlerRepeatedPutInFlight(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	a.sink.first, a.sink.hold = make(chan struct{}), make(chan struct{})
+	body := "the body of a slow object"
+	key := a.prefix + "data/all_1_1_0/data.bin"
+	replies := make(chan reply, 2)
+	send := func() {
+		r, err := e.tryDo(a.cred, http.MethodPut, "/olympos/"+key, body)
+		if err != nil {
+			r.status = -1
+		}
+		replies <- r
+	}
+	go send()
+	<-a.sink.first
+	go send()
+	time.Sleep(200 * time.Millisecond)
+	a.sink.mu.Lock()
+	started := a.sink.started
+	a.sink.mu.Unlock()
+	if started != 1 {
+		t.Fatalf("the repeated PUT started a second write (%d)", started)
+	}
+	close(a.sink.hold)
+	for range 2 {
+		r := <-replies
+		wantStatus(t, r, http.StatusOK)
+		if got := r.header.Get("ETag"); got != shaTag(body) {
+			t.Errorf("ETag %s", got)
+		}
+	}
+	if got := a.s.Objects(); len(got) != 1 {
+		t.Fatalf("objects %+v", got)
 	}
 	notStopped(t, a.s)
 }
@@ -1033,6 +1112,31 @@ func TestHandlerMultipart(t *testing.T) {
 	e := newEnv(t)
 	parts := []string{strings.Repeat("a", 100<<10), strings.Repeat("b", 70<<10), "the last part"}
 	whole := strings.Join(parts, "")
+
+	t.Run("complete sent again", func(t *testing.T) {
+		a := e.backup(t)
+		m := e.createUpload(t, a, a.prefix+"data/big.bin")
+		var tags []string
+		for i, p := range parts {
+			tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+		}
+		first := m.complete(t, tags...)
+		wantStatus(t, first, http.StatusOK)
+		again := m.complete(t, tags...)
+		wantStatus(t, again, http.StatusOK)
+		if again.body != first.body {
+			t.Errorf("repeated complete %q, want %q", again.body, first.body)
+		}
+		if puts := a.sink.all(); len(puts) != 1 || len(a.s.Objects()) != 1 {
+			t.Fatalf("sink puts %d, objects %d", len(puts), len(a.s.Objects()))
+		}
+		notStopped(t, a.s)
+		// Another part list for the completed upload: the run stops.
+		wantStatus(t, m.complete(t, tags[0]), http.StatusForbidden)
+		if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+			t.Fatalf("stop reason %q", got)
+		}
+	})
 
 	t.Run("in order", func(t *testing.T) {
 		a := e.backup(t)

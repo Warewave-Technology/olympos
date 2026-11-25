@@ -177,9 +177,18 @@ type fakeBlobs struct {
 	wrapReadErr bool
 	// failOn: fail and failAfter apply only to paths that contain it.
 	failOn string
-	// failTags is what SetTags returns.
-	failTags error
-	dests    map[uuid.UUID]*fakeBlobs
+	// failTags is what SetTags returns, after failTagsAfter calls that
+	// work.
+	failTags      error
+	failTagsAfter int
+	// holdOn: an upload of a path that contains it, once it read its body,
+	// closes held and waits for its context to end.
+	holdOn   string
+	held     chan struct{}
+	holdOnce sync.Once
+	// uploads counts the stored uploads.
+	uploads int
+	dests   map[uuid.UUID]*fakeBlobs
 }
 
 func newBlobs(prefix string) *fakeBlobs {
@@ -214,7 +223,7 @@ func (f *fakeBlobs) Prefix() string { return f.prefix }
 
 func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct string, tags map[string]string) (blob.UploadResult, error) {
 	if f.failOn != "" && !strings.Contains(path, f.failOn) {
-		return f.store(path, r, tags)
+		return f.storeCtx(ctx, path, r, tags)
 	}
 	if f.failAfter > 0 {
 		_, _ = io.CopyN(io.Discard, r, f.failAfter)
@@ -237,11 +246,20 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
 		return blob.UploadResult{}, f.failManifest
 	}
-	return f.store(path, r, tags)
+	return f.storeCtx(ctx, path, r, tags)
 }
 
 func (f *fakeBlobs) store(path string, r io.Reader, tags map[string]string) (blob.UploadResult, error) {
+	return f.storeCtx(context.Background(), path, r, tags)
+}
+
+func (f *fakeBlobs) storeCtx(ctx context.Context, path string, r io.Reader, tags map[string]string) (blob.UploadResult, error) {
 	b, err := io.ReadAll(r)
+	if err == nil && f.holdOn != "" && strings.Contains(path, f.holdOn) {
+		f.holdOnce.Do(func() { close(f.held) })
+		<-ctx.Done()
+		return blob.UploadResult{}, ctx.Err()
+	}
 	if err != nil {
 		if f.wrapReadErr {
 			return blob.UploadResult{}, fmt.Errorf("upload %s: %s", path, err)
@@ -255,6 +273,7 @@ func (f *fakeBlobs) store(path string, r io.Reader, tags map[string]string) (blo
 	}
 	f.blobs[path] = b
 	f.tags[path] = tags
+	f.uploads++
 	return blob.UploadResult{Bytes: int64(len(b))}, nil
 }
 
@@ -263,7 +282,10 @@ func (f *fakeBlobs) SetTags(ctx context.Context, path string, tags map[string]st
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failTags != nil {
-		return f.failTags
+		if f.failTagsAfter == 0 {
+			return f.failTags
+		}
+		f.failTagsAfter--
 	}
 	if _, ok := f.blobs[path]; !ok {
 		return fmt.Errorf("%s does not exist", path)

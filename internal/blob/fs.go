@@ -351,12 +351,13 @@ func (f *FS) Download(ctx context.Context, path string, max int64) ([]byte, erro
 	return io.ReadAll(io.LimitReader(fh, max))
 }
 
-// SetTags replaces the tags sidecar of a probe file, or of an object of a
-// native run (IsNativeRunObject), which is tagged complete once the run's
-// manifest is signed. The file must exist, and only its sidecar changes.
-// Every other backup keeps the tags Upload wrote once.
+// SetTags replaces the tags sidecar of a probe file, or of an object or the
+// manifest of a native run (IsNativeRunObject, isNativeManifest), which are
+// tagged complete once the run's manifest is signed. The file must exist,
+// and only its sidecar changes. Every other backup keeps the tags Upload
+// wrote once.
 func (f *FS) SetTags(ctx context.Context, path string, tags map[string]string) error {
-	if !IsProbePath(path) && !IsNativeRunObject(path) {
+	if !IsProbePath(path) && !IsNativeRunObject(path) && !f.isNativeManifest(path) {
 		return fmt.Errorf("refusing to rewrite tags of %q: only probe files and the objects of native runs", path)
 	}
 	p, err := f.file(path, false)
@@ -390,6 +391,27 @@ func IsNativeRunObject(path string) bool {
 		}
 	}
 	return false
+}
+
+// isNativeManifest reports whether path is the manifest of a native run:
+// <dir>/<run-id>.manifest.json next to the run's directory <dir>/<run-id>.
+// A logical run's manifest has a file of the run next to it, not a
+// directory.
+func (f *FS) isNativeManifest(path string) bool {
+	dir, base := "", path
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		dir, base = path[:i+1], path[i+1:]
+	}
+	id, ok := strings.CutSuffix(base, ".manifest.json")
+	if u, err := uuid.Parse(id); !ok || err != nil || u.String() != id {
+		return false
+	}
+	p, err := f.file(dir+id, false)
+	if err != nil {
+		return false
+	}
+	st, err := os.Lstat(p)
+	return err == nil && st.IsDir()
 }
 
 // GetTags reads the tags sidecar (empty when there is none).

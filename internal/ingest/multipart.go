@@ -413,6 +413,9 @@ func (q *request) completeUpload() *s3Error {
 	}
 	u, e := q.h.findUpload(query.Get("uploadId"), s, q.key)
 	if e != nil {
+		if c, ok := s.completedUpload(query.Get("uploadId")); ok && c.key == q.key {
+			return q.repeatComplete(c, wantMD5)
+		}
 		return e
 	}
 	body, d, err := q.readSmall(maxCompleteSize)
@@ -468,8 +471,39 @@ func (q *request) completeUpload() *s3Error {
 	// The whole object's ETag, with the part count, as S3 marks a multipart
 	// ETag.
 	tag := fmt.Sprintf(`"%s-%d"`, rec.SHA256[:32], len(list.Parts))
+	s.completeUpload(u.id, completedUpload{key: q.key, listSHA256: hex.EncodeToString(d.sha.Sum(nil)), etag: tag})
+	q.completed(tag)
+	return nil
+}
+
+func (q *request) completed(tag string) {
 	writeXML(q.w, http.StatusOK, completeResult{Xmlns: s3Namespace, Location: "/" + bucket + "/" + q.key,
 		Bucket: bucket, Key: q.key, ETag: tag})
+}
+
+// repeatComplete answers a CompleteMultipartUpload of an upload that
+// completed already: a client that did not see the answer sends it again.
+// The same part list gets the same answer; another one stops the run.
+func (q *request) repeatComplete(c completedUpload, wantMD5 []byte) *s3Error {
+	_, d, err := q.readSmall(maxCompleteSize)
+	switch {
+	case errors.Is(err, errRunStopped):
+		return errStopped
+	case errors.Is(err, errWrite):
+		q.stop(ReasonRewrite)
+		return denied("The upload completed with another part list.")
+	case err != nil:
+		return errIncomplete
+	}
+	if e := q.checkDigest(d, wantMD5); e != nil {
+		q.stop(ReasonBadDigest)
+		return e
+	}
+	if hex.EncodeToString(d.sha.Sum(nil)) != c.listSHA256 {
+		q.stop(ReasonRewrite)
+		return denied("The upload completed with another part list.")
+	}
+	q.completed(c.etag)
 	return nil
 }
 

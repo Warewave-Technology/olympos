@@ -235,3 +235,31 @@ func TestNativeQuota(t *testing.T) {
 	finished("partial", 1<<20, `{"write": "w/"}`)
 	want(1 << 30)
 }
+
+// Minor 4: the worker's context does not cut the sink's uploads. A server
+// that shuts down stops the session (stopForward), which ends the bodies; an
+// upload the worker's context cut while the session is still live would be
+// taken by the handler for a failed destination. Only close ends them.
+func TestNativeSinkOutlivesWorkerContext(t *testing.T) {
+	a := newMemWriter()
+	a.hold = make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	s := newNativeSink(ctx, sinkRun, []*nativeDest{{ref: destRef{Name: "a"}, w: a, dir: "p/run", tier: "daily"}})
+	defer s.close()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Put(context.Background(), sinkRun+"/data/x.bin", strings.NewReader("x"))
+		done <- err
+	}()
+	<-a.read
+	cancel()
+	select {
+	case err := <-done:
+		t.Fatalf("the worker's context cut the upload: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(a.hold)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

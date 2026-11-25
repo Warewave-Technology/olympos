@@ -8,8 +8,9 @@ package backup
 // and credential, and fans every object out to every destination
 // (nativeSink), tagged incomplete. When the target reports the backup
 // created, it signs the run's manifest, writes it next to the run's
-// directory on each destination and re-tags the run's objects complete
-// there. The credential is revoked on every way out. Objects stay
+// directory on each destination, still incomplete, re-tags the run's objects
+// complete there, and the manifest last. The credential is revoked on every
+// way out. Objects stay
 // incomplete on a destination that did not get that far, and a lifecycle
 // rule removes them.
 
@@ -209,9 +210,13 @@ func (d *nativeDest) failed() error {
 // that fails an object is detached for the rest of the run; Put fails only
 // when no destination took the object.
 type nativeSink struct {
-	runID  string
-	dests  []*nativeDest
-	ctx    context.Context // the run's: uploads end with it
+	runID string
+	dests []*nativeDest
+	// ctx ends the uploads still running when the run ends (close). It is
+	// not the worker's context: a server shutting down stops the session,
+	// which ends the bodies; a Put cut by the worker's context while the
+	// session is live would be taken for a failed destination.
+	ctx    context.Context
 	cancel context.CancelFunc
 
 	mu     sync.Mutex
@@ -222,7 +227,7 @@ type nativeSink struct {
 var errSinkClosed = errors.New("the native run has ended")
 
 func newNativeSink(ctx context.Context, runID string, dests []*nativeDest) *nativeSink {
-	ctx, cancel := context.WithCancel(ctx)
+	ctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &nativeSink{runID: runID, dests: dests, ctx: ctx, cancel: cancel}
 }
 
@@ -507,7 +512,10 @@ func nativeCopyError(d *nativeDest, scrub func(string) string, msg string) strin
 
 // completeNative finishes a native copy on one destination whose objects are
 // all stored: its sidecar, holding the signed manifest, next to the run's
-// directory, then every object tagged complete.
+// directory, then every object tagged complete, then the sidecar tagged
+// complete. Until that last step the sidecar is incomplete like the objects:
+// a copy left half tagged (a failed SetTags, a shutdown) never shows a
+// complete manifest over objects the lifecycle rule is going to delete.
 func (w *Worker) completeNative(ctx context.Context, d *nativeDest, runID uuid.UUID, objects []ingest.ObjectRecord, total int64,
 	version string, res *NativeManifestResult, envelope func(destRef, ManifestBlob, string) Manifest) error {
 	m := envelope(d.ref, ManifestBlob{Path: d.dir, Size: total, SHA256: res.SHA256}, d.tier)
@@ -517,11 +525,15 @@ func (w *Worker) completeNative(ctx context.Context, d *nativeDest, runID uuid.U
 	if err != nil {
 		return errors.New("encode manifest: " + err.Error())
 	}
-	if _, err := d.w.Upload(ctx, ManifestPath(d.dir, runID), bytes.NewReader(b), "application/json", d.tags(StateComplete)); err != nil {
+	side := ManifestPath(d.dir, runID)
+	if _, err := d.w.Upload(ctx, side, bytes.NewReader(b), "application/json", d.tags(StateIncomplete)); err != nil {
 		return errors.New("upload manifest: " + err.Error())
 	}
 	if err := retag(ctx, d, runID.String(), objects); err != nil {
 		return errors.New("tag the objects complete: " + err.Error())
+	}
+	if err := d.w.(tagSetter).SetTags(ctx, side, d.tags(StateComplete)); err != nil {
+		return errors.New("tag the manifest complete: " + err.Error())
 	}
 	return nil
 }

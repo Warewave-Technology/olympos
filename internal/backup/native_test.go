@@ -127,7 +127,11 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		_ = resp.Body.Close()
 		return resp.StatusCode, nil
 	}
-	var o fakeOpts
+	var o struct {
+		fakeOpts
+		// Repeat sends the first object again: "same" body or "other".
+		Repeat string `json:"native_repeat"`
+	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
 		return "", errors.New("clickhouse: BACKUP: S3 secret " + run.Secret + " refused")
@@ -141,6 +145,14 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		default:
 		}
 		status, err := do(http.MethodPut, obj.rel, obj.body)
+		if err == nil && status == http.StatusOK && o.Repeat != "" && strings.HasSuffix(obj.rel, "all_1_1_0/data.bin") {
+			// Its S3 client did not see the answer and sends the PUT again.
+			body := obj.body
+			if o.Repeat == "other" {
+				body = append(bytes.Clone(body), '!')
+			}
+			status, err = do(http.MethodPut, obj.rel, body)
+		}
 		if err == nil && status != http.StatusOK {
 			err = fmt.Errorf("PUT %s: %d", obj.rel, status)
 		}
@@ -387,18 +399,46 @@ func TestNativeRunAllDestinationsFail(t *testing.T) {
 	}
 }
 
-// A destination that cannot change tags never completes a native copy.
+// A destination that cannot change tags never completes a native copy. Its
+// manifest is tagged complete only after every object: a copy left half
+// tagged has an incomplete manifest, like the objects the lifecycle rule
+// removes.
 func TestNativeRunTagsFail(t *testing.T) {
-	db := testutil.DB(t)
-	e := seedNative(t, db)
-	e.B2.failTags = errors.New("409 Conflict")
-	run := queue(t, db, e.Job, "manual", nil)
-	claimAndRun(t, e.W, run)
-	cs := loadCopies(t, db, run)
-	if r := loadRun(t, db, run); r.Status != "partial" || len(cs) != 2 || cs[1].Status != "failed" ||
-		!strings.HasPrefix(cs[1].Error, "tag the objects complete: ") || !strings.HasSuffix(cs[1].Error, "409 Conflict") ||
-		cs[1].BlobPath != runDir(t, db, "b", run) {
-		t.Fatalf("run: %+v copies %+v", r, cs)
+	for name, tc := range map[string]struct {
+		after   int
+		errText string
+	}{
+		"half way through the objects": {3, "tag the objects complete: "},
+		"on the manifest":              {len(nativeBackup()), "tag the manifest complete: "},
+	} {
+		t.Run(name, func(t *testing.T) {
+			db := testutil.DB(t)
+			e := seedNative(t, db)
+			e.B2.failTags, e.B2.failTagsAfter = errors.New("409 Conflict"), tc.after
+			run := queue(t, db, e.Job, "manual", nil)
+			claimAndRun(t, e.W, run)
+			cs := loadCopies(t, db, run)
+			dir := runDir(t, db, "b", run)
+			if r := loadRun(t, db, run); r.Status != "partial" || len(cs) != 2 || cs[0].Status != "succeeded" || cs[1].Status != "failed" ||
+				!strings.HasPrefix(cs[1].Error, tc.errText) || !strings.HasSuffix(cs[1].Error, "409 Conflict") || cs[1].BlobPath != dir {
+				t.Fatalf("run: %+v copies %+v", r, cs)
+			}
+			if tg := e.B2.tags[backup.ManifestPath(dir, run)]; tg[backup.StateTag] != backup.StateIncomplete {
+				t.Fatalf("the failed copy's manifest is tagged %v", tg)
+			}
+			complete := 0
+			for _, o := range nativeBackup() {
+				if e.B2.tags[dir+"/"+o.rel][backup.StateTag] == backup.StateComplete {
+					complete++
+				}
+			}
+			if complete != tc.after {
+				t.Fatalf("%d objects tagged complete, want %d", complete, tc.after)
+			}
+			if tg := e.B1.tags[backup.ManifestPath(runDir(t, db, "a", run), run)]; tg[backup.StateTag] != backup.StateComplete {
+				t.Fatalf("the complete copy's manifest is tagged %v", tg)
+			}
+		})
 	}
 }
 
@@ -505,5 +545,89 @@ func TestNativeRunScrubsSecret(t *testing.T) {
 	}
 	if cred := credentialOf(t, db, run); cred.Revoked == nil {
 		t.Fatal("credential not revoked")
+	}
+}
+
+// A PUT sent again with the same body (ClickHouse did not see the answer)
+// is answered as stored: nothing is written twice, which every destination
+// would refuse, and the run succeeds.
+func TestNativeRunRepeatedPut(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	setOptions(t, db, e.Job, `{"method":"native","native_repeat":"same"}`)
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	if r := loadRun(t, db, run); r.Status != "succeeded" {
+		t.Fatalf("run: %+v copies %+v", r, loadCopies(t, db, run))
+	}
+	// Each destination: every object once, and the manifest.
+	for _, b := range []*fakeBlobs{e.B1, e.B2} {
+		if b.uploads != len(nativeBackup())+1 {
+			t.Fatalf("%d uploads, want %d", b.uploads, len(nativeBackup())+1)
+		}
+	}
+}
+
+// Another body for a stored object stops the run as a client that broke the
+// protocol: the copies are not blamed on their destinations.
+func TestNativeRunRewrittenObject(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	setOptions(t, db, e.Job, `{"method":"native","native_repeat":"other"}`)
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	if call := nativeCallOf(t, run); call.killed != ingest.ReasonRewrite {
+		t.Fatalf("killed for %q, want %q", call.killed, ingest.ReasonRewrite)
+	}
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "failed" || !strings.Contains(r.Error, ingest.ReasonRewrite) || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	for _, c := range cs {
+		if c.Status != "failed" || strings.HasPrefix(c.Error, "upload") || !strings.Contains(c.Error, ingest.ReasonRewrite) {
+			t.Fatalf("copy: %+v", c)
+		}
+	}
+}
+
+// Minor 4: the server shutting down in the middle of an object stops the
+// session; the uploads are not cut by the worker's context, so no copy is
+// taken for a failed destination.
+func TestNativeRunShutdownMidObject(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.B1.holdOn, e.B1.held = "all_2_2_0/data.bin", make(chan struct{})
+	run := queue(t, db, e.Job, "manual", nil)
+	id, err := e.W.Claim(context.Background())
+	if err != nil || id != run {
+		t.Fatalf("claimed %s %v", id, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { <-e.B1.held; cancel() }()
+	e.W.Execute(ctx, run)
+
+	if call := nativeCallOf(t, run); call.killed != "server shutting down" {
+		t.Fatalf("killed for %q", call.killed)
+	}
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "failed" || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	for _, c := range cs {
+		if c.Status != "failed" || strings.HasPrefix(c.Error, "upload") || !strings.Contains(c.Error, "server shutting down") {
+			t.Fatalf("copy: %+v", c)
+		}
+	}
+	if cred := credentialOf(t, db, run); cred.Revoked == nil {
+		t.Fatal("credential not revoked")
+	}
+}
+
+func setOptions(t *testing.T, db *store.DB, job uuid.UUID, opts string) {
+	t.Helper()
+	if _, err := db.Exec(context.Background(), `UPDATE backup_jobs SET engine_options = $2 WHERE id = $1`, job, opts); err != nil {
+		t.Fatal(err)
 	}
 }
