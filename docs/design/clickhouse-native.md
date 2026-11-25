@@ -198,12 +198,14 @@ nothing was deleted, was rejected.
   key version).
   - `secrets.KeyVault` gains `Sign(ctx, name, digest)` and `Verify(ctx, keyID, digest, sig)`: `azkeys` in
     Azure, a key file in the dev Key Vault.
-  - The install docs add the key, and the managed identity's `sign` and `verify` permissions.
+  - The install docs add the key, and the managed identity's `keys/sign` and `keys/get` permissions on it.
 - **Key versions.** A version that signed a manifest stays enabled for as long as any backup it signed is
   within retention (the longest tier, plus the time a restore may take). The install docs say so, and
   rotation keeps old versions.
 - **No signature, no run.** A native run whose manifest does not verify does not exist for restore. Logical
   runs keep their unsigned sidecars, unchanged.
+- **Decided while building Milestone B (R25).** The managed identity needs `keys/get`, not `keys/verify`:
+  Olympos verifies locally with the public key it fetches (cached for an hour), and never calls the vault's verify.
 
 ### 6. Restore
 
