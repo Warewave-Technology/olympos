@@ -30,6 +30,8 @@ regexes = [
   '''^tok-9f3a7c1e5b2d4e6f8a0b$''',
   # web/src/test/synthetic-settings.test.tsx
   '''^tok-7f3c-very-secret$''',
+  # internal/ingest/sigv4_test.go: the SigV4 test secret
+  '''^0123456789abcdef0123456789abcdef01234567$''',
   # internal/blob/s3_test.go: a wrong MinIO secret
   '''^WRONG-SECRET-123$''',
 ]
