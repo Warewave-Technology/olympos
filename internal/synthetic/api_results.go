@@ -42,6 +42,10 @@ const (
 	// resolved (it is broken for good): its runs end before they start, on
 	// every cluster the probe could serve.
 	CellCredentialError = "credential_error"
+	// CellCredentialUnavailable: a credential the scenario uses cannot be
+	// read for now (Key Vault or the key encryption key does not answer):
+	// its runs are skipped, so the last counted run is old news (#69).
+	CellCredentialUnavailable = "credential_unavailable"
 	// CellNoData: no run has counted yet.
 	CellNoData = "no_data"
 )
@@ -54,9 +58,10 @@ const (
 )
 
 // cellState is where a scenario stands on a cluster. Excluded wins, then
-// paused, then the probe, then a credential that cannot be resolved, then
-// the alert, then the last counted run.
-func cellState(enabled bool, target string, credentialBroken, firing bool, lastStatus *string) string {
+// paused, then the probe, then a credential that cannot be resolved or read
+// (credState, see loadCredentialStates), then the alert, then the last
+// counted run.
+func cellState(enabled bool, target, credState string, firing bool, lastStatus *string) string {
 	switch {
 	case target == TargetExcluded:
 		return CellExcluded
@@ -66,8 +71,10 @@ func cellState(enabled bool, target string, credentialBroken, firing bool, lastS
 		return CellNotInstalled
 	case target == TargetProbeOffline:
 		return CellProbeOffline
-	case credentialBroken:
+	case credState == "broken":
 		return CellCredentialError
+	case credState == "unavailable":
+		return CellCredentialUnavailable
 	case firing:
 		return CellFailing
 	case lastStatus == nil:
@@ -110,20 +117,25 @@ func loadPairStates(ctx context.Context, q store.Querier, scenarios []uuid.UUID)
 	return out, err
 }
 
-// loadBrokenScenarios returns the scenarios among ids with a credential
-// that cannot be resolved for good (resolve_state broken).
-func loadBrokenScenarios(ctx context.Context, q store.Querier, scenarios []uuid.UUID) (map[uuid.UUID]bool, error) {
-	rows, err := q.Query(ctx, `SELECT DISTINCT st.scenario_id FROM scenario_steps st
+// loadCredentialStates returns the scenarios among ids with a credential
+// that is not ok, by the worst resolve_state of their credentials: broken
+// (cannot be resolved for good) over unavailable (cannot be read for now).
+func loadCredentialStates(ctx context.Context, q store.Querier, scenarios []uuid.UUID) (map[uuid.UUID]string, error) {
+	rows, err := q.Query(ctx, `SELECT st.scenario_id, bool_or(c.resolve_state = 'broken') FROM scenario_steps st
 		JOIN synthetic_credentials c ON c.id = st.credential_id
-		WHERE c.resolve_state = 'broken' AND st.scenario_id = ANY($1)`, scenarios)
+		WHERE c.resolve_state <> 'ok' AND st.scenario_id = ANY($1) GROUP BY st.scenario_id`, scenarios)
 	if err != nil {
 		return nil, err
 	}
-	out := map[uuid.UUID]bool{}
+	out := map[uuid.UUID]string{}
 	_, err = pgx.CollectRows(rows, func(r pgx.CollectableRow) (struct{}, error) {
 		var id uuid.UUID
-		err := r.Scan(&id)
-		out[id] = true
+		var broken bool
+		err := r.Scan(&id, &broken)
+		out[id] = "unavailable"
+		if broken {
+			out[id] = "broken"
+		}
 		return struct{}{}, err
 	})
 	return out, err
@@ -322,7 +334,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	broken, err := loadBrokenScenarios(ctx, q, ids)
+	credStates, err := loadCredentialStates(ctx, q, ids)
 	if err != nil {
 		a.fail(w, r, err)
 		return
@@ -365,7 +377,7 @@ func (a *API) overview(w http.ResponseWriter, r *http.Request) {
 			}
 			p := pair{s.ID, tc.ID}
 			ps := states[p]
-			cell := cellView{ClusterID: tc.ID, State: cellState(s.Enabled, tc.State, broken[s.ID], firing[p], ps.lastStatus),
+			cell := cellView{ClusterID: tc.ID, State: cellState(s.Enabled, tc.State, credStates[s.ID], firing[p], ps.lastStatus),
 				LastRunID: ps.lastRun, LastStatus: ps.lastStatus, LastFinishedAt: ps.lastFinished, FailedStep: ps.failedStep,
 				FailureReason: ps.reason, ConsecutiveFailures: ps.failures, BlockedReason: ps.blocked}
 			switch cell.State {
@@ -465,7 +477,7 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 		a.fail(w, r, err)
 		return
 	}
-	broken, err := loadBrokenScenarios(ctx, q, ids)
+	credStates, err := loadCredentialStates(ctx, q, ids)
 	if err != nil {
 		a.fail(w, r, err)
 		return
@@ -513,7 +525,7 @@ func (a *API) scenarioClusters(w http.ResponseWriter, r *http.Request) {
 		p := pair{id, tc.ID}
 		ps := states[p]
 		row := clusterRowView{ClusterID: tc.ID, ClusterName: tc.Name, ProbeStatus: tc.ProbeStatus,
-			State:               cellState(s.Enabled, tc.State, broken[id], firing[p], ps.lastStatus),
+			State:               cellState(s.Enabled, tc.State, credStates[id], firing[p], ps.lastStatus),
 			ConsecutiveFailures: ps.failures, ConsecutivePasses: ps.passes, BlockedReason: ps.blocked,
 			Timeline: make([]bucketView, timelineBucket)}
 		if ps.lastRun != nil && ps.lastStatus != nil {

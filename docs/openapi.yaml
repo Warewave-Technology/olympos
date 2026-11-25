@@ -2418,13 +2418,15 @@ components:
     # ------------------------------------------------------------ synthetic monitoring
     SyntheticCellState:
       type: string
-      enum: [failing, degraded, passing, probe_offline, not_installed, excluded, paused, credential_error, no_data]
+      enum: [failing, degraded, passing, probe_offline, not_installed, excluded, paused, credential_error, credential_unavailable, no_data]
       description: >-
         failing: the cluster alert fires. degraded: the last counted run failed or errored, the alert does not
         fire (yet). probe_offline: offline, or enrolled and not connected yet. not_installed: no probe (or revoked).
         credential_error: a credential the scenario uses cannot be resolved (resolve_state broken), on every
         cluster its probe is online on; its runs end before they start and move no streak.
-        Excluded wins over paused, paused over the probe, the probe over a credential error, a credential error
+        credential_unavailable: the same for a credential that cannot be read for now (resolve_state
+        unavailable), from the first failure; its runs are skipped. credential_error wins over it.
+        Excluded wins over paused, paused over the probe, the probe over a credential state, a credential state
         over the alert.
     SyntheticStep:
       type: object

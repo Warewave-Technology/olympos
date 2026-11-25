@@ -26,6 +26,11 @@ v0.3.1-rc.1.
     *error* (`credential_expired`). These two reasons move no streak and are left out of availability, p95,
     the timeline and the hourly aggregates, so expired credentials no longer open `synthetic.failing` per
     scenario.
+  - Found in the lab test of v0.3.1-rc.1 ([#69](https://github.com/Warewave-Technology/olympos/issues/69)):
+    the matrix and the scenario's cluster table show *credential unavailable* from the first temporary
+    failure, instead of the last run's result while the runs are skipped. The log has one WARN line when a
+    credential's state changes and one INFO line when it resolves again, instead of a WARN line per run
+    (461 lines in 45 minutes for 3 scenarios on 2 clusters).
 - gitleaks allowlists the exact fake values of the tests instead of nine whole test files, so a real secret
   added to one of those files is caught. New fixtures mark their line with `gitleaks:allow`.
 

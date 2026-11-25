@@ -258,7 +258,8 @@ spec:
 // item and the outbox one synthetic.credential_broken, no run counts as a
 // failure and no scenario alert opens. Then it writes the secret and checks
 // that the cells pass, the item goes and one synthetic.credential_restored
-// goes out (docs/design/credential-alerts.md).
+// goes out (docs/design/credential-alerts.md). Last, a short temporary
+// failure: credential_unavailable cells and no message (#69).
 func checkCredentialAlerts(t *testing.T, admin *client, clusters []string) {
 	t.Helper()
 	applyStdin(t, kvWriterPod)
@@ -374,6 +375,22 @@ func checkCredentialAlerts(t *testing.T, admin *client, clusters []string) {
 	}
 	if n := count("synthetic.credential_broken"); n != "1" {
 		t.Errorf("synthetic.credential_broken messages after recovery: %s (want 1)", n)
+	}
+
+	// Temporary (#69): a directory where the secret was is neither missing
+	// nor forbidden, so the local Key Vault cannot read it for now. The
+	// cells say so at once; no message before 30 minutes.
+	run(t, "kubectl", "-n", "olympos", "exec", "m9-kv-writer", "--", "sh", "-c",
+		"rm /kv/secrets/lab/"+secretName+" && mkdir /kv/secrets/lab/"+secretName)
+	waitCells(t, admin, scenarioID, clusters, 4*time.Minute, "credential_unavailable")
+	if state, cause := credState(); state != "unavailable" || cause != "unavailable" {
+		t.Errorf("credential state with an unreadable secret: %q %q (want unavailable, unavailable)", state, cause)
+	}
+	run(t, "kubectl", "-n", "olympos", "exec", "m9-kv-writer", "--", "sh", "-c",
+		"rmdir /kv/secrets/lab/"+secretName+" && printf %s m9-token > /kv/secrets/lab/"+secretName)
+	waitCells(t, admin, scenarioID, clusters, 4*time.Minute, "passing")
+	if b, r := count("synthetic.credential_broken"), count("synthetic.credential_restored"); b != "1" || r != "1" {
+		t.Errorf("messages after a short unavailable episode: %s broken, %s restored (want 1 and 1)", b, r)
 	}
 }
 

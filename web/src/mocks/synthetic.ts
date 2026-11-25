@@ -94,6 +94,8 @@ export const credentials: SyntheticCredential[] = [
   cred('search-api-key', 'header', ['search.wrw.com'], { header_name: 'X-Api-Key', source: 'keyvault_ref', expires_at: null, resolve_state: 'broken', resolve_cause: 'not_found', resolve_failing_since: db.iso(95 * MIN), resolve_failures_24h: 3, last_resolve_failed_at: db.iso(40 * MIN) }),
   // Key Vault did not answer a few minutes ago: no alert yet (a message goes out after 30 minutes)
   cred('reports-login', 'basic', ['reports.wrw.com'], { expires_at: db.isoIn(9 * D + H), resolve_state: 'unavailable', resolve_cause: 'unavailable', resolve_failing_since: db.iso(12 * MIN) }),
+  // used by an enabled scenario: its cells read "credential unavailable" (#69)
+  cred('orders-api-key', 'bearer', ['orders.wrw.com'], { source: 'keyvault_ref', expires_at: null, resolve_state: 'unavailable', resolve_cause: 'unavailable', resolve_failing_since: db.iso(6 * MIN) }),
   cred('partner-oauth', 'oauth2_client_credentials', ['partner-sftp.acme.net', 'login.acme.net'], { oauth_token_url: 'https://login.acme.net/oauth2/token', oauth_scopes: 'sftp.read', expires_at: null, created_by: db.people.selin.id, created_by_name: db.people.selin.display_name, created_at: db.iso(D), updated_at: db.iso(D) }),
 ];
 const credRef = (name: string) => {
@@ -224,6 +226,7 @@ export const scenarios: Scenario[] = [
     ],
   }),
   scenario('Legacy reports portal', { type: 'http', interval_seconds: 900, enabled: false, run_on: 'selector', run_on_selector: 'site=factory', steps: [http('GET', 'https://reports.wrw.com/login', credRef('reports-login'))] }),
+  scenario('Orders API', { type: 'http', owner_selector: 'team=payments', exclude_selectors: [LAB], steps: [http('GET', 'https://orders.wrw.com/v1/health', credRef('orders-api-key'))] }),
 ];
 // the POST body of the search step (visible to editors only: the step uses a credential)
 scenarios[5].steps[1].http!.body = '{"q":"olympos","limit":5}';
@@ -246,6 +249,7 @@ const story: Record<string, Story> = {
   'Partner SFTP': { p95: 41, avail: 99.9 },
   'Search API latency': { degraded: { 'prod-aks-weu-02': { step: 1, reason: 'assertion_failed: latency 780 ms > 500 ms', n: 2, ms: 780 } }, p95: 780, avail: 99.7 },
   'Legacy reports portal': { p95: 0, avail: 0 },
+  'Orders API': { p95: 212, avail: 99.9 },
 };
 
 // ------------------------------------------------------------ targeting, cells, stats
@@ -298,6 +302,8 @@ function cellState(s: Scenario, c: Cluster): SyntheticCellState {
   if (c.probe_status === 'offline' || c.probe_status === 'pending') return 'probe_offline';
   // after the probe, before the alert: a credential that cannot be resolved ends its runs before they start
   if (scenarioCredentials(s).some((x) => x.resolve_state === 'broken')) return 'credential_error';
+  // its runs are skipped while Key Vault does not answer (#69)
+  if (scenarioCredentials(s).some((x) => x.resolve_state === 'unavailable')) return 'credential_unavailable';
   const st = story[s.name];
   if (st?.failing?.[c.name]) return 'failing';
   if (st?.degraded?.[c.name]) return 'degraded';

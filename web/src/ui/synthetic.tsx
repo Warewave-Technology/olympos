@@ -16,11 +16,12 @@ export const CELL: Record<SyntheticCellState, { label: string; symbol: string; c
   excluded: { label: 'excluded', symbol: '–', cls: 'c-ex' },
   paused: { label: 'paused', symbol: '‖', cls: 'c-ex' },
   credential_error: { label: 'credential error', symbol: '⊘', cls: 'c-cred' },
+  credential_unavailable: { label: 'credential unavailable', symbol: '◷', cls: 'c-credu' },
   no_data: { label: 'no data yet', symbol: '○', cls: 'c-off' },
 };
 
 /** The states the legend explains, in the mockup's order. */
-export const LEGEND_STATES: SyntheticCellState[] = ['passing', 'failing', 'degraded', 'probe_offline', 'not_installed', 'excluded', 'paused', 'credential_error', 'no_data'];
+export const LEGEND_STATES: SyntheticCellState[] = ['passing', 'failing', 'degraded', 'probe_offline', 'not_installed', 'excluded', 'paused', 'credential_error', 'credential_unavailable', 'no_data'];
 
 /** A matrix cell: the symbol on screen, "<cluster> <state>" for assistive tech and the tooltip. */
 export function MatrixCell({ cluster, state, detail, onOpen }: { cluster: string; state: SyntheticCellState; detail?: string; onOpen?: () => void }) {
@@ -74,13 +75,14 @@ export function ScenarioStatusBadge({ status, failing, degraded, of }: { status:
   }
 }
 
-const CELL_TONE: Record<SyntheticCellState, Tone> = { passing: 'ok', failing: 'crit', degraded: 'warn', probe_offline: 'mute', not_installed: 'mute', excluded: 'mute', paused: 'mute', credential_error: 'crit', no_data: 'mute' };
+const CELL_TONE: Record<SyntheticCellState, Tone> = { passing: 'ok', failing: 'crit', degraded: 'warn', probe_offline: 'mute', not_installed: 'mute', excluded: 'mute', paused: 'mute', credential_error: 'crit', credential_unavailable: 'warn', no_data: 'mute' };
 
 /** Result column of the per-cluster table ("Failed · 3rd in a row", "Excluded", "Probe offline"). */
 export function clusterResult(r: Pick<ScenarioClusterRow, 'state' | 'last_run' | 'consecutive_failures'>): { text: string; tone: Tone } {
   const last = r.last_run;
-  // its runs end before they start: not a failed run, so no streak
+  // its runs end before they start (or are skipped): not a failed run, so no streak
   if (r.state === 'credential_error') return { text: 'Credential error', tone: 'crit' };
+  if (r.state === 'credential_unavailable') return { text: 'Credential unavailable', tone: 'warn' };
   if (r.state === 'excluded' || r.state === 'paused' || r.state === 'probe_offline' || r.state === 'not_installed' || !last) {
     const label = CELL[r.state]?.label ?? r.state;
     return { text: label.charAt(0).toUpperCase() + label.slice(1), tone: CELL_TONE[r.state] ?? 'mute' };
@@ -125,6 +127,9 @@ export const CAUSE_TEXT: Record<NonNullable<CredentialResolveCause>, string> = {
  * The state of a credential as the badge and the muted line under it: broken "Cannot be resolved" with the cause and
  * since when, unavailable "Unavailable" since when. null when it is fine (resolve_state ok, or an API that sends none).
  */
+/** A cell whose runs a credential stops: the last counted run is old news (no time, no link to it). */
+export const isCredentialCell = (s: SyntheticCellState) => s === 'credential_error' || s === 'credential_unavailable';
+
 export function credentialState(c: { resolve_state?: CredentialResolveState; resolve_cause?: CredentialResolveCause; resolve_failing_since?: string | null }): { tone: Tone; label: string; note: string } | null {
   if (c.resolve_state !== 'broken' && c.resolve_state !== 'unavailable') return null;
   const since = c.resolve_failing_since ? `since ${clockTime(c.resolve_failing_since)}` : '';

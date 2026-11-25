@@ -1268,8 +1268,9 @@ func TestCredentialStateInTheViews(t *testing.T) {
 }
 
 // A scenario with a broken credential shows credential_error on every
-// cluster it would run on that is reachable: excluded, paused, probe
-// states come first, and the alert does not outrank it.
+// cluster it would run on that is reachable, credential_unavailable when
+// the credential is unavailable: excluded, paused, probe states come
+// first, and the alert does not outrank it.
 func TestOverviewCredentialErrorCell(t *testing.T) {
 	c := newCredStateEnv(t)
 	x := c.x
@@ -1315,10 +1316,15 @@ func TestOverviewCredentialErrorCell(t *testing.T) {
 	if got[c.sc][x.clusters["dev-1"]] != "failing" {
 		t.Fatalf("a healthy credential changes nothing: %v", got[c.sc])
 	}
-	// Transient: nothing changes in the matrix.
-	c.state("unavailable", "unavailable", time.Hour)
-	if got, _ = cells(); got[c.sc][x.clusters["dev-1"]] != "failing" {
-		t.Fatalf("an unavailable credential: %v", got[c.sc])
+	// Transient (#69): its runs are skipped, so the cells say so from the
+	// first failure, in the same place as a broken one.
+	c.state("unavailable", "unavailable", time.Minute)
+	got, _ = cells()
+	for cl, w := range map[uuid.UUID]string{x.clusters["dev-1"]: "credential_unavailable", x.clusters["dev-2"]: "credential_unavailable",
+		x.clusters["prod-1"]: "credential_unavailable", offline: "probe_offline", notInstalled: "not_installed", excluded: "excluded"} {
+		if got[c.sc][cl] != w {
+			t.Errorf("unavailable credential, cell %s: %s, want %s", cl, got[c.sc][cl], w)
+		}
 	}
 	c.state("broken", "not_found", time.Minute)
 	got, _ = cells()
