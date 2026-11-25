@@ -1,0 +1,1 @@
+CREATE VIEW spike.recent UUID 'ff7f6dbb-abf8-43bb-af4e-d8ff3400a68b' (`id` UInt64, `ts` DateTime, `amount` Float64) AS SELECT id, ts, amount FROM spike.events WHERE ts > (now() - toIntervalDay(1))

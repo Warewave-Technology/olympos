@@ -1,0 +1,1 @@
+CREATE MATERIALIZED VIEW spike.big_amounts UUID 'acfda0b0-b3d9-4352-9540-c9583bda3b57' TO INNER UUID 'f5d8930f-21e4-425b-9b1e-f89a42191075' (`id` UInt64, `amount` Float64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id, amount FROM spike.events WHERE amount > 900
