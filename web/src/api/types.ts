@@ -396,6 +396,15 @@ export interface BackupRun {
   created_at?: string;
   /** Optional (openapi extension): dry-run checklist steps. */
   steps?: { name: string; ok: boolean; detail: string }[];
+  /** native: a ClickHouse native run (no repairs, no restore commands by hand); logical: every other run. */
+  method?: 'native' | 'logical';
+  /** How many objects a native run stored; null for logical runs and for a native run that has not finished. */
+  objects?: number | null;
+}
+/** GET /backup/settings: what the backup wizard needs to know about the server. */
+export interface BackupSettings {
+  /** The ingest endpoint of native ClickHouse backups is on (ingest.url is set). */
+  ingest_enabled: boolean;
 }
 /** Ready-to-copy restore commands of one successful run (F19). */
 export interface RestoreCopy {

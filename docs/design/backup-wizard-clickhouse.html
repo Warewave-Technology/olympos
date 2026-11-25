@@ -118,7 +118,7 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 <p class="muted" style="margin: 6px 0 0; font-size: 13px">How ClickHouse is backed up. Either way the backup goes to the job's destination, with the same tiers and retention.</p></div>
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
 <legend class="lbl">Method</legend>
-<label class="opt off"><input type="radio" name="m2" disabled style="margin-top: 2px"><span><b style="font-weight: 500">Native</b><br><span class="muted" style="font-size: 12px">Native backups need the ingest endpoint, which is off on this server. An admin turns it on with <span class="mono">ingest.url</span> (<a href="../install.md">docs/install.md</a>).</span></span></label>
+<label class="opt off"><input type="radio" name="m2" disabled style="margin-top: 2px"><span><b style="font-weight: 500">Native</b><br><span class="muted" style="font-size: 12px">Native backups need the ingest endpoint, which is off on this server. An admin turns it on with <span class="mono">ingest.url</span> (<a href="../configuration.md#ingest">docs/configuration.md#ingest</a>).</span></span></label>
 <label class="opt on"><input type="radio" name="m2" checked style="margin-top: 2px"><span><b style="font-weight: 500">Logical</b><br><span class="muted" style="font-size: 12px">Olympos reads every table through the agent tunnel, and a restore regenerates the DDL. Views, materialized views, dictionaries, defaults, TTLs, skip indexes and codecs are not kept.</span></span></label>
 </fieldset>
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">

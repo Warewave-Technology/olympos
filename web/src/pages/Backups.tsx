@@ -579,7 +579,7 @@ function RunsTable({ limit, status = '', compact, clusterName, show, showCluster
       <DataTable
         label={compact ? 'Recent runs' : 'Backup runs'}
         onRowClick={(r) => setOpen(r.id)}
-        rowLabel={(r) => `${r.status === 'succeeded' || r.status === 'partial' ? 'Restore commands and details' : 'Details'} of the ${r.target_service} run of ${relDateTime(r.started_at ?? r.scheduled_for)}`}
+        rowLabel={(r) => `${(r.status === 'succeeded' || r.status === 'partial') && r.method !== 'native' ? 'Restore commands and details' : 'Details'} of the ${r.target_service} run of ${relDateTime(r.started_at ?? r.scheduled_for)}`}
         what="backup runs"
         rows={q.data ? (clusterName ? q.data.items.filter((r) => r.cluster_name === clusterName) : q.data.items).slice(0, show ?? limit) : undefined}
         loading={q.isPending}

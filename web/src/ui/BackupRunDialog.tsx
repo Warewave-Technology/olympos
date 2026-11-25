@@ -160,7 +160,7 @@ export function RestoreWithCopies({
 const shortHash = (h: string) => (h.length > 16 ? `${h.slice(0, 8)}…${h.slice(-4)}` : h);
 
 /** One row per destination of a run (the run dialog, and the last olympos-self run on its card). */
-export function CopiesTable({ copies, isRepair, title = 'Copies', id = 'run-copies' }: { copies: BackupRunCopy[]; isRepair: boolean; title?: string; id?: string }) {
+export function CopiesTable({ copies, isRepair, native = false, title = 'Copies', id = 'run-copies' }: { copies: BackupRunCopy[]; isRepair: boolean; native?: boolean; title?: string; id?: string }) {
   return (
     <div>
       <h3 id={id} className="small" style={{ margin: '0 0 8px', fontWeight: 600 }}>
@@ -212,7 +212,9 @@ export function CopiesTable({ copies, isRepair, title = 'Copies', id = 'run-copi
         </table>
       </div>
       <p className="muted small" style={{ margin: '8px 0 0' }}>
-        Each copy is verified by size and hash. A copy completed by a repair comes from a later dump, so its SHA-256 differs.
+        {native
+          ? "Each copy is verified by size and hash. A native copy is the run's directory; its SHA-256 is the signed manifest's."
+          : 'Each copy is verified by size and hash. A copy completed by a repair comes from a later dump, so its SHA-256 differs.'}
       </p>
     </div>
   );
@@ -231,6 +233,7 @@ function RepairNote({ run, onOpen }: { run: BackupRunDetail; onOpen: (id: string
     );
   }
   if (run.status !== 'partial') return null;
+  if (run.method === 'native') return <div className="note warn">Not every copy was written. A native run is not repaired: the next run is a full backup.</div>;
   const repaired = (run.restore?.copies ?? []).filter((c) => c.run_id !== run.id);
   if (repaired.length) {
     return (
@@ -321,7 +324,10 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
       description={r ? `${r.cluster_name} · ${r.trigger} · ${relDateTime(r.started_at ?? r.scheduled_for)}` : undefined}
     >
       <QueryView q={q} what="the run">
-        {(run) => (
+        {(run) => {
+          // ClickHouse BACKUP through the ingest endpoint: a run directory per copy, no commands to restore it by hand
+          const native = run.method === 'native';
+          return (
           <div className="stack-sm" style={{ gap: 14 }}>
             <dl className="kv">
               <dt>Result</dt>
@@ -340,6 +346,15 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
                   </div>
                 )}
               </dd>
+              {native && (
+                <>
+                  <dt>Method</dt>
+                  <dd>
+                    <Badge tone="info">Native</Badge>
+                    {run.objects != null && <span className="muted small"> · {run.objects.toLocaleString('en-US')} {run.objects === 1 ? 'object' : 'objects'}</span>}
+                  </dd>
+                </>
+              )}
               {run.destination_name && (
                 <>
                   <dt>Destination</dt>
@@ -352,26 +367,30 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
               <dd>{duration(between(run.started_at, run.finished_at))}</dd>
               {run.blob_path && !isGroupRun(run) && (
                 <>
-                  <dt>Blob</dt>
+                  <dt>{native ? 'Directory' : 'Blob'}</dt>
                   <dd className="mono small break">{run.blob_path}</dd>
                   <dt>SHA-256</dt>
                   <dd className="mono small break">{run.sha256}</dd>
                 </>
               )}
             </dl>
-            {(isGroupRun(run) || !!run.repair_of) && run.copies && run.copies.length > 0 && <CopiesTable copies={run.copies} isRepair={!!run.repair_of} />}
+            {(isGroupRun(run) || !!run.repair_of) && run.copies && run.copies.length > 0 && <CopiesTable copies={run.copies} isRepair={!!run.repair_of} native={native} />}
             <RepairNote run={run} onOpen={open} />
             {run.restore && mayRestore && uiRestorable(run) && (
               <div className="spread" style={{ alignItems: 'center' }}>
                 <p className="small" style={{ margin: 0 }}>
-                  <b>Restore…</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.
+                  <b>Restore…</b> loads this backup into a new target after a second person approves it. {native ? 'A native backup has no commands to restore by hand.' : 'Or restore by hand with the commands below.'}
                 </p>
                 <button ref={restoreBtn} type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
                   Restore…
                 </button>
               </div>
             )}
-            {run.restore ? (
+            {native ? (
+              run.restore && !(mayRestore && uiRestorable(run)) ? (
+                <p className="muted small">A native backup has no commands to restore by hand: it is restored with Restore… into a new target, which needs the operator role.</p>
+              ) : null
+            ) : run.restore ? (
               <RestoreWithCopies guide={run.restore} runId={run.id} runCopies={run.copies} onSelect={setCopy} onOpenRepair={open} pending={q.isPlaceholderData} />
             ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (
               <p className="muted small">Dry runs only check the setup; they are not restorable backups.</p>
@@ -388,7 +407,8 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
               </p>
             )}
           </div>
-        )}
+          );
+        }}
       </QueryView>
     </Modal>
   );

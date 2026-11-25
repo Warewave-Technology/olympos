@@ -25,6 +25,9 @@ const PEOPLE = {
 };
 const env = readFileSync(join(ROOT, 'test', 'e2e', '.work', 'ENV.md'), 'utf8');
 const vaultToken = (name) => env.match(new RegExp(`${name} +\\([^)]+\\): +(\\S+)`))?.[1];
+// The lab's native-ready ClickHouse (24.8 or later, trusting the Olympos CA) and its lab password.
+const NATIVE_CH = process.env.NATIVE_CH ?? 'native-ch';
+const NATIVE_CH_PASSWORD = 'CANARY-lab-native-ch-password';
 
 mkdirSync(OUT, { recursive: true });
 const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: 'chrome' });
@@ -115,7 +118,7 @@ async function openWizard(page, cluster, target) {
   await page.goto(`${URL}/backups`);
   await page.getByText(cluster, { exact: true }).first().click();
   await page.getByRole('link', { name: `Configure backup for ${target}` }).click();
-  await page.getByText('STEP 1 OF 4').waitFor();
+  await page.getByText(/^step 1 of [45]$/i).waitFor(); // a ClickHouse target has a Backup method step
 }
 
 const stages = {
@@ -648,6 +651,62 @@ const stages = {
       await shot(admin, 'restore-04-clickhouse-result', admin.locator('.split-detail'));
     } finally {
       await apiCall(admin, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+      dropCH();
+    }
+  },
+
+  // ClickHouse native (docs/design/backup-wizard-clickhouse.html): the Backup
+  // method step of the wizard, then a native run and its run page. Needs the
+  // server's ingest endpoint (ingest.url) and a native-ready ClickHouse in the
+  // lab; ClickHouse reaches the endpoint directly, not through the agent.
+  async clickhouseNative() {
+    const page = await signIn('admin');
+    if (!(await apiCall(page, 'GET', '/backup/settings')).ingest_enabled) throw new Error('the lab server has no ingest.url: native ClickHouse backups are off');
+    const dropCH = () => chSQL(NATIVE_CH, 'backup', NATIVE_CH_PASSWORD, ['DROP DATABASE IF EXISTS shop SYNC']);
+    dropCH();
+    try {
+      chSQL(NATIVE_CH, 'backup', NATIVE_CH_PASSWORD, [
+        'CREATE DATABASE IF NOT EXISTS shop',
+        'CREATE TABLE IF NOT EXISTS shop.orders (id UInt64, placed Date, total Decimal(10, 2) CODEC(ZSTD(3)), note String DEFAULT \'\') ENGINE = MergeTree PARTITION BY toYYYYMM(placed) ORDER BY id TTL placed + INTERVAL 5 YEAR',
+        "INSERT INTO shop.orders (id, placed, total) SELECT number, toDate('2026-10-01') + number % 60, (number % 97) * 1.25 FROM numbers(20000)",
+        'CREATE VIEW IF NOT EXISTS shop.orders_by_day AS SELECT placed, count() AS n FROM shop.orders GROUP BY placed',
+      ]);
+      await openWizard(page, 'lab', NATIVE_CH);
+      await page.getByRole('button', { name: 'Next: credentials' }).click();
+      await page.getByText('Store in Olympos', { exact: true }).click(); // the lab has no Azure Key Vault
+      await page.getByLabel('Username', { exact: true }).fill('backup');
+      await page.getByLabel('Password', { exact: true }).fill(NATIVE_CH_PASSWORD);
+      const dbs = page.getByLabel('Databases', { exact: true });
+      await dbs.fill('shop');
+      await dbs.press('Enter');
+      await page.getByRole('button', { name: 'Next: method' }).click();
+      await page.getByRole('heading', { name: 'Backup method' }).waitFor();
+      // a new job starts on Native when the server takes native backups
+      await page.getByRole('radio', { name: /^Native/ }).and(page.locator(':checked')).waitFor();
+      await page.getByText('Weekly full, daily incrementals', { exact: true }).click();
+      await dump(page, 'native method step');
+      await shot(page, 'clickhouse-native-01-method');
+      await page.getByRole('button', { name: 'Next: destination' }).click();
+      await page.locator('label.opt').filter({ hasText: 'lab-copies' }).click();
+      await page.getByRole('button', { name: /^Next/ }).click();
+      await page.getByText('Native · weekly full, daily incrementals').waitFor();
+      await page.getByRole('button', { name: 'Create job and run dry run' }).click();
+      await page.getByRole('button', { name: 'Enable backup' }).and(page.locator(':enabled')).waitFor({ timeout: 300_000 });
+      await dump(page, 'native dry run done');
+      await page.getByRole('button', { name: 'Enable backup' }).click();
+      await page.waitForURL(/\/backups(?!\/new)/, { timeout: 30_000 });
+
+      // A native run: the run page shows the Native badge and the object count, and no restore commands.
+      const run = await runJob(page, NATIVE_CH, (r) => !r.repair_of);
+      if (run.status !== 'succeeded' || run.method !== 'native' || !run.objects) throw new Error(`native run ended ${run.status} (${run.method}, ${run.objects} objects): ${run.error}`);
+      await openRun(page, NATIVE_CH, (rows) => rows.filter({ hasText: 'Succeeded' }).filter({ hasNotText: 'test' }));
+      const dlg = page.getByRole('dialog');
+      await dlg.getByText(/^· [\d,]+ objects?$/).waitFor();
+      await dlg.getByText('A native backup has no commands to restore by hand.', { exact: false }).waitFor();
+      await dump(page, 'native run dialog');
+      await shot(page, 'clickhouse-native-02-run', dlg);
+      await page.keyboard.press('Escape');
+    } finally {
       dropCH();
     }
   },
