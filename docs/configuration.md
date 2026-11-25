@@ -179,7 +179,7 @@ because a run's session and its credential live in the one process that opened t
 
 **The byte limit of a native run.** A run may write at most the largest of:
 
-- twice the job's last full native run that succeeded or partly succeeded;
+- twice the job's last full native run that succeeded or partly succeeded (not a dry run);
 - 1.5 times what the run's databases hold on disk, the `bytes_on_disk` of their active parts in
   `system.parts`, which the server reads on the target just before the `BACKUP`;
 - 1 GiB.
@@ -190,6 +190,11 @@ more than the database holds; it is not a retention or cost control. A run that 
 `KILL QUERY` and fails with `native byte limit: the run wrote more than <limit> (…); set ingest.maxRunBytes to
 allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to
 every native job), or back to `0` for the automatic limit.
+
+**Dry runs.** The dry run of a native job (*Review & test run* in the backup wizard) is a `BACKUP` with
+`structure_only = 1`: ClickHouse writes the databases' definitions and no data, through the endpoint to the
+destinations. It checks egress, the endpoint's certificate, the run's credential, the signed manifest and the
+tags in seconds, however large the databases are; it does not show how long the data takes to upload.
 
 ### `targetTLS`
 

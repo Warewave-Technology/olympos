@@ -3,6 +3,7 @@ package clickhouse
 import (
 	"context"
 	"errors"
+	"fmt"
 	"hash/crc32"
 	"maps"
 	"path"
@@ -325,4 +326,67 @@ type renamingVault struct{ *fakeVault }
 func (v renamingVault) Sign(ctx context.Context, keyName string, digest []byte) ([]byte, string, error) {
 	sig, _, err := v.fakeVault.Sign(ctx, "other-key", digest)
 	return sig, "other-key/1", err
+}
+
+// structureOnly is d as a BACKUP with structure_only = 1 leaves it (R40,
+// seen on 24.8 and 25.8): a .backup that lists only the metadata/*.sql
+// files, and only those objects.
+func (d nativeRunData) structureOnly(t *testing.T, runID string) nativeRunData {
+	t.Helper()
+	var files strings.Builder
+	out := nativeRunData{bodies: map[string][]byte{}}
+	for _, f := range d.meta.Files {
+		if !strings.HasPrefix(f.Name, "metadata/") {
+			continue
+		}
+		fmt.Fprintf(&files, "<file><name>%s</name><size>%d</size><checksum>%s</checksum></file>", f.Name, f.Size, f.Checksum)
+		key := runID + "/" + f.Name
+		out.bodies[key] = d.bodies[key]
+		out.objects = append(out.objects, ingest.ObjectRecord{Key: key, Size: int64(f.Size), SHA256: sum(key)})
+	}
+	raw := []byte("<config><version>1</version><deduplicate_files>1</deduplicate_files><timestamp>2026-11-25 23:47:49</timestamp>" +
+		"<uuid>9a004670-dfb8-457c-a0eb-15bb4afc0f01</uuid><contents>" + files.String() + "</contents></config>")
+	meta, err := ParseBackupMeta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.meta = meta
+	out.bodies[runID+"/.backup"] = raw
+	out.objects = append(out.objects, ingest.ObjectRecord{Key: runID + "/.backup", Size: int64(len(raw)), SHA256: sum(runID + "/.backup")})
+	return out
+}
+
+// R40: a test run's BACKUP has structure_only = 1. Its manifest has the
+// databases and their objects, no part rows and no rows; a structure-only
+// build refuses a .backup that lists any data file.
+func TestBuildNativeManifestStructureOnly(t *testing.T) {
+	for _, ver := range nativeVersions {
+		t.Run(ver, func(t *testing.T) {
+			full := nativeRunOf(t, ver, "full", captureFullRun)
+			so := full.structureOnly(t, captureFullRun)
+			m, err := BuildNativeManifest(NativeBuild{RunID: captureFullRun, ServerVersion: "25.8.33.6",
+				Settings: statementSettings(captureFullRun, true), Objects: so.objects, Body: so.body, StructureOnly: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(m.PartRows) != 0 || m.Settings["structure_only"] != "1" || len(m.Databases) != 1 || rowsOf(t, m, "spike", "events") != 0 {
+				t.Fatalf("manifest: %+v", m)
+			}
+			if _, err := Sign(context.Background(), newFakeVault(), testManifestKey, m); err != nil {
+				t.Fatal(err)
+			}
+			_, err = BuildNativeManifest(NativeBuild{RunID: captureFullRun, ServerVersion: "25.8.33.6",
+				Settings: statementSettings(captureFullRun, true), Objects: full.objects, Body: full.body, StructureOnly: true})
+			if !errors.Is(err, ErrNativeMeta) || !strings.Contains(err.Error(), "structure-only") {
+				t.Fatalf("a structure-only build of a backup with data: %v", err)
+			}
+		})
+	}
+	// Signed as a test run's: the settings say structure_only.
+	so := nativeRunOf(t, "25.8", "full", captureFullRun).structureOnly(t, captureFullRun)
+	res, err := Engine{}.SignNativeManifest(context.Background(), backup.NativeManifestInput{KV: newFakeVault(), KeyName: testManifestKey,
+		RunID: captureFullRun, ServerVersion: "25.8.33.6", Objects: so.objects, Captured: so.body, StructureOnly: true})
+	if err != nil || !strings.Contains(string(res.Signed), `"structure_only":"1"`) {
+		t.Fatalf("signed: %v %.300s", err, res.Signed)
+	}
 }

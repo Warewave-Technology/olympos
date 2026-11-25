@@ -473,7 +473,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                 (target.engine === 'postgresql'
                   ? 'A dry run takes a schema-only dump end to end, so problems show up now and not at night.'
                   : isClickHouse && method === 'native'
-                    ? 'A dry run takes a native backup end to end, so egress and certificate problems show up now and not at night.'
+                    ? 'A dry run takes a structure-only native backup (the definitions, no data) end to end, so egress, certificate and credential problems show up now and not at night.'
                     : 'A dry run takes a small test backup end to end, so problems show up now and not at night.')}
             </p>
           </div>

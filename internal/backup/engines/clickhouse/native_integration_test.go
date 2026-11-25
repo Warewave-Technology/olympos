@@ -141,6 +141,53 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		}
 		in.checkNoSecret(t, r, engineLogs)
 	})
+	// R40: a test run's BACKUP has structure_only = 1. It goes through the
+	// endpoint as a full one does, in seconds: the .backup lists only the
+	// metadata/*.sql files, and the manifest builds from it.
+	t.Run("structure only", func(t *testing.T) {
+		in := newIngest(t, db)
+		r := in.open(t, newDirStore(t, 0), nil)
+		r.structureOnly = true
+		start := time.Now()
+		if _, err := runNative(t, chc, r, nil, "spike", "big"); err != nil {
+			t.Fatalf("RunNative: %v", err)
+		}
+		took := time.Since(start).Round(time.Millisecond)
+		chc.wantStatus(t, r.id, statusCreated)
+		r.s.Revoke("run ended")
+		objs := r.s.Objects()
+		var keys []string
+		for _, o := range objs {
+			rel := strings.TrimPrefix(o.Key, r.id+"/")
+			if rel != ".backup" && !strings.HasPrefix(rel, "metadata/") {
+				t.Errorf("a structure-only backup stored %s", rel)
+			}
+			keys = append(keys, rel)
+		}
+		sort.Strings(keys)
+		raw, ok := r.s.Captured(r.id + "/.backup")
+		if !ok {
+			t.Fatal("the session kept no .backup")
+		}
+		meta, err := ParseBackupMeta(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, true),
+			Objects: objs, Body: r.s.Captured, StructureOnly: true})
+		if err != nil {
+			t.Fatalf("manifest: %v", err)
+		}
+		if len(m.Databases) != 2 || len(m.PartRows) != 0 || rowsOf(t, m, "spike", "events") != 0 {
+			t.Fatalf("manifest: %+v", m.Databases)
+		}
+		t.Logf("structure only, %s: %d objects (%s); .backup lists %d files, base %q", took, len(objs), strings.Join(keys, " "),
+			len(meta.Files), meta.BaseBackup)
+		t.Logf("requests:\n%s", in.rec.summary())
+		in.rec.checkR13(t)
+		in.checkNoSecret(t, r, engineLogs)
+	})
+
 	t.Run("incremental", func(t *testing.T) {
 		if fullID == "" {
 			t.Skip("no full backup to take it on")
@@ -422,7 +469,7 @@ func runNativeCtx(t *testing.T, ctx context.Context, chc *nativeCH, r *nativeTes
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	nr := NativeRun{URL: r.url, AccessKey: r.cred.AccessKey, Secret: r.cred.Secret, RunID: r.id, Base: base,
-		Databases: dbs, Stop: r.s.Stopped(), Before: r.before}
+		Databases: dbs, StructureOnly: r.structureOnly, Stop: r.s.Stopped(), Before: r.before}
 	return Engine{}.RunNative(ctx, chc.ec(), nr)
 }
 
@@ -557,8 +604,9 @@ type nativeTestRun struct {
 	id, url string
 	s       *ingest.Session
 	cred    ingest.Credential
-	// before is the run's NativeRun.Before.
-	before func(context.Context, backup.NativeTarget) error
+	// before is the run's NativeRun.Before, structureOnly its StructureOnly.
+	before        func(context.Context, backup.NativeTarget) error
+	structureOnly bool
 }
 
 func (in *nativeIngest) open(t *testing.T, st *dirStore, read []string) *nativeTestRun {

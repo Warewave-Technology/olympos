@@ -44,7 +44,11 @@ type nativeObject struct {
 
 // nativeBackup is what the fake ClickHouse writes: two parts of shop.orders
 // (40 and 2 rows), the metadata, and .backup last, which lists the rest.
-func nativeBackup() []nativeObject {
+func nativeBackup() []nativeObject { return nativeBackupOf(false) }
+
+// nativeBackupOf is nativeBackup, or with structureOnly what a BACKUP with
+// structure_only = 1 writes: the metadata and .backup.
+func nativeBackupOf(structureOnly bool) []nativeObject {
 	objs := []nativeObject{
 		{"data/shop/orders/all_1_1_0/data.bin", bytes.Repeat([]byte("part-one-"), 40_000)},
 		{"data/shop/orders/all_1_1_0/count.txt", []byte("40")},
@@ -53,6 +57,9 @@ func nativeBackup() []nativeObject {
 		{"metadata/shop.sql", []byte("CREATE DATABASE shop UUID 'a1485f28-bfdd-4ac8-8373-2de920367b6a' ENGINE = Atomic")},
 		{"metadata/shop/orders.sql", []byte("CREATE TABLE shop.orders UUID 'aa757254-1568-44ed-857d-b236f30e79cd' (`id` UInt64) " +
 			"ENGINE = MergeTree ORDER BY id")},
+	}
+	if structureOnly {
+		objs = objs[4:]
 	}
 	var files strings.Builder
 	for _, o := range objs {
@@ -155,7 +162,7 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		nativeCalls.mu.Unlock()
 	}
 	steps := []nativeObject{{".lock", []byte("lock")}}
-	steps = append(steps, nativeBackup()...)
+	steps = append(steps, nativeBackupOf(run.StructureOnly)...)
 	for _, obj := range steps {
 		select {
 		case reason := <-run.Stop:
@@ -770,5 +777,40 @@ func TestNativeRunQuota(t *testing.T) {
 	if r.Status != "failed" || !strings.HasPrefix(r.Error, "native byte limit: the run wrote more than 1000 B (ingest.maxRunBytes)") ||
 		!strings.Contains(r.Error, "raise ingest.maxRunBytes") {
 		t.Fatalf("run: %+v", r)
+	}
+}
+
+// R40: a dry run of a native job backs up the structure only. It goes the
+// whole way (credential, upload, signed manifest, tags) with no data, and is
+// not the last full the byte limit counts from.
+func TestNativeRunDryRun(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	run := queue(t, db, e.Job, "test", nil)
+	claimAndRun(t, e.W, run)
+	if call := nativeCallOf(t, run); !call.run.StructureOnly {
+		t.Fatal("a dry run's BACKUP is not structure only")
+	}
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "succeeded" || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	for i, b := range []*fakeBlobs{e.B1, e.B2} {
+		dir := runDir(t, db, []string{"a", "b"}[i], run)
+		_, m := readSidecar(t, b, e.kv, dir, run)
+		if m.Settings["structure_only"] != "1" || len(m.PartRows) != 0 || len(m.Objects) != len(nativeBackupOf(true)) ||
+			m.Databases[0].Objects[0].Rows != 0 || cs[i].Tier != "test" {
+			t.Fatalf("copy %d: %+v, manifest %+v", i, cs[i], m)
+		}
+		if tg := b.tags[backup.ManifestPath(dir, run)]; tg[backup.StateTag] != backup.StateComplete || tg[backup.TierTag] != "test" {
+			t.Fatalf("copy %d: manifest tagged %v", i, tg)
+		}
+	}
+	// The next scheduled run is a full one: its BACKUP has the data.
+	full := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, full)
+	if call := nativeCallOf(t, full); call.run.StructureOnly || call.quota != 1<<30 {
+		t.Fatalf("after a dry run: structure only %v, quota %d", call.run.StructureOnly, call.quota)
 	}
 }

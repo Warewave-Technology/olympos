@@ -82,13 +82,17 @@ func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
 // BackupNative implements backup.NativeEngine with RunNative.
 func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
 	return e.RunNative(ctx, ec, NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
-		Databases: run.Databases, Stop: run.Stop, Before: run.Before})
+		Databases: run.Databases, StructureOnly: run.StructureOnly, Stop: run.Stop, Before: run.Before})
 }
 
 // statementSettings are the settings backupStatement writes into the BACKUP
 // statement of a full backup: what the manifest records.
-func statementSettings(runID string) map[string]string {
-	return map[string]string{"async": "1", "allow_s3_native_copy": "0", "id": runID}
+func statementSettings(runID string, structureOnly bool) map[string]string {
+	s := map[string]string{"async": "1", "allow_s3_native_copy": "0", "id": runID}
+	if structureOnly {
+		s["structure_only"] = "1"
+	}
+	return s
 }
 
 // NativeRun is one native backup: where ClickHouse writes it, with which
@@ -108,6 +112,9 @@ type NativeRun struct {
 	// Databases are backed up whole. Empty means every database the
 	// backup user sees, except the system databases.
 	Databases []string
+	// StructureOnly backs up the databases' DDL and no data (structure_only
+	// = 1): a test run's, which checks the path end to end in seconds (R40).
+	StructureOnly bool
 	// Stop delivers why the run's ingest session stopped (a quota, a rate
 	// storm, expiry). ClickHouse retries refused uploads almost forever, so
 	// the run is then ended with KILL QUERY (spike §3).
@@ -200,6 +207,9 @@ func backupStatement(nr NativeRun) string {
 	}
 	b.WriteString(" TO S3(" + quoteString(nr.URL) + ", " + quoteString(nr.AccessKey) + ", " + quoteString(nr.Secret) + ")")
 	b.WriteString(" SETTINGS async = 1, allow_s3_native_copy = 0, id = " + quoteString(nr.RunID))
+	if nr.StructureOnly {
+		b.WriteString(", structure_only = 1")
+	}
 	if nr.Base != nil {
 		b.WriteString(", base_backup = S3(" + quoteString(nr.Base.URL) + "), use_same_s3_credentials_for_base_backup = 1")
 	}

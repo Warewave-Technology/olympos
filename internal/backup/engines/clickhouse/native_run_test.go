@@ -35,6 +35,8 @@ func TestBackupStatementGolden(t *testing.T) {
 	full := testNativeRun()
 	incr := testNativeRun()
 	incr.Base = &NativeBase{URL: "https://olympos-ingest.contoso.internal:9444/olympos/" + nrBaseID + "/", RunID: nrBaseID}
+	structureOnly := testNativeRun()
+	structureOnly.StructureOnly = true
 
 	for _, tc := range []struct {
 		name string
@@ -44,6 +46,9 @@ func TestBackupStatementGolden(t *testing.T) {
 		{"full", full, "BACKUP DATABASE `db1`, DATABASE `web-shop` TO S3(" +
 			"'https://olympos-ingest.contoso.internal:9444/olympos/" + nrRunID + "/', '" + nrKey + "', '" + nrSecret + "')" +
 			" SETTINGS async = 1, allow_s3_native_copy = 0, id = '" + nrRunID + "'"},
+		{"structure only", structureOnly, "BACKUP DATABASE `db1`, DATABASE `web-shop` TO S3(" +
+			"'https://olympos-ingest.contoso.internal:9444/olympos/" + nrRunID + "/', '" + nrKey + "', '" + nrSecret + "')" +
+			" SETTINGS async = 1, allow_s3_native_copy = 0, id = '" + nrRunID + "', structure_only = 1"},
 		{"incremental", incr, "BACKUP DATABASE `db1`, DATABASE `web-shop` TO S3(" +
 			"'https://olympos-ingest.contoso.internal:9444/olympos/" + nrRunID + "/', '" + nrKey + "', '" + nrSecret + "')" +
 			" SETTINGS async = 1, allow_s3_native_copy = 0, id = '" + nrRunID + "'" +
@@ -369,13 +374,21 @@ func TestNativeEngine(t *testing.T) {
 	}
 
 	// The manifest records the settings the statement has.
-	stmt := backupStatement(testNativeRun())
-	for k, v := range statementSettings(nrRunID) {
-		if k == "id" {
-			v = quoteString(v)
+	for _, so := range []bool{false, true} {
+		nr := testNativeRun()
+		nr.StructureOnly = so
+		stmt := backupStatement(nr)
+		settings := statementSettings(nrRunID, so)
+		if _, ok := settings["structure_only"]; ok != so {
+			t.Errorf("structure only %v: settings %v", so, settings)
 		}
-		if !strings.Contains(stmt, k+" = "+v) {
-			t.Errorf("setting %s = %s is not in %s", k, v, redactStatement(stmt))
+		for k, v := range settings {
+			if k == "id" {
+				v = quoteString(v)
+			}
+			if !strings.Contains(stmt, k+" = "+v) {
+				t.Errorf("setting %s = %s is not in %s", k, v, redactStatement(stmt))
+			}
 		}
 	}
 }

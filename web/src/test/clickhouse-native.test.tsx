@@ -109,6 +109,8 @@ describe('Backup wizard · ClickHouse method', () => {
     await toReview(user);
     const dt = await screen.findByText('Method', { selector: 'dt' }, T);
     expect(dt.nextElementSibling).toHaveTextContent('Native · weekly full, daily incrementals');
+    // a native dry run backs up the structure only (R40)
+    expect(screen.getByText(/A dry run takes a structure-only native backup \(the definitions, no data\)/)).toBeInTheDocument();
 
     const rec = recordRequests();
     try {

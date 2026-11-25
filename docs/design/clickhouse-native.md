@@ -183,6 +183,12 @@ nothing was deleted, was rejected.
    query_id = …` and checks that `system.backups` reports `BACKUP_FAILED` (spike §3). It then revokes the
    credential, and the run fails. The objects stay `incomplete`.
 
+**Test runs (R40).** A test run (the wizard's dry run) sends the same statement with `structure_only = 1`.
+ClickHouse then writes only `metadata/*.sql` and `.backup` (seen on 24.8 and 25.8), so the run checks egress,
+the certificate, the credential, the signed manifest and the tags in seconds, whatever the databases hold. Its
+manifest records the setting and has no part rows. It is not the last full of the byte limit (§9), and not a
+base (§7).
+
 ### 5. The signed manifest
 
 - **Format.** `olympos.clickhouse.native/v1`, inside the existing sidecar's `Details`:
@@ -261,7 +267,8 @@ The existing flow, with these changes for a native source:
   week, by the job's timezone, an incremental otherwise).
 - **The base (my call).** The latest run of the same job that **succeeded on every destination** and whose
   manifests verify. One `BACKUP` statement writes the same backup to every destination, so its base must exist,
-  identical, on each of them. A `partial` run is never a base, and the next run after one is a full. The base's
+  identical, on each of them. A `partial` run is never a base, and the next run after one is a full. A test run
+  is never a base either: it holds no data (R40). The base's
   reads are served from the first destination of the group that holds it.
 - **Repairs (my call).** They are off for native runs. A repair runs the engine again, so it would be a
   different backup, with a different snapshot, under the same run. The next scheduled run (a full after a
@@ -282,8 +289,8 @@ The existing flow, with these changes for a native source:
 
 ### 9. Limits and metrics
 
-- **Bytes per run (R39).** A run may write the largest of twice its job's last full native run, 1.5
-  times the size on disk of its databases (`bytes_on_disk` of their active parts, read on the target
+- **Bytes per run (R39).** A run may write the largest of twice its job's last full native run (not a test
+  run), 1.5 times the size on disk of its databases (`bytes_on_disk` of their active parts, read on the target
   before the `BACKUP`) and 1 GiB. `ingest.maxRunBytes` replaces it when set. Bytes ClickHouse sends again for an
   object already stored (a repeat, R35) are drained and not counted.
 - **Requests per run.** 200 per second.

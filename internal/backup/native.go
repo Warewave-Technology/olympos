@@ -77,6 +77,10 @@ type NativeRun struct {
 	// RunID is the backup run, a lower-case UUID.
 	RunID     string
 	Databases []string
+	// StructureOnly backs up the databases' structure and no data: a test
+	// run's (R40), which checks the whole path (egress, certificate,
+	// credential, signing, tagging) without copying the data.
+	StructureOnly bool
 	// Stop delivers why the run's ingest session stopped (a quota, a failed
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
@@ -113,6 +117,8 @@ type NativeManifestInput struct {
 	Objects []ingest.ObjectRecord
 	// Captured returns a body the session kept (Session.Captured).
 	Captured func(key string) ([]byte, bool)
+	// StructureOnly is a test run's backup (NativeRun.StructureOnly).
+	StructureOnly bool
 }
 
 // NativeManifestResult is a signed native manifest.
@@ -374,6 +380,8 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		return outcome{status: "failed", err: errIngestOff, engineFailed: true, native: true}, nil
 	}
 	runID := r.id.String()
+	// A test run (a dry run) backs up the structure only (R40).
+	test := r.trigger == "test"
 	started := time.Now().UTC()
 	copies := make([]copyResult, len(n.dests))
 	var live []*nativeDest
@@ -440,7 +448,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		return nil
 	}
 	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: nativeURL(cfg.URL, runID), AccessKey: cred.AccessKey,
-		Secret: secret, RunID: runID, Databases: n.opts.Databases, Stop: stopped.ch, Before: before})
+		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Stop: stopped.ch, Before: before})
 	cred = ingest.Credential{}
 	reason := done()
 	sess.Revoke(nativeRunEnded)
@@ -488,7 +496,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	}
 
 	res, err := n.eng.SignNativeManifest(ctx, NativeManifestInput{KV: cfg.KV, KeyName: cfg.ManifestKeyName, RunID: runID,
-		ServerVersion: version, Objects: objects, Captured: sess.Captured})
+		ServerVersion: version, Objects: objects, Captured: sess.Captured, StructureOnly: test})
 	if err != nil {
 		msg := n.scrub("native manifest: " + err.Error())
 		for _, d := range live {
@@ -673,11 +681,13 @@ func (f *stopForward) run(ctx context.Context, sess *ingest.Session) func() stri
 
 // nativeLastFull is the bytes of the job's last full native run that
 // succeeded or partly succeeded, 0 before its first. A native run is one with
-// an ingest credential; a full one's credential reads nothing.
+// an ingest credential; a full one's credential reads nothing. A test run
+// is structure only (R40), so it does not count; it is no base for an
+// incremental either (task 13's base selection leaves it out the same way).
 func nativeLastFull(ctx context.Context, q store.Querier, jobID uuid.UUID) (int64, error) {
 	var last int64
 	err := q.QueryRow(ctx, `SELECT r.bytes FROM backup_runs r WHERE r.job_id = $1 AND r.status IN ('succeeded', 'partial')
-		AND EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.scope -> 'read' IS NULL)
+		AND r.trigger <> 'test' AND EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.scope -> 'read' IS NULL)
 		ORDER BY r.finished_at DESC LIMIT 1`, jobID).Scan(&last)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil

@@ -533,6 +533,9 @@ type NativeBuild struct {
 	// Base is an incremental's base chain, verified, base first
 	// (VerifyChain); nil for a full backup.
 	Base []*NativeManifest
+	// StructureOnly is a test run's BACKUP with structure_only = 1 (R40):
+	// its .backup lists no data file, so the manifest has no part rows.
+	StructureOnly bool
 }
 
 // BuildNativeManifest builds the manifest of a native run from its .backup
@@ -581,6 +584,9 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 	}
 	byName := map[string]MetaFile{}
 	for _, f := range meta.Files {
+		if b.StructureOnly && !strings.HasPrefix(f.Name, "metadata/") {
+			return nil, metaErr("%s is in the .backup of a structure-only backup, which holds metadata only", clip(f.Name))
+		}
 		byName[f.Name] = f
 		if !f.Written() {
 			continue
@@ -749,8 +755,8 @@ func tableRows(parts map[string]uint64, db, name string) (uint64, error) {
 // a reader will (VerifySigned, the trusted key and the run), before anything
 // writes it (R25).
 func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestInput) (*backup.NativeManifestResult, error) {
-	m, err := BuildNativeManifest(NativeBuild{RunID: in.RunID, ServerVersion: in.ServerVersion, Settings: statementSettings(in.RunID),
-		Objects: in.Objects, Body: in.Captured})
+	m, err := BuildNativeManifest(NativeBuild{RunID: in.RunID, ServerVersion: in.ServerVersion,
+		Settings: statementSettings(in.RunID, in.StructureOnly), Objects: in.Objects, Body: in.Captured, StructureOnly: in.StructureOnly})
 	if err != nil {
 		return nil, err
 	}

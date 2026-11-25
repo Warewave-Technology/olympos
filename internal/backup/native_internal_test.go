@@ -183,7 +183,7 @@ func TestNativeSinkClosed(t *testing.T) {
 }
 
 // nativeLastFull: the bytes of the job's last full native run, 0 before
-// the first; logical runs and incrementals do not count.
+// the first; logical runs, incrementals and test runs do not count.
 func TestNativeLastFull(t *testing.T) {
 	db := testutil.DB(t)
 	ctx := context.Background()
@@ -203,12 +203,13 @@ func TestNativeLastFull(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Date(2026, 11, 1, 2, 0, 0, 0, time.UTC)
+	trigger := "manual"
 	finished := func(status string, bytes int64, scope string) {
 		t.Helper()
 		at = at.Add(time.Hour)
 		var id uuid.UUID
-		if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, bytes) VALUES ($1, 'manual', $2, $3, $3, $4)
-			RETURNING id`, job, status, at, bytes).Scan(&id); err != nil {
+		if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at, finished_at, bytes) VALUES ($1, $5, $2, $3, $3, $4)
+			RETURNING id`, job, status, at, bytes, trigger).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		if scope != "" {
@@ -233,6 +234,10 @@ func TestNativeLastFull(t *testing.T) {
 	finished("succeeded", 30<<30, `{"write": "z/", "read": ["x/"]}`) // an incremental
 	want(3 << 30)
 	finished("partial", 1<<20, `{"write": "w/"}`)
+	want(1 << 20)
+	// A dry run backs up the structure only (R40): it is no full.
+	trigger = "test"
+	finished("succeeded", 2<<10, `{"write": "v/"}`)
 	want(1 << 20)
 }
 
