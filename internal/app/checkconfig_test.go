@@ -41,6 +41,14 @@ func (f *fakeKV) SetSecret(_ context.Context, vault, name string, value []byte) 
 	return nil
 }
 
+func (*fakeKV) Sign(context.Context, string, []byte) ([]byte, string, error) {
+	return nil, "", errors.New("fakeKV does not sign")
+}
+
+func (*fakeKV) Verify(context.Context, string, []byte, []byte) error {
+	return errors.New("fakeKV does not verify")
+}
+
 func (f *fakeKV) KEKRecoverable(context.Context) (bool, string, error) {
 	if f.recovery == nil {
 		return true, "Recoverable", nil
