@@ -136,6 +136,11 @@ func ParseOptions(raw json.RawMessage) (Options, error) {
 	default:
 		return Options{}, &optionError{"incremental", `must be "weekly_full_daily" or empty`}
 	}
+	// A native run backs up whole databases; a table filter would be
+	// silently ignored (R31).
+	if o.Native() && len(o.Tables) > 0 {
+		return Options{}, &optionError{"tables", `cannot be used with method "native", which backs up whole databases`}
+	}
 
 	if strings.TrimSpace(o.CAPEM) != "" {
 		if !x509.NewCertPool().AppendCertsFromPEM([]byte(o.CAPEM)) {

@@ -197,6 +197,25 @@ func TestCheckNativeTarget(t *testing.T) {
 		t.Fatalf("clusters: %v", err)
 	}
 
+	// The Altinity operator's all-sharded alone does not refuse (R30); a
+	// sharded cluster next to it does, and is named.
+	q = healthyTarget("24.8.14.39")
+	q.answers["system.clusters"] = [][]string{{"all-sharded", "2"}}
+	if err := checkNativeTarget(context.Background(), q, dbs); err != nil {
+		t.Fatalf("all-sharded alone: %v", err)
+	}
+	q.answers["system.clusters"] = [][]string{{"all-sharded", "2"}, {"events", "2"}}
+	err = checkNativeTarget(context.Background(), q, dbs)
+	if !errors.Is(err, ErrNativeSharded) || !strings.Contains(err.Error(), "events with 2 shards") || strings.Contains(err.Error(), "all-sharded") {
+		t.Fatalf("all-sharded and a sharded cluster: %v", err)
+	}
+	// A Distributed table refuses even when all-sharded is the only cluster.
+	q.answers["system.clusters"] = [][]string{{"all-sharded", "3"}}
+	q.answers["'Distributed'"] = [][]string{{"db1", "all_events"}}
+	if err := checkNativeTarget(context.Background(), q, dbs); !errors.Is(err, ErrNativeSharded) || !strings.Contains(err.Error(), "db1.all_events") {
+		t.Fatalf("all-sharded and a Distributed table: %v", err)
+	}
+
 	// A check that cannot be made refuses the run.
 	for _, frag := range []string{"version()", "'Distributed'", "system.clusters"} {
 		q := healthyTarget("24.8.14.39")
@@ -204,6 +223,30 @@ func TestCheckNativeTarget(t *testing.T) {
 		if err := checkNativeTarget(context.Background(), q, dbs); err == nil || !strings.Contains(err.Error(), "ACCESS_DENIED") {
 			t.Errorf("%s fails: %v", frag, err)
 		}
+	}
+}
+
+// TestNativeThrottle pins the query settings of the native statements (R29):
+// put and get together stay under the endpoint's 200 requests a second per
+// run, bursts included.
+func TestNativeThrottle(t *testing.T) {
+	asMap := func(settings []ch.Setting) map[string]string {
+		m := map[string]string{}
+		for _, s := range settings {
+			if !s.Important {
+				t.Errorf("%s is not important: a server that does not know it would run unthrottled", s.Key)
+			}
+			m[s.Key] = s.Value
+		}
+		return m
+	}
+	want := map[string]string{"s3_max_put_rps": "150", "s3_max_put_burst": "150", "s3_max_get_rps": "40", "s3_max_get_burst": "40"}
+	if got := asMap(nativeBackupSettings); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("backup settings %v, want %v", got, want)
+	}
+	want = map[string]string{"s3_max_put_rps": "40", "s3_max_put_burst": "40", "s3_max_get_rps": "150", "s3_max_get_burst": "150"}
+	if got := asMap(nativeRestoreSettings); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("restore settings %v, want %v", got, want)
 	}
 }
 

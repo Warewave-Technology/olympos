@@ -362,7 +362,7 @@ paths:
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
-        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, engine_options, ...). ClickHouse engine_options: method must be native or logical (empty is logical) and is native only while the ingest endpoint is on (ingest_enabled of GET /backup/settings); incremental is weekly_full_daily and needs method native. Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
+        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, engine_options, ...). ClickHouse engine_options: method must be native or logical (empty is logical) and is native only while the ingest endpoint is on (ingest_enabled of GET /backup/settings); incremental is weekly_full_daily and needs method native; tables cannot be used with method native, which backs up whole databases. Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
   /backup/jobs/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -1850,7 +1850,7 @@ components:
         destination_group_id: {type: string, description: "Write to every destination of a group (docs/design/destination-groups.md)."}
         engine_options:
           type: object
-          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..], method: native|logical (default logical), incremental: weekly_full_daily (native only)}; vault: {}"
+          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..] (logical only), method: native|logical (default logical), incremental: weekly_full_daily (native only)}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}

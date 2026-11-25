@@ -170,6 +170,29 @@ func backupStatement(nr NativeRun) string {
 	return b.String()
 }
 
+// nativeThrottle are query settings (ch-go Query.Settings, not the BACKUP
+// SETTINGS clause) under which ClickHouse keeps its own S3 requests per
+// second, bursts included, below the endpoint's 200 per run (R29): without
+// them its backup threads stay over the rate, and a run of more than about
+// 6,000 objects is stopped for a rate storm (task 9, gate R17). The PUT
+// throttler counts PUT, POST, COPY and LIST, the GET throttler GET.
+func nativeThrottle(put, get int) []ch.Setting {
+	return []ch.Setting{
+		{Key: "s3_max_put_rps", Value: strconv.Itoa(put), Important: true},
+		{Key: "s3_max_put_burst", Value: strconv.Itoa(put), Important: true},
+		{Key: "s3_max_get_rps", Value: strconv.Itoa(get), Important: true},
+		{Key: "s3_max_get_burst", Value: strconv.Itoa(get), Important: true},
+	}
+}
+
+var (
+	// nativeBackupSettings go with every native BACKUP: it mostly writes.
+	nativeBackupSettings = nativeThrottle(150, 40)
+	// nativeRestoreSettings are the mirror for the native RESTORE (task 13):
+	// it mostly reads.
+	nativeRestoreSettings = nativeThrottle(40, 150)
+)
+
 // redactStatement returns s with the secret of every S3(url, key, secret,
 // …) replaced by '[HIDDEN]': the arguments from the third on. The URL and
 // the key stay. What it cannot read for certain, an unterminated quote or
@@ -311,16 +334,27 @@ func checkNativeTarget(ctx context.Context, c querier, databases []string) error
 	if err != nil {
 		return fmt.Errorf("clickhouse: read system.clusters: %w", err)
 	}
-	if len(rows) > 0 {
-		names := make([]string, 0, len(rows))
-		for _, r := range rows {
-			names = append(names, fmt.Sprintf("%s with %s shards", r[0], r[1]))
+	var names []string
+	for _, r := range rows {
+		// The Altinity operator generates all-sharded for every install,
+		// with each replica as its own shard, so an unsharded replicated
+		// install has it too (R30). A really sharded one is still refused
+		// by its own cluster and its Distributed tables.
+		if r[0] == altinityAllSharded {
+			continue
 		}
+		names = append(names, fmt.Sprintf("%s with %s shards", r[0], r[1]))
+	}
+	if len(names) > 0 {
 		return fmt.Errorf("%w: this server is in a sharded cluster (%s), and a native backup saves only the one shard it runs on. "+
 			"Use the logical method for this job", ErrNativeSharded, strings.Join(names, ", "))
 	}
 	return nil
 }
+
+// altinityAllSharded is the cluster the Altinity operator generates with
+// every replica as a shard.
+const altinityAllSharded = "all-sharded"
 
 // parseVersion reads the major and minor of version() ("24.8.14.39").
 func parseVersion(v string) (major, minor int, ok bool) {
@@ -431,7 +465,7 @@ func (s *session) runBackup(ctx context.Context, nr NativeRun) error {
 	stmt := backupStatement(nr)
 	queryID := nativeQueryID(nr.RunID)
 	log.Info("clickhouse: starting a native backup", "query_id", queryID, "statement", redactStatement(stmt))
-	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, queryID); err != nil {
+	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, queryID, nativeBackupSettings...); err != nil {
 		return fmt.Errorf("clickhouse: BACKUP: %s", maskSecret(err.Error(), nr.Secret))
 	}
 
@@ -518,13 +552,14 @@ func (s *session) backupStatus(ctx context.Context, runID string) (status, msg s
 }
 
 // nativeExec runs a statement and drops its result, within nativeQueryTimeout.
-func (s *session) nativeExec(ctx context.Context, body, queryID string) error {
+func (s *session) nativeExec(ctx context.Context, body, queryID string, settings ...ch.Setting) error {
 	ctx, cancel := context.WithTimeout(ctx, nativeQueryTimeout)
 	defer cancel()
 	var res nativeResult
 	return s.client.Do(ctx, ch.Query{
 		Body:     body,
 		QueryID:  queryID,
+		Settings: settings,
 		Result:   &res,
 		OnResult: func(context.Context, proto.Block) error { return nil },
 	})

@@ -135,6 +135,14 @@ func TestCheckOptions(t *testing.T) {
 	if f := e.CheckOptions(native, off); f["method"] == "" || len(f) != 1 {
 		t.Fatalf("native with ingest off: %v", f)
 	}
+	// A native run backs up whole databases, so a table filter is refused.
+	tables := json.RawMessage(`{"method":"native","databases":["a"],"tables":["a.t"]}`)
+	if f := e.CheckOptions(tables, on); !strings.Contains(f["tables"], `method "native"`) || len(f) != 1 {
+		t.Fatalf("native with tables: %v", f)
+	}
+	if f := e.CheckOptions(json.RawMessage(`{"method":"logical","tables":["a.t"]}`), on); f != nil {
+		t.Fatalf("logical with tables: %v", f)
+	}
 	if f := e.CheckOptions(json.RawMessage(`{"databse":["a"]}`), on); !strings.Contains(f["engine_options"], "unknown field") || len(f) != 1 {
 		t.Fatalf("typo: %v", f)
 	}

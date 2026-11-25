@@ -83,17 +83,17 @@ INSERT INTO big.blob SELECT number, randomString(4096) FROM numbers(16384);
 )
 
 // nativeParts is how many parts the table of the rate gate has (about five
-// objects each); OLYMPOS_NATIVE_PARTS changes it. ClickHouse sends far more
-// than 200 requests a second, so with 600 parts every run is over the rate
-// and its 503s are retried, and it ends before the 30 s that stop a session
-// (R17). With 2500 parts it stays over the rate for 30 s, and the session
-// is stopped for "rate" on 24.8 and 25.8 alike: the R17 gate of task 9,
-// which its report records.
+// objects each); OLYMPOS_NATIVE_PARTS changes it. Without the throttle of
+// R29, ClickHouse sends far more than 200 requests a second, and a run of
+// more than about 6,000 objects stayed over the rate for 30 s and was
+// stopped for a rate storm (task 9: 2500 parts, on 24.8 and 25.8). With it,
+// 1500 parts, about 7,500 objects, go up under the rate. That the endpoint
+// stops a client that ignores the rate is TestHandlerRateStorm's (ingest).
 var nativeParts = func() int {
 	if n, err := strconv.Atoi(os.Getenv("OLYMPOS_NATIVE_PARTS")); err == nil && n > 0 {
 		return n
 	}
-	return 600
+	return 1500
 }()
 
 func testRunNative(t *testing.T, db *store.DB, image, wantServer string) {
@@ -276,7 +276,9 @@ CREATE TABLE dist.all AS dist.local ENGINE = Distributed(default, dist, local);`
 		in.checkNoSecret(t, r, engineLogs)
 	})
 
-	// R17: a table of many parts at the real rate (200 requests a second).
+	// R17 and R29: a table of many parts at the real rate (200 requests a
+	// second). The run's throttle keeps ClickHouse under it: the run is
+	// created, longer than the 30 s that stop a storm, and not stopped.
 	t.Run("gate rate", func(t *testing.T) {
 		in := newIngest(t, db)
 		r := in.open(t, newDirStore(t, 0), nil)
@@ -291,8 +293,9 @@ CREATE TABLE dist.all AS dist.local ENGINE = Distributed(default, dist, local);`
 		if err != nil {
 			t.Fatalf("RunNative: %v", err)
 		}
-		if in.rec.count("PUT", "", 503) == 0 {
-			t.Fatal("no request was over the rate: the gate did not run")
+		chc.wantStatus(t, r.id, statusCreated)
+		if ok := in.rec.count("PUT", "", http.StatusOK); nativeParts >= 1500 && ok <= 6000 {
+			t.Fatalf("only %d objects: the run is not over the size an unthrottled run was stopped at", ok)
 		}
 		in.rec.checkR13(t)
 	})
