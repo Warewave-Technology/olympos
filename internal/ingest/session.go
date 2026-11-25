@@ -272,7 +272,7 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		source:   o.Source,
 		maxBytes: o.MaxBytes, accessKey: cred.AccessKey, expires: now.Add(o.TTL),
 		secret: cred.Secret, stopped: make(chan string, 1), captured: map[string][]byte{},
-		ended: make(chan struct{}), stored: map[string]int{}, writing: map[string]chan struct{}{},
+		ended: make(chan struct{}), stored: map[string]int{}, writing: map[string]*keyWriter{},
 		completed: map[string]completedUpload{},
 	}
 	if err := insertCredential(ctx, r.db, cred.AccessKey, o.RunID, o.Kind, s.scope,
@@ -392,12 +392,12 @@ type Session struct {
 	stopReason string
 	written    int64
 	objects    []ObjectRecord
-	// stored indexes objects by key; writing holds the keys a PutObject is
-	// writing, each closed when that write ends (claim). completed are the
-	// multipart uploads that completed, by upload ID, for a repeated
-	// CompleteMultipartUpload.
+	// stored indexes objects by key; writing holds the one writer of each
+	// key being written (R36: a PutObject or an open multipart upload).
+	// completed are the multipart uploads that completed, by upload ID, for
+	// a repeated CompleteMultipartUpload.
 	stored    map[string]int
-	writing   map[string]chan struct{}
+	writing   map[string]*keyWriter
 	completed map[string]completedUpload
 	captured  map[string][]byte
 	// capturedBytes is the size of all captured bodies.
@@ -553,38 +553,87 @@ func (s *Session) RecordObject(rec ObjectRecord) {
 	s.objects = append(s.objects, rec)
 }
 
-// claim reserves key for one PutObject. An object is written once: when key
-// is stored already, claim returns its record and stored, and nothing is to
-// be written. When another PutObject of key is still writing (a client that
-// sent it again before it saw the answer), claim waits for that one to end.
+// keyWriter is the one write of a key in progress (R36): a PutObject, or
+// the multipart upload upload. done is closed when it ends, stored or not.
+type keyWriter struct {
+	upload string
+	done   chan struct{}
+}
+
+// errUploadOpen: a PutObject of a key whose multipart upload is open.
+var errUploadOpen = errors.New("ingest: an upload of the key is open")
+
+// claimPut reserves key for one PutObject (R35, R36). An object is written
+// once: when key is stored already, it returns its record and stored, and
+// nothing is to be written. When a PutObject of key is still writing (a
+// client that sent it again before it saw the answer), it waits for that
+// one to end. A key whose multipart upload is open is errUploadOpen.
 // Otherwise the caller writes key and calls release when it is done,
 // recorded or not. It fails with errRunStopped once the session has ended.
-func (s *Session) claim(key string) (rec ObjectRecord, stored bool, release func(), err error) {
+func (s *Session) claimPut(key string) (rec ObjectRecord, stored bool, release func(), err error) {
 	for {
-		s.mu.Lock()
-		if i, ok := s.stored[key]; ok {
-			rec := s.objects[i]
-			s.mu.Unlock()
-			return rec, true, nil, nil
+		rec, stored, w, release := s.claimKey(key, "")
+		switch {
+		case stored || release != nil:
+			return rec, stored, release, nil
+		case w.upload != "":
+			return ObjectRecord{}, false, nil, errUploadOpen
 		}
-		busy, ok := s.writing[key]
-		if !ok {
-			done := make(chan struct{})
-			s.writing[key] = done
-			s.mu.Unlock()
-			return ObjectRecord{}, false, func() {
-				s.mu.Lock()
-				delete(s.writing, key)
-				s.mu.Unlock()
-				close(done)
-			}, nil
-		}
-		s.mu.Unlock()
 		select {
-		case <-busy:
+		case <-w.done:
 		case <-s.ended:
 			return ObjectRecord{}, false, nil, errRunStopped
 		}
+	}
+}
+
+// claimUpload reserves key for the multipart upload id (R36). A stored key
+// is returned as for claimPut: the upload can only end as a repeat. When a
+// PutObject of key is writing, it waits for it. When another upload of key
+// is open, it returns that upload's ID and the channel its end closes: the
+// caller aborts it, waits, and claims again. Otherwise the caller writes key
+// and calls release when the upload ends.
+func (s *Session) claimUpload(key, id string) (rec ObjectRecord, stored bool, open string, ended <-chan struct{}, release func(), err error) {
+	for {
+		rec, stored, w, release := s.claimKey(key, id)
+		switch {
+		case stored || release != nil:
+			return rec, stored, "", nil, release, nil
+		case w.upload != "":
+			return ObjectRecord{}, false, w.upload, w.done, nil, nil
+		}
+		select {
+		case <-w.done:
+		case <-s.ended:
+			return ObjectRecord{}, false, "", nil, nil, errRunStopped
+		}
+	}
+}
+
+// claimKey returns key's record when it is stored; else takes key for the
+// writer upload ("" for a PutObject) and returns its release; else returns
+// the writer that holds it.
+func (s *Session) claimKey(key, upload string) (ObjectRecord, bool, *keyWriter, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i, ok := s.stored[key]; ok {
+		return s.objects[i], true, nil, nil
+	}
+	if w, ok := s.writing[key]; ok {
+		return ObjectRecord{}, false, w, nil
+	}
+	w := &keyWriter{upload: upload, done: make(chan struct{})}
+	s.writing[key] = w
+	var once sync.Once
+	return ObjectRecord{}, false, nil, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.writing[key] == w {
+				delete(s.writing, key)
+			}
+			s.mu.Unlock()
+			close(w.done)
+		})
 	}
 }
 

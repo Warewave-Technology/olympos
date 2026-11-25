@@ -747,15 +747,19 @@ func (q *request) put() *s3Error {
 	if q.key == s.LockKey() {
 		return q.putLock(wantMD5)
 	}
-	stored, ok, release, err := s.claim(q.key)
+	stored, ok, release, err := s.claimPut(q.key)
 	switch {
+	case errors.Is(err, errUploadOpen):
+		q.h.log.Warn("ingest: the run sent a PutObject of a key it is uploading in parts", "run", s.RunID().String(), "key", q.key)
+		q.stop(ReasonRewrite)
+		return denied("An upload of the object is open; objects are written once.")
 	case err != nil:
 		return errStopped
 	case ok:
 		return q.repeatPut(stored, wantMD5)
 	}
 	defer release()
-	obj := q.h.newObject(q.r.Context(), s, q.key, nil)
+	obj := q.h.newObject(q.r.Context(), s, q.key, s.Sink(), nil)
 	d, err := q.copyBody(obj, true)
 	if err != nil {
 		return q.objectFailed(err, obj.abort)
@@ -1097,9 +1101,9 @@ type objectStream struct {
 	keepMax int64
 }
 
-// newObject starts Sink.Put for key. When the session ends first, the stream
+// newObject starts sink.Put for key (the session's Sink, or a drainSink). When the session ends first, the stream
 // is aborted, and onEnd runs if it is not nil.
-func (h *handler) newObject(ctx context.Context, s *Session, key string, onEnd func()) *objectStream {
+func (h *handler) newObject(ctx context.Context, s *Session, key string, sink Sink, onEnd func()) *objectStream {
 	ctx, cancel := context.WithCancel(ctx)
 	pr, pw := io.Pipe()
 	o := &objectStream{key: key, pw: pw, cancel: cancel, done: make(chan struct{}), finished: make(chan struct{}),
@@ -1108,7 +1112,7 @@ func (h *handler) newObject(ctx context.Context, s *Session, key string, onEnd f
 		o.keepMax = limit + 1 // one more byte, so that Capture sees a body over its limit
 	}
 	go func() {
-		_, err := s.Sink().Put(ctx, key, pr)
+		_, err := sink.Put(ctx, key, pr)
 		// A sink that returned before EOF must not leave a writer blocked.
 		pr.CloseWithError(errSinkDone)
 		o.err = err

@@ -32,8 +32,20 @@ type upload struct {
 	key string
 	obj *objectStream
 
+	// repeat is the stored record of key when the upload was created for a
+	// stored key: it writes nothing and can only end as a repeat (R36).
+	repeat *ObjectRecord
+	// release gives up the upload's claim on key; finished is closed when
+	// the upload ended (finish).
+	release    func()
+	finished   chan struct{}
+	finishOnce sync.Once
+
 	mu     sync.Mutex
 	closed bool // completed, aborted or failed
+	// completing: a CompleteMultipartUpload is storing the object; the
+	// upload stays findable until it is recorded.
+	completing bool
 	// busy is set while one request writes into obj; next is the part obj
 	// waits for.
 	busy  bool
@@ -65,8 +77,43 @@ func (q *request) createUpload() *s3Error {
 	if q.key == s.LockKey() {
 		return denied("The .lock is not uploaded in parts.")
 	}
-	u := &upload{id: randomHex(16), s: s, key: q.key, next: 1, parts: map[int]*part{}}
-	// The cap is checked before the upload starts a Sink.Put.
+	u := &upload{id: randomHex(16), s: s, key: q.key, next: 1, parts: map[int]*part{}, finished: make(chan struct{})}
+	// One writer per key (R36). ClickHouse sends CreateMultipartUpload again
+	// when it did not see the answer: the earlier upload of the key is
+	// dropped, and its sink write ended, before this one starts (a
+	// filesystem destination refuses a second write of a file in progress).
+	// A stored key's upload writes nothing and can only end as a repeat.
+	for {
+		rec, stored, open, ended, release, err := s.claimUpload(q.key, u.id)
+		if err != nil {
+			return errStopped
+		}
+		if open != "" {
+			if prev, e := h.findUpload(open, s, q.key); e == nil {
+				h.failUpload(prev, errReplaced)
+			}
+			select {
+			case <-ended:
+			case <-s.ended:
+				return errStopped
+			}
+			continue
+		}
+		if stored {
+			u.repeat = &rec
+		}
+		u.release = release
+		break
+	}
+	sink := s.Sink()
+	if u.repeat != nil {
+		sink = drainSink{}
+	}
+	// The cap is checked before the upload starts a Sink.Put. The upload
+	// outlives this request; the session's end aborts it. Until obj is set,
+	// u.mu keeps anything that ends the upload (onEnd, a later Create of the
+	// key) waiting.
+	u.mu.Lock()
 	h.mu.Lock()
 	open := 0
 	for _, other := range h.uploads {
@@ -76,15 +123,13 @@ func (q *request) createUpload() *s3Error {
 	}
 	if open >= maxUploads {
 		h.mu.Unlock()
+		u.mu.Unlock()
+		u.finish()
 		return denied("The run has too many open multipart uploads.")
 	}
 	h.uploads[u.id] = u
 	h.mu.Unlock()
-	// The upload outlives this request; the session's end aborts it. Its ID
-	// is not out yet, and u.mu keeps an early end (onEnd) waiting until obj
-	// is set.
-	u.mu.Lock()
-	u.obj = h.newObject(context.Background(), s, q.key, func() { h.failUpload(u, errRunStopped) })
+	u.obj = h.newObject(context.Background(), s, q.key, sink, func() { h.failUpload(u, errRunStopped) })
 	u.mu.Unlock()
 	if !s.live(h.reg.now()) {
 		// It ended before the upload was in the map.
@@ -93,6 +138,37 @@ func (q *request) createUpload() *s3Error {
 	}
 	writeXML(q.w, http.StatusOK, initiateResult{Xmlns: s3Namespace, Bucket: bucket, Key: q.key, UploadID: u.id})
 	return nil
+}
+
+// errReplaced aborts an upload whose key a new CreateMultipartUpload took.
+var errReplaced = errors.New("ingest: the upload was replaced by a new upload of its key")
+
+// drainSink takes the upload of a stored key, which can only end as a
+// repeat: it reads the parts and writes nothing.
+type drainSink struct{}
+
+func (drainSink) Put(_ context.Context, key string, r io.Reader) (ObjectRecord, error) {
+	n, err := io.Copy(io.Discard, r)
+	return ObjectRecord{Key: key, Size: n}, err
+}
+
+// finish ends the upload's claim on its key and wakes a repeated Complete
+// that waits for it. Only the first call counts.
+func (u *upload) finish() {
+	u.finishOnce.Do(func() {
+		if u.release != nil {
+			u.release()
+		}
+		close(u.finished)
+	})
+}
+
+// endUpload drops a completed (or failed) upload from the map, then ends it.
+func (h *handler) endUpload(u *upload) {
+	h.mu.Lock()
+	delete(h.uploads, u.id)
+	h.mu.Unlock()
+	u.finish()
 }
 
 // findUpload returns the upload id of this session and key.
@@ -109,9 +185,6 @@ func (h *handler) findUpload(id string, s *Session, key string) (*upload, *s3Err
 // failUpload ends an upload that will not complete: the sink drops the
 // object, and the waiting parts leave the disk. Only the first call counts.
 func (h *handler) failUpload(u *upload, err error) {
-	h.mu.Lock()
-	delete(h.uploads, u.id)
-	h.mu.Unlock()
 	u.mu.Lock()
 	if u.closed {
 		u.mu.Unlock()
@@ -130,7 +203,10 @@ func (h *handler) failUpload(u *upload, err error) {
 		_ = os.Remove(p.spill)
 		u.s.releaseSpill(p.reserved)
 	}
+	// The sink has returned once abort does: the claim is given up after
+	// the write ended (a destination's partial file is gone).
 	_ = obj.abort(err)
+	h.endUpload(u)
 }
 
 // partFailed is objectFailed for an upload: a failure that is not the
@@ -411,9 +487,10 @@ func (q *request) completeUpload() *s3Error {
 	if e != nil {
 		return e
 	}
-	u, e := q.h.findUpload(query.Get("uploadId"), s, q.key)
+	id := query.Get("uploadId")
+	u, e := q.h.findUpload(id, s, q.key)
 	if e != nil {
-		if c, ok := s.completedUpload(query.Get("uploadId")); ok && c.key == q.key {
+		if c, ok := s.completedUpload(id); ok && c.key == q.key {
 			return q.repeatComplete(c, wantMD5)
 		}
 		return e
@@ -432,6 +509,7 @@ func (q *request) completeUpload() *s3Error {
 		q.stop(ReasonBadDigest)
 		return e
 	}
+	listSHA := hex.EncodeToString(d.sha.Sum(nil))
 	var list completeRequest
 	if err := xml.Unmarshal(body, &list); err != nil {
 		return q.brokenUpload(u, "The part list is not valid XML.")
@@ -439,8 +517,23 @@ func (q *request) completeUpload() *s3Error {
 
 	u.mu.Lock()
 	if u.closed {
+		completing := u.completing
 		u.mu.Unlock()
-		return errNoSuchUpload
+		if !completing {
+			return errNoSuchUpload
+		}
+		// A repeat of a Complete still storing its object waits for it, and
+		// gets its answer (R35, R36).
+		select {
+		case <-u.finished:
+		case <-s.ended:
+			return errStopped
+		}
+		c, ok := s.completedUpload(id)
+		if !ok || c.key != q.key {
+			return errNoSuchUpload
+		}
+		return q.answerRepeat(c, listSHA)
 	}
 	// Every part from 1 was streamed, in order, and none waits.
 	ok := !u.busy && len(list.Parts) > 0 && len(list.Parts) == u.next-1 && len(u.parts) == u.next-1
@@ -455,23 +548,31 @@ func (q *request) completeUpload() *s3Error {
 		u.mu.Unlock()
 		return q.brokenUpload(u, "The part list does not match the parts received.")
 	}
-	u.closed = true
+	u.closed, u.completing = true, true
 	u.mu.Unlock()
-	q.h.mu.Lock()
-	delete(q.h.uploads, u.id)
-	q.h.mu.Unlock()
+	// The upload stays findable until its object is recorded, and its claim
+	// on the key held until then.
+	defer q.h.endUpload(u)
 
 	rec, e := q.finishObject(u.obj)
 	if e != nil {
 		return e
 	}
-	if e := q.stored(rec, u.obj.kept); e != nil {
+	if u.repeat != nil {
+		// The upload of a stored key: the same object again is a repeat,
+		// another one would overwrite it.
+		if rec.Size != u.repeat.Size || rec.SHA256 != u.repeat.SHA256 {
+			q.h.log.Warn("ingest: the run uploaded another object for a stored key", "run", s.RunID().String(), "key", q.key)
+			q.stop(ReasonRewrite)
+			return denied("The object is stored with other content; objects are not overwritten.")
+		}
+	} else if e := q.stored(rec, u.obj.kept); e != nil {
 		return e
 	}
 	// The whole object's ETag, with the part count, as S3 marks a multipart
 	// ETag.
 	tag := fmt.Sprintf(`"%s-%d"`, rec.SHA256[:32], len(list.Parts))
-	s.completeUpload(u.id, completedUpload{key: q.key, listSHA256: hex.EncodeToString(d.sha.Sum(nil)), etag: tag})
+	s.completeUpload(u.id, completedUpload{key: q.key, listSHA256: listSHA, etag: tag})
 	q.completed(tag)
 	return nil
 }
@@ -485,26 +586,42 @@ func (q *request) completed(tag string) {
 // completed already: a client that did not see the answer sends it again.
 // The same part list gets the same answer; another one stops the run.
 func (q *request) repeatComplete(c completedUpload, wantMD5 []byte) *s3Error {
-	_, d, err := q.readSmall(maxCompleteSize)
-	switch {
-	case errors.Is(err, errRunStopped):
-		return errStopped
-	case errors.Is(err, errWrite):
-		q.stop(ReasonRewrite)
-		return denied("The upload completed with another part list.")
-	case err != nil:
-		return errIncomplete
-	}
-	if e := q.checkDigest(d, wantMD5); e != nil {
-		q.stop(ReasonBadDigest)
+	listSHA, e := q.readPartList(wantMD5)
+	if e != nil {
 		return e
 	}
-	if hex.EncodeToString(d.sha.Sum(nil)) != c.listSHA256 {
+	return q.answerRepeat(c, listSHA)
+}
+
+// answerRepeat answers a repeated Complete with the part list of SHA-256
+// listSHA.
+func (q *request) answerRepeat(c completedUpload, listSHA string) *s3Error {
+	if listSHA != c.listSHA256 {
 		q.stop(ReasonRewrite)
 		return denied("The upload completed with another part list.")
 	}
 	q.completed(c.etag)
 	return nil
+}
+
+// readPartList reads a repeated Complete's part list and returns its
+// SHA-256.
+func (q *request) readPartList(wantMD5 []byte) (string, *s3Error) {
+	_, d, err := q.readSmall(maxCompleteSize)
+	switch {
+	case errors.Is(err, errRunStopped):
+		return "", errStopped
+	case errors.Is(err, errWrite):
+		q.stop(ReasonRewrite)
+		return "", denied("The upload completed with another part list.")
+	case err != nil:
+		return "", errIncomplete
+	}
+	if e := q.checkDigest(d, wantMD5); e != nil {
+		q.stop(ReasonBadDigest)
+		return "", e
+	}
+	return hex.EncodeToString(d.sha.Sum(nil)), nil
 }
 
 func (q *request) abortUpload() *s3Error {
