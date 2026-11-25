@@ -230,6 +230,102 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		in.checkNoSecret(t, r, engineLogs)
 	})
 
+	// The run's connection breaks mid-run: the next poll fails, and the
+	// backup is KILLed over a new connection.
+	t.Run("lost connection kills", func(t *testing.T) {
+		slow := newDirStore(t, 2<<20)
+		in := newIngest(t, db)
+		r := in.open(t, slow, nil)
+		ec := chc.ec()
+		var mu sync.Mutex
+		var conns []net.Conn
+		dial := ec.Dial
+		ec.Dial = func(ctx context.Context) (net.Conn, error) {
+			c, err := dial(ctx)
+			if err == nil {
+				mu.Lock()
+				conns = append(conns, c)
+				mu.Unlock()
+			}
+			return c, err
+		}
+		go func() {
+			select {
+			case <-slow.first:
+				mu.Lock()
+				_ = conns[0].Close()
+				mu.Unlock()
+			case <-time.After(2 * time.Minute):
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		_, err := Engine{}.RunNative(ctx, ec, NativeRun{URL: r.url, AccessKey: r.cred.AccessKey, Secret: r.cred.Secret,
+			RunID: r.id, Databases: []string{"big"}, Stop: r.s.Stopped()})
+		if err == nil || errors.Is(err, ErrNativeOrphan) || !strings.Contains(err.Error(), "KILL QUERY on a new connection made it") {
+			t.Fatalf("RunNative after a lost connection: %v", err)
+		}
+		mu.Lock()
+		n := len(conns)
+		mu.Unlock()
+		if n != 2 {
+			t.Fatalf("%d connections, want the run's and the KILL's", n)
+		}
+		if status := chc.status(t, r.id); status != statusFailed && status != statusCancelled {
+			t.Fatalf("system.backups: %s", status)
+		}
+		t.Logf("%v", err)
+		r.s.Revoke("run ended")
+		in.checkNoSecret(t, r, engineLogs)
+	})
+
+	// OLYMPOS_NATIVE_ORPHAN_PROBE=1: does a backup whose credential is
+	// revoked, with no KILL, end on its own (task 9 round 3)? Watched for
+	// 3 min, then KILLed.
+	t.Run("probe orphan", func(t *testing.T) {
+		if os.Getenv("OLYMPOS_NATIVE_ORPHAN_PROBE") != "1" {
+			t.Skip("a probe; set OLYMPOS_NATIVE_ORPHAN_PROBE=1")
+		}
+		slow := newDirStore(t, 2<<20)
+		in := newIngest(t, db)
+		r := in.open(t, slow, nil)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		s, err := connect(ctx, chc.ec(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		nr := NativeRun{URL: r.url, AccessKey: r.cred.AccessKey, Secret: r.cred.Secret, RunID: r.id, Databases: []string{"big"}}
+		if err := s.nativeExec(ctx, backupStatement(nr), nativeQueryID(r.id), nativeBackupSettings...); err != nil {
+			t.Fatalf("BACKUP: %s", maskSecret(err.Error(), nr.Secret))
+		}
+		// Revoked while a part of the big file's multipart upload streams,
+		// the case the spike saw retried (spike §3).
+		retry(t, 2*time.Minute, "an UploadPart in flight", func() (string, error) {
+			if in.rec.started("partNumber,uploadId") == 0 {
+				return "", errors.New("none yet")
+			}
+			return "", nil
+		})
+		r.s.Revoke("probe")
+		start := time.Now()
+		var status string
+		for time.Since(start) < 3*time.Minute {
+			if status = chc.status(t, r.id); status != statusCreating {
+				break
+			}
+			time.Sleep(5 * time.Second)
+		}
+		chc.query(t, "SYSTEM FLUSH LOGS")
+		t.Logf("after the revoke: %s at %s; requests:\n%s", status, time.Since(start).Round(time.Second), in.rec.summary())
+		t.Logf("system.backups error: %s", chc.query(t, "SELECT substring(error, 1, 300) FROM system.backups WHERE id = "+quoteString(r.id)))
+		if status == statusCreating {
+			t.Logf("still running at 3 min; KILL")
+			chc.query(t, "KILL QUERY WHERE query_id = "+quoteString(nativeQueryID(r.id))+" SYNC")
+		}
+	})
+
 	// The target checks run on the server before any BACKUP.
 	t.Run("refused", func(t *testing.T) {
 		chc.query(t, `CREATE DATABASE dist;
@@ -531,6 +627,16 @@ type recorder struct {
 	h    http.Handler
 	mu   sync.Mutex
 	reqs []seenRequest
+	// begun counts the requests that came in, by their parameter names.
+	begun map[string]int
+}
+
+// started is how many requests with these parameter names came in, served
+// or not yet.
+func (rc *recorder) started(params string) int {
+	rc.mu.Lock()
+	defer rc.mu.Unlock()
+	return rc.begun[params]
 }
 
 type seenRequest struct {
@@ -549,6 +655,12 @@ func (rc *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Strings(names)
 	seen := seenRequest{method: r.Method, params: strings.Join(names, ","), length: r.ContentLength}
+	rc.mu.Lock()
+	if rc.begun == nil {
+		rc.begun = map[string]int{}
+	}
+	rc.begun[seen.params]++
+	rc.mu.Unlock()
 	if r.ContentLength == 0 {
 		seen.sha256 = r.Header.Get("X-Amz-Content-Sha256")
 	}

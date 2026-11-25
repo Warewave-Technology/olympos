@@ -57,6 +57,11 @@ var (
 	// ErrNativeSharded: the target is sharded. A BACKUP without ON CLUSTER
 	// saves the shard it runs on and reports success (design §4.1).
 	ErrNativeSharded = errors.New("clickhouse: native backups of sharded targets are not supported")
+	// ErrNativeOrphan: the run lost track of its backup (a lost connection,
+	// a missing row, a KILL that did not end it), and a KILL on a new
+	// connection did not end it either. The backup may still run on the
+	// server, retrying its uploads with the revoked credential.
+	ErrNativeOrphan = errors.New("clickhouse: the native backup may still be running on the target")
 )
 
 // NativeRun is one native backup: where ClickHouse writes it, with which
@@ -373,8 +378,11 @@ func parseVersion(v string) (major, minor int, ok bool) {
 // backup is created or failed, all on one connection from ec.Dial. When
 // nr.Stop delivers or ctx is cancelled, it KILLs the backup on that
 // connection, waits up to 30 s for system.backups to show it failed, and
-// returns an error that names the reason. The caller revokes the run's
-// credential in every case.
+// returns an error that names the reason. When the run loses track of the
+// backup (its connection breaks, its row is gone, the KILL does not end it),
+// one more KILL goes over a new connection from ec.Dial; an error wrapping
+// ErrNativeOrphan says that this did not end it either. The caller revokes
+// the run's credential in every case.
 //
 // The statement and its secret are never logged or returned; errors from
 // the server have the secret masked as well.
@@ -404,7 +412,8 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 	if err := checkNativeTarget(ctx, s, dbs); err != nil {
 		return version, err
 	}
-	return version, s.runBackup(ctx, nr)
+	again := func(ctx context.Context) (*session, error) { return connect(ctx, ec, opts) }
+	return version, s.runBackup(ctx, nr, again)
 }
 
 // nativeDatabases is the run's databases, sorted: the ones named, each of
@@ -450,8 +459,15 @@ func compactStrings(sorted []string) []string {
 // nativeQueryID is the query id of a run's BACKUP, which KILL names.
 func nativeQueryID(runID string) string { return "olympos-backup-" + runID }
 
-// runBackup sends the statement and follows the backup to its end.
-func (s *session) runBackup(ctx context.Context, nr NativeRun) error {
+// redial opens a new connection to the target, for the KILL of a backup
+// whose own connection was lost.
+type redial func(ctx context.Context) (*session, error)
+
+// runBackup sends the statement and follows the backup to its end. Once the
+// statement may have reached the server, every way out that did not see
+// the backup end goes through a KILL: on the run's connection when it
+// still works, else on a new one (orphanKill).
+func (s *session) runBackup(ctx context.Context, nr NativeRun, again redial) error {
 	log := slog.Default().With("run", nr.RunID)
 	select {
 	case reason, ok := <-nr.Stop:
@@ -466,7 +482,13 @@ func (s *session) runBackup(ctx context.Context, nr NativeRun) error {
 	queryID := nativeQueryID(nr.RunID)
 	log.Info("clickhouse: starting a native backup", "query_id", queryID, "statement", redactStatement(stmt))
 	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, queryID, nativeBackupSettings...); err != nil {
-		return fmt.Errorf("clickhouse: BACKUP: %s", maskSecret(err.Error(), nr.Secret))
+		msg := maskSecret(err.Error(), nr.Secret)
+		if _, refused := ch.AsException(err); refused {
+			// The server refused the statement: no backup runs.
+			return fmt.Errorf("clickhouse: BACKUP: %s", msg)
+		}
+		// The connection failed; the backup may have started.
+		return orphanKill(log, again, nr, queryID, "BACKUP: "+msg)
 	}
 
 	tick := time.NewTicker(nativePollInterval)
@@ -474,7 +496,7 @@ func (s *session) runBackup(ctx context.Context, nr NativeRun) error {
 	for {
 		status, msg, err := s.backupStatus(context.WithoutCancel(ctx), nr.RunID)
 		if err != nil {
-			return fmt.Errorf("clickhouse: read system.backups: %s", maskSecret(err.Error(), nr.Secret))
+			return orphanKill(log, again, nr, queryID, "read system.backups: "+maskSecret(err.Error(), nr.Secret))
 		}
 		switch status {
 		case statusCreated:
@@ -484,16 +506,16 @@ func (s *session) runBackup(ctx context.Context, nr NativeRun) error {
 			return fmt.Errorf("clickhouse: native backup %s: %s", status, maskSecret(msg, nr.Secret))
 		case statusCreating:
 		case "":
-			return errors.New("clickhouse: the native backup is no longer in system.backups (did the server restart?)")
+			return orphanKill(log, again, nr, queryID, "the native backup is no longer in system.backups (did the server restart?)")
 		default:
-			return fmt.Errorf("clickhouse: native backup has the unexpected status %q", clip(status))
+			return orphanKill(log, again, nr, queryID, fmt.Sprintf("the native backup has the unexpected status %q", clip(status)))
 		}
 		select {
 		case <-tick.C:
 		case reason, ok := <-nr.Stop:
-			return s.killBackup(log, nr, queryID, "the ingest session stopped: "+stopReason(reason, ok))
+			return s.killBackup(log, again, nr, queryID, "the ingest session stopped: "+stopReason(reason, ok))
 		case <-ctx.Done():
-			return s.killBackup(log, nr, queryID, ctx.Err().Error())
+			return s.killBackup(log, again, nr, queryID, ctx.Err().Error())
 		}
 	}
 }
@@ -505,32 +527,98 @@ func stopReason(reason string, ok bool) string {
 	return reason
 }
 
-// killBackup ends a running backup with KILL QUERY … SYNC and waits up to
-// nativeKillWait for system.backups to show it failed. It always returns an
-// error that names why.
-func (s *session) killBackup(log *slog.Logger, nr NativeRun, queryID, why string) error {
+// killBackup ends a running backup with KILL QUERY … SYNC on the run's
+// connection and waits up to nativeKillWait for system.backups to show it
+// ended. When the KILL or a read fails, or the wait runs out, it tries
+// again on a new connection. It always returns an error that names why.
+func (s *session) killBackup(log *slog.Logger, again redial, nr NativeRun, queryID, why string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
 	defer cancel()
 	log.Warn("clickhouse: ending the native backup with KILL QUERY", "query_id", queryID, "reason", why)
+	status, err := s.killOn(ctx, nr, queryID)
+	switch {
+	case status == statusFailed || status == statusCancelled:
+		log.Warn("clickhouse: native backup ended by KILL QUERY", "status", status)
+		return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY made it %s", why, status)
+	case status == statusCreated:
+		return fmt.Errorf("clickhouse: native backup ended (%s), although it was created before KILL QUERY", why)
+	case err != nil:
+		return orphanKill(log, again, nr, queryID, why+"; KILL QUERY: "+maskSecret(err.Error(), nr.Secret))
+	default:
+		return orphanKill(log, again, nr, queryID, fmt.Sprintf("%s; still %s %s after KILL QUERY", why, statusText(status), nativeKillWait))
+	}
+}
+
+// orphanKill is the last try to end a backup the run lost track of: one
+// KILL QUERY … SYNC on a new connection (ec.Dial; harmless when it reaches
+// another server, which runs no such query), within nativeKillWait of its
+// own. When that does not end the backup either, the error wraps
+// ErrNativeOrphan: the backup may still run on the server. why may hold
+// server messages, masked; never the statement.
+func orphanKill(log *slog.Logger, again redial, nr NativeRun, queryID, why string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
+	defer cancel()
+	log.Warn("clickhouse: lost the native backup; KILL QUERY on a new connection", "query_id", queryID, "reason", why)
+	s, err := again(ctx)
+	if err != nil {
+		err = orphanResult(why, "", fmt.Errorf("a new connection: %s", maskSecret(err.Error(), nr.Secret)))
+	} else {
+		defer s.close()
+		status, kerr := s.killOn(ctx, nr, queryID)
+		if kerr != nil {
+			kerr = errors.New(maskSecret(kerr.Error(), nr.Secret))
+		}
+		err = orphanResult(why, status, kerr)
+	}
+	if errors.Is(err, ErrNativeOrphan) {
+		log.Error("clickhouse: the native backup may still run on the server", "query_id", queryID, "err", err)
+	}
+	return err
+}
+
+// orphanResult is orphanKill's error from what the KILL on the new
+// connection left: the last status it read ("" when none) and its error.
+func orphanResult(why, status string, killErr error) error {
+	switch {
+	case status == statusFailed || status == statusCancelled:
+		return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY on a new connection made it %s", why, status)
+	case status == statusCreated:
+		return fmt.Errorf("clickhouse: native backup ended (%s), although it was created", why)
+	case killErr != nil:
+		return fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v", ErrNativeOrphan, why, killErr)
+	default:
+		return fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s", ErrNativeOrphan, why, statusText(status))
+	}
+}
+
+func statusText(status string) string {
+	if status == "" {
+		return "not in system.backups"
+	}
+	return clip(status)
+}
+
+// killOn sends KILL QUERY … SYNC for the run's backup on s and reads its
+// status once a second until it is BACKUP_FAILED, BACKUP_CANCELLED or
+// BACKUP_CREATED, ctx ends, or the row is missing (the server does not know
+// the backup). It returns the last status read and the error that stopped
+// it, if any.
+func (s *session) killOn(ctx context.Context, nr NativeRun, queryID string) (string, error) {
 	if err := s.nativeExec(ctx, "KILL QUERY WHERE query_id = "+quoteString(queryID)+" SYNC", ""); err != nil {
-		return fmt.Errorf("clickhouse: native backup ended (%s), but KILL QUERY failed: %s", why, maskSecret(err.Error(), nr.Secret))
+		return "", err
 	}
 	for {
 		status, _, err := s.backupStatus(ctx, nr.RunID)
 		if err != nil {
-			return fmt.Errorf("clickhouse: native backup ended (%s); its status after KILL QUERY could not be read: %s",
-				why, maskSecret(err.Error(), nr.Secret))
+			return "", err
 		}
 		switch status {
-		case statusFailed, statusCancelled:
-			log.Warn("clickhouse: native backup ended by KILL QUERY", "status", status)
-			return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY made it %s", why, status)
-		case statusCreated:
-			return fmt.Errorf("clickhouse: native backup ended (%s), although it was created before KILL QUERY", why)
+		case statusFailed, statusCancelled, statusCreated, "":
+			return status, nil
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("clickhouse: native backup ended (%s), but it is still %s %s after KILL QUERY", why, clip(status), nativeKillWait)
+			return status, nil
 		case <-time.After(time.Second):
 		}
 	}

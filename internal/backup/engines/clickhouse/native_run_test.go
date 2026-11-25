@@ -313,3 +313,28 @@ func TestNativeRunHidesSecret(t *testing.T) {
 		}
 	}
 }
+
+// TestOrphanResult: what a KILL on a new connection left decides whether
+// the backup is reported as possibly still running (ErrNativeOrphan).
+func TestOrphanResult(t *testing.T) {
+	const why = "read system.backups: connection reset"
+	for _, tc := range []struct {
+		status string
+		err    error
+		orphan bool
+		want   string
+	}{
+		{statusFailed, nil, false, "made it BACKUP_FAILED"},
+		{statusCancelled, nil, false, "made it BACKUP_CANCELLED"},
+		{statusCreated, nil, false, "although it was created"},
+		{"", errors.New("dial: refused"), true, "failed: dial: refused"},
+		{statusCreating, errors.New("timeout"), true, "failed: timeout"},
+		{statusCreating, nil, true, `it is "CREATING_BACKUP"`},
+		{"", nil, true, "not in system.backups"},
+	} {
+		err := orphanResult(why, tc.status, tc.err)
+		if errors.Is(err, ErrNativeOrphan) != tc.orphan || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), why) {
+			t.Errorf("status %q, error %v: %v", tc.status, tc.err, err)
+		}
+	}
+}
