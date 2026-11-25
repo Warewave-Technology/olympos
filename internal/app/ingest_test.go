@@ -175,6 +175,7 @@ func TestIngestServerCertFiles(t *testing.T) {
 // An http ingest.url serves plain HTTP (lab use).
 func TestIngestServerPlainHTTP(t *testing.T) {
 	d := ingestDeps(t)
+	d.Cfg.DevMode = true // an http ingest.url needs it (config validation)
 	d.Cfg.Ingest.URL = "http://olympos-ingest.test:9444"
 	srv, cf, unregister, err := d.ingestServer()
 	if err != nil {

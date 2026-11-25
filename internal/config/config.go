@@ -379,6 +379,8 @@ func (c *Server) Validate() error {
 			errs = append(errs, "ingest.url must be an absolute https (or http) URL with a host")
 		case (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil:
 			errs = append(errs, "ingest.url must be only scheme, host and port, with no path or query")
+		case u.Scheme == "http" && !c.DevMode:
+			errs = append(errs, "ingest.url must be https unless devMode is on")
 		case u.Scheme == "http" && c.Ingest.TLSCertFile != "":
 			errs = append(errs, "ingest.tlsCertFile needs an https ingest.url")
 		}

@@ -1,10 +1,13 @@
 package config
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Warewave-Technology/olympos/internal/devbuild"
 )
 
 func TestSyntheticDefaults(t *testing.T) {
@@ -87,9 +90,19 @@ func TestIngestURLRequiredWhenListening(t *testing.T) {
 	if err := c.Validate(); err != nil {
 		t.Fatalf("with ingest.url: %v", err)
 	}
+	// Plain HTTP is for development only.
 	c.Ingest.URL = "http://olympos-ingest.example:9444"
-	if err := c.Validate(); err != nil || c.IngestTLS() {
-		t.Fatalf("http ingest.url: plain HTTP, no error (%v)", err)
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ingest.url must be https unless devMode is on") {
+		t.Fatalf("http ingest.url without devMode: %v", err)
+	}
+	if !c.IngestEnabled() || c.IngestTLS() {
+		t.Fatal("an http ingest.url is plain HTTP")
+	}
+	if devbuild.Enabled {
+		c.DevMode = true
+		if err := c.Validate(); err != nil {
+			t.Fatalf("http ingest.url with devMode: %v", err)
+		}
 	}
 }
 
@@ -103,7 +116,6 @@ func TestIngestValidation(t *testing.T) {
 		"path":                func(c *Server) { c.Ingest.URL = ok + "/s3" },
 		"query":               func(c *Server) { c.Ingest.URL = ok + "?a=b" },
 		"empty listener":      func(c *Server) { c.Listen.Ingest = "" },
-		"cert with http url":  func(c *Server) { c.Ingest.URL, c.Ingest.TLSCertFile, c.Ingest.TLSKeyFile = "http://h:9444", "/c", "/k" },
 		"negative maxRuns":    func(c *Server) { c.Ingest.MaxRuns = -1 },
 		"negative maxRunTime": func(c *Server) { c.Ingest.MaxRunDuration = -time.Hour },
 	} {
@@ -112,6 +124,13 @@ func TestIngestValidation(t *testing.T) {
 		mod(c)
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: want a validation error", name)
+		}
+	}
+	if devbuild.Enabled {
+		c := validServer()
+		c.DevMode, c.Ingest.URL, c.Ingest.TLSCertFile, c.Ingest.TLSKeyFile = true, "http://h:9444", "/c", "/k"
+		if err := c.Validate(); err == nil {
+			t.Error("certificate files with an http ingest.url: want a validation error")
 		}
 	}
 	// A trailing slash is fine, and with the endpoint off nothing else is checked.

@@ -162,7 +162,7 @@ listener (`listen.ingest`), and the server stores them in the backup destination
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `ingest.url` | URL | — | no | **Turns the endpoint on.** How ClickHouse reaches it: `https://host:port`, for example `https://olympos.example.internal:9444`; scheme, host and port only, no path. The internal CA issues the endpoint certificate for its host. An `http` URL serves plain HTTP, for a lab inside a trusted network only. Empty: native ClickHouse backups are off, no listener opens and nothing else under `ingest` is used. |
+| `ingest.url` | URL | — | no | **Turns the endpoint on.** How ClickHouse reaches it: `https://host:port`, for example `https://olympos.example.internal:9444`; scheme, host and port only, no path. The internal CA issues the endpoint certificate for its host. An `http` URL serves plain HTTP and is accepted only with `devMode` (lab use only: the credentials and the backup data are not encrypted). Empty: native ClickHouse backups are off, no listener opens and nothing else under `ingest` is used. |
 | `ingest.tlsCertFile` | path | — | no | Externally issued certificate for the endpoint (needs an `https` `ingest.url`). Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. Empty: the internal CA issues one for the host of `ingest.url`, and ClickHouse has to trust that CA. |
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
@@ -274,6 +274,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `gateway.tlsCertFile and gateway.tlsKeyFile must be set together` | Set both or neither. |
 | `ingest.tlsCertFile and ingest.tlsKeyFile must be set together` | Set both or neither. |
 | `ingest.url must be an absolute https (or http) URL with a host` / `ingest.url must be only scheme, host and port, with no path or query` | Fix the URL, or leave `ingest.url` out to keep the endpoint off. |
+| `ingest.url must be https unless devMode is on` | Use an `https` URL. Plain HTTP is for a lab on a dev build (`devMode`). |
 | `ingest.tlsCertFile needs an https ingest.url` / `listen.ingest must not be empty while ingest.url is set` | Use an `https` URL with certificate files; set `listen.ingest` to an address or leave it out for `:9444`. |
 | `ingest.maxRuns must be positive` / `ingest.maxRunDuration must be positive` | Use a positive value, or leave the key out for the default. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
