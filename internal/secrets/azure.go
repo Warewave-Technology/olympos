@@ -29,8 +29,9 @@ type AzureKeyVault struct {
 	mu      sync.Mutex
 	secrets map[string]*azsecrets.Client
 	keys    *azkeys.Client
-	// pub caches signing keys' public halves by key ID (<name>/<version>)
-	// for pubKeyTTL.
+	// pub caches signing keys' public halves for pubKeyTTL, by key ID
+	// (<name>/<version>) with the name lower-cased: Key Vault key names are
+	// case-insensitive, so one version is one entry whatever the spelling.
 	pub map[string]cachedPub
 	now func() time.Time // time.Now; tests set it
 }
@@ -200,10 +201,11 @@ func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.Pub
 	if a.now != nil {
 		now = a.now
 	}
+	cacheKey := strings.ToLower(name) + "/" + ver
 	a.mu.Lock()
-	e, ok := a.pub[keyID]
+	e, ok := a.pub[cacheKey]
 	if ok && now().Sub(e.fetched) >= pubKeyTTL {
-		delete(a.pub, keyID)
+		delete(a.pub, cacheKey)
 		ok = false
 	}
 	a.mu.Unlock()
@@ -240,7 +242,7 @@ func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.Pub
 	if a.pub == nil {
 		a.pub = map[string]cachedPub{}
 	}
-	a.pub[keyID] = cachedPub{key: pub, fetched: now()}
+	a.pub[cacheKey] = cachedPub{key: pub, fetched: now()}
 	a.mu.Unlock()
 	return pub, nil
 }

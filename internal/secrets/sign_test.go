@@ -269,6 +269,41 @@ func TestAzureSignVerify(t *testing.T) {
 	}
 }
 
+// TestAzurePublicKeyCacheCaseInsensitive: Key Vault key names are
+// case-insensitive, so key IDs that differ only in the name's case are one
+// cache entry: one GetKey, and one expiry for both.
+func TestAzurePublicKeyCacheCaseInsensitive(t *testing.T) {
+	ctx := context.Background()
+	f := &fakeKeyServer{gets: map[string]int{}, off: map[string]bool{}, keys: map[string]*ecdsa.PrivateKey{testCurVer: newKey(t)}}
+	srv := httptest.NewTLSServer(f)
+	defer srv.Close()
+	f.url = srv.URL
+	c, err := azkeys.NewClient(srv.URL, fakeCred{}, &azkeys.ClientOptions{
+		ClientOptions:                        azcore.ClientOptions{Transport: srv.Client(), Retry: azpolicy.RetryOptions{MaxRetries: -1}},
+		DisableChallengeResourceVerification: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kv := &AzureKeyVault{keys: c}
+	d := sha256.Sum256([]byte("manifest"))
+	sig := rawSign(t, f.keys[testCurVer], d[:])
+	for _, name := range []string{testKeyName, "OLYMPOS-MANIFEST", "Olympos-Manifest"} {
+		if err := kv.Verify(ctx, name+"/"+testCurVer, d[:], sig); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+	}
+	if gets, _ := f.fetched(); gets[testCurVer] != 1 {
+		t.Fatalf("case variants of one key ID fetched the key %d times, want 1", gets[testCurVer])
+	}
+	kv.mu.Lock()
+	n := len(kv.pub)
+	kv.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("%d cache entries for one key version, want 1", n)
+	}
+}
+
 // A malformed key ID in a response is refused, not a panic (azkeys.ID.Name).
 func TestKIDParts(t *testing.T) {
 	for kid, want := range map[string][2]string{
