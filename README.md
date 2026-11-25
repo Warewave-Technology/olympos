@@ -19,7 +19,7 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 > **Status:** v0.3.0 is the latest release: synthetic monitoring from a probe in every cluster, on top of
 > v0.2's restore from the UI and destination groups, on one server instance with Microsoft Entra ID and
-> Azure Key Vault. v0.3.1-rc.1 is the release candidate for v0.3.1 (one alert per synthetic credential that
+> Azure Key Vault. v0.3.1-rc.2 is the release candidate for v0.3.1 (one alert per synthetic credential that
 > cannot be resolved).
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 

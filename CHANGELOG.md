@@ -10,7 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 One alert per synthetic credential that cannot be resolved, merged migrations that cannot change, a
 tighter secret scan, and a test for ClickHouse restores next to a shared Keeper. Release candidate:
-v0.3.1-rc.1.
+v0.3.1-rc.2 (v0.3.1-rc.1 plus the two fixes its lab test found,
+[#69](https://github.com/Warewave-Technology/olympos/issues/69)).
 
 ### Changed
 - **One alert per synthetic credential that cannot be resolved**
