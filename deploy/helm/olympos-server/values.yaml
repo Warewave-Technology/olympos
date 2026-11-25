@@ -42,6 +42,13 @@ olympos:
     perClusterConcurrency: 2
   changeRequests:
     ttl: 72h
+  # The S3 endpoint native ClickHouse backups write to (docs/configuration.md).
+  ingest:
+    # How ClickHouse reaches the endpoint. Empty: the in-cluster Service,
+    # https://<release>-ingest.<namespace>.svc:<ingestService.port>.
+    url: ""
+    maxRuns: 4            # native runs at once; sizes the spill volume
+    maxRunDuration: 6h
 
 # Olympos' own database. bundled: a single-instance PostgreSQL 16 in the
 # same namespace (PVC, NetworkPolicy allowing only the server, generated
@@ -80,6 +87,13 @@ gatewayService:
   annotations:
     service.beta.kubernetes.io/azure-load-balancer-internal: "true"
   nodePort: null
+ingestService:
+  # ClickHouse pods dial this endpoint (HTTPS, SigV4 per run). In-cluster by
+  # default; use an internal LoadBalancer for ClickHouse outside the cluster.
+  type: ClusterIP
+  port: 9444
+  annotations: {}
+  nodePort: null
 ingress:
   enabled: false
   className: ""
@@ -89,6 +103,11 @@ ingress:
 
 # Optional externally issued gateway certificate (kubernetes.io/tls Secret).
 gatewayTLSSecret: ""
+
+# Optional externally issued ingest certificate (kubernetes.io/tls Secret).
+# Without it the internal CA issues one for the host of olympos.ingest.url:
+# ClickHouse then has to trust the internal CA.
+ingestTLSSecret: ""
 
 # Dev/lab only: persistent directory for keyVault.provider=local.
 localKeyVault:

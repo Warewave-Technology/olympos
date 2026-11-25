@@ -49,6 +49,7 @@ spec:
         ports:
         - {name: http, containerPort: 8080}
         - {name: gateway, containerPort: 8443}
+        - {name: ingest, containerPort: 9444}
         - {name: metrics, containerPort: 9090}
         readinessProbe:
           httpGet: {path: /readyz, port: metrics}
@@ -72,6 +73,10 @@ spec:
         {{- if .Values.gatewayTLSSecret }}
         - {name: gateway-tls, mountPath: /etc/olympos/gateway-tls, readOnly: true}
         {{- end }}
+        {{- if .Values.ingestTLSSecret }}
+        - {name: ingest-tls, mountPath: /etc/olympos/ingest-tls, readOnly: true}
+        {{- end }}
+        - {name: ingest-spill, mountPath: /var/lib/olympos/ingest-spill}
         {{- if eq .Values.olympos.keyVault.provider "local" }}
         - {name: localkv, mountPath: /var/lib/olympos/localkv}
         {{- end }}
@@ -98,6 +103,14 @@ spec:
       - name: gateway-tls
         secret: {secretName: {{ .Values.gatewayTLSSecret }}}
       {{- end }}
+      {{- if .Values.ingestTLSSecret }}
+      - name: ingest-tls
+        secret: {secretName: {{ .Values.ingestTLSSecret }}}
+      {{- end }}
+      # Out-of-order parts of native backups wait here (up to 1Gi per run,
+      # the handler's spill limit) plus 1Gi of slack.
+      - name: ingest-spill
+        emptyDir: {sizeLimit: {{ add (int (default 4 (default (dict) .Values.olympos.ingest).maxRuns)) 1 }}Gi}
       {{- if eq .Values.olympos.keyVault.provider "local" }}
       - name: localkv
         {{- if .Values.localKeyVault.persistence.enabled }}

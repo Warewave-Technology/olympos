@@ -36,6 +36,25 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  name: {{ .Release.Name }}-ingest
+  labels: {{- include "olympos-server.labels" . | nindent 4 }}
+  {{- with .Values.ingestService.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.ingestService.type }}
+  selector: {{- include "olympos-server.selector" . | nindent 4 }}
+  ports:
+  - name: ingest
+    port: {{ .Values.ingestService.port }}
+    targetPort: ingest
+    {{- if .Values.ingestService.nodePort }}
+    nodePort: {{ .Values.ingestService.nodePort }}
+    {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
   name: {{ .Release.Name }}-metrics
   labels: {{- include "olympos-server.labels" . | nindent 4 }}
 spec:

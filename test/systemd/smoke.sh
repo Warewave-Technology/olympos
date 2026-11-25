@@ -69,6 +69,7 @@ olympos:
   agentGatewayURL: $gw:8443
   bootstrapAdmins: ["$ADMIN"]
   listen: {http: ":8080", gateway: ":8443", metrics: "127.0.0.1:9090"}
+  ingest: {url: "https://$gw:9444"}
   keyVault: {provider: local, name: smoke, localDir: /var/lib/olympos/localkv}
   database: {dsn: "postgres:///olympos?host=/var/run/postgresql"}
   backup: {pgDumpDir: "/usr/lib/postgresql", nfsRoot: /var/lib/olympos/nfs, clickhouseClient: /usr/lib/olympos/bin/clickhouse}

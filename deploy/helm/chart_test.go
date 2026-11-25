@@ -450,3 +450,118 @@ func TestServerExternalDatabaseNeedsDSN(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// serverConfig loads the config.yaml a render produced, through the server's
+// own loader (so a duplicate key or a failed validation fails the test).
+func serverConfig(t *testing.T, docs []map[string]any) *config.Server {
+	t.Helper()
+	cm := find(docs, "ConfigMap", "o-config")
+	if cm == nil {
+		t.Fatal("no config ConfigMap")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(cm["data"].(map[string]any)["config.yaml"].(string)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("server cannot load the rendered config: %v", err)
+	}
+	return cfg
+}
+
+// #62: the ingest endpoint of native ClickHouse backups: a fourth container
+// port with its own Service, a spill volume sized from ingest.maxRuns, and
+// an optional certificate Secret.
+func TestServerIngestPort(t *testing.T) {
+	login := []string{"--set", "olympos.entra.tenantID=00000000-0000-0000-0000-0000000000aa", "--set", "olympos.entra.clientID=app",
+		"--set", "olympos.keyVault.name=kv-test"}
+	docs, err := renderServer(t, login...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := find(docs, "Deployment", "o")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+	container := spec["containers"].([]any)[0].(map[string]any)
+	var port any
+	for _, p := range container["ports"].([]any) {
+		if p.(map[string]any)["name"] == "ingest" {
+			port = p.(map[string]any)["containerPort"]
+		}
+	}
+	if port != float64(9444) && port != int64(9444) {
+		t.Errorf("container port ingest: %v", port)
+	}
+	svc := find(docs, "Service", "o-ingest")
+	if svc == nil {
+		t.Fatal("no Service o-ingest")
+	}
+	sp := svc["spec"].(map[string]any)["ports"].([]any)[0].(map[string]any)
+	if sp["name"] != "ingest" || (sp["port"] != float64(9444) && sp["port"] != int64(9444)) || sp["targetPort"] != "ingest" {
+		t.Errorf("Service port: %v", sp)
+	}
+	volume := func(docs []map[string]any, name string) map[string]any {
+		spec := find(docs, "Deployment", "o")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		for _, v := range spec["volumes"].([]any) {
+			if v.(map[string]any)["name"] == name {
+				return v.(map[string]any)
+			}
+		}
+		return nil
+	}
+	mountPath := func(docs []map[string]any, name string) string {
+		spec := find(docs, "Deployment", "o")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		for _, m := range spec["containers"].([]any)[0].(map[string]any)["volumeMounts"].([]any) {
+			if m.(map[string]any)["name"] == name {
+				return m.(map[string]any)["mountPath"].(string)
+			}
+		}
+		return ""
+	}
+	limit := func(docs []map[string]any) any {
+		v := volume(docs, "ingest-spill")
+		if v == nil {
+			return nil
+		}
+		return v["emptyDir"].(map[string]any)["sizeLimit"]
+	}
+	// maxRuns x 1Gi per run, plus 1Gi.
+	if got := limit(docs); got != "5Gi" {
+		t.Errorf("spill sizeLimit with the default 4 runs: %v, want 5Gi", got)
+	}
+	if got := mountPath(docs, "ingest-spill"); got != "/var/lib/olympos/ingest-spill" {
+		t.Errorf("spill mount: %q", got)
+	}
+	if volume(docs, "ingest-tls") != nil || mountPath(docs, "ingest-tls") != "" {
+		t.Error("no ingest-tls volume without ingestTLSSecret")
+	}
+	cfg := serverConfig(t, docs)
+	if cfg.Listen.Ingest != ":9444" || cfg.Ingest.SpillDir != "/var/lib/olympos/ingest-spill" || cfg.Ingest.MaxRuns != 4 {
+		t.Errorf("config: listen %q, %+v", cfg.Listen.Ingest, cfg.Ingest)
+	}
+	if cfg.Ingest.URL != "https://o-ingest.olympos.svc:9444" {
+		t.Errorf("default ingest.url is the in-cluster Service: %q", cfg.Ingest.URL)
+	}
+	if cfg.Ingest.TLSCertFile != "" {
+		t.Errorf("no certificate files without ingestTLSSecret: %+v", cfg.Ingest)
+	}
+
+	docs, err = renderServer(t, append(login, "--set", "olympos.ingest.maxRuns=8", "--set", "olympos.ingest.url=https://ingest.example:9444",
+		"--set", "ingestTLSSecret=ing")...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := limit(docs); got != "9Gi" {
+		t.Errorf("spill sizeLimit with 8 runs: %v, want 9Gi", got)
+	}
+	if v := volume(docs, "ingest-tls"); v == nil || v["secret"].(map[string]any)["secretName"] != "ing" {
+		t.Errorf("ingest-tls volume: %v", v)
+	}
+	if got := mountPath(docs, "ingest-tls"); got != "/etc/olympos/ingest-tls" {
+		t.Errorf("ingest-tls mount: %q", got)
+	}
+	cfg = serverConfig(t, docs)
+	if cfg.Ingest.MaxRuns != 8 || cfg.Ingest.URL != "https://ingest.example:9444" ||
+		cfg.Ingest.TLSCertFile != "/etc/olympos/ingest-tls/tls.crt" || cfg.Ingest.TLSKeyFile != "/etc/olympos/ingest-tls/tls.key" {
+		t.Errorf("config: %+v", cfg.Ingest)
+	}
+}

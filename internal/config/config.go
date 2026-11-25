@@ -33,11 +33,17 @@ type Server struct {
 		HTTP    string `yaml:"http"`    // user-facing, default :8080 (TLS terminated by ingress)
 		Gateway string `yaml:"gateway"` // agent gateway, default :8443
 		Metrics string `yaml:"metrics"` // /metrics, /healthz, /readyz; default :9090
+		// Ingest is the S3 endpoint of native ClickHouse backups, default
+		// :9444. Empty turns the endpoint off: no listener, no sessions.
+		Ingest string `yaml:"ingest"`
 		// TLSCertFile/TLSKeyFile serve the UI over HTTPS directly (systemd
 		// install, no ingress). Reloaded on SIGHUP.
 		TLSCertFile string `yaml:"tlsCertFile"`
 		TLSKeyFile  string `yaml:"tlsKeyFile"`
 	} `yaml:"listen"`
+	// ingestOff: the file sets listen.ingest to "" on purpose, which keeps
+	// the endpoint off instead of taking the :9444 default.
+	ingestOff bool
 
 	Entra struct {
 		TenantID        string `yaml:"tenantID"`
@@ -56,7 +62,10 @@ type Server struct {
 		Name           string `yaml:"name"`
 		KEKName        string `yaml:"kekName"`
 		HMACSecretName string `yaml:"hmacSecretName"`
-		LocalDir       string `yaml:"localDir"`
+		// ManifestKeyName is the Key Vault key that signs backup manifests,
+		// default olympos-manifest.
+		ManifestKeyName string `yaml:"manifestKeyName"`
+		LocalDir        string `yaml:"localDir"`
 		// ManagedIdentityClientID selects the user-assigned identity.
 		ManagedIdentityClientID string `yaml:"managedIdentityClientID"`
 		// References lets users other than global admins enter kv://
@@ -84,6 +93,11 @@ type Server struct {
 		TLSKeyFile  string   `yaml:"tlsKeyFile"`
 		ExtraSANs   []string `yaml:"extraSANs"`
 	} `yaml:"gateway"`
+
+	// Ingest is the endpoint ClickHouse writes native backups to and reads
+	// them from (listen.ingest). It is served over TLS: from the files, or
+	// else a certificate of the internal CA for the host of URL.
+	Ingest Ingest `yaml:"ingest"`
 
 	// TargetTLS configures how the server verifies targets' TLS certificates
 	// (end-to-end through the tunnel). CABundleFile holds the CAs that issue
@@ -247,6 +261,8 @@ func Load(path string) (*Server, error) {
 		} else if err := yaml.Unmarshal(b, c); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
+		// An empty listen.ingest is not the same as an absent one.
+		c.ingestOff = ingestSetEmpty(b)
 	}
 	envOverride(&c.Database.DSN, "OLYMPOS_DATABASE_DSN")
 	envOverride(&c.PublicURL, "OLYMPOS_PUBLIC_URL")
@@ -257,6 +273,49 @@ func Load(path string) (*Server, error) {
 	}
 	c.defaults()
 	return c, c.Validate()
+}
+
+// ingestSetEmpty reports whether the document sets listen.ingest to the empty
+// string (under olympos: or at the top level).
+func ingestSetEmpty(doc []byte) bool {
+	type listen struct {
+		Listen struct {
+			Ingest *string `yaml:"ingest"`
+		} `yaml:"listen"`
+	}
+	var p struct {
+		listen  `yaml:",inline"`
+		Olympos *listen `yaml:"olympos"`
+	}
+	if yaml.Unmarshal(doc, &p) != nil {
+		return false
+	}
+	l := p.listen
+	if p.Olympos != nil {
+		l = *p.Olympos
+	}
+	return l.Listen.Ingest != nil && *l.Listen.Ingest == ""
+}
+
+// Ingest configures the native-backup endpoint.
+type Ingest struct {
+	// URL is how ClickHouse reaches the endpoint (https://host:port). It is
+	// required while listen.ingest is set, and names the host of the
+	// internal-CA certificate.
+	URL string `yaml:"url"`
+	// TLSCertFile/TLSKeyFile: optional externally issued server certificate,
+	// reloaded on SIGHUP. When empty the internal CA issues one for the host
+	// of URL.
+	TLSCertFile string `yaml:"tlsCertFile"`
+	TLSKeyFile  string `yaml:"tlsKeyFile"`
+	// MaxRuns is how many native runs may hold an ingest session at once
+	// (default 4).
+	MaxRuns int `yaml:"maxRuns"`
+	// MaxRunDuration ends a native run's session (default 6h).
+	MaxRunDuration time.Duration `yaml:"maxRunDuration"`
+	// SpillDir holds out-of-order upload parts until their turn, up to 1 GiB
+	// per run. Default: the operating system's temporary directory.
+	SpillDir string `yaml:"spillDir"`
 }
 
 // DefaultDSN: local PostgreSQL over the Unix socket, peer auth, database
@@ -278,11 +337,15 @@ func (c *Server) defaults() {
 	def(&c.Listen.HTTP, ":8080")
 	def(&c.Listen.Gateway, ":8443")
 	def(&c.Listen.Metrics, ":9090")
+	if !c.ingestOff {
+		def(&c.Listen.Ingest, ":9444")
+	}
 	def(&c.Entra.AuthorityHost, "https://login.microsoftonline.com")
 	def(&c.Entra.GraphURL, "https://graph.microsoft.com")
 	def(&c.KeyVault.Provider, "azure")
 	def(&c.KeyVault.KEKName, "olympos-kek")
 	def(&c.KeyVault.HMACSecretName, "olympos-hmac")
+	def(&c.KeyVault.ManifestKeyName, "olympos-manifest")
 	def(&c.KeyVault.LocalDir, "/var/lib/olympos/localkv")
 	if c.Database.DSNRef == "" {
 		def(&c.Database.DSN, DefaultDSN)
@@ -304,6 +367,12 @@ func (c *Server) defaults() {
 	if c.Backup.PerClusterConcurrency == 0 {
 		c.Backup.PerClusterConcurrency = 2
 	}
+	if c.Ingest.MaxRuns == 0 {
+		c.Ingest.MaxRuns = 4
+	}
+	if c.Ingest.MaxRunDuration == 0 {
+		c.Ingest.MaxRunDuration = 6 * time.Hour
+	}
 	if c.ChangeRequests.TTL == 0 {
 		c.ChangeRequests.TTL = 72 * time.Hour
 	}
@@ -321,6 +390,22 @@ func (c *Server) Validate() error {
 	}
 	if (c.Gateway.TLSCertFile == "") != (c.Gateway.TLSKeyFile == "") {
 		errs = append(errs, "gateway.tlsCertFile and gateway.tlsKeyFile must be set together")
+	}
+	if (c.Ingest.TLSCertFile == "") != (c.Ingest.TLSKeyFile == "") {
+		errs = append(errs, "ingest.tlsCertFile and ingest.tlsKeyFile must be set together")
+	}
+	if c.Ingest.MaxRuns < 0 {
+		errs = append(errs, "ingest.maxRuns must be positive")
+	}
+	if c.Ingest.MaxRunDuration < 0 {
+		errs = append(errs, "ingest.maxRunDuration must be positive")
+	}
+	if c.Listen.Ingest != "" {
+		if c.Ingest.URL == "" {
+			errs = append(errs, "ingest.url is required while listen.ingest is set (empty listen.ingest turns the endpoint off)")
+		} else if u, err := url.Parse(c.Ingest.URL); err != nil || u.Host == "" || u.Scheme != "https" {
+			errs = append(errs, "ingest.url must be an absolute https URL")
+		}
 	}
 	if c.DevMode && !devbuild.Enabled {
 		errs = append(errs, "devMode is only available in development builds (go build -tags dev); release binaries have no dev login and no local key vault")
@@ -366,6 +451,15 @@ func (c *Server) GatewayHost() string {
 		h = h[:i]
 	}
 	return strings.Trim(h, "[]")
+}
+
+// IngestHost returns the host part of ingest.url, without port or brackets.
+func (c *Server) IngestHost() string {
+	u, err := url.Parse(c.Ingest.URL)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }
 
 // RefRule allows Key Vault references matching Ref (glob on
