@@ -173,6 +173,44 @@ func TestAgentIdentitySecretOnly(t *testing.T) {
 	}
 }
 
+// #59: with identity.manageSecrets=false (Argo CD, Flux) the chart renders
+// neither identity Secret, so a sync cannot write a spent bootstrap token
+// or replace an enrolled certificate, and it needs no bootstrapToken. The
+// Role, its binding and the CA stay; the probe's Secret volume is optional.
+func TestIdentitySecretsNotManaged(t *testing.T) {
+	ca := base64.StdEncoding.EncodeToString([]byte("-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"))
+	if _, err := exec.LookPath("helm"); err != nil {
+		t.Skip("helm not installed")
+	}
+	out, err := exec.Command("helm", "template", "a", "olympos-agent", "--namespace", "olympos-system",
+		"--set", "server=gw.example:8443", "--set", "serverCA="+ca, "--set", "identity.manageSecrets=false").CombinedOutput()
+	if err != nil {
+		t.Fatalf("no bootstrapToken with manageSecrets=false: %v\n%s", err, out)
+	}
+	docs := render(t, "--set", "identity.manageSecrets=false")
+	for _, name := range []string{"olympos-agent-identity", "olympos-probe-identity"} {
+		if find(docs, "Secret", name) != nil {
+			t.Errorf("Secret %s rendered with manageSecrets=false", name)
+		}
+	}
+	if find(docs, "Role", "olympos-agent-identity") == nil || find(docs, "RoleBinding", "olympos-agent-identity") == nil ||
+		find(docs, "ConfigMap", "olympos-agent-ca") == nil {
+		t.Fatal("the Role, its binding and the CA ConfigMap must stay")
+	}
+	vols := probeDeployment(t, docs).Spec.Template.Spec.Volumes
+	for _, v := range vols {
+		if v.Name == "identity" && (v.Projected == nil || v.Projected.Sources[0].Secret.Optional == nil || !*v.Projected.Sources[0].Secret.Optional) {
+			t.Fatalf("the probe's identity volume must stay optional: %+v", v)
+		}
+	}
+	// The default is unchanged: plain Helm manages both Secrets.
+	for _, name := range []string{"olympos-agent-identity", "olympos-probe-identity"} {
+		if find(render(t), "Secret", name) == nil {
+			t.Errorf("Secret %s missing by default", name)
+		}
+	}
+}
+
 func TestBenchRBACOnlyWhenEnabled(t *testing.T) {
 	if find(render(t), "Role", "olympos-agent-bench") != nil {
 		t.Fatal("bench RBAC rendered while bench.enabled=false")
@@ -264,6 +302,37 @@ func renderServer(t *testing.T, extra ...string) ([]map[string]any, error) {
 		}
 	}
 	return docs, nil
+}
+
+// #59: the bundled PostgreSQL's password from an existing Secret. helm
+// template cannot look up, so without it every GitOps render generates a
+// new password; with it the render holds no password at all, and both the
+// database and the server read the named Secret.
+func TestServerPostgreSQLExistingSecret(t *testing.T) {
+	a, err := renderServer(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := renderServer(t)
+	pw := func(docs []map[string]any) any {
+		return find(docs, "Secret", "o-postgresql")["data"].(map[string]any)["password"]
+	}
+	if pw(a) == pw(b) {
+		t.Fatal("expected a generated password per render without existingSecret (the problem this value solves)")
+	}
+	docs, err := renderServer(t, "--set", "postgresql.existingSecret=olympos-db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if find(docs, "Secret", "o-postgresql") != nil {
+		t.Fatal("existingSecret: the chart must render no password Secret")
+	}
+	for _, k := range [][2]string{{"StatefulSet", "o-postgresql"}, {"Deployment", "o"}} {
+		y, _ := yaml.Marshal(find(docs, k[0], k[1]))
+		if !strings.Contains(string(y), "secretName: olympos-db") || strings.Contains(string(y), "secretName: o-postgresql") {
+			t.Fatalf("%s %s must read the existing Secret:\n%s", k[0], k[1], y)
+		}
+	}
 }
 
 // F5: single replica by default, a second one only when explicitly enabled.

@@ -1,6 +1,10 @@
 # The Secrets the agent may read/write (SPEC §4.4): its own identity and,
 # with the probe enabled, the probe's (probe-identity.yaml), which it keeps
 # for the probe. Existing data (enrolled cert/key) is preserved across upgrades.
+# With identity.manageSecrets=false (Argo CD, Flux: helm template cannot look
+# up) the chart renders neither Secret: they are created once on the cluster
+# with the bootstrap token (docs/install.md, #59).
+{{- if eq (include "olympos-agent.manageSecrets" .) "true" }}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace "olympos-agent-identity" }}
 apiVersion: v1
 kind: Secret
@@ -18,6 +22,7 @@ stringData:
   bootstrap-token: {{ required "bootstrapToken is required on first install" .Values.bootstrapToken | quote }}
 {{- end }}
 ---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:

@@ -250,6 +250,89 @@ probe*. `probe.networkPolicy.egressCIDRs` restricts its egress at the network le
 Annotate Services to be discovered (`olympos.io/backup`, `olympos.io/vault`, `olympos.io/port`,
 `olympos.io/tls-server-name`, see SPEC §5).
 
+### Install with Argo CD or Flux
+
+Argo CD, and any pipeline that renders the charts with `helm template` (a Flux `Kustomization` of rendered
+manifests, for one), cannot use Helm's `lookup`: it finds nothing there, so two Secrets the charts keep with `lookup` would be rewritten on every sync: the bootstrap token
+would be written again into the agent's identity Secrets (the probe then retries a spent token on every
+sync, and the application never shows in sync), and the server chart would generate a new database
+password (the server then loses its database). Two values keep these Secrets out of the rendered output:
+
+- **Agent chart: `identity.manageSecrets: false`.** The chart renders neither `olympos-agent-identity` nor
+  `olympos-probe-identity`. Create them once on the cluster instead, with the bootstrap token, before the
+  application syncs. *Add cluster* and *Install probe* show the commands under **GitOps (Argo CD, Flux)**,
+  with the chart values for Git next to them. The token never goes into Git: it is valid for one hour and
+  used once, and the agent replaces it with its certificate.
+
+  ```bash
+  kubectl create namespace olympos-system --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n olympos-system create secret generic olympos-agent-identity \
+    --from-literal=bootstrap-token=<token> --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n olympos-system create secret generic olympos-probe-identity \
+    --from-literal=bootstrap-token=<token> --dry-run=client -o yaml | kubectl apply -f -
+  ```
+
+  `kubectl apply` adds the token to a Secret that exists and keeps its other keys, so the same command
+  installs a probe again on a cluster whose probe was revoked.
+
+  ![Add cluster, GitOps tab: the Secrets with the token (masked here), and the chart values for Git](images/install-gitops.png)
+- **Server chart: `postgresql.existingSecret`.** Create a Secret with a `password` key once, name it here,
+  and the chart renders no password. A Secret from Git (SealedSecrets, External Secrets) is fine here: the
+  password is meant to last.
+
+  ```bash
+  kubectl -n olympos create secret generic olympos-db --from-literal=password="$(openssl rand -base64 30)"
+  ```
+
+Never sync these Secrets with `Replace=true` (Argo CD) or `force: true` (Flux): a replace drops the keys
+the agent wrote, and the agent and the probe lose their certificates. Plain `apply` (client-side or
+server-side) keeps them.
+
+An Argo CD `Application` for the agent:
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: olympos-agent, namespace: argocd}
+spec:
+  project: default
+  destination: {server: https://kubernetes.default.svc, namespace: olympos-system}
+  source:
+    repoURL: ghcr.io/warewave-technology/charts   # registered in Argo CD as an OCI Helm repository
+    chart: olympos-agent
+    targetRevision: 0.4.0
+    helm:
+      valuesObject:            # the values from the GitOps tab of Add cluster
+        server: olympos-gw.contoso.internal:8443
+        clusterName: oke-fra-mes
+        serverCA: LS0tLS1CRUdJTi…
+        identity: {manageSecrets: false}
+  syncPolicy:
+    automated: {selfHeal: true}
+    syncOptions: [ServerSideApply=true]
+```
+
+A Flux `HelmRelease` for the agent (with an `OCIRepository` named `olympos-agent` that points at
+`oci://ghcr.io/warewave-technology/charts/olympos-agent`):
+
+```yaml
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata: {name: olympos-agent, namespace: olympos-system}
+spec:
+  interval: 10m
+  chartRef: {kind: OCIRepository, name: olympos-agent}
+  values:                      # the values from the GitOps tab of Add cluster
+    server: olympos-gw.contoso.internal:8443
+    clusterName: oke-fra-mes
+    serverCA: LS0tLS1CRUdJTi…
+    identity: {manageSecrets: false}
+```
+
+A Flux `HelmRelease` installs with Helm itself, where `lookup` works, so plain values work there too. With
+`driftDetection` on, use the two values above: the agent changes its identity Secrets after the install,
+which drift detection reports and corrects as drift. The server chart takes `postgresql.existingSecret: olympos-db` the same way.
+
 ## 4. Backup storage hardening (required)
 
 Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:

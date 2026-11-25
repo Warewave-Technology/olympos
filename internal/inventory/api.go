@@ -268,6 +268,8 @@ type InstallResponse struct {
 	Cluster   *Cluster  `json:"cluster"`
 	Command   string    `json:"command"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// GitOps is the same install for Argo CD, Flux (#59).
+	GitOps *GitOpsInstall `json:"gitops"`
 }
 
 func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
@@ -321,7 +323,7 @@ func (a *API) createCluster(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
-	httpx.JSON(w, http.StatusCreated, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp})
+	httpx.JSON(w, http.StatusCreated, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp, GitOps: a.gitopsInstall(c, token)})
 }
 
 // newToken issues a fresh bootstrap token (e.g. the first one expired, or
@@ -377,7 +379,7 @@ func (a *API) newToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp})
+	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.installCommand(c, token), ExpiresAt: exp, GitOps: a.gitopsInstall(c, token)})
 }
 
 // Roles a bootstrap token may enroll (enroll_tokens.roles).
@@ -474,7 +476,7 @@ func (a *API) newProbeToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Internal(w, r, a.Log, err)
 		return
 	}
-	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.probeInstallCommand(token), ExpiresAt: exp})
+	httpx.JSON(w, http.StatusOK, InstallResponse{Cluster: c, Command: a.probeInstallCommand(token), ExpiresAt: exp, GitOps: a.gitopsProbeInstall(token)})
 }
 
 // probeInstallCommand adds the probe to an installed agent release: the
@@ -567,8 +569,13 @@ var (
 	errNoProbe = errors.New("no probe installed")
 )
 
+// caBase64 is the serverCA value: the base64 of the internal CA's PEM.
+func (a *API) caBase64() string {
+	return base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.CA.Cert.Raw}))
+}
+
 func (a *API) installCommand(c *Cluster, token string) string {
-	ca := base64.StdEncoding.EncodeToString(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: a.CA.Cert.Raw}))
+	ca := a.caBase64()
 	lines := []string{
 		"helm upgrade --install olympos-agent " + a.chart(),
 		"--namespace olympos-system --create-namespace",

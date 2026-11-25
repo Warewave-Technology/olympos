@@ -7,6 +7,15 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Install with Argo CD or Flux** ([#59](https://github.com/Warewave-Technology/olympos/issues/59)). Argo CD
+  and other tools that render the charts with `helm template` could not keep two Secrets that the charts keep with `lookup`:
+  every sync wrote the spent bootstrap token into the agent's identity Secrets again (the probe then retried
+  it on every sync) and generated a new database password in the server chart (the server then lost its
+  database). The agent chart's `identity.manageSecrets: false` renders no identity Secrets, which are created
+  once on the cluster with the token; the server chart's `postgresql.existingSecret` takes the password from
+  a Secret the user keeps. *Add cluster* and *Install probe* show a **GitOps (Argo CD, Flux)** variant of the
+  command: the Secrets with the token, and the chart values for Git without it. See `docs/install.md`
+  (*Install with Argo CD or Flux*).
 - Releases that change the security model ship a release candidate first
   ([#60](https://github.com/Warewave-Technology/olympos/issues/60)): the release workflow refuses a final tag
   whose security-model commits are not all in an RC of the same version, before anything is published. Such a

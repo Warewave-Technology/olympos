@@ -5,6 +5,7 @@ import type { Cluster, InstallResponse } from '../api/types';
 import { CheckIcon } from '../ui/icons';
 import { tokenCountdown } from '../ui/InstallProbeDialog';
 import { Badge, CopyButton, Field, FormError, Modal, Spinner, aria, fieldError, useNow } from '../ui/kit';
+import { GitOpsCommands, InstallModePills, type InstallMode } from '../ui/InstallCommand';
 import { TagInput } from '../ui/TagInput';
 
 const NAME_RE = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
@@ -23,6 +24,7 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
   const [bench, setBench] = useState(false);
   const [localErr, setLocalErr] = useState<Record<string, string>>({});
   const [install, setInstall] = useState<InstallResponse | null>(null);
+  const [mode, setMode] = useState<InstallMode>('helm');
   const nameRef = useRef<HTMLInputElement>(null);
   const now = useNow(1000);
 
@@ -138,21 +140,30 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
         {install && cd && (
           <>
             <div>
-              <div className="spread" style={{ marginBottom: 6 }}>
-                <span className="lbl" style={{ margin: 0 }}>
-                  Run on the cluster
-                </span>
+              <div className="spread" style={{ marginBottom: 10 }}>
+                <InstallModePills mode={mode} onMode={setMode} install={install} />
                 <span aria-live="polite">
                   <Badge tone={cd.expired ? 'crit' : 'warn'}>{cd.text}</Badge>
                 </span>
               </div>
-              <pre className="code scroll" aria-label="Helm install command" tabIndex={0}>
-                {install.command}
-              </pre>
-              <div className="field-hint">
-                <span className="mono">probe.enabled=true</span> by default (synthetic monitoring). Add <span className="mono">--set probe.enabled=false</span> to install the agent alone; the cluster then shows “Probe: not installed”.
-              </div>
+              {mode === 'gitops' && install.gitops ? null : (
+                <>
+                  <span className="lbl">Run on the cluster</span>
+                  <pre className="code scroll" aria-label="Helm install command" tabIndex={0}>
+                    {install.command}
+                  </pre>
+                  <div className="field-hint">
+                    <span className="mono">probe.enabled=true</span> by default (synthetic monitoring). Add <span className="mono">--set probe.enabled=false</span> to install the agent alone; the cluster then shows “Probe: not installed”.
+                  </div>
+                </>
+              )}
             </div>
+            {mode === 'gitops' && install.gitops && (
+              <GitOpsCommands
+                gitops={install.gitops}
+                tokenNote="The token stays out of Git: it is valid for one hour and enrolls this cluster and its probe once. The agent replaces it with its certificate."
+              />
+            )}
             {online ? (
               <div className="panel" role="status">
                 <CheckIcon ok label="Connected" />
@@ -188,7 +199,7 @@ export function AddClusterDialog({ open, onClose, existing }: { open: boolean; o
         <div className="end">
           {install ? (
             <>
-              <CopyButton text={install.command} label="Copy command" />
+              {mode === 'helm' && <CopyButton text={install.command} label="Copy command" />}
               <button type="button" className="btn pri" onClick={onClose}>
                 Done
               </button>

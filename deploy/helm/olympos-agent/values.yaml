@@ -2,6 +2,14 @@
 server: ""
 # One-time bootstrap token (TTL 1 h). Only used on first install.
 bootstrapToken: ""
+identity:
+  # The chart writes the bootstrap token into the identity Secrets
+  # (olympos-agent-identity, olympos-probe-identity) and keeps what the agent
+  # enrolled there, with Helm's lookup. Argo CD, Flux and other tools that
+  # render with helm template cannot look up: set false, and create the
+  # Secrets once on the cluster with the token (docs/install.md, "Install
+  # with Argo CD or Flux"). The chart then renders neither Secret.
+  manageSecrets: true
 # Base64-encoded PEM of the Olympos internal CA (pins the server).
 serverCA: ""
 # TLS server name override (defaults to the host of `server`).

@@ -112,6 +112,8 @@ export interface InstallResponse {
   cluster: Cluster;
   command: string;
   expires_at: string;
+  /** The same install for Argo CD, Flux (#59): Secrets with the token once on the cluster, values for Git. */
+  gitops?: { secrets: string; values: string };
 }
 
 export interface Node {

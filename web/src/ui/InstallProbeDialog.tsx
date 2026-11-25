@@ -7,6 +7,7 @@ import { api } from '../api/client';
 import type { Cluster, InstallResponse, ProbeStatus } from '../api/types';
 import { age } from '../lib/format';
 import { CheckIcon } from './icons';
+import { GitOpsCommands, InstallModePills, type InstallMode } from './InstallCommand';
 import { Badge, CopyButton, FormError, Modal, Spinner, useAction, useNow, type Tone } from './kit';
 
 /** Install tokens live one hour (inventory.EnrollTokenTTL). */
@@ -92,6 +93,7 @@ export function InstallProbeDialog({ cluster, onClose }: { cluster: Cluster; onC
   const qc = useQueryClient();
   const issue = useAction<InstallResponse>();
   const [install, setInstall] = useState<InstallResponse | null>(null);
+  const [mode, setMode] = useState<InstallMode>('helm');
   // Whether the poll saw the new probe enrolled (pending) after the token was issued.
   const [sawEnrolling, setSawEnrolling] = useState(false);
   const now = useNow(1000);
@@ -146,18 +148,24 @@ export function InstallProbeDialog({ cluster, onClose }: { cluster: Cluster; onC
         {install && cd && (
           <>
             <div>
-              <div className="spread" style={{ marginBottom: 6 }}>
-                <span className="lbl" style={{ margin: 0 }}>
-                  Run on the cluster
-                </span>
+              <div className="spread" style={{ marginBottom: 10 }}>
+                <InstallModePills mode={mode} onMode={setMode} install={install} />
                 <span aria-live="polite">
                   <Badge tone={cd.expired ? 'crit' : 'warn'}>{cd.text}</Badge>
                 </span>
               </div>
-              <pre className="code scroll" aria-label="Helm upgrade command" tabIndex={0}>
-                {install.command}
-              </pre>
+              {mode === 'gitops' && install.gitops ? null : (
+                <>
+                  <span className="lbl">Run on the cluster</span>
+                  <pre className="code scroll" aria-label="Helm upgrade command" tabIndex={0}>
+                    {install.command}
+                  </pre>
+                </>
+              )}
             </div>
+            {mode === 'gitops' && install.gitops && (
+              <GitOpsCommands gitops={install.gitops} tokenNote="The token stays out of Git: it is valid for one hour and enrolls one probe. The agent replaces it with the probe's certificate." />
+            )}
             {connected ? (
               <div className="panel" role="status">
                 <CheckIcon ok label="Connected" />
@@ -192,7 +200,7 @@ export function InstallProbeDialog({ cluster, onClose }: { cluster: Cluster; onC
         <div className="end">
           {install ? (
             <>
-              <CopyButton text={install.command} label="Copy command" />
+              {mode === 'helm' && <CopyButton text={install.command} label="Copy command" />}
               <button type="button" className="btn pri" onClick={onClose}>
                 Done
               </button>
