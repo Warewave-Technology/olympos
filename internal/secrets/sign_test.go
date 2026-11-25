@@ -71,13 +71,13 @@ func (f *fakeKeyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	key, ok := f.keys[ver]
-	if name != testKeyName || !ok {
+	if !strings.EqualFold(name, testKeyName) || !ok { // names are case-insensitive
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":{"code":"KeyNotFound","message":"A key with (name/id) was not found"}}`))
 		return
 	}
-	kid := f.url + "/keys/" + name + "/" + ver
+	kid := f.url + "/keys/" + testKeyName + "/" + ver // the vault's spelling
 	w.Header().Set("Content-Type", "application/json")
 	if sign {
 		var req struct{ Alg, Value string }
@@ -247,6 +247,15 @@ func TestAzureSignVerify(t *testing.T) {
 	if err := kv.Verify(ctx, testKeyName+"/00000000000000000000000000000000", digest, sig); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("unknown version: %v", err)
 	}
+	// Key Vault key names are case-insensitive: the key ID has the vault's
+	// spelling of the name.
+	sigUpper, idUpper, err := kv.Sign(ctx, "Olympos-Manifest", digest)
+	if err != nil || idUpper != keyID {
+		t.Fatalf("sign with another case: %q %v", idUpper, err)
+	}
+	if err := kv.Verify(ctx, idUpper, digest, sigUpper); err != nil {
+		t.Fatal(err)
+	}
 	if _, _, err := kv.Sign(ctx, "no-such-key", digest); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("unknown key: %v", err)
 	}
@@ -276,5 +285,16 @@ func TestKIDParts(t *testing.T) {
 	}
 	if n, v := kidParts(nil); n != "" || v != "" {
 		t.Errorf("nil: %q %q", n, v)
+	}
+}
+
+func TestKeyIDName(t *testing.T) {
+	if n, err := KeyIDName(testKeyName + "/" + testCurVer); err != nil || n != testKeyName {
+		t.Fatalf("%q %v", n, err)
+	}
+	for _, bad := range []string{"", testKeyName, testKeyName + "/", "/" + testCurVer, "a/b/c", "../x/1"} {
+		if n, err := KeyIDName(bad); err == nil {
+			t.Errorf("%q: %q", bad, n)
+		}
 	}
 }

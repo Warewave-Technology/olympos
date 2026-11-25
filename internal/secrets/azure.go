@@ -164,14 +164,16 @@ func (a *AzureKeyVault) Sign(ctx context.Context, keyName string, digest []byte)
 	if err != nil {
 		return nil, "", keyError("sign with key "+keyName, err)
 	}
+	// Key Vault key names are case-insensitive; the key ID keeps the vault's
+	// spelling.
 	name, ver := kidParts(resp.KID)
-	if name != keyName || !validKVName(ver) {
+	if !strings.EqualFold(name, keyName) || !validKVName(name) || !validKVName(ver) {
 		return nil, "", fmt.Errorf("sign with key %s: the response names no version of the key", keyName)
 	}
 	if len(resp.Result) != 64 {
 		return nil, "", fmt.Errorf("sign with key %s: %d-byte signature, want 64 (ES256)", keyName, len(resp.Result))
 	}
-	return resp.Result, keyName + "/" + ver, nil
+	return resp.Result, name + "/" + ver, nil
 }
 
 // Verify checks sig locally with the public key of the version keyID names.
@@ -220,7 +222,7 @@ func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.Pub
 	if k == nil {
 		return nil, fmt.Errorf("get key %s: the response has no key", keyID)
 	}
-	if n, v := kidParts(k.KID); n != name || v != ver {
+	if n, v := kidParts(k.KID); !strings.EqualFold(n, name) || v != ver {
 		return nil, fmt.Errorf("get key %s: the response is for another key", keyID)
 	}
 	if resp.Attributes != nil && resp.Attributes.Enabled != nil && !*resp.Attributes.Enabled {

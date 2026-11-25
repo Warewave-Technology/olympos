@@ -34,6 +34,13 @@ type KeyVault interface {
 	// stays enabled while a backup it signed is within retention. A bad
 	// signature is ErrSignatureInvalid; an unknown key or version is
 	// ErrKeyNotFound; a disabled version is ErrKeyDisabled.
+	//
+	// Verify checks the signature against the key version keyID names; it
+	// does not decide which key is trusted. Callers MUST check that keyID's
+	// name is the key they trust (for manifests, keyVault.manifestKeyName)
+	// before calling it: a key ID read from storage can name any key in the
+	// vault. KeyIDName returns the name; compare it case-insensitively, as
+	// Key Vault key names are.
 	Verify(ctx context.Context, keyID string, digest, sig []byte) error
 }
 
@@ -54,6 +61,13 @@ var ErrKeyNotFound = errors.New("key vault key not found")
 // ErrKeyDisabled is returned when the key version a key ID names is
 // disabled in the vault: what it signed no longer verifies.
 var ErrKeyDisabled = errors.New("key vault key version disabled")
+
+// KeyIDName returns the key name in a key ID (<name>/<version>), for the
+// caller to pin before Verify.
+func KeyIDName(keyID string) (string, error) {
+	name, _, err := parseKeyID(keyID)
+	return name, err
+}
 
 // parseKeyID splits a key ID, <name>/<version>, as Sign returns it.
 func parseKeyID(keyID string) (name, version string, err error) {
