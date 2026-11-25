@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"math/big"
 	"reflect"
+	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,11 +40,16 @@ func testNativeManifest() *NativeManifest {
 		BaseManifestSHA256: sum("base"),
 		ServerVersion:      "25.8.1.1",
 		Settings:           map[string]string{"compression_method": "zstd", "base_backup": "run-1", "id": "run-2"},
+		// Every DDLKey below is one of these objects. The data part is last:
+		// TestVerifyRefusesTamper drops it.
 		Objects: []ingest.ObjectRecord{
 			{Key: "run-2/metadata/sales/orders.sql", Size: 120, SHA256: sum("orders.sql")},
 			{Key: "run-2/.backup", Size: 4096, SHA256: sum(".backup")},
-			{Key: "run-2/data/sales/orders/all_1_1_0/data.bin", Size: 1 << 20, SHA256: sum("data.bin")},
+			{Key: "run-2/metadata/sales/orders_mv.sql", Size: 140, SHA256: sum("orders_mv.sql")},
+			{Key: "run-2/metadata/sales/by_day.sql", Size: 90, SHA256: sum("by_day.sql")},
+			{Key: "run-2/metadata/dicts/countries.sql", Size: 300, SHA256: sum("countries.sql")},
 			{Key: "run-2/metadata/sales.sql", Size: 0, SHA256: sum("")},
+			{Key: "run-2/data/sales/orders/all_1_1_0/data.bin", Size: 1 << 20, SHA256: sum("data.bin")},
 		},
 		Databases: []NativeDatabase{
 			{Name: "sales", Objects: []NativeObject{
@@ -249,7 +256,7 @@ func TestSignVerify(t *testing.T) {
 	if !bytes.Equal(got.Canonical(), m.Canonical()) {
 		t.Fatalf("verified manifest differs:\n got %s\nwant %s", got.Canonical(), m.Canonical())
 	}
-	if got.RunID != "run-2" || got.Settings["id"] != "run-2" || len(got.Objects) != 4 || len(got.Databases) != 2 {
+	if got.RunID != "run-2" || got.Settings["id"] != "run-2" || len(got.Objects) != 7 || len(got.Databases) != 2 {
 		t.Fatalf("verified manifest: %+v", got)
 	}
 
@@ -327,6 +334,20 @@ func TestVerifyReordered(t *testing.T) {
 	if !bytes.Equal(got.Canonical(), testNativeManifest().Canonical()) {
 		t.Fatal("verified manifest differs")
 	}
+	// The lists come back in canonical order, not in the stored one: the
+	// same manifest, whatever the order it was stored in.
+	want := testNativeManifest()
+	slices.SortFunc(want.Objects, func(x, y ingest.ObjectRecord) int { return strings.Compare(x.Key, y.Key) })
+	slices.SortFunc(want.Databases, func(x, y NativeDatabase) int { return strings.Compare(x.Name, y.Name) })
+	for _, d := range want.Databases {
+		slices.SortFunc(d.Objects, func(x, y NativeObject) int { return strings.Compare(x.Name, y.Name) })
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("not in canonical order:\n got %+v\nwant %+v", got, want)
+	}
+	if got.Objects[0].Key != "run-2/.backup" || got.Databases[0].Name != "dicts" || got.Databases[1].Objects[0].Name != "by_day" {
+		t.Fatalf("not sorted: %+v", got)
+	}
 }
 
 // TestVerifyRefusesTamper: one byte changed anywhere in the signed JSON is
@@ -347,7 +368,7 @@ func TestVerifyRefusesTamper(t *testing.T) {
 		func(m *NativeManifest) { m.Objects[0].Size++ },
 		func(m *NativeManifest) { m.Databases[0].Objects[1].Rows = 41 },
 		func(m *NativeManifest) { m.Settings["extra"] = "1" },
-		func(m *NativeManifest) { m.Objects = m.Objects[1:] },
+		func(m *NativeManifest) { m.Objects = m.Objects[:len(m.Objects)-1] },
 	} {
 		var top map[string]json.RawMessage
 		_ = json.Unmarshal(raw, &top)
@@ -435,6 +456,22 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 		"hash without a base":    strings.Replace(raw, `"base_run_id":"run-1"`, `"base_run_id":""`, 1),
 		"bad base hash":          strings.Replace(raw, sum("base"), h[:10], 1),
 		"key id without version": strings.Replace(raw, `"key_id":"olympos-manifest/1"`, `"key_id":"olympos-manifest"`, 1),
+		"DDL not an object":      strings.Replace(raw, `"ddl_key":"run-2/metadata/sales/by_day.sql"`, `"ddl_key":"run-2/metadata/sales/nope.sql"`, 1),
+		"no DDL":                 strings.Replace(raw, `"ddl_key":"run-2/metadata/sales/by_day.sql"`, `"ddl_key":""`, 1),
+		"DDL of another run":     strings.Replace(raw, `"ddl_key":"run-2/metadata/sales/by_day.sql"`, `"ddl_key":"run-1/metadata/sales/by_day.sql"`, 1),
+		"DDL climbing out":       strings.Replace(raw, `"ddl_key":"run-2/metadata/sales/by_day.sql"`, `"ddl_key":"run-2/../run-1/metadata/sales/by_day.sql"`, 1),
+		"object of another run":  strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-1/.backup"`, 1),
+		"object climbing out":    strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-2/../run-1/.backup"`, 1),
+		"object with a dot":      strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-2/./.backup"`, 1),
+		"object with empty part": strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-2//.backup"`, 1),
+		"object that is the run": strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-2/"`, 1),
+		"object under a prefix":  strings.Replace(raw, `"key":"run-2/.backup"`, `"key":"run-22/.backup"`, 1),
+		"run id with a slash":    strings.Replace(raw, `"run_id":"run-2"`, `"run_id":"run-2/data"`, 1),
+		"run id dot-dot":         strings.Replace(raw, `"run_id":"run-2"`, `"run_id":".."`, 1),
+		"null signature":         regexpSig.ReplaceAllString(raw, `"signature":null`),
+		"empty signature":        regexpSig.ReplaceAllString(raw, `"signature":""`),
+		"short signature":        regexpSig.ReplaceAllString(raw, `"signature":"`+base64.StdEncoding.EncodeToString(make([]byte, 63))+`"`),
+		"long signature":         regexpSig.ReplaceAllString(raw, `"signature":"`+base64.StdEncoding.EncodeToString(make([]byte, 65))+`"`),
 		"signature not base64":   strings.Replace(raw, `"signature":"`, `"signature":"*`, 1),
 	}
 	for name, bad := range cases {
@@ -469,6 +506,8 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 	}
 }
 
+var regexpSig = regexp.MustCompile(`"signature":"[^"]*"`)
+
 func mustB64(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(s)
@@ -487,6 +526,15 @@ func TestSignRefusesInvalid(t *testing.T) {
 		"bad sha256":    func(m *NativeManifest) { m.Objects[0].SHA256 = "x" },
 		"negative size": func(m *NativeManifest) { m.Objects[0].Size = -1 },
 		"bad utf-8":     func(m *NativeManifest) { m.Settings["k"] = "\xff" },
+		"DDL not an object": func(m *NativeManifest) {
+			m.Databases[0].Objects[0].DDLKey = "run-2/metadata/sales/nope.sql"
+		},
+		"object of another run": func(m *NativeManifest) { m.Objects[1].Key = "run-1/.backup" },
+		"object climbing out":   func(m *NativeManifest) { m.Objects[1].Key = "run-2/../run-1/.backup" },
+		"DDL of another run": func(m *NativeManifest) {
+			m.Objects[0].Key = "run-1/metadata/sales/orders.sql"
+			m.Databases[0].Objects[1].DDLKey = "run-1/metadata/sales/orders.sql"
+		},
 	} {
 		kv := newFakeVault()
 		m := testNativeManifest()

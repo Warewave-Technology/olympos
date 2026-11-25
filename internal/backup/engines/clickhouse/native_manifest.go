@@ -273,7 +273,8 @@ func Sign(ctx context.Context, kv secrets.KeyVault, keyName string, m *NativeMan
 // storage can name any key in the vault, and kv.Verify does not decide which
 // is trusted. Everything that is not exactly a valid manifest is
 // ErrManifestInvalid, refused before the vault is asked; a signature that
-// does not verify is the vault's error, wrapped.
+// does not verify is the vault's error, wrapped. The manifest it returns
+// has its lists in canonical order, whatever order they were stored in.
 func VerifySigned(ctx context.Context, kv secrets.KeyVault, trustedKeyName string, raw []byte) (*NativeManifest, error) {
 	refuse := func(format string, a ...any) (*NativeManifest, error) {
 		return nil, fmt.Errorf("%w: %s", ErrManifestInvalid, fmt.Sprintf(format, a...))
@@ -312,15 +313,20 @@ func VerifySigned(ctx context.Context, kv secrets.KeyVault, trustedKeyName strin
 	if trustedKeyName == "" || !strings.EqualFold(name, trustedKeyName) {
 		return refuse("signed by key %q, not by the manifest key %q", name, trustedKeyName)
 	}
-	// Strict: the unused bits of the last character must be zero, so a
-	// signature has one encoding.
+	// Strict refuses non-zero unused bits in the last character. That is
+	// tidiness, not uniqueness: Strict still skips \r and \n, and ES256
+	// signatures are malleable anyway. Nothing relies on one encoding.
 	sig, err := base64.StdEncoding.Strict().DecodeString(sig64)
 	if err != nil {
 		return refuse("signature: %v", err)
 	}
-	if err := kv.Verify(ctx, keyID, m.digest(), sig); err != nil {
-		return nil, fmt.Errorf("verify native manifest %s: %w", m.RunID, err)
+	if len(sig) != 64 {
+		return refuse("signature is %d bytes, want 64 (ES256 r||s)", len(sig))
 	}
+	if err := kv.Verify(ctx, keyID, m.digest(), sig); err != nil {
+		return nil, fmt.Errorf("verify native manifest %q: %w", m.RunID, err)
+	}
+	m.sortCanonical()
 	return m, nil
 }
 
@@ -477,8 +483,10 @@ func (m *NativeManifest) validate() error {
 	if m.Format != NativeManifestFormat {
 		return bad("format %q, want %q", m.Format, NativeManifestFormat)
 	}
-	if m.RunID == "" {
-		return bad("no run id")
+	// Every key is under "<run-id>/": a manifest vouches only for its own
+	// run's objects, never for another run's or a path that climbs out.
+	if m.RunID == "" || strings.Contains(m.RunID, "/") || m.RunID == "." || m.RunID == ".." {
+		return bad("run id %q is not one path segment", m.RunID)
 	}
 	if (m.BaseRunID == "") != (m.BaseManifestSHA256 == "") {
 		return bad("a base run id and its manifest's SHA-256 go together")
@@ -497,6 +505,8 @@ func (m *NativeManifest) validate() error {
 			return bad("an object without a key")
 		case keys[o.Key]:
 			return bad("object %q twice", o.Key)
+		case !m.ownKey(o.Key):
+			return bad("object %q is not under %q", o.Key, m.RunID+"/")
 		case o.Size < 0:
 			return bad("object %q: size %d", o.Key, o.Size)
 		case !isSHA256Hex(o.SHA256):
@@ -520,7 +530,12 @@ func (m *NativeManifest) validate() error {
 			switch o.Kind {
 			case KindTable, KindView, KindMaterializedView, KindDictionary:
 			default:
-				return bad("%s.%s: kind %q", d.Name, o.Name, o.Kind)
+				return bad("%q.%q: kind %q", d.Name, o.Name, o.Kind)
+			}
+			// The DDL runs as SQL on the target: it must be an object of the
+			// run, so its SHA-256 is signed with the rest.
+			if !keys[o.DDLKey] {
+				return bad("%q.%q: DDL %q is not an object of the run", d.Name, o.Name, o.DDLKey)
 			}
 			strs = append(strs, d.Name, o.Name, o.Engine, o.DDLKey)
 		}
@@ -531,6 +546,32 @@ func (m *NativeManifest) validate() error {
 		}
 	}
 	return nil
+}
+
+// ownKey reports whether key is "<run-id>/<path>" with no empty, "." or
+// ".." segment in <path>.
+func (m *NativeManifest) ownKey(key string) bool {
+	rest, ok := strings.CutPrefix(key, m.RunID+"/")
+	if !ok {
+		return false
+	}
+	for seg := range strings.SplitSeq(rest, "/") {
+		if seg == "" || seg == "." || seg == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+// sortCanonical puts the lists in the order Canonical writes them, so what
+// VerifySigned returns does not depend on the order it was stored in. Keys
+// and names are unique in a valid manifest: the order is total.
+func (m *NativeManifest) sortCanonical() {
+	slices.SortFunc(m.Objects, func(x, y ingest.ObjectRecord) int { return strings.Compare(x.Key, y.Key) })
+	slices.SortFunc(m.Databases, func(x, y NativeDatabase) int { return strings.Compare(x.Name, y.Name) })
+	for _, d := range m.Databases {
+		slices.SortFunc(d.Objects, func(x, y NativeObject) int { return strings.Compare(x.Name, y.Name) })
+	}
 }
 
 func isSHA256Hex(s string) bool {
