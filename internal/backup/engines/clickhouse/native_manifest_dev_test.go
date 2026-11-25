@@ -17,7 +17,7 @@ func TestNativeManifestLocalKeyVault(t *testing.T) {
 	ctx := context.Background()
 	kv := &secrets.LocalKeyVault{Dir: t.TempDir()}
 	raw := signedJSON(t, kv, testManifestKey, testNativeManifest())
-	got, err := VerifySigned(ctx, kv, testManifestKey, raw)
+	got, err := VerifySigned(ctx, kv, testManifestKey, testRunID, raw)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,7 +25,7 @@ func TestNativeManifestLocalKeyVault(t *testing.T) {
 		t.Fatal("verified manifest differs")
 	}
 	bad := bytes.Replace(raw, []byte(`"key_id":"`+testManifestKey+`/1"`), []byte(`"key_id":"`+testManifestKey+`/2"`), 1)
-	if _, err := VerifySigned(ctx, kv, testManifestKey, bad); !errors.Is(err, secrets.ErrKeyNotFound) {
+	if _, err := VerifySigned(ctx, kv, testManifestKey, testRunID, bad); !errors.Is(err, secrets.ErrKeyNotFound) {
 		t.Fatalf("unknown key version: %v", err)
 	}
 }
