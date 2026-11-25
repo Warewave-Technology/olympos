@@ -198,11 +198,15 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
   // Native ClickHouse backups need the server's ingest endpoint (ingest.url).
   const settingsQ = useQuery({ queryKey: ['backup-settings'], queryFn: () => api.get<BackupSettings>('/backup/settings'), enabled: isClickHouse, staleTime: 60_000 });
+  // The wizard has no table filter control: a job that has one (set through the API) stays logical.
+  const tables = (job?.engine_options?.tables as string[] | undefined) ?? [];
   const nativeReason = !isClickHouse
     ? null
     : belowNativeVersion(target.detected_version)
       ? `Native backups need ClickHouse 24.8 or later; this server runs ${target.detected_version}.`
-      : settingsQ.data?.ingest_enabled === false
+      : tables.length > 0
+        ? `This job backs up only some tables (${tables.slice(0, 3).join(', ')}${tables.length > 3 ? ` and ${tables.length - 3} more` : ''}); native backups take whole databases. Keep Logical, or remove the table filter through the API.`
+        : settingsQ.data?.ingest_enabled === false
         ? 'Native backups need the ingest endpoint, which is off on this server. An admin turns it on with ingest.url (docs/configuration.md#ingest).'
         : null;
   const nativeChecking = isClickHouse && settingsQ.isPending;
@@ -394,7 +398,8 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const destErr = fe('destination_id') ?? fe('destination_group_id');
   const tlsHint = target.tls_ok ? 'TLS verified' : target.tls_ok === false ? 'no TLS' : 'TLS not probed';
   const stepHint = (s: Step) => (s === 'target' ? `${target.service} · ${tlsHint}` : s === 'credentials' && isVault ? 'Olympos AppRole, no password' : STEP_INFO[s].hint);
-  const methodErr = fe('method') ?? fe('tables');
+  const tablesErr = fe('tables');
+  const methodErr = fe('method') ?? (tablesErr ? `Table filter: ${tablesErr}` : undefined);
   const incrementalErr = fe('incremental');
   const annotation = [
     'metadata:',

@@ -42,6 +42,26 @@ async function toReview(user: ReturnType<typeof userEvent.setup>) {
   await screen.findByRole('heading', { name: 'Review & test run' }, T);
 }
 
+/** An existing job of metrics-ch-dr (ClickHouse 24.8) with these engine_options, for the edit tests. */
+function editJob(engine_options: Record<string, unknown>) {
+  const base = db.jobs.find((x) => x.target.service === 'metrics-ch')!;
+  const j = { ...base, id: `job-${Math.random().toString(16).slice(2)}`, target: db.tByService('metrics-ch-dr'), engine_options };
+  db.jobs.push(j);
+  return j;
+}
+
+function dropJob(j: { id: string }) {
+  db.jobs.splice(db.jobs.findIndex((x) => x.id === j.id), 1);
+}
+
+/** Opens an existing job's wizard on its Backup method step. */
+async function toMethodOf(user: ReturnType<typeof userEvent.setup>, j: { id: string; target: { id: string } }) {
+  await renderApp(`/backups/new?target=${j.target.id}&job=${j.id}`);
+  await user.click(await screen.findByRole('button', { name: /^Backup method/ }, T));
+  await screen.findByRole('heading', { name: 'Backup method' }, T);
+  await waitFor(() => expect(screen.queryByText('Checking whether this server takes native backups…')).toBeNull(), T);
+}
+
 /** Records the non-GET requests the page sends; `answer` may replace the response. */
 function recordRequests(answer?: (method: string, path: string) => Response | undefined) {
   const sent: { method: string; path: string; body: Record<string, unknown> }[] = [];
@@ -163,6 +183,75 @@ describe('Backup wizard · ClickHouse method', () => {
     expect(native).toHaveAccessibleDescription('Native backups need ClickHouse 24.8 or later; this server runs 24.3.');
     expect(screen.getByRole('radio', { name: /^Logical/ })).toBeChecked();
   });
+
+  it('keeps an existing logical job on Logical on 24.8 or later with the ingest endpoint on', async () => {
+    const user = userEvent.setup();
+    const j = editJob({ databases: ['metrics'] });
+    try {
+      await toMethodOf(user, j);
+      const native = screen.getByRole('radio', { name: /^Native/ });
+      expect(native).toBeEnabled();
+      expect(native).not.toBeChecked();
+      expect(screen.getByRole('radio', { name: /^Logical/ })).toBeChecked();
+      expect(screen.queryByText('Before the first native run')).toBeNull();
+    } finally {
+      dropJob(j);
+    }
+  });
+
+  it('refuses to save an existing native job while the ingest endpoint is off', async () => {
+    localStorage.setItem(INGEST_OFF, '1');
+    const user = userEvent.setup();
+    const j = editJob({ databases: ['metrics'], method: 'native', incremental: 'weekly_full_daily' });
+    try {
+      await toMethodOf(user, j);
+      const native = screen.getByRole('radio', { name: /^Native/ });
+      expect(native).toBeChecked();
+      expect(native).toHaveAccessibleDescription(/Native backups need the ingest endpoint, which is off on this server/);
+      await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+      // still on the method step, the reason on the Method field
+      expect(screen.getByRole('heading', { name: 'Backup method' })).toBeInTheDocument();
+      expect(screen.getByRole('group', { name: 'Method' })).toHaveAccessibleDescription(/Native backups need the ingest endpoint, which is off on this server/);
+      await user.click(screen.getByRole('radio', { name: /^Logical/ }));
+      await user.click(screen.getByRole('button', { name: 'Next: destination' }));
+      await screen.findByRole('heading', { name: 'Destination & schedule' }, T);
+    } finally {
+      dropJob(j);
+    }
+  });
+
+  it('disables Native for a job with a table filter, and keeps the filter and the CA when saving', async () => {
+    const user = userEvent.setup();
+    const pem = '-----BEGIN CERTIFICATE-----\nMIIBlab\n-----END CERTIFICATE-----';
+    const j = editJob({ databases: ['metrics'], tables: ['metrics.events', 'metrics.sessions'], ca_pem: pem });
+    let refuse = true; // the first save is refused on tables
+    const rec = recordRequests((method) => {
+      if (method !== 'PATCH' || !refuse) return undefined;
+      refuse = false;
+      const body = JSON.stringify({ error: 'invalid job', fields: { tables: 'cannot be used with method "native", which backs up whole databases' } });
+      return new Response(body, { status: 422, headers: { 'content-type': 'application/json' } });
+    });
+    try {
+      await toMethodOf(user, j);
+      const native = screen.getByRole('radio', { name: /^Native/ });
+      expect(native).toBeDisabled();
+      expect(native).toHaveAccessibleDescription(
+        'This job backs up only some tables (metrics.events, metrics.sessions); native backups take whole databases. Keep Logical, or remove the table filter through the API.',
+      );
+      await toReview(user);
+      await user.click(screen.getByRole('button', { name: 'Save changes' }));
+      // a refused table filter is named on the method step
+      await screen.findByRole('heading', { name: 'Backup method' }, T);
+      expect(screen.getByText('Table filter: cannot be used with method "native", which backs up whole databases')).toBeInTheDocument();
+      await toReview(user);
+      await user.click(screen.getByRole('button', { name: 'Save changes' }));
+      await waitFor(() => expect(rec.sent.filter((c) => c.method === 'PATCH')).toHaveLength(2), T);
+      expect(rec.sent.at(-1)!.body.engine_options).toEqual({ databases: ['metrics'], tables: ['metrics.events', 'metrics.sessions'], ca_pem: pem, method: 'logical', incremental: '' });
+    } finally {
+      rec.restore();
+      dropJob(j);
+    }
+  }, 15_000);
 });
 
 const operator = { principal: { object_id: 'o1', name: 'Op' }, is_guest: false, roles: ['operator'], grants: [], permissions: { read: true, operate: true }, dev_mode: false } as unknown as Me;
@@ -210,8 +299,9 @@ describe('run page · native run', () => {
     expect(screen.queryByText(/To restore by hand/)).toBeNull();
     expect(screen.queryByText('Download the backup and its manifest')).toBeNull();
     expect(screen.queryByRole('group', { name: 'Restore from copy' })).toBeNull();
-    expect(screen.getByText(/A native backup has no commands to restore by hand\./)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Restore…' })).toBeInTheDocument();
+    // R38: native restore is not available yet
+    expect(screen.getByText('Native restore is not available yet; the backup is kept. A native backup has no commands to restore by hand.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restore…' })).toBeNull();
   });
 
   it('shows a succeeded native run with no repair note, and a logical run with no method row', async () => {

@@ -659,9 +659,16 @@ const stages = {
   // method step of the wizard, then a native run and its run page. Needs the
   // server's ingest endpoint (ingest.url) and a native-ready ClickHouse in the
   // lab; ClickHouse reaches the endpoint directly, not through the agent.
+  // A lab without them skips the stage, so the later stages still run.
   async clickhouseNative() {
     const page = await signIn('admin');
-    if (!(await apiCall(page, 'GET', '/backup/settings')).ingest_enabled) throw new Error('the lab server has no ingest.url: native ClickHouse backups are off');
+    const ingest = (await apiCall(page, 'GET', '/backup/settings')).ingest_enabled;
+    const target = (await apiCall(page, 'GET', '/targets')).items.find((x) => x.service === NATIVE_CH && x.cluster_name === 'lab' && x.status !== 'gone');
+    if (!ingest || !target) {
+      console.log(`  skipped: ${!ingest ? 'the lab server has no ingest.url (native ClickHouse backups are off)' : `no ${NATIVE_CH} target in the lab cluster`}`);
+      await page.context().close();
+      return;
+    }
     const dropCH = () => chSQL(NATIVE_CH, 'backup', NATIVE_CH_PASSWORD, ['DROP DATABASE IF EXISTS shop SYNC']);
     dropCH();
     try {
@@ -702,7 +709,7 @@ const stages = {
       await openRun(page, NATIVE_CH, (rows) => rows.filter({ hasText: 'Succeeded' }).filter({ hasNotText: 'test' }));
       const dlg = page.getByRole('dialog');
       await dlg.getByText(/^· [\d,]+ objects?$/).waitFor();
-      await dlg.getByText('A native backup has no commands to restore by hand.', { exact: false }).waitFor();
+      await dlg.getByText('Native restore is not available yet; the backup is kept.', { exact: false }).waitFor();
       await dump(page, 'native run dialog');
       await shot(page, 'clickhouse-native-02-run', dlg);
       await page.keyboard.press('Escape');

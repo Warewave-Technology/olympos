@@ -280,7 +280,9 @@ const RESTORABLE_ENGINES = ['postgresql', 'clickhouse', 'vault'];
  * not a dry run, with at least one succeeded copy) of an engine the server restores. Olympos' own
  * database is restored with the server stopped (docs/restore-olympos.md).
  */
-export const uiRestorable = (run: BackupRunDetail) => !!run.restore && (run.restore.copies?.length ?? 1) > 0 && RESTORABLE_ENGINES.includes(run.engine) && run.target_service !== 'olympos-self';
+export const uiRestorable = (run: BackupRunDetail) =>
+  // R38: native ClickHouse runs are refused as a source until native restore lands
+  !!run.restore && (run.restore.copies?.length ?? 1) > 0 && RESTORABLE_ENGINES.includes(run.engine) && run.target_service !== 'olympos-self' && run.method !== 'native';
 
 export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const [runId, setRunId] = useState(id);
@@ -379,17 +381,15 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             {run.restore && mayRestore && uiRestorable(run) && (
               <div className="spread" style={{ alignItems: 'center' }}>
                 <p className="small" style={{ margin: 0 }}>
-                  <b>Restore…</b> loads this backup into a new target after a second person approves it. {native ? 'A native backup has no commands to restore by hand.' : 'Or restore by hand with the commands below.'}
+                  <b>Restore…</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.
                 </p>
                 <button ref={restoreBtn} type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
                   Restore…
                 </button>
               </div>
             )}
-            {native ? (
-              run.restore && !(mayRestore && uiRestorable(run)) ? (
-                <p className="muted small">A native backup has no commands to restore by hand: it is restored with Restore… into a new target, which needs the operator role.</p>
-              ) : null
+            {native && run.restore ? (
+              <p className="muted small">Native restore is not available yet; the backup is kept. A native backup has no commands to restore by hand.</p>
             ) : run.restore ? (
               <RestoreWithCopies guide={run.restore} runId={run.id} runCopies={run.copies} onSelect={setCopy} onOpenRepair={open} pending={q.isPlaceholderData} />
             ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (
