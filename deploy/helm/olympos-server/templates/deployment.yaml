@@ -1,6 +1,8 @@
 {{- if and (gt (int .Values.replicas) 1) (not .Values.experimental.multiReplica) }}
 {{- fail "olympos-server v0.1 runs as a single replica (replicas: 1). Tunnels only open on the replica an agent is connected to, so more replicas would work only sometimes. See docs/install.md; experimental.multiReplica=true overrides this, unsupported." }}
 {{- end }}
+{{- /* The ingest endpoint (native ClickHouse backups) is on only with this URL. */}}
+{{- $ingestURL := (default (dict) .Values.olympos.ingest).url }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,7 +51,9 @@ spec:
         ports:
         - {name: http, containerPort: 8080}
         - {name: gateway, containerPort: 8443}
+        {{- if $ingestURL }}
         - {name: ingest, containerPort: 9444}
+        {{- end }}
         - {name: metrics, containerPort: 9090}
         readinessProbe:
           httpGet: {path: /readyz, port: metrics}
@@ -73,10 +77,12 @@ spec:
         {{- if .Values.gatewayTLSSecret }}
         - {name: gateway-tls, mountPath: /etc/olympos/gateway-tls, readOnly: true}
         {{- end }}
+        {{- if $ingestURL }}
         {{- if .Values.ingestTLSSecret }}
         - {name: ingest-tls, mountPath: /etc/olympos/ingest-tls, readOnly: true}
         {{- end }}
         - {name: ingest-spill, mountPath: /var/lib/olympos/ingest-spill}
+        {{- end }}
         {{- if eq .Values.olympos.keyVault.provider "local" }}
         - {name: localkv, mountPath: /var/lib/olympos/localkv}
         {{- end }}
@@ -103,6 +109,7 @@ spec:
       - name: gateway-tls
         secret: {secretName: {{ .Values.gatewayTLSSecret }}}
       {{- end }}
+      {{- if $ingestURL }}
       {{- if .Values.ingestTLSSecret }}
       - name: ingest-tls
         secret: {secretName: {{ .Values.ingestTLSSecret }}}
@@ -111,6 +118,7 @@ spec:
       # the handler's spill limit) plus 1Gi of slack.
       - name: ingest-spill
         emptyDir: {sizeLimit: {{ add (int (default 4 (default (dict) .Values.olympos.ingest).maxRuns)) 1 }}Gi}
+      {{- end }}
       {{- if eq .Values.olympos.keyVault.provider "local" }}
       - name: localkv
         {{- if .Values.localKeyVault.persistence.enabled }}

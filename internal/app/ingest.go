@@ -17,12 +17,15 @@ import (
 // wrap it in a recover. The server sets no read or write timeout (a part
 // takes as long as ClickHouse needs); the sessions bound a run.
 //
-// The returned certFile (nil for the internal-CA certificate) is reloaded on
-// SIGHUP, and unregister takes the endpoint's metrics off /metrics.
+// With an http ingest.url it serves plain HTTP (lab use, inside a trusted
+// network). The returned certFile (nil for the internal-CA certificate) is
+// reloaded on SIGHUP, and unregister takes the endpoint's metrics off /metrics.
 func (d *Deps) ingestServer() (srv *http.Server, cf *certFile, unregister func(), err error) {
-	tlsCfg, cf, err := d.ingestTLS()
-	if err != nil {
-		return nil, nil, nil, err
+	var tlsCfg *tls.Config // nil: an http ingest.url serves plain HTTP
+	if d.Cfg.IngestTLS() {
+		if tlsCfg, cf, err = d.ingestTLS(); err != nil {
+			return nil, nil, nil, err
+		}
 	}
 	m := ingest.NewMetrics()
 	if err := metrics.Registry.Register(m); err != nil {
@@ -47,7 +50,7 @@ func (d *Deps) ingestTLS() (*tls.Config, *certFile, error) {
 		c.GetCertificate = cf.get
 		return c, cf, nil
 	}
-	get, err := d.internalServerCert("ingest", []string{d.Cfg.IngestHost()})
+	get, err := d.internalServerCert("ingest", []string{d.Cfg.IngestHost()}, certValidity)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -55,14 +58,22 @@ func (d *Deps) ingestTLS() (*tls.Config, *certFile, error) {
 	return c, nil, nil
 }
 
-// internalServerCert issues a 90-day certificate of the internal CA for
-// hosts, and re-issues it when it has less than 30 days left (a systemd
-// service can run longer than that). what names the listener in the log.
-func (d *Deps) internalServerCert(what string, hosts []string) (func(*tls.ClientHelloInfo) (*tls.Certificate, error), error) {
+// certValidity is the validity of the server certificates the internal CA
+// issues for the gateway and the ingest endpoint.
+const certValidity = 90 * 24 * time.Hour
+
+// renewBefore is how long before expiry such a certificate is re-issued.
+const renewBefore = 30 * 24 * time.Hour
+
+// internalServerCert issues a certificate of the internal CA for hosts, valid
+// for validity, and re-issues it when it has less than renewBefore left (a
+// systemd service can run longer than that). what names the listener in the
+// log.
+func (d *Deps) internalServerCert(what string, hosts []string, validity time.Duration) (func(*tls.ClientHelloInfo) (*tls.Certificate, error), error) {
 	var mu sync.Mutex
 	var cur *tls.Certificate
 	issue := func() error {
-		der, key, err := d.CA.IssueServerCert(hosts, 90*24*time.Hour)
+		der, key, err := d.CA.IssueServerCert(hosts, validity)
 		if err != nil {
 			return err
 		}
@@ -77,7 +88,7 @@ func (d *Deps) internalServerCert(what string, hosts []string) (func(*tls.Client
 	return func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 		mu.Lock()
 		defer mu.Unlock()
-		if time.Until(cur.Leaf.NotAfter) < 30*24*time.Hour {
+		if time.Until(cur.Leaf.NotAfter) < renewBefore {
 			if err := issue(); err != nil {
 				d.Log.Error("renew "+what+" certificate", "err", err)
 			}

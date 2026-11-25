@@ -43,9 +43,11 @@ olympos:
   changeRequests:
     ttl: 72h
   # The S3 endpoint native ClickHouse backups write to (docs/configuration.md).
+  # Off until `url` is set: only then the chart opens the port, the Service,
+  # the spill volume and the certificate mount.
   ingest:
-    # How ClickHouse reaches the endpoint. Empty: the in-cluster Service,
-    # https://<release>-ingest.<namespace>.svc:<ingestService.port>.
+    # How ClickHouse reaches the endpoint, e.g.
+    # https://<release>-ingest.<namespace>.svc:9444 (the in-cluster Service).
     url: ""
     maxRuns: 4            # native runs at once; sizes the spill volume
     maxRunDuration: 6h

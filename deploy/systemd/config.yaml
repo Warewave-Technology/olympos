@@ -8,7 +8,6 @@ olympos:
   listen:
     http: ":8080"
     gateway: ":8443"
-    ingest: ":9444"                                    # native ClickHouse backups; "" turns it off
     metrics: "127.0.0.1:9090"
     # Serve the UI over HTTPS directly (otherwise put a reverse proxy in front):
     # tlsCertFile: /etc/olympos/tls/ui.crt
@@ -16,10 +15,6 @@ olympos:
   # gateway:                                           # optional own gateway certificate
   #   tlsCertFile: /etc/olympos/tls/gateway.crt
   #   tlsKeyFile: /etc/olympos/tls/gateway.key
-  ingest:                                              # needed while listen.ingest is set
-    url: https://olympos.example.internal:9444         # CHANGE: how ClickHouse reaches the ingest port
-    # tlsCertFile: /etc/olympos/tls/ingest.crt         # optional own certificate (default: internal CA)
-    # tlsKeyFile: /etc/olympos/tls/ingest.key
   entra:
     tenantID: ""                                       # CHANGE
     clientID: ""                                       # CHANGE

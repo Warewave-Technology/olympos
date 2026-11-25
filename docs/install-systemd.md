@@ -16,7 +16,6 @@ protection**, backup storage). The VM needs:
 - outbound HTTPS to Entra ID, Key Vault and your backup destinations;
 - inbound `:8443` from every agent (gRPC, mTLS — do not put a TLS-terminating proxy in front of it) and the UI
   port from users;
-- inbound `:9444` from the ClickHouse pods, only if you back up ClickHouse natively (the ingest endpoint, HTTPS);
 - **Key Vault access:** on an Azure VM assign a user-assigned managed identity and set
   `keyVault.managedIdentityClientID` (the server then asks the VM's managed identity endpoint, IMDS, for it;
   on AKS the server uses Workload Identity instead, see [Azure prerequisites](azure.md)). On other hosts use a service principal with a
@@ -90,8 +89,7 @@ Logs go to journald: `journalctl -u olympos-server` (JSON lines, secrets redacte
 ## 4. Configure
 
 Edit `/etc/olympos/config.yaml` (every key: [Configuration](configuration.md)): at least `publicURL`,
-`agentGatewayURL`, `ingest.url`, `entra`, `bootstrapAdmins`, `keyVault`. (`ingest.url` is how ClickHouse reaches
-the native-backup endpoint on `:9444`; without that endpoint, set `listen.ingest: ""` instead.) Then:
+`agentGatewayURL`, `entra`, `bootstrapAdmins`, `keyVault`. Then:
 
 ```bash
 sudo -u olympos olympos-server check-config -db    # validates files, tools and the database login
@@ -107,8 +105,6 @@ curl -fsS http://127.0.0.1:9090/readyz
   `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`; otherwise keep a high port.
 - **Gateway (`:8443`):** by default the internal CA issues the certificate (agents pin that CA) and renews it
   itself. An own certificate: `gateway.tlsCertFile` / `gateway.tlsKeyFile`.
-- **Ingest (`:9444`):** the same: the internal CA issues a certificate for the host of `ingest.url`, or use
-  `ingest.tlsCertFile` / `ingest.tlsKeyFile`.
 - Renewed certificate files are picked up with `sudo systemctl reload olympos-server` (SIGHUP; no restart, no
   dropped agent streams). Other configuration changes need a restart.
 

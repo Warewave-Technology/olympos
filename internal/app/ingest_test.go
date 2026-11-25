@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/Warewave-Technology/olympos/internal/config"
+	"github.com/Warewave-Technology/olympos/internal/gateway"
 	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/pki"
@@ -168,5 +169,83 @@ func TestIngestServerCertFiles(t *testing.T) {
 	tr.CloseIdleConnections()
 	if err := get(c); err != nil {
 		t.Fatalf("after the reload: %v", err)
+	}
+}
+
+// An http ingest.url serves plain HTTP (lab use).
+func TestIngestServerPlainHTTP(t *testing.T) {
+	d := ingestDeps(t)
+	d.Cfg.Ingest.URL = "http://olympos-ingest.test:9444"
+	srv, cf, unregister, err := d.ingestServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unregister)
+	if cf != nil || srv.TLSConfig != nil {
+		t.Fatal("an http ingest.url has no TLS")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(l) }()
+	t.Cleanup(func() { _ = srv.Close() })
+	resp, err := http.Get("http://" + l.Addr().String() + "/olympos/run/obj")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("unsigned request: %d", resp.StatusCode)
+	}
+}
+
+// The gateway's internal-CA certificate (shared issuing code with the ingest
+// endpoint) covers the host of agentGatewayURL and gateway.extraSANs, is
+// signed by the CA, is kept while valid and re-issued when close to expiry.
+func TestGatewayTLSInternalCA(t *testing.T) {
+	d := ingestDeps(t)
+	d.Cfg.AgentGatewayURL = "gw.test:8443"
+	d.Cfg.Gateway.ExtraSANs = []string{"gw-alt.test", "10.1.2.3"}
+	d.Gateway = gateway.New(d.DB, d.CA, d.Log)
+	c, cf, err := d.gatewayTLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cf != nil || c.GetCertificate == nil || len(c.Certificates) != 0 {
+		t.Fatalf("internal CA: a certificate callback, no file, no static certificate (%v, %d)", cf, len(c.Certificates))
+	}
+	first, err := c.GetCertificate(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"gw.test", "gw-alt.test", "10.1.2.3"} {
+		if err := first.Leaf.VerifyHostname(name); err != nil {
+			t.Errorf("certificate does not cover %s: %v", name, err)
+		}
+	}
+	if _, err := first.Leaf.Verify(x509.VerifyOptions{Roots: d.CA.Pool(), DNSName: "gw.test"}); err != nil {
+		t.Errorf("not signed by the internal CA: %v", err)
+	}
+	if again, _ := c.GetCertificate(nil); again != first {
+		t.Error("a certificate with more than 30 days left is kept")
+	}
+
+	// Close to expiry (29 days of validity < 30 days renewBefore): every
+	// handshake re-issues.
+	get, err := d.internalServerCert("gateway", []string{"gw.test"}, 29*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := get(nil)
+	b, err := get(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b || a.Leaf.SerialNumber.Cmp(b.Leaf.SerialNumber) == 0 {
+		t.Error("a certificate with less than 30 days left is re-issued")
+	}
+	if err := b.Leaf.VerifyHostname("gw.test"); err != nil {
+		t.Errorf("re-issued certificate: %v", err)
 	}
 }

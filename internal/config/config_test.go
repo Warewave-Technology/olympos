@@ -1,9 +1,6 @@
 package config
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -76,37 +73,57 @@ func validServer() *Server {
 	return c
 }
 
+// The endpoint is on only when ingest.url is set: without it there is no
+// listener and no error; with it the URL must be valid.
 func TestIngestURLRequiredWhenListening(t *testing.T) {
 	c := validServer()
-	err := c.Validate()
-	if err == nil || !strings.Contains(err.Error(), "ingest.url is required") {
-		t.Fatalf("listener on without ingest.url: %v", err)
+	if c.IngestEnabled() || c.Validate() != nil {
+		t.Fatalf("no ingest.url: the endpoint is off without an error: %v", c.Validate())
 	}
 	c.Ingest.URL = "https://olympos-ingest.example:9444"
+	if !c.IngestEnabled() || !c.IngestTLS() {
+		t.Fatal("ingest.url set: the endpoint is on, over TLS")
+	}
 	if err := c.Validate(); err != nil {
 		t.Fatalf("with ingest.url: %v", err)
 	}
-	// An empty listener turns the endpoint off: no URL needed.
-	c = validServer()
-	c.Listen.Ingest = ""
-	if err := c.Validate(); err != nil {
-		t.Fatalf("endpoint off: %v", err)
+	c.Ingest.URL = "http://olympos-ingest.example:9444"
+	if err := c.Validate(); err != nil || c.IngestTLS() {
+		t.Fatalf("http ingest.url: plain HTTP, no error (%v)", err)
 	}
 }
 
 func TestIngestValidation(t *testing.T) {
+	const ok = "https://olympos-ingest.example:9444"
 	for name, mod := range map[string]func(*Server){
-		"cert without key": func(c *Server) { c.Ingest.TLSCertFile = "/c.crt" },
-		"relative url":     func(c *Server) { c.Ingest.URL = "olympos-ingest.example" },
-		"maxRuns":          func(c *Server) { c.Ingest.MaxRuns = -1 },
-		"maxRunDuration":   func(c *Server) { c.Ingest.MaxRunDuration = -time.Hour },
+		"cert without key":    func(c *Server) { c.Ingest.TLSCertFile = "/c.crt" },
+		"no scheme":           func(c *Server) { c.Ingest.URL = "olympos-ingest.example:9444" },
+		"other scheme":        func(c *Server) { c.Ingest.URL = "ftp://olympos-ingest.example" },
+		"no host":             func(c *Server) { c.Ingest.URL = "https://" },
+		"path":                func(c *Server) { c.Ingest.URL = ok + "/s3" },
+		"query":               func(c *Server) { c.Ingest.URL = ok + "?a=b" },
+		"empty listener":      func(c *Server) { c.Listen.Ingest = "" },
+		"cert with http url":  func(c *Server) { c.Ingest.URL, c.Ingest.TLSCertFile, c.Ingest.TLSKeyFile = "http://h:9444", "/c", "/k" },
+		"negative maxRuns":    func(c *Server) { c.Ingest.MaxRuns = -1 },
+		"negative maxRunTime": func(c *Server) { c.Ingest.MaxRunDuration = -time.Hour },
 	} {
 		c := validServer()
-		c.Ingest.URL = "https://olympos-ingest.example:9444"
+		c.Ingest.URL = ok
 		mod(c)
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: want a validation error", name)
 		}
+	}
+	// A trailing slash is fine, and with the endpoint off nothing else is checked.
+	c := validServer()
+	c.Ingest.URL = ok + "/"
+	if err := c.Validate(); err != nil {
+		t.Errorf("trailing slash: %v", err)
+	}
+	c = validServer()
+	c.Listen.Ingest = ""
+	if err := c.Validate(); err != nil {
+		t.Errorf("endpoint off: an empty listen.ingest is not checked: %v", err)
 	}
 }
 
@@ -121,33 +138,6 @@ func TestIngestHost(t *testing.T) {
 		c.Ingest.URL = url
 		if got := c.IngestHost(); got != want {
 			t.Errorf("%s: %q, want %q", url, got, want)
-		}
-	}
-}
-
-// An empty listen.ingest in the file turns the endpoint off; an absent one
-// takes the default.
-func TestIngestOffByEmptyListener(t *testing.T) {
-	dir := t.TempDir()
-	load := func(doc string) *Server {
-		t.Helper()
-		p := filepath.Join(dir, "c.yaml")
-		if err := os.WriteFile(p, []byte(doc), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		c, _ := Load(p) // validation errors (no publicURL...) are not the point
-		return c
-	}
-	for doc, want := range map[string]string{
-		"listen: {ingest: \"\"}\n":             "",
-		"olympos:\n  listen: {ingest: \"\"}\n": "",
-		"olympos:\n  listen: {http: \":1\"}\n": ":9444",
-		"listen: {ingest: \":7000\"}\n":        ":7000",
-		"olympos:\n  listen: {ingest: null}\n": ":9444",
-		"publicURL: https://olympos.example\n": ":9444",
-	} {
-		if got := load(doc).Listen.Ingest; got != want {
-			t.Errorf("%q: listen.ingest %q, want %q", doc, got, want)
 		}
 	}
 }

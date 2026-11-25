@@ -33,17 +33,15 @@ type Server struct {
 		HTTP    string `yaml:"http"`    // user-facing, default :8080 (TLS terminated by ingress)
 		Gateway string `yaml:"gateway"` // agent gateway, default :8443
 		Metrics string `yaml:"metrics"` // /metrics, /healthz, /readyz; default :9090
-		// Ingest is the S3 endpoint of native ClickHouse backups, default
-		// :9444. Empty turns the endpoint off: no listener, no sessions.
+		// Ingest is the address of the S3 endpoint of native ClickHouse
+		// backups, default :9444. The endpoint is on only when ingest.url is
+		// set.
 		Ingest string `yaml:"ingest"`
 		// TLSCertFile/TLSKeyFile serve the UI over HTTPS directly (systemd
 		// install, no ingress). Reloaded on SIGHUP.
 		TLSCertFile string `yaml:"tlsCertFile"`
 		TLSKeyFile  string `yaml:"tlsKeyFile"`
 	} `yaml:"listen"`
-	// ingestOff: the file sets listen.ingest to "" on purpose, which keeps
-	// the endpoint off instead of taking the :9444 default.
-	ingestOff bool
 
 	Entra struct {
 		TenantID        string `yaml:"tenantID"`
@@ -261,8 +259,6 @@ func Load(path string) (*Server, error) {
 		} else if err := yaml.Unmarshal(b, c); err != nil {
 			return nil, fmt.Errorf("parse %s: %w", path, err)
 		}
-		// An empty listen.ingest is not the same as an absent one.
-		c.ingestOff = ingestSetEmpty(b)
 	}
 	envOverride(&c.Database.DSN, "OLYMPOS_DATABASE_DSN")
 	envOverride(&c.PublicURL, "OLYMPOS_PUBLIC_URL")
@@ -275,33 +271,11 @@ func Load(path string) (*Server, error) {
 	return c, c.Validate()
 }
 
-// ingestSetEmpty reports whether the document sets listen.ingest to the empty
-// string (under olympos: or at the top level).
-func ingestSetEmpty(doc []byte) bool {
-	type listen struct {
-		Listen struct {
-			Ingest *string `yaml:"ingest"`
-		} `yaml:"listen"`
-	}
-	var p struct {
-		listen  `yaml:",inline"`
-		Olympos *listen `yaml:"olympos"`
-	}
-	if yaml.Unmarshal(doc, &p) != nil {
-		return false
-	}
-	l := p.listen
-	if p.Olympos != nil {
-		l = *p.Olympos
-	}
-	return l.Listen.Ingest != nil && *l.Listen.Ingest == ""
-}
-
 // Ingest configures the native-backup endpoint.
 type Ingest struct {
-	// URL is how ClickHouse reaches the endpoint (https://host:port). It is
-	// required while listen.ingest is set, and names the host of the
-	// internal-CA certificate.
+	// URL is how ClickHouse reaches the endpoint (https://host:port). Set,
+	// it turns the endpoint on (listener at listen.ingest) and names the
+	// host of the internal-CA certificate; empty, there is no endpoint.
 	URL string `yaml:"url"`
 	// TLSCertFile/TLSKeyFile: optional externally issued server certificate,
 	// reloaded on SIGHUP. When empty the internal CA issues one for the host
@@ -337,9 +311,7 @@ func (c *Server) defaults() {
 	def(&c.Listen.HTTP, ":8080")
 	def(&c.Listen.Gateway, ":8443")
 	def(&c.Listen.Metrics, ":9090")
-	if !c.ingestOff {
-		def(&c.Listen.Ingest, ":9444")
-	}
+	def(&c.Listen.Ingest, ":9444")
 	def(&c.Entra.AuthorityHost, "https://login.microsoftonline.com")
 	def(&c.Entra.GraphURL, "https://graph.microsoft.com")
 	def(&c.KeyVault.Provider, "azure")
@@ -400,11 +372,18 @@ func (c *Server) Validate() error {
 	if c.Ingest.MaxRunDuration < 0 {
 		errs = append(errs, "ingest.maxRunDuration must be positive")
 	}
-	if c.Listen.Ingest != "" {
-		if c.Ingest.URL == "" {
-			errs = append(errs, "ingest.url is required while listen.ingest is set (empty listen.ingest turns the endpoint off)")
-		} else if u, err := url.Parse(c.Ingest.URL); err != nil || u.Host == "" || u.Scheme != "https" {
-			errs = append(errs, "ingest.url must be an absolute https URL")
+	if c.IngestEnabled() {
+		u, err := url.Parse(c.Ingest.URL)
+		switch {
+		case err != nil || u.Hostname() == "" || (u.Scheme != "https" && u.Scheme != "http"):
+			errs = append(errs, "ingest.url must be an absolute https (or http) URL with a host")
+		case (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" || u.User != nil:
+			errs = append(errs, "ingest.url must be only scheme, host and port, with no path or query")
+		case u.Scheme == "http" && c.Ingest.TLSCertFile != "":
+			errs = append(errs, "ingest.tlsCertFile needs an https ingest.url")
+		}
+		if c.Listen.Ingest == "" {
+			errs = append(errs, "listen.ingest must not be empty while ingest.url is set")
 		}
 	}
 	if c.DevMode && !devbuild.Enabled {
@@ -452,6 +431,14 @@ func (c *Server) GatewayHost() string {
 	}
 	return strings.Trim(h, "[]")
 }
+
+// IngestEnabled reports whether the ingest endpoint of native ClickHouse
+// backups is on: it is, when ingest.url is set.
+func (c *Server) IngestEnabled() bool { return c.Ingest.URL != "" }
+
+// IngestTLS reports whether the endpoint is served over HTTPS (an http
+// ingest.url serves plain HTTP: lab use inside a trusted network).
+func (c *Server) IngestTLS() bool { return !strings.HasPrefix(c.Ingest.URL, "http://") }
 
 // IngestHost returns the host part of ingest.url, without port or brackets.
 func (c *Server) IngestHost() string {

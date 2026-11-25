@@ -165,7 +165,6 @@ func wiredHandler(t *testing.T, db *store.DB) http.Handler {
   devMode: true
   publicURL: http://olympos.test
   agentGatewayURL: gw.test:8443
-  listen: {ingest: ""}
   keyVault: {provider: local, name: test, localDir: `+dir+`/kv}
 `), 0o600); err != nil {
 		t.Fatal(err)

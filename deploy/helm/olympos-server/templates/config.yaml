@@ -19,19 +19,21 @@ data:
        twice (a duplicate key stops the server). The listen ports must match
        the container ports; TLS files and other keys are the user's. */}}
 {{- $_ := set $o "experimental" (merge (dict "multiReplica" .Values.experimental.multiReplica) (default (dict) $o.experimental)) }}
-{{- $_ := set $o "listen" (merge (dict "http" ":8080" "gateway" ":8443" "metrics" ":9090" "ingest" ":9444") (default (dict) $o.listen)) }}
+{{- $_ := set $o "listen" (merge (dict "http" ":8080" "gateway" ":8443" "metrics" ":9090") (default (dict) $o.listen)) }}
 {{- if .Values.gatewayTLSSecret }}
 {{- $_ := set $o "gateway" (merge (dict "tlsCertFile" "/etc/olympos/gateway-tls/tls.crt" "tlsKeyFile" "/etc/olympos/gateway-tls/tls.key") (default (dict) $o.gateway)) }}
 {{- end }}
-{{- /* The ingest endpoint of native ClickHouse backups: the spill directory is
-       the emptyDir the Deployment mounts, and ingest.url defaults to the
-       in-cluster Service. */}}
-{{- $ing := merge (dict "spillDir" "/var/lib/olympos/ingest-spill") (default (dict) $o.ingest) }}
+{{- /* The ingest endpoint of native ClickHouse backups is on only with
+       olympos.ingest.url. Then its listen port must match the container
+       port, the spill directory is the emptyDir the Deployment mounts, and
+       the certificate files are the ingestTLSSecret's. */}}
+{{- $ing := default (dict) $o.ingest }}
+{{- if $ing.url }}
+{{- $_ := set $o "listen" (merge (dict "ingest" ":9444") $o.listen) }}
+{{- $ing = merge (dict "spillDir" "/var/lib/olympos/ingest-spill") $ing }}
 {{- if .Values.ingestTLSSecret }}
 {{- $ing = merge (dict "tlsCertFile" "/etc/olympos/ingest-tls/tls.crt" "tlsKeyFile" "/etc/olympos/ingest-tls/tls.key") $ing }}
 {{- end }}
-{{- if not $ing.url }}
-{{- $_ := set $ing "url" (printf "https://%s-ingest.%s.svc:%d" .Release.Name .Release.Namespace (int .Values.ingestService.port)) }}
-{{- end }}
 {{- $_ := set $o "ingest" $ing }}
+{{- end }}
 {{ toYaml $o | indent 6 }}

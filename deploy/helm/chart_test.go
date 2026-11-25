@@ -470,13 +470,38 @@ func serverConfig(t *testing.T, docs []map[string]any) *config.Server {
 	return cfg
 }
 
-// #62: the ingest endpoint of native ClickHouse backups: a fourth container
-// port with its own Service, a spill volume sized from ingest.maxRuns, and
-// an optional certificate Secret.
+// #62: the ingest endpoint of native ClickHouse backups is on only with
+// olympos.ingest.url. Then: a fourth container port with its own Service, a
+// spill volume sized from ingest.maxRuns, and an optional certificate Secret.
 func TestServerIngestPort(t *testing.T) {
 	login := []string{"--set", "olympos.entra.tenantID=00000000-0000-0000-0000-0000000000aa", "--set", "olympos.entra.clientID=app",
 		"--set", "olympos.keyVault.name=kv-test"}
-	docs, err := renderServer(t, login...)
+	const ingestURL = "https://o-ingest.olympos.svc:9444"
+	has := func(docs []map[string]any) (port bool) {
+		spec := find(docs, "Deployment", "o")["spec"].(map[string]any)["template"].(map[string]any)["spec"].(map[string]any)
+		for _, p := range spec["containers"].([]any)[0].(map[string]any)["ports"].([]any) {
+			port = port || p.(map[string]any)["name"] == "ingest"
+		}
+		return port
+	}
+	// Off by default: no port, no Service, no volumes, no endpoint in the config.
+	off, err := renderServer(t, login...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, _ := yaml.Marshal(find(off, "Deployment", "o"))
+	if has(off) || find(off, "Service", "o-ingest") != nil || strings.Contains(string(y), "ingest-") {
+		t.Errorf("without olympos.ingest.url the chart renders no ingest port, Service or volume:\n%s", y)
+	}
+	if cfg := serverConfig(t, off); cfg.IngestEnabled() {
+		t.Errorf("config without olympos.ingest.url: %+v", cfg.Ingest)
+	}
+	// ingestTLSSecret alone changes nothing.
+	if docs, err := renderServer(t, append(login, "--set", "ingestTLSSecret=ing")...); err != nil || has(docs) {
+		t.Errorf("ingestTLSSecret without the URL: %v", err)
+	}
+
+	docs, err := renderServer(t, append(login, "--set", "olympos.ingest.url="+ingestURL)...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,8 +563,8 @@ func TestServerIngestPort(t *testing.T) {
 	if cfg.Listen.Ingest != ":9444" || cfg.Ingest.SpillDir != "/var/lib/olympos/ingest-spill" || cfg.Ingest.MaxRuns != 4 {
 		t.Errorf("config: listen %q, %+v", cfg.Listen.Ingest, cfg.Ingest)
 	}
-	if cfg.Ingest.URL != "https://o-ingest.olympos.svc:9444" {
-		t.Errorf("default ingest.url is the in-cluster Service: %q", cfg.Ingest.URL)
+	if cfg.Ingest.URL != ingestURL || !cfg.IngestEnabled() {
+		t.Errorf("ingest.url: %q", cfg.Ingest.URL)
 	}
 	if cfg.Ingest.TLSCertFile != "" {
 		t.Errorf("no certificate files without ingestTLSSecret: %+v", cfg.Ingest)

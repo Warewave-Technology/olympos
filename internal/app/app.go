@@ -320,7 +320,7 @@ func Run(cfgPath string) error {
 		return fmt.Errorf("internal ca: %w", err)
 	}
 
-	if cfg.Listen.Ingest != "" {
+	if cfg.IngestEnabled() {
 		d.Ingest = ingest.NewRegistry(d.DB, d.HMAC, cfg.Ingest.MaxRuns, nil)
 		// The secrets of the credentials of the last process are gone with it.
 		if err := d.Ingest.MarkInterrupted(ctx); err != nil {
@@ -479,7 +479,13 @@ func Run(cfgPath string) error {
 	errc := make(chan error, 4)
 	go func() { errc <- gs.Serve(gl) }()
 	if ingestSrv != nil {
-		go func() { errc <- ingestSrv.ServeTLS(il, "", "") }()
+		go func() {
+			if ingestSrv.TLSConfig != nil {
+				errc <- ingestSrv.ServeTLS(il, "", "")
+				return
+			}
+			errc <- ingestSrv.Serve(il)
+		}()
 	}
 	go func() {
 		if uiCert != nil {
@@ -489,7 +495,11 @@ func Run(cfgPath string) error {
 		errc <- httpSrv.ListenAndServe()
 	}()
 	go func() { errc <- opsSrv.ListenAndServe() }()
-	log.Info("olympos server started", "http", cfg.Listen.HTTP, "gateway", cfg.Listen.Gateway, "metrics", cfg.Listen.Metrics, "ingest", cfg.Listen.Ingest)
+	ingestAddr := "off"
+	if ingestSrv != nil {
+		ingestAddr = cfg.Listen.Ingest
+	}
+	log.Info("olympos server started", "http", cfg.Listen.HTTP, "gateway", cfg.Listen.Gateway, "metrics", cfg.Listen.Metrics, "ingest", ingestAddr)
 
 	select {
 	case <-ctx.Done():
@@ -558,7 +568,7 @@ func (d *Deps) gatewayTLS() (*tls.Config, *certFile, error) {
 		return c, cf, nil
 	}
 	hosts := append([]string{d.Cfg.GatewayHost()}, d.Cfg.Gateway.ExtraSANs...)
-	get, err := d.internalServerCert("gateway", hosts)
+	get, err := d.internalServerCert("gateway", hosts, certValidity)
 	if err != nil {
 		return nil, nil, err
 	}

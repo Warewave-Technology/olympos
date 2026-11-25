@@ -32,6 +32,7 @@ spec:
     {{- if .Values.gatewayService.nodePort }}
     nodePort: {{ .Values.gatewayService.nodePort }}
     {{- end }}
+{{- if (default (dict) .Values.olympos.ingest).url }}
 ---
 apiVersion: v1
 kind: Service
@@ -51,6 +52,7 @@ spec:
     {{- if .Values.ingestService.nodePort }}
     nodePort: {{ .Values.ingestService.nodePort }}
     {{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: Service

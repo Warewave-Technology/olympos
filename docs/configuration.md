@@ -96,7 +96,7 @@ built with `-tags dev`; release binaries and images reject them.
 |---|---|---|---|---|
 | `listen.http` | string | `:8080` | no | UI and REST API listener. |
 | `listen.gateway` | string | `:8443` | no | Agent gateway listener (gRPC, mTLS). Do not terminate TLS in front of it. |
-| `listen.ingest` | string | `:9444` | no | Ingest listener: the S3 endpoint native ClickHouse backups write to and read from (HTTPS; each run signs with its own short-lived credential). An empty value, written as `ingest: ""`, turns the endpoint off: no listener, and `ingest.url` is not needed. While it is on, `ingest.url` is required. |
+| `listen.ingest` | string | `:9444` | no | Address of the ingest listener: the S3 endpoint native ClickHouse backups write to and read from (HTTPS; each run signs with its own short-lived credential). Used only when `ingest.url` is set; without it there is no listener. |
 | `listen.metrics` | string | `:9090` | no | `/metrics`, `/healthz`, `/readyz`. The ingest endpoint adds `olympos_ingest_requests_total`, `olympos_ingest_bytes_total`, `olympos_ingest_refused_total` and `olympos_ingest_runs`. |
 | `listen.tlsCertFile` | path | — | no | Serve the UI over HTTPS directly (no ingress or proxy). Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. |
 | `listen.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
@@ -158,11 +158,12 @@ At start the server retries the connection for up to two minutes.
 
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
 listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS.
+**To turn on native ClickHouse backups, set `ingest.url`.** Without it the server opens no ingest port.
 
 | Key | Type | Default | Required | Description |
 |---|---|---|---|---|
-| `ingest.url` | URL | — | yes (while `listen.ingest` is set) | How ClickHouse reaches the endpoint: an absolute `https` URL, for example `https://olympos.example.internal:9444`. The internal CA issues the endpoint certificate for its host. |
-| `ingest.tlsCertFile` | path | — | no | Externally issued certificate for the endpoint. Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. Empty: the internal CA issues one for the host of `ingest.url`, and ClickHouse has to trust that CA. |
+| `ingest.url` | URL | — | no | **Turns the endpoint on.** How ClickHouse reaches it: `https://host:port`, for example `https://olympos.example.internal:9444`; scheme, host and port only, no path. The internal CA issues the endpoint certificate for its host. An `http` URL serves plain HTTP, for a lab inside a trusted network only. Empty: native ClickHouse backups are off, no listener opens and nothing else under `ingest` is used. |
+| `ingest.tlsCertFile` | path | — | no | Externally issued certificate for the endpoint (needs an `https` `ingest.url`). Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. Empty: the internal CA issues one for the host of `ingest.url`, and ClickHouse has to trust that CA. |
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
 | `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. |
@@ -272,8 +273,8 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `listen.tlsCertFile and listen.tlsKeyFile must be set together` | Set both or neither. |
 | `gateway.tlsCertFile and gateway.tlsKeyFile must be set together` | Set both or neither. |
 | `ingest.tlsCertFile and ingest.tlsKeyFile must be set together` | Set both or neither. |
-| `ingest.url is required while listen.ingest is set (...)` | Set `ingest.url`, or set `listen.ingest: ""` to turn the endpoint off. A config from before the endpoint existed hits this at the first start after an upgrade. |
-| `ingest.url must be an absolute https URL` | Include scheme `https` and host. |
+| `ingest.url must be an absolute https (or http) URL with a host` / `ingest.url must be only scheme, host and port, with no path or query` | Fix the URL, or leave `ingest.url` out to keep the endpoint off. |
+| `ingest.tlsCertFile needs an https ingest.url` / `listen.ingest must not be empty while ingest.url is set` | Use an `https` URL with certificate files; set `listen.ingest` to an address or leave it out for `:9444`. |
 | `ingest.maxRuns must be positive` / `ingest.maxRunDuration must be positive` | Use a positive value, or leave the key out for the default. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
@@ -313,10 +314,10 @@ YAML errors appear as `parse <file>: ...`. Errors the server reports only at sta
 | `ingress.host` | `olympos.contoso.internal` | Ingress host. |
 | `ingress.tlsSecretName` | `""` | TLS Secret for the Ingress; no `tls` block when empty. |
 | `ingress.annotations` | `{}` | |
-| `ingestService.type` / `port` / `nodePort` | `ClusterIP` / `9444` / `null` | Ingest Service `<release>-ingest` (targets container port 9444), the S3 endpoint of native ClickHouse backups. Use an internal `LoadBalancer` for ClickHouse outside the cluster. |
+| `ingestService.type` / `port` / `nodePort` | `ClusterIP` / `9444` / `null` | Ingest Service `<release>-ingest` (targets container port 9444), the S3 endpoint of native ClickHouse backups. Rendered only when `olympos.ingest.url` is set. Use an internal `LoadBalancer` for ClickHouse outside the cluster. |
 | `ingestService.annotations` | `{}` | Ingest Service annotations. |
 | `gatewayTLSSecret` | `""` | A `kubernetes.io/tls` Secret with your own gateway certificate. Mounted at `/etc/olympos/gateway-tls` and rendered as `gateway.tlsCertFile`/`tlsKeyFile`. |
-| `ingestTLSSecret` | `""` | A `kubernetes.io/tls` Secret with your own ingest certificate. Mounted at `/etc/olympos/ingest-tls` and rendered as `ingest.tlsCertFile`/`tlsKeyFile`. Empty: the internal CA issues one for the host of `olympos.ingest.url`. |
+| `ingestTLSSecret` | `""` | A `kubernetes.io/tls` Secret with your own ingest certificate. Mounted at `/etc/olympos/ingest-tls` and rendered as `ingest.tlsCertFile`/`tlsKeyFile`; used only when `olympos.ingest.url` is set. Empty: the internal CA issues one for the host of `olympos.ingest.url`. |
 | `localKeyVault.persistence.enabled` / `size` / `storageClass` | `false` / `64Mi` / `""` | **Dev only.** PVC for `keyVault.provider: local`; an `emptyDir` is used when disabled. |
 | `trivyCache.persistent` | `true` | PVC `<release>-trivy-cache` at `/var/cache/trivy`. When `false`, an `emptyDir` with `sizeLimit` = `size`. |
 | `trivyCache.size` / `storageClass` | `10Gi` / `""` | |
@@ -332,18 +333,20 @@ The `olympos:` defaults in `values.yaml` are: `publicURL: https://olympos.contos
 `keyVault: {provider: azure, name: "", kekName: olympos-kek, hmacSecretName: olympos-hmac,
 managedIdentityClientID: ""}`, `database.dsnRef: ""`, `slack.botTokenRef: ""`, `deadMansSwitch.url: ""`,
 `backup: {globalConcurrency: 4, perClusterConcurrency: 2}`, `changeRequests.ttl: 72h`,
-`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h}`. With `ingest.url` empty the chart uses the in-cluster
-Service, `https://<release>-ingest.<namespace>.svc:<ingestService.port>`. You must at least
+`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h}`. Native ClickHouse backups are off until you set
+`olympos.ingest.url`, for example the in-cluster Service,
+`https://<release>-ingest.<namespace>.svc:9444`. You must at least
 set `publicURL`, `agentGatewayURL`, `entra.tenantID`, `entra.clientID` and `keyVault.name`.
 
 ### What the chart sets for you
 
-- **`listen`:** always `http: ":8080"`, `gateway: ":8443"`, `ingest: ":9444"`, `metrics: ":9090"`, because the container ports are
+- **`listen`:** always `http: ":8080"`, `gateway: ":8443"`, `metrics: ":9090"` (and `ingest: ":9444"` when `olympos.ingest.url` is set), because the container ports are
   fixed to match. Other `olympos.listen` keys you set are kept, so `listen.tlsCertFile`/`tlsKeyFile` (UI over
   HTTPS without an ingress) work with a mounted Secret.
-- **`ingest`:** `spillDir: /var/lib/olympos/ingest-spill`, an `emptyDir` volume of `maxRuns` × 1Gi + 1Gi
-  (5Gi with the default 4 runs; the chart computes it from `olympos.ingest.maxRuns`), and `url` when you left
-  it empty. With `ingestTLSSecret`, also `tlsCertFile`/`tlsKeyFile`. Other `olympos.ingest` keys are kept.
+- **`ingest`:** only when `olympos.ingest.url` is set: the container port 9444, the Service, `spillDir:
+  /var/lib/olympos/ingest-spill` with an `emptyDir` volume of `maxRuns` × 1Gi + 1Gi (5Gi with the default 4
+  runs; the chart computes it from `olympos.ingest.maxRuns`), and with `ingestTLSSecret` the
+  `tlsCertFile`/`tlsKeyFile` and the mount. Other `olympos.ingest` keys are kept.
 - **`experimental.multiReplica`:** from the top-level `experimental.multiReplica` value.
 - **`gateway.tlsCertFile`/`tlsKeyFile`:** when `gatewayTLSSecret` is set; other `olympos.gateway` keys such as
   `extraSANs` are kept.
@@ -518,8 +521,6 @@ on `PATH`.
 olympos:
   publicURL: https://olympos.example.internal
   agentGatewayURL: olympos.example.internal:8443
-  ingest:
-    url: https://olympos.example.internal:9444   # or listen.ingest: "" to turn native ClickHouse backups off
   entra:
     tenantID: <tenant-id>
     clientID: <client-id>
