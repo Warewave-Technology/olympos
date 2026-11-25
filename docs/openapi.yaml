@@ -739,7 +739,7 @@ paths:
         "422":
           description: >-
             A check failed (fields name it): unknown run or target (also outside scope), run not succeeded/partial,
-            dry run, no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
+            dry run, a native ClickHouse run (run_id: "native restore is not available yet; the backup is kept"), no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
             a Vault configured in Olympos, databases not in the backup, a selected database exists on the target
             with data in it, Vault not initialized/sealed/token without snapshot-force, credential or vault_token
             missing, justification 10–2000 chars, agent_offline, the target check failed, or "restores of <engine>
