@@ -1,4 +1,4 @@
-{{- if eq (include "olympos-probe.enabled" .) "true" }}
+{{- if and (eq (include "olympos-probe.enabled" .) "true") (eq (include "olympos-agent.manageSecrets" .) "true") }}
 {{- /*
 The probe's identity (synthetic monitoring, decision 1). The agent enrolls
 the probe, writes tls.crt, tls.key and cluster-id here and renews them; the

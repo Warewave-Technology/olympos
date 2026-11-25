@@ -1549,6 +1549,15 @@ components:
         cluster: {$ref: "#/components/schemas/Cluster"}
         command: {type: string, description: "Multi-line helm command containing the one-time token"}
         expires_at: {type: string, format: date-time}
+        gitops:
+          type: object
+          description: >-
+            The same install for Argo CD, Flux and other tools that render the chart with helm template (#59):
+            secrets creates the identity Secrets with the token, once, on the cluster; values are the chart values
+            for Git, without the token, with identity.manageSecrets false.
+          properties:
+            secrets: {type: string, description: "kubectl commands containing the one-time token"}
+            values: {type: string, description: "YAML; no token"}
     Node:
       type: object
       properties:

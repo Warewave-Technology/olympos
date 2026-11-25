@@ -800,6 +800,36 @@ const stages = {
     }
   },
 
+  // Add cluster for Argo CD or Flux (docs/install.md, "Install with Argo CD or Flux"): the GitOps tab of the
+  // install command. Creates a cluster it never installs, masks the token, and revokes the cluster again.
+  async installGitOps() {
+    const admin = await signIn('admin');
+    const NAME = 'oke-fra-gitops';
+    for (const c of (await apiCall(admin, 'GET', '/clusters')).items.filter((x) => x.name === NAME && x.status !== 'revoked')) {
+      await apiCall(admin, 'DELETE', `/clusters/${c.id}`, undefined, [200, 204]);
+    }
+    await admin.goto(`${URL}/?add=true`);
+    await admin.getByLabel('Cluster name').fill(NAME);
+    const labelInput = admin.getByRole('textbox', { name: 'Labels' });
+    await labelInput.fill('env=prod');
+    await labelInput.press('Enter');
+    await admin.getByRole('button', { name: 'Create install command' }).click();
+    await admin.getByRole('dialog').locator('pre').first().waitFor();
+    const dlg = admin.getByRole('dialog');
+    await dlg.getByRole('button', { name: 'GitOps (Argo CD, Flux)' }).click();
+    await dlg.getByLabel('Chart values').waitFor();
+    await maskTokens(admin);
+    await admin.evaluate(() => {
+      // the CA is long and says nothing in an image
+      for (const pre of document.querySelectorAll('pre')) pre.textContent = pre.textContent.replace(/serverCA: (\S{24})\S+/, 'serverCA: $1…');
+    });
+    await dump(admin, 'gitops install');
+    await shot(admin, 'install-gitops', dlg);
+    await dlg.getByRole('button', { name: 'Done' }).click();
+    const c = (await apiCall(admin, 'GET', '/clusters')).items.find((x) => x.name === NAME && x.status !== 'revoked');
+    if (c) await apiCall(admin, 'DELETE', `/clusters/${c.id}`, undefined, [200, 204]);
+  },
+
   // A credential that cannot be resolved (docs/synthetic-monitoring.md, "Credentials that cannot be
   // resolved"): a Key Vault reference to a secret that the lab's local Key Vault does not have. Needs the
   // probes online and the olympos-lab.test allowlist rule (monitoring stage). Removes what it creates.

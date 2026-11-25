@@ -92,7 +92,7 @@ spec:
         {{- end }}
       {{- if .Values.postgresql.bundled }}
       - name: db-password
-        secret: {secretName: {{ .Release.Name }}-postgresql, defaultMode: 0440}
+        secret: {secretName: {{ .Values.postgresql.existingSecret | default (printf "%s-postgresql" .Release.Name) }}, defaultMode: 0440}
       {{- end }}
       {{- if .Values.gatewayTLSSecret }}
       - name: gateway-tls

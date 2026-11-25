@@ -276,6 +276,7 @@ YAML errors appear as `parse <file>: ...`. Errors the server reports only at sta
 | `experimental.multiReplica` | `false` | Renders `experimental.multiReplica` into the config. When `false` the Deployment uses the `Recreate` strategy. |
 | `olympos.*` | see below | Rendered into `config.yaml` under `olympos:`. |
 | `postgresql.bundled` | `true` | Deploy a single-instance PostgreSQL (StatefulSet, Service, NetworkPolicy that admits only the server pods, and a Secret `<release>-postgresql` with a generated password kept across upgrades and uninstall). |
+| `postgresql.existingSecret` | `""` | A Secret with the key `password` for the bundled PostgreSQL. Set, the chart renders no password Secret and generates nothing: required with Argo CD, Flux and other tools that render with `helm template`, where the generated password would change on every sync ([install.md](install.md#install-with-argo-cd-or-flux)). |
 | `postgresql.image` | `docker.io/library/postgres:16.11-bookworm@sha256:…` | Bundled PostgreSQL image. |
 | `postgresql.size` | `8Gi` | PVC size. |
 | `postgresql.storageClass` | `""` | PVC storage class (cluster default when empty). |
@@ -372,6 +373,7 @@ variables that the chart renders; the chart has no `extraEnv`.
 |---|---|---|
 | `server` | `""` | **Required.** Gateway `host:port` (`OLYMPOS_SERVER`). |
 | `bootstrapToken` | `""` | **Required on first install.** One-time enrollment token (valid 1 h), stored in the Secret `olympos-agent-identity` (and, while the probe has no certificate, in `olympos-probe-identity`: the same token enrolls the agent and the probe once each). A token issued again for a cluster that already has a probe (*Show install command*) enrolls only the agent; use *Install probe* for the probe. Once the agent has enrolled (the Secret holds `tls.crt`), upgrades keep the Secret and ignore this value. |
+| `identity.manageSecrets` | `true` | The chart writes `bootstrapToken` into the identity Secrets and keeps what the agent enrolled, with Helm's `lookup`. `false`: the chart renders neither Secret and needs no `bootstrapToken`; create them once on the cluster with the token (the GitOps tab of *Add cluster* and *Install probe*). Required with Argo CD, Flux and other tools that render with `helm template` ([install.md](install.md#install-with-argo-cd-or-flux)). |
 | `serverCA` | `""` | **Required.** Base64-encoded PEM of the Olympos internal CA. Rendered into the ConfigMap `olympos-agent-ca` and mounted at `/etc/olympos/ca.crt`; the agent pins it. |
 | `serverName` | `""` | TLS server name override (`OLYMPOS_SERVER_NAME`). Empty: the host part of `server`. |
 | `clusterName` | `""` | Not used by any chart template. The agent's identity comes from its enrolled certificate. |

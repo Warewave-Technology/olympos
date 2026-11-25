@@ -40,6 +40,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $p := .Values.probe | default dict -}}
 {{- ne (toString (index $p "enabled")) "false" -}}
 {{- end -}}
+{{- /* "true" unless identity.manageSecrets is false (#59); a release older
+than the value has no identity section and keeps managing them. */}}
+{{- define "olympos-agent.manageSecrets" -}}
+{{- $i := .Values.identity | default dict -}}
+{{- ne (toString (index $i "manageSecrets")) "false" -}}
+{{- end -}}
 {{- define "olympos-probe.image" -}}
 {{- $img := (.Values.probe | default dict).image | default dict -}}
 {{- $repo := $img.repository | default "ghcr.io/warewave-technology/olympos-probe" -}}

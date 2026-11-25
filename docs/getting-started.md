@@ -57,7 +57,9 @@ Each cluster gets an agent. The agent only dials out to the server, so the clust
 
 2. **Create install command** shows a Helm command with a one-time bootstrap token (valid for an hour,
    usable once; the token is masked in the image below). The command installs the agent and, next to it,
-   the probe that runs [synthetic monitoring](synthetic-monitoring.md) scenarios.
+   the probe that runs [synthetic monitoring](synthetic-monitoring.md) scenarios. With Argo CD or Flux,
+   the **GitOps** tab gives the same install as two steps instead
+   ([Install with Argo CD or Flux](install.md#install-with-argo-cd-or-flux)).
 
    ![The generated install command](images/start-03-install-command.png)
 

@@ -378,6 +378,18 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
   return { res };
 }
 
+// The GitOps variant of an install response (#59), as the server builds it.
+function gitopsOf(token: string, cluster?: { name: string; bench_enabled?: boolean }) {
+  const secret = (name: string) => `kubectl -n olympos-system create secret generic ${name} \\\n  --from-literal=bootstrap-token=${token} --dry-run=client -o yaml | kubectl apply -f -`;
+  if (!cluster) {
+    return { secrets: secret('olympos-probe-identity'), values: '# add to the values of the olympos-agent application\nprobe:\n  enabled: true\n' };
+  }
+  return {
+    secrets: ['kubectl create namespace olympos-system --dry-run=client -o yaml | kubectl apply -f -', secret('olympos-agent-identity'), secret('olympos-probe-identity')].join('\n'),
+    values: `# oci://olympos.contoso.internal/charts/olympos-agent, namespace olympos-system\n${cluster.bench_enabled ? 'bench:\n  enabled: true\n' : ''}clusterName: ${cluster.name}\nidentity:\n  manageSecrets: false\nserver: olympos-gw.contoso.internal:8443\nserverCA: LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t\n`,
+  };
+}
+
 const routes: [string, string, Handler][] = [
   ...fleetRoutes,
   ...syntheticRoutes,
@@ -424,11 +436,13 @@ const routes: [string, string, Handler][] = [
       db.clusters.push(c);
       db.enrolling.set(c.id, Date.now());
       db.record('cluster.created', 'cluster', name, 'install command issued');
+      const token = `obt_6Qv${Math.random().toString(36).slice(2, 10)}h2Kx`;
       return ok(
         {
           cluster: c,
-          command: `helm install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${name} \\\n  --set bootstrapToken=obt_6Qv${Math.random().toString(36).slice(2, 10)}h2Kx${c.bench_enabled ? ' \\\n  --set bench.enabled=true' : ''}`,
+          command: `helm install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${name} \\\n  --set bootstrapToken=${token}${c.bench_enabled ? ' \\\n  --set bench.enabled=true' : ''}`,
           expires_at: new Date(Date.now() + 3600_000).toISOString(),
+          gitops: gitopsOf(token, c),
         },
         201,
       );
@@ -490,10 +504,12 @@ const routes: [string, string, Handler][] = [
       const c = db.clusters.find((x) => x.id === p.id);
       if (!c) return notFound();
       db.enrolling.set(c.id, Date.now());
+      const token = `obt_${Math.random().toString(36).slice(2, 12)}`;
       return ok({
         cluster: c,
-        command: `helm upgrade --install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${c.name} \\\n  --set bootstrapToken=obt_${Math.random().toString(36).slice(2, 12)}`,
+        command: `helm upgrade --install olympos-agent oci://olympos.contoso.internal/charts/olympos-agent \\\n  --namespace olympos-system --create-namespace \\\n  --set server=olympos-gw.contoso.internal:8443 \\\n  --set clusterName=${c.name} \\\n  --set bootstrapToken=${token}`,
         expires_at: new Date(Date.now() + 3600_000).toISOString(),
+        gitops: gitopsOf(token, c),
       });
     },
   ],
@@ -510,10 +526,12 @@ const routes: [string, string, Handler][] = [
       probeEnrolling.set(c.id, Date.now());
       db.record('cluster.probe_token_issued', 'cluster', c.name, 'probe install command issued');
       const sets = AGENT_SETS.map((kv) => ` --set ${kv}`).join('');
+      const token = `olyb_${Math.random().toString(36).slice(2, 12)}`;
       return ok({
         cluster: c,
-        command: `helm upgrade olympos-agent oci://olympos.contoso.internal/charts/olympos-agent -n olympos-system --reuse-values${sets} --set probe.enabled=true --set probe.bootstrapToken=olyb_${Math.random().toString(36).slice(2, 12)}`,
+        command: `helm upgrade olympos-agent oci://olympos.contoso.internal/charts/olympos-agent -n olympos-system --reuse-values${sets} --set probe.enabled=true --set probe.bootstrapToken=${token}`,
         expires_at: new Date(Date.now() + 3600_000).toISOString(),
+        gitops: gitopsOf(token),
       });
     },
   ],

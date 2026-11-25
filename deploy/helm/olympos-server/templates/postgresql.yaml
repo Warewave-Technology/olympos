@@ -1,6 +1,10 @@
 {{- if .Values.postgresql.bundled }}
 {{- $name := printf "%s-postgresql" .Release.Name }}
-{{- /* The password is generated once and kept across upgrades. */}}
+{{- $secret := .Values.postgresql.existingSecret | default $name }}
+{{- if not .Values.postgresql.existingSecret }}
+{{- /* The password is generated once and kept across upgrades. helm template
+(Argo CD, Flux) cannot look up and would generate a new one on every render:
+postgresql.existingSecret names a Secret the user keeps instead (#59). */}}
 {{- $existing := lookup "v1" "Secret" .Release.Namespace $name }}
 {{- $password := randAlphaNum 40 }}
 {{- if and $existing $existing.data (index $existing.data "password") }}
@@ -17,6 +21,7 @@ type: Opaque
 data:
   password: {{ $password | b64enc | quote }}
 ---
+{{- end }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -80,7 +85,7 @@ spec:
         - {name: run, mountPath: /var/run/postgresql}
       volumes:
       - name: password
-        secret: {secretName: {{ $name }}, defaultMode: 0440}
+        secret: {secretName: {{ $secret }}, defaultMode: 0440}
       - name: run
         emptyDir: {}
       {{- with .Values.postgresql.nodeSelector }}

@@ -411,6 +411,31 @@ describe('Settings › Clusters & agents: the synthetic probe', () => {
     expect(within(dlg).getByRole('button', { name: 'Copy command' })).toBeInTheDocument();
   });
 
+  it('offers the probe install for GitOps: the token only in the Secret command, probe.enabled for Git (#59)', async () => {
+    const user = userEvent.setup();
+    const c = db.byName('aks-sea-apac');
+    await renderApp(`/settings/clusters?cluster=${c.id}`);
+    const probe = await screen.findByLabelText('Synthetic probe', {}, T);
+    await user.click(within(probe).getByRole('button', { name: 'Install probe' }));
+    const dlg = screen.getByRole('dialog', { name: 'Install the synthetic probe on aks-sea-apac' });
+    await user.click(within(dlg).getByRole('button', { name: 'Create install command' }));
+    await within(dlg).findByLabelText('Helm upgrade command', {}, T);
+    await user.click(within(dlg).getByRole('button', { name: 'GitOps (Argo CD, Flux)' }));
+    expect(within(dlg).getByRole('button', { name: 'GitOps (Argo CD, Flux)' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dlg).queryByLabelText('Helm upgrade command')).not.toBeInTheDocument();
+    const secrets = within(dlg).getByLabelText('Commands that create the identity Secrets').textContent!;
+    const token = secrets.match(/bootstrap-token=(olyb_\w+)/)?.[1];
+    expect(token).toBeTruthy();
+    expect(secrets).toContain('create secret generic olympos-probe-identity');
+    expect(secrets).not.toContain('olympos-agent-identity');
+    const values = within(dlg).getByLabelText('Chart values').textContent!;
+    expect(values).toContain('probe:\n  enabled: true');
+    expect(values).not.toContain(token!);
+    // one copy button per step, none for the Helm command
+    expect(within(dlg).getAllByRole('button', { name: 'Copy' })).toHaveLength(2);
+    expect(within(dlg).queryByRole('button', { name: 'Copy command' })).not.toBeInTheDocument();
+  });
+
   it('says "Probe connected" only for the new probe, not an earlier one that reconnects', () => {
     const exp = new Date(Date.now() + 3600_000).toISOString(); // issued now
     const after = new Date(Date.now() + 5_000).toISOString();
@@ -508,6 +533,32 @@ describe('Add cluster and Access', () => {
     await user.click(within(dlg).getByRole('button', { name: 'Create install command' }));
     await within(dlg).findByLabelText('Helm install command', {}, T);
     expect(dlg).toHaveTextContent('probe.enabled=true by default (synthetic monitoring).');
+  });
+
+  it('offers Add cluster for GitOps: Secrets with the token once, values for Git without it (#59)', async () => {
+    const user = userEvent.setup();
+    await renderApp('/settings/clusters');
+    await user.click(await screen.findByRole('button', { name: 'Add cluster' }, T));
+    const dlg = screen.getByRole('dialog', { name: 'Connect a cluster to Olympos' });
+    await user.type(within(dlg).getByLabelText('Cluster name'), 'oke-fra-gitops');
+    await user.click(within(dlg).getByRole('button', { name: 'Create install command' }));
+    await within(dlg).findByLabelText('Helm install command', {}, T);
+    expect(within(dlg).getByRole('button', { name: 'Helm' })).toHaveAttribute('aria-pressed', 'true');
+    await user.click(within(dlg).getByRole('button', { name: 'GitOps (Argo CD, Flux)' }));
+    const secrets = within(dlg).getByLabelText('Commands that create the identity Secrets').textContent!;
+    const token = secrets.match(/bootstrap-token=(obt_\w+)/)?.[1];
+    expect(token).toBeTruthy();
+    for (const s of ['olympos-agent-identity', 'olympos-probe-identity']) expect(secrets).toContain(`create secret generic ${s}`);
+    const values = within(dlg).getByLabelText('Chart values').textContent!;
+    expect(values).toContain('clusterName: oke-fra-gitops');
+    expect(values).toContain('identity:\n  manageSecrets: false');
+    expect(values).not.toContain(token!);
+    expect(dlg).toHaveTextContent('The token stays out of Git');
+    expect(within(dlg).getByRole('link', { name: 'Install with Argo CD or Flux' })).toHaveAttribute('href', expect.stringContaining('docs/install.md#install-with-argo-cd-or-flux'));
+    // back to Helm: the helm command again
+    await user.click(within(dlg).getByRole('button', { name: 'Helm' }));
+    expect(within(dlg).getByLabelText('Helm install command')).toBeInTheDocument();
+    expect(within(dlg).getByRole('button', { name: 'Copy command' })).toBeInTheDocument();
   });
 
   it('lists synthetic-editor among the roles guests cannot hold', async () => {
