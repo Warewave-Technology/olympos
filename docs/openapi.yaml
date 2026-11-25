@@ -362,7 +362,7 @@ paths:
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
-        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, ...). Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
+        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, engine_options, ...). ClickHouse engine_options: method must be native or logical (empty is logical) and is native only while the ingest endpoint is on (ingest_enabled of GET /backup/settings); incremental is weekly_full_daily and needs method native. Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
   /backup/jobs/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -371,10 +371,11 @@ paths:
         "200": {description: Job, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
     patch:
       tags: [backups]
-      summary: Partial update. target_id cannot change. A new credential replaces (and deletes) the old one. Enabling or changing the schedule restarts it from now.
+      summary: Partial update. target_id cannot change. A new credential replaces (and deletes) the old one. Enabling or changing the schedule restarts it from now. engine_options replaces the whole object and is checked like on create (a native ClickHouse job needs the ingest endpoint); a PATCH without engine_options does not re-check the stored ones.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+        "422": {description: "Validation, as on create (fields: engine_options, method, incremental, cron, ...)"}
     delete:
       tags: [backups]
       summary: Delete the job (soft delete; runs and blobs are kept, the job's credential is removed, queued runs fail).
@@ -493,6 +494,19 @@ paths:
       responses:
         "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {run_id: {type: string}}}}}}
         "409": {description: "Not configured yet, or a run is already queued/running (a repair waiting for its not_before does not count)"}
+  /backup/settings:
+    get:
+      tags: [backups]
+      summary: Server settings the backup wizard needs (any signed-in user).
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingest_enabled: {type: boolean, description: "The ingest endpoint of native ClickHouse backups is on (ingest.url is set). New ClickHouse jobs default to method native when true; native jobs are refused (422, field method) when false."}
   /backup/schedule-preview:
     get:
       tags: [backups]
@@ -1836,7 +1850,7 @@ components:
         destination_group_id: {type: string, description: "Write to every destination of a group (docs/design/destination-groups.md)."}
         engine_options:
           type: object
-          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
+          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..], method: native|logical (default logical), incremental: weekly_full_daily (native only)}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}

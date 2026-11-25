@@ -35,7 +35,8 @@ func init() {
 		d.Inventory.OnTargetGone = append(d.Inventory.OnTargetGone, backup.OnTargetGone)
 		d.Inventory.OnTargetUpsert = append(d.Inventory.OnTargetUpsert, backup.OnTargetUpsert)
 
-		api := &backup.API{DB: d.DB, Log: log, Dialer: d.Gateway, Creds: creds}
+		api := &backup.API{DB: d.DB, Log: log, Dialer: d.Gateway, Creds: creds,
+			IngestEnabled: d.Cfg.IngestEnabled()}
 		sched := &backup.Scheduler{DB: d.DB, Log: log.With("loop", "scheduler"), DeadMansSwitchURL: d.Cfg.DeadMansSwitch.URL}
 		blobs := blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage))
 		worker := &backup.Worker{

@@ -28,11 +28,15 @@ type apiEnv struct {
 	dev    fixture
 }
 
-func newAPI(t *testing.T) *apiEnv {
+func newAPI(t *testing.T) *apiEnv { return newAPIIngest(t, false) }
+
+// newAPIIngest is newAPI with the ingest endpoint of native backups on or off.
+func newAPIIngest(t *testing.T, ingest bool) *apiEnv {
 	t.Helper()
 	a := &apiEnv{dialer: newDialer()}
 	a.e = apitest.New(t, apitest.Options{Modules: func(e *apitest.Env) []server.Module {
-		return []server.Module{&backup.API{DB: e.DB, Log: e.Log, Dialer: a.dialer, Creds: &backup.Credentials{KV: e.KV, Envelope: e.Envelope}}}
+		return []server.Module{&backup.API{DB: e.DB, Log: e.Log, Dialer: a.dialer, Creds: &backup.Credentials{KV: e.KV, Envelope: e.Envelope},
+			IngestEnabled: ingest}}
 	}})
 	a.prod = seed(t, a.e.DB, "prod-aks", map[string]string{"env": "prod"}, "online")
 	a.dev = seed(t, a.e.DB, "dev-kind", map[string]string{"env": "dev"}, "online")
@@ -266,6 +270,72 @@ func TestJobsAPI(t *testing.T) {
 	}
 	if strings.Contains(e.LogBuf.String(), canaryPW) {
 		t.Fatal("password in logs")
+	}
+}
+
+// Native jobs need the ingest endpoint: create and update refuse them while
+// it is off (R14), and the settings tell the wizard whether it is on.
+func TestJobsAPINativeMethod(t *testing.T) {
+	for _, ingest := range []bool{false, true} {
+		a := newAPIIngest(t, ingest)
+		e := a.e
+		op := e.Login(e.Principal("ada", "Member", "operator@env=prod"))
+		viewer := e.Login(e.Principal("vic", "Member", "viewer@env=prod"))
+		create := func(opts any) (int, map[string]string) {
+			var verr struct{ Fields map[string]string }
+			code := op.Do("POST", "/api/v1/backup/jobs", map[string]any{"target_id": a.prod.TargetID, "destination_id": a.prod.DestID,
+				"cron": "0 2 * * *", "credential": map[string]any{"source": "stored", "username": "backup", "password": "pw"},
+				"engine_options": opts}, &verr)
+			return code, verr.Fields
+		}
+		var settings struct {
+			IngestEnabled bool `json:"ingest_enabled"`
+		}
+		if code := viewer.Do("GET", "/api/v1/backup/settings", nil, &settings); code != http.StatusOK || settings.IngestEnabled != ingest {
+			t.Fatalf("ingest %v: settings %d %+v", ingest, code, settings)
+		}
+
+		// Existing jobs have no method: they keep working with the endpoint off.
+		for _, opts := range []any{nil, map[string]any{}, map[string]any{"method": "logical"}} {
+			if code, f := create(opts); code != http.StatusCreated {
+				t.Fatalf("ingest %v: logical job %v: %d %v", ingest, opts, code, f)
+			}
+		}
+		if code, f := create(map[string]any{"method": "fast"}); code != http.StatusUnprocessableEntity || f["method"] == "" {
+			t.Fatalf("ingest %v: unknown method: %d %v", ingest, code, f)
+		}
+		code, f := create(map[string]any{"method": "native", "incremental": "weekly_full_daily"})
+		if ingest {
+			if code != http.StatusCreated {
+				t.Fatalf("native with ingest on: %d %v", code, f)
+			}
+		} else if code != http.StatusUnprocessableEntity || f["method"] == "" {
+			t.Fatalf("native with ingest off: %d %v", code, f)
+		}
+
+		// Update: a job that is logical now cannot become native without the endpoint.
+		var job struct{ ID string }
+		if code := op.Do("POST", "/api/v1/backup/jobs", map[string]any{"target_id": a.prod.TargetID, "destination_id": a.prod.DestID,
+			"cron": "0 2 * * *", "credential": map[string]any{"source": "stored", "username": "backup", "password": "pw"}}, &job); code != http.StatusCreated {
+			t.Fatalf("job: %d", code)
+		}
+		var verr struct{ Fields map[string]string }
+		code = op.Do("PATCH", "/api/v1/backup/jobs/"+job.ID, map[string]any{"engine_options": map[string]any{"method": "native"}}, &verr)
+		if ingest {
+			if code != http.StatusOK {
+				t.Fatalf("patch native with ingest on: %d", code)
+			}
+		} else if code != http.StatusUnprocessableEntity || verr.Fields["method"] == "" {
+			t.Fatalf("patch native with ingest off: %d %v", code, verr.Fields)
+		}
+		// Changes that do not touch the options never trip over the endpoint
+		// being off, for a native job that was created while it was on.
+		if _, err := e.DB.Exec(context.Background(), `UPDATE backup_jobs SET engine_options = '{"method":"native"}' WHERE id = $1`, job.ID); err != nil {
+			t.Fatal(err)
+		}
+		if code := op.Do("PATCH", "/api/v1/backup/jobs/"+job.ID, map[string]any{"enabled": false}, nil); code != http.StatusOK {
+			t.Fatalf("ingest %v: patch of a native job without options: %d", ingest, code)
+		}
 	}
 }
 
