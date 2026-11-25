@@ -73,6 +73,32 @@ first release); renumbering is not needed. Rules:
 - Upgrade test (`e2e.yml`, job `upgrade`): install the latest `v*` release, create data, upgrade to `HEAD`,
   run the smoke tests.
 
+## Releases
+
+A release is a `v*` tag on `main`, pushed by a maintainer (ruleset *release tags* below); `release.yml`
+builds, signs and publishes it. Release candidates are `vX.Y.Z-rc.N`.
+
+**Security-model changes ship a release candidate first** (#60, `docs/design/rc-rule.md`). A release changes
+the security model when a commit since the previous final release touches one of the files that
+`scripts/security-model-paths.sh` lists: `docs/security-model.md`, `proto/`, `internal/secrets/`,
+`internal/probe/`, `internal/agent/`, or the agent chart's RBAC templates (`clusterrole.yaml`, `bench.yaml`).
+CI labels such pull requests `security-model`. Such a release:
+
+1. ships at least one release candidate, and its latest RC contains every one of those commits. `release.yml`
+   checks this first on a final tag and fails before anything is built or published; the message names the
+   commits. Delete the final tag, tag a new RC, and tag the final again after the steps below;
+2. is tested in the lab on that RC with a **focused test plan**, written in the RC's preparation pull request:
+   what the change does and how the test exercises it, on both lab clusters, failure paths as well as the
+   success path. The results go into the pull request of the final release. An idle lab proves nothing, so
+   the plan, not a number of days, decides when the test is done;
+3. passes an independent security review before the final tag, like
+   [the v0.1 review](security-review-v0.1.md): a reviewer that did not write the change reads the diff since
+   the previous final release against `docs/security-model.md`, and the findings are fixed or accepted in
+   writing.
+
+A file that should be on the list goes into `scripts/security-model-paths.sh` (and its test,
+`scripts/test-security-model-paths.sh`, which CI runs).
+
 ## Lab
 
 Kind runs on OrbStack's Docker. **Never touch other kube contexts**: e2e uses its own kubeconfig

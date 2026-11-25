@@ -60,7 +60,20 @@ env:
   CERT_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
+  # A final tag of a release that changes the security model needs an RC of
+  # the same version with every such change in it (#60). Fails before
+  # anything is built or published; RC tags and dry runs pass through.
+  rc-rule:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - name: Security-model changes shipped an RC first
+        if: github.ref_type == 'tag'
+        run: ./scripts/security-model-paths.sh --check "$GITHUB_REF_NAME"
+
   images:
+    needs: [rc-rule]
     runs-on: ubuntu-24.04
     steps:
       # Two architectures of the server image (tools, pg_dump) in the
@@ -121,6 +134,7 @@ jobs:
         with: {name: image-sboms, path: "sbom-*.json\ndigests.txt"}
 
   packages:
+    needs: [rc-rule]
     runs-on: ubuntu-24.04
     strategy:
       matrix: {arch: [amd64, arm64]}
@@ -194,6 +208,7 @@ jobs:
             dist/SHA256SUMS-*
 
   charts:
+    needs: [rc-rule]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
