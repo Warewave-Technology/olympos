@@ -1,7 +1,7 @@
 # ClickHouse native backup through an Olympos S3 endpoint (#62)
 
-Status: draft for the owner's review, 2026-11-25. The owner chose option 1 of *Owner decision* below (an
-allowlist on the parsed definitions, no opt-in) on 2026-11-25. The approach (ClickHouse writes to Olympos, which looks like
+Status: approved by the owner on 2026-11-25, with option 1 of *Owner decision* below (an allowlist on the
+parsed definitions, no opt-in). The decisions marked *my call* came from an independent builder check. The approach (ClickHouse writes to Olympos, which looks like
 S3) was approved in the v0.4 plan. This page turns it into a design, with the spike's findings
 ([clickhouse-native-spike.md](clickhouse-native-spike.md)) and the code as it is today.
 
