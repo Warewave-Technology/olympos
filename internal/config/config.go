@@ -387,6 +387,11 @@ func (c *Server) Validate() error {
 		if c.Listen.Ingest == "" {
 			errs = append(errs, "listen.ingest must not be empty while ingest.url is set")
 		}
+		if c.Experimental.MultiReplica {
+			// A run's session, and its secret, live in the one process
+			// that opened it.
+			errs = append(errs, "ingest.url cannot be set while experimental.multiReplica is true: ingest sessions live in one server process")
+		}
 	}
 	if c.DevMode && !devbuild.Enabled {
 		errs = append(errs, "devMode is only available in development builds (go build -tags dev); release binaries have no dev login and no local key vault")

@@ -78,7 +78,7 @@ func validServer() *Server {
 
 // The endpoint is on only when ingest.url is set: without it there is no
 // listener and no error; with it the URL must be valid.
-func TestIngestURLRequiredWhenListening(t *testing.T) {
+func TestIngestOnlyWithURL(t *testing.T) {
 	c := validServer()
 	if c.IngestEnabled() || c.Validate() != nil {
 		t.Fatalf("no ingest.url: the endpoint is off without an error: %v", c.Validate())
@@ -143,6 +143,20 @@ func TestIngestValidation(t *testing.T) {
 	c.Listen.Ingest = ""
 	if err := c.Validate(); err != nil {
 		t.Errorf("endpoint off: an empty listen.ingest is not checked: %v", err)
+	}
+}
+
+// Ingest sessions live in one server process, so the endpoint is refused
+// with more than one replica.
+func TestIngestNotWithMultiReplica(t *testing.T) {
+	c := validServer()
+	c.Experimental.MultiReplica = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("multiReplica without ingest.url: %v", err)
+	}
+	c.Ingest.URL = "https://olympos-ingest.example:9444"
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "ingest.url cannot be set while experimental.multiReplica is true") {
+		t.Fatalf("multiReplica with ingest.url: %v", err)
 	}
 }
 

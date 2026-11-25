@@ -53,8 +53,8 @@ type Deps struct {
 	Inventory *inventory.Service
 	Cred      azcore.TokenCredential // nil in devMode without Azure
 	SelfDB    SelfDB
-	// Ingest holds the sessions of native ClickHouse runs; nil while
-	// listen.ingest is empty (the endpoint is off).
+	// Ingest holds the sessions of native ClickHouse runs; nil without
+	// ingest.url (the endpoint is off).
 	Ingest *ingest.Registry
 }
 
@@ -320,12 +320,8 @@ func Run(cfgPath string) error {
 		return fmt.Errorf("internal ca: %w", err)
 	}
 
-	if cfg.IngestEnabled() {
-		d.Ingest = ingest.NewRegistry(d.DB, d.HMAC, cfg.Ingest.MaxRuns, nil)
-		// The secrets of the credentials of the last process are gone with it.
-		if err := d.Ingest.MarkInterrupted(ctx); err != nil {
-			return err
-		}
+	if err := d.startIngest(ctx); err != nil {
+		return err
 	}
 
 	d.Gateway = gateway.New(d.DB, d.CA, log.With("component", "gateway"))
@@ -522,6 +518,21 @@ func Run(cfgPath string) error {
 	}
 	gs.GracefulStop()
 	wg.Wait()
+	return nil
+}
+
+// startIngest revokes the ingest credentials the last process left open
+// (their secrets are gone with it), and opens the registry of ingest
+// sessions when the endpoint is on. The revoke runs with the endpoint off
+// too: the table is always there, and the endpoint may have been on before
+// the restart.
+func (d *Deps) startIngest(ctx context.Context) error {
+	if err := ingest.MarkInterrupted(ctx, d.DB, time.Now()); err != nil {
+		return err
+	}
+	if d.Cfg.IngestEnabled() {
+		d.Ingest = ingest.NewRegistry(d.DB, d.HMAC, d.Cfg.Ingest.MaxRuns, nil)
+	}
 	return nil
 }
 

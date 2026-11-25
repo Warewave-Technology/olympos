@@ -14,8 +14,11 @@ import (
 // ingestServer is the S3 endpoint of native ClickHouse backups. The handler
 // ends a failed or revoked stream by panicking with http.ErrAbortHandler so
 // the client sees a broken transfer, never a truncated success: nothing may
-// wrap it in a recover. The server sets no read or write timeout (a part
-// takes as long as ClickHouse needs); the sessions bound a run.
+// wrap it in a recover. The server sets no read or write timeout on a body
+// (a part takes as long as ClickHouse needs; the sessions bound a run), but
+// bounds the header read and drops idle connections. It speaks HTTP/1.1
+// only, as ClickHouse does. Before it serves, the spill files a crash left
+// behind are removed.
 //
 // With an http ingest.url it serves plain HTTP (lab use, inside a trusted
 // network). The returned certFile (nil for the internal-CA certificate) is
@@ -31,8 +34,16 @@ func (d *Deps) ingestServer() (srv *http.Server, cf *certFile, unregister func()
 	if err := metrics.Registry.Register(m); err != nil {
 		return nil, nil, nil, err
 	}
+	if n, err := ingest.RemoveSpillFiles(d.Cfg.Ingest.SpillDir); err != nil {
+		d.Log.Warn("ingest: could not remove old spill files", "dir", d.Cfg.Ingest.SpillDir, "err", err)
+	} else if n > 0 {
+		d.Log.Info("ingest: removed spill files a previous process left", "dir", d.Cfg.Ingest.SpillDir, "files", n)
+	}
 	h := ingest.NewHandler(d.Ingest, d.Log.With("component", "ingest"), m, ingest.WithSpillDir(d.Cfg.Ingest.SpillDir))
-	srv = &http.Server{Addr: d.Cfg.Listen.Ingest, Handler: h, TLSConfig: tlsCfg, ReadHeaderTimeout: 10 * time.Second}
+	srv = &http.Server{Addr: d.Cfg.Listen.Ingest, Handler: h, TLSConfig: tlsCfg,
+		ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 120 * time.Second,
+		// An empty, non-nil map turns HTTP/2 off.
+		TLSNextProto: map[string]func(*http.Server, *tls.Conn, http.Handler){}}
 	return srv, cf, func() { metrics.Registry.Unregister(m) }, nil
 }
 

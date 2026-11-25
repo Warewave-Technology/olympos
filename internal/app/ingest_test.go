@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/Warewave-Technology/olympos/internal/config"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
 	"github.com/Warewave-Technology/olympos/internal/ingest"
@@ -249,4 +251,109 @@ func TestGatewayTLSInternalCA(t *testing.T) {
 	if err := b.Leaf.VerifyHostname("gw.test"); err != nil {
 		t.Errorf("re-issued certificate: %v", err)
 	}
+}
+
+// The ingest server speaks HTTP/1.1 only (ClickHouse does), drops idle
+// connections, bounds the header read, and sets no read or write timeout on
+// a body (a part takes as long as ClickHouse needs).
+func TestIngestServerTimeouts(t *testing.T) {
+	d := ingestDeps(t)
+	srv, _, unregister, err := d.ingestServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unregister)
+	if srv.IdleTimeout != 120*time.Second {
+		t.Errorf("IdleTimeout %v, want 2m", srv.IdleTimeout)
+	}
+	if srv.ReadHeaderTimeout <= 0 || srv.ReadHeaderTimeout > 30*time.Second {
+		t.Errorf("ReadHeaderTimeout %v", srv.ReadHeaderTimeout)
+	}
+	if srv.ReadTimeout != 0 || srv.WriteTimeout != 0 {
+		t.Errorf("a body has no deadline: ReadTimeout %v, WriteTimeout %v", srv.ReadTimeout, srv.WriteTimeout)
+	}
+	if srv.TLSNextProto == nil || len(srv.TLSNextProto) != 0 {
+		t.Errorf("HTTP/2 is off: TLSNextProto %v", srv.TLSNextProto)
+	}
+	// A client that offers h2 gets HTTP/1.1.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.ServeTLS(l, "", "") }()
+	t.Cleanup(func() { _ = srv.Close() })
+	conn, err := tls.Dial("tcp", l.Addr().String(), &tls.Config{RootCAs: d.CA.Pool(), ServerName: d.Cfg.IngestHost(),
+		NextProtos: []string{"h2", "http/1.1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if p := conn.ConnectionState().NegotiatedProtocol; p == "h2" {
+		t.Errorf("negotiated %q", p)
+	}
+}
+
+// Spill files a crash left in ingest.spillDir are removed when the server
+// starts; other files stay.
+func TestIngestServerRemovesSpillFiles(t *testing.T) {
+	d := ingestDeps(t)
+	dir := t.TempDir()
+	d.Cfg.Ingest.SpillDir = dir
+	for _, name := range []string{"olympos-ingest-123.part", "olympos-ingest-456.part", "keep.txt"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, _, unregister, err := d.ingestServer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unregister)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "keep.txt" {
+		t.Errorf("left in the spill dir: %v", entries)
+	}
+}
+
+// Start-up revokes the credentials the last process left open, also when
+// the endpoint is now off: the table is always there.
+func TestStartIngestMarksInterrupted(t *testing.T) {
+	for _, on := range []bool{false, true} {
+		d := ingestDeps(t)
+		d.Ingest = nil
+		run := uuid.New()
+		_, cred, err := ingest.NewRegistry(d.DB, d.HMAC, 1, nil).Open(context.Background(), ingest.OpenOptions{
+			RunID: run, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: run.String() + "/"}, TTL: time.Hour,
+			Sink: nopSink{}, MaxBytes: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !on {
+			d.Cfg.Ingest.URL = ""
+		}
+		if err := d.startIngest(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if (d.Ingest != nil) != on {
+			t.Errorf("endpoint on %v: registry %v", on, d.Ingest)
+		}
+		var reason *string
+		if err := d.DB.QueryRow(context.Background(), `SELECT reason FROM ingest_credentials WHERE access_key = $1`,
+			cred.AccessKey).Scan(&reason); err != nil {
+			t.Fatal(err)
+		}
+		if reason == nil || *reason != "server restart" {
+			t.Errorf("endpoint on %v: reason %v, want server restart", on, reason)
+		}
+	}
+}
+
+type nopSink struct{}
+
+func (nopSink) Put(context.Context, string, io.Reader) (ingest.ObjectRecord, error) {
+	return ingest.ObjectRecord{}, nil
 }
