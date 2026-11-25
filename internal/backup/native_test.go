@@ -1,0 +1,509 @@
+//go:build dev
+
+package backup_test
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/minio/minio-go/v7/pkg/signer"
+
+	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/backup/engines/clickhouse"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
+	"github.com/Warewave-Technology/olympos/internal/secrets"
+	"github.com/Warewave-Technology/olympos/internal/store"
+	"github.com/Warewave-Technology/olympos/internal/testutil"
+)
+
+// The worker's native path (task 10) against a real ingest endpoint: the
+// fake engine plays ClickHouse, PUTting a small backup with signed requests
+// as ClickHouse does, and the real ClickHouse code builds and signs the
+// manifest.
+
+const nativeKey = "olympos-manifest"
+
+// nativeObject is one object of the fake backup, keyed relative to the run.
+type nativeObject struct {
+	rel  string
+	body []byte
+}
+
+// nativeBackup is what the fake ClickHouse writes: two parts of shop.orders
+// (40 and 2 rows), the metadata, and .backup last, which lists the rest.
+func nativeBackup() []nativeObject {
+	objs := []nativeObject{
+		{"data/shop/orders/all_1_1_0/data.bin", bytes.Repeat([]byte("part-one-"), 40_000)},
+		{"data/shop/orders/all_1_1_0/count.txt", []byte("40")},
+		{"data/shop/orders/all_2_2_0/data.bin", []byte("part-two")},
+		{"data/shop/orders/all_2_2_0/count.txt", []byte("2")},
+		{"metadata/shop.sql", []byte("CREATE DATABASE shop UUID 'a1485f28-bfdd-4ac8-8373-2de920367b6a' ENGINE = Atomic")},
+		{"metadata/shop/orders.sql", []byte("CREATE TABLE shop.orders UUID 'aa757254-1568-44ed-857d-b236f30e79cd' (`id` UInt64) " +
+			"ENGINE = MergeTree ORDER BY id")},
+	}
+	var files strings.Builder
+	for _, o := range objs {
+		sum := sha256.Sum256(o.body)
+		fmt.Fprintf(&files, "<file><name>%s</name><size>%d</size><checksum>%s</checksum></file>", o.rel, len(o.body), hex.EncodeToString(sum[:16]))
+	}
+	meta := "<config><version>1</version><deduplicate_files>1</deduplicate_files><timestamp>2026-11-26 02:00:00</timestamp>" +
+		"<uuid>b72cb88e-d879-4426-b595-748adff8e17e</uuid><contents>" + files.String() + "</contents></config>"
+	return append(objs, nativeObject{".backup", []byte(meta)})
+}
+
+// nativeCall is what the fake ClickHouse saw of one run.
+type nativeCall struct {
+	run    backup.NativeRun
+	killed string // the stop reason it was KILLed for
+}
+
+var nativeCalls = struct {
+	mu   sync.Mutex
+	runs map[string]*nativeCall
+}{runs: map[string]*nativeCall{}}
+
+func nativeCallOf(t *testing.T, run uuid.UUID) nativeCall {
+	t.Helper()
+	nativeCalls.mu.Lock()
+	defer nativeCalls.mu.Unlock()
+	c := nativeCalls.runs[run.String()]
+	if c == nil {
+		t.Fatalf("the engine never ran %s", run)
+	}
+	return *c
+}
+
+func (fakeEngine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
+	var o struct {
+		Method    string   `json:"method"`
+		Databases []string `json:"databases"`
+	}
+	if err := json.Unmarshal(raw, &o); err != nil {
+		return backup.NativeJob{}, err
+	}
+	return backup.NativeJob{Native: o.Method == "native", Databases: o.Databases}, nil
+}
+
+// BackupNative plays ClickHouse: it takes the .lock, PUTs every object of
+// nativeBackup, signed with the run's credential, and drops the .lock. A
+// refused request is retried by ClickHouse until the run KILLs it: here,
+// it waits for the stop and is KILLed.
+func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
+	call := &nativeCall{run: run}
+	nativeCalls.mu.Lock()
+	nativeCalls.runs[run.RunID] = call
+	nativeCalls.mu.Unlock()
+	kill := func(reason string) error {
+		nativeCalls.mu.Lock()
+		call.killed = reason
+		nativeCalls.mu.Unlock()
+		return fmt.Errorf("clickhouse: native backup ended (the ingest session stopped: %s): KILL QUERY made it BACKUP_FAILED", reason)
+	}
+	do := func(method, rel string, body []byte) (int, error) {
+		req, err := http.NewRequestWithContext(ctx, method, run.URL+rel, bytes.NewReader(body))
+		if err != nil {
+			return 0, err
+		}
+		sum := sha256.Sum256(body)
+		req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
+		resp, err := http.DefaultClient.Do(signer.SignV4(*req, run.AccessKey, run.Secret, "", "us-east-1"))
+		if err != nil {
+			return 0, err
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.StatusCode, nil
+	}
+	var o fakeOpts
+	_ = json.Unmarshal(ec.Options, &o)
+	if o.LeakSecret {
+		return "", errors.New("clickhouse: BACKUP: S3 secret " + run.Secret + " refused")
+	}
+	steps := []nativeObject{{".lock", []byte("lock")}}
+	steps = append(steps, nativeBackup()...)
+	for _, obj := range steps {
+		select {
+		case reason := <-run.Stop:
+			return "", kill(reason)
+		default:
+		}
+		status, err := do(http.MethodPut, obj.rel, obj.body)
+		if err == nil && status != http.StatusOK {
+			err = fmt.Errorf("PUT %s: %d", obj.rel, status)
+		}
+		if err != nil {
+			select {
+			case reason := <-run.Stop:
+				return "", kill(reason)
+			case <-time.After(10 * time.Second):
+				return "", fmt.Errorf("clickhouse: %v, and the run did not stop", err)
+			}
+		}
+	}
+	if status, err := do(http.MethodDelete, ".lock", nil); err != nil || status != http.StatusNoContent {
+		return "", fmt.Errorf("DELETE .lock: %d %v", status, err)
+	}
+	return "fake 25.8", nil
+}
+
+// SignNativeManifest is the real engine's.
+func (fakeEngine) SignNativeManifest(ctx context.Context, in backup.NativeManifestInput) (*backup.NativeManifestResult, error) {
+	return clickhouse.Engine{}.SignNativeManifest(ctx, in)
+}
+
+// nativeEnv is a group of two destinations, a native job on it and an
+// ingest endpoint on httptest.
+type nativeEnv struct {
+	groupFixture
+	reg *ingest.Registry
+	srv *httptest.Server
+	kv  *secrets.LocalKeyVault
+}
+
+func seedNative(t *testing.T, db *store.DB) nativeEnv {
+	t.Helper()
+	g := seedGroup(t, db, jobOpts{options: `{"method":"native","databases":["shop"]}`})
+	fp, err := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := ingest.NewRegistry(db, fp, 4, nil)
+	srv := httptest.NewServer(ingest.NewHandler(reg, quietLog(), ingest.NewMetrics(), ingest.WithSpillDir(t.TempDir())))
+	t.Cleanup(srv.Close)
+	kv := &secrets.LocalKeyVault{Dir: t.TempDir()}
+	g.W.Native = &backup.NativeConfig{Registry: reg, URL: srv.URL, KV: kv, ManifestKeyName: nativeKey}
+	return nativeEnv{groupFixture: g, reg: reg, srv: srv, kv: kv}
+}
+
+// runDir is the run's directory on a destination of prefix.
+func runDir(t *testing.T, db *store.DB, prefix string, run uuid.UUID) string {
+	t.Helper()
+	var started time.Time
+	if err := db.QueryRow(context.Background(), `SELECT started_at FROM backup_runs WHERE id = $1`, run).Scan(&started); err != nil {
+		t.Fatal(err)
+	}
+	return backup.RunDir(prefix, "prod", "db", "orders", "clickhouse", started, run)
+}
+
+// readSidecar reads a native copy's sidecar and verifies its manifest from
+// the bytes in Details, as a restore does.
+func readSidecar(t *testing.T, b *fakeBlobs, kv secrets.KeyVault, dir string, run uuid.UUID) (backup.Manifest, *clickhouse.NativeManifest) {
+	t.Helper()
+	raw := b.blobs[backup.ManifestPath(dir, run)]
+	var side struct {
+		backup.Manifest
+		Details map[string]json.RawMessage `json:"details"`
+	}
+	if err := json.Unmarshal(raw, &side); err != nil {
+		t.Fatalf("sidecar %s: %v (%v)", backup.ManifestPath(dir, run), err, keysOf(b.blobs))
+	}
+	signed := side.Details[backup.NativeManifestDetail]
+	if !bytes.HasPrefix(signed, []byte(`{"key_id":"`+nativeKey+`/1","manifest":{`)) {
+		t.Fatalf("the signed manifest is not in Details as it was signed: %.80s", signed)
+	}
+	m, err := clickhouse.VerifySigned(context.Background(), kv, nativeKey, run.String(), signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return side.Manifest, m
+}
+
+type credRow struct {
+	Scope   string
+	Reason  *string
+	Revoked *time.Time
+	TTL     time.Duration
+}
+
+func credentialOf(t *testing.T, db *store.DB, run uuid.UUID) credRow {
+	t.Helper()
+	var c credRow
+	var created, expires time.Time
+	if err := db.QueryRow(context.Background(), `SELECT scope::text, reason, revoked_at, created_at, expires_at FROM ingest_credentials
+		WHERE run_id = $1 AND kind = 'backup'`, run).Scan(&c.Scope, &c.Reason, &c.Revoked, &created, &expires); err != nil {
+		t.Fatal(err)
+	}
+	c.TTL = expires.Sub(created)
+	return c
+}
+
+// TestNativeRunSucceeds: every object reaches every destination tagged
+// incomplete, then one signed manifest per destination, every object
+// re-tagged complete, both copies succeeded, the credential revoked.
+func TestNativeRunSucceeds(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "succeeded" || r.Error != "" || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	call := nativeCallOf(t, run)
+	if call.run.URL != e.srv.URL+"/olympos/"+run.String()+"/" || call.run.RunID != run.String() || call.killed != "" ||
+		strings.Join(call.run.Databases, ",") != "shop" || !strings.HasPrefix(call.run.AccessKey, "OLY") {
+		t.Fatalf("engine call: %v, killed %q", call.run, call.killed)
+	}
+	var total int64
+	for _, o := range nativeBackup() {
+		total += int64(len(o.body))
+	}
+	for i, b := range []*fakeBlobs{e.B1, e.B2} {
+		dir := runDir(t, db, []string{"a", "b"}[i], run)
+		c := cs[i]
+		env, m := readSidecar(t, b, e.kv, dir, run)
+		if c.Status != "succeeded" || c.BlobPath != dir || c.SHA != m.SHA256() || c.Bytes != total || c.Tier != "daily" {
+			t.Fatalf("copy %d: %+v (dir %s, manifest %s)", i, c, dir, m.SHA256())
+		}
+		for _, o := range nativeBackup() {
+			p := dir + "/" + o.rel
+			if !bytes.Equal(b.blobs[p], o.body) {
+				t.Fatalf("copy %d: %s not stored (%v)", i, p, keysOf(b.blobs))
+			}
+			if tg := b.tags[p]; tg[backup.StateTag] != backup.StateComplete || tg[backup.TierTag] != "daily" {
+				t.Fatalf("copy %d: %s tagged %v", i, p, tg)
+			}
+		}
+		if tg := b.tags[backup.ManifestPath(dir, run)]; tg[backup.StateTag] != backup.StateComplete || tg[backup.TierTag] != "daily" {
+			t.Fatalf("copy %d: manifest tagged %v", i, tg)
+		}
+		if _, ok := b.blobs[dir+"/.lock"]; ok {
+			t.Fatal("the .lock reached a destination")
+		}
+		// The sidecar is the run's, its blob the run's directory.
+		if env.Format != backup.ManifestFormat || env.RunID != run || env.Engine != "clickhouse" || env.Blob.Path != dir ||
+			env.Blob.SHA256 != m.SHA256() || env.Blob.Size != total || env.ServerVersion != "fake 25.8" || env.Tier != "daily" ||
+			env.Group == nil || env.Destination == nil {
+			t.Fatalf("copy %d sidecar: %+v", i, env)
+		}
+		// Rows per table: the sum of its parts' count.txt.
+		if len(m.Databases) != 1 || m.Databases[0].Objects[0].Name != "orders" || m.Databases[0].Objects[0].Rows != 42 ||
+			m.PartRows["data/shop/orders/all_1_1_0/count.txt"] != 40 || len(m.Objects) != len(nativeBackup()) ||
+			m.ServerVersion != "fake 25.8" || m.Settings["id"] != run.String() {
+			t.Fatalf("manifest: %+v", m)
+		}
+	}
+	if r.BlobPath != cs[0].BlobPath || r.SHA != cs[0].SHA || r.Bytes != total {
+		t.Fatalf("run columns: %+v", r)
+	}
+	cred := credentialOf(t, db, run)
+	if cred.Revoked == nil || cred.Reason == nil || *cred.Reason != "run ended" || cred.Scope != `{"write": "`+run.String()+`/"}` ||
+		cred.TTL != 6*time.Hour {
+		t.Fatalf("credential: %+v", cred)
+	}
+}
+
+// Review Focus 4: one destination fails in the middle of an object. Its copy
+// fails with that object, its objects stay incomplete, the run is partial,
+// and the other copy is complete. A native run queues no repair.
+func TestNativeRunOneDestinationFails(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.B2.fail, e.B2.failAfter, e.B2.failOn = errors.New("503 ServerBusy"), 100_000, "all_1_1_0/data.bin"
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	const failed = "upload data/shop/orders/all_1_1_0/data.bin: 503 ServerBusy"
+	if r.Status != "partial" || r.Error != "dest-b: "+failed || len(cs) != 2 || cs[0].Status != "succeeded" ||
+		cs[1].Status != "failed" || cs[1].Error != failed {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	dir1, dir2 := runDir(t, db, "a", run), runDir(t, db, "b", run)
+	_, m := readSidecar(t, e.B1, e.kv, dir1, run)
+	if cs[0].SHA != m.SHA256() || m.Databases[0].Objects[0].Rows != 42 {
+		t.Fatalf("the complete copy: %+v", cs[0])
+	}
+	for _, o := range nativeBackup() {
+		if tg := e.B1.tags[dir1+"/"+o.rel]; tg[backup.StateTag] != backup.StateComplete {
+			t.Fatalf("copy 1: %s tagged %v", o.rel, tg)
+		}
+	}
+	// What reached member 2 before it failed stays incomplete; nothing after.
+	if _, ok := e.B2.blobs[backup.ManifestPath(dir2, run)]; ok {
+		t.Fatal("a manifest on the failed copy")
+	}
+	for p, tg := range e.B2.tags {
+		if tg[backup.StateTag] != backup.StateIncomplete {
+			t.Fatalf("copy 2: %s tagged %v", p, tg)
+		}
+	}
+	if _, ok := e.B2.blobs[dir2+"/data/shop/orders/all_2_2_0/data.bin"]; ok {
+		t.Fatal("the failed destination took objects after its failure")
+	}
+	if ev := events(t, db, "backup.partial"); len(ev) != 1 || ev[0].Payload["repair_queued"] != false {
+		t.Fatalf("partial event: %+v", ev)
+	}
+	var repairs int
+	if err := db.QueryRow(context.Background(), `SELECT count(*) FROM backup_runs WHERE repair_of = $1`, run).Scan(&repairs); err != nil || repairs != 0 {
+		t.Fatalf("repairs queued for a native run: %d %v", repairs, err)
+	}
+	if cred := credentialOf(t, db, run); cred.Revoked == nil {
+		t.Fatal("credential not revoked")
+	}
+}
+
+// When no destination takes an object, the session stops, the backup is
+// KILLed, the run fails with each copy's own error and the credential is
+// revoked.
+func TestNativeRunAllDestinationsFail(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.B1.fail, e.B1.failOn = errors.New("403 AuthorizationPermissionMismatch"), "count.txt"
+	e.B2.fail, e.B2.failAfter, e.B2.failOn = errors.New("503 ServerBusy"), 100_000, "all_1_1_0/data.bin"
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "failed" || r.Error != "upload data/shop/orders/all_1_1_0/count.txt: 403 AuthorizationPermissionMismatch" || len(cs) != 2 ||
+		cs[0].Status != "failed" || cs[1].Status != "failed" || cs[1].Error != "upload data/shop/orders/all_1_1_0/data.bin: 503 ServerBusy" {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	if call := nativeCallOf(t, run); call.killed != ingest.ReasonDestination {
+		t.Fatalf("killed for %q, want %q", call.killed, ingest.ReasonDestination)
+	}
+	if cred := credentialOf(t, db, run); cred.Revoked == nil {
+		t.Fatal("credential not revoked")
+	}
+	if ev := events(t, db, "backup.failed"); len(ev) != 1 {
+		t.Fatalf("failed events: %+v", ev)
+	}
+}
+
+// A destination that cannot change tags never completes a native copy.
+func TestNativeRunTagsFail(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.B2.failTags = errors.New("409 Conflict")
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	cs := loadCopies(t, db, run)
+	if r := loadRun(t, db, run); r.Status != "partial" || len(cs) != 2 || cs[1].Status != "failed" ||
+		!strings.HasPrefix(cs[1].Error, "tag the objects complete: ") || !strings.HasSuffix(cs[1].Error, "409 Conflict") ||
+		cs[1].BlobPath != runDir(t, db, "b", run) {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+}
+
+// R14: with the endpoint off, a native job's run fails with the reason; it
+// writes nothing and opens no session.
+func TestNativeRunIngestOff(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.W.Native = nil
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	if r := loadRun(t, db, run); r.Status != "failed" || r.Error != "the ingest endpoint is off: set ingest.url" {
+		t.Fatalf("run: %+v", r)
+	}
+	if len(e.B1.blobs)+len(e.B2.blobs) != 0 || len(loadCopies(t, db, run)) != 0 {
+		t.Fatal("wrote with the endpoint off")
+	}
+}
+
+// Repairs are off for native runs: a repair queued for the job, from before
+// it was native, is refused.
+func TestNativeRunNotRepaired(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedNative(t, db)
+	orig := insertFinishedRun(t, db, e.Job, "partial", time.Date(2026, 11, 2, 2, 0, 0, 0, time.UTC), e.DestID)
+	var rep uuid.UUID
+	if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, repair_of, destination_ids) VALUES ($1, 'manual', 'queued', $2, $3)
+		RETURNING id`, e.Job, orig, []uuid.UUID{e.Dest2}).Scan(&rep); err != nil {
+		t.Fatal(err)
+	}
+	claimAndRun(t, e.W, rep)
+	if r := loadRun(t, db, rep); r.Status != "failed" || r.Error != "a native run is not repaired; the next run is a full backup" {
+		t.Fatalf("repair: %+v", r)
+	}
+	if len(e.B2.blobs) != 0 {
+		t.Fatal("the repair wrote")
+	}
+}
+
+// Review Focus 2: after a restart a native run left running has its ingest
+// credential revoked ("server restart") by start-up recovery; the worker
+// fails it at once, not after the stale-heartbeat delay. Its objects stay
+// incomplete. A running run of this process is left alone.
+func TestNativeRunServerRestart(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedNative(t, db)
+	running := func() uuid.UUID {
+		var id uuid.UUID
+		if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at) VALUES ($1, 'manual', 'running', now()) RETURNING id`,
+			e.Job).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := e.reg.Open(ctx, ingest.OpenOptions{RunID: id, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: id.String() + "/"},
+			TTL: time.Hour, Sink: discardSink{}, MaxBytes: 1 << 20}); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	before := running()
+	if err := ingest.MarkInterrupted(ctx, db, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	after := running() // opened after the restart: its credential is live
+	if err := e.W.ReapStale(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if r := loadRun(t, db, before); r.Status != "failed" || !strings.HasPrefix(r.Error, "interrupted: the server restarted during the native backup") {
+		t.Fatalf("run before the restart: %+v", r)
+	}
+	if r := loadRun(t, db, after); r.Status != "running" {
+		t.Fatalf("run after the restart: %+v", r)
+	}
+	if ev := events(t, db, "backup.failed"); len(ev) != 1 {
+		t.Fatalf("failed events: %+v", ev)
+	}
+}
+
+type discardSink struct{}
+
+func (discardSink) Put(_ context.Context, key string, r io.Reader) (ingest.ObjectRecord, error) {
+	n, err := io.Copy(io.Discard, r)
+	return ingest.ObjectRecord{Key: key, Size: n}, err
+}
+
+// The ingest secret never reaches the run's records, even when the engine
+// lets it through.
+func TestNativeRunScrubsSecret(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	if _, err := db.Exec(context.Background(), `UPDATE backup_jobs SET engine_options = '{"method":"native","leak_secret":true}' WHERE id = $1`, e.Job); err != nil {
+		t.Fatal(err)
+	}
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	secret := nativeCallOf(t, run).run.Secret
+	r := loadRun(t, db, run)
+	if r.Status != "failed" || secret == "" || strings.Contains(r.Error, secret) || r.Error != "clickhouse: BACKUP: S3 secret [HIDDEN] refused" {
+		t.Fatalf("run: %+v", r)
+	}
+	if cs := loadCopies(t, db, run); len(cs) != 0 {
+		t.Fatalf("copies of a run that wrote nothing: %+v", cs)
+	}
+	if cred := credentialOf(t, db, run); cred.Revoked == nil {
+		t.Fatal("credential not revoked")
+	}
+}

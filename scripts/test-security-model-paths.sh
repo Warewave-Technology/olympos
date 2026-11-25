@@ -113,6 +113,18 @@ if printf 'internal/backup/engines/clickhouse/native_run_test.go\ninternal/backu
   echo "FAIL: --files matched a test next to the native run" >&2
   fail=1
 fi
+# The worker's native run scopes the run's credential and decides what its
+# signed manifest says and when its objects are complete.
+if ! out=$(printf 'internal/backup/worker.go\ninternal/backup/native.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/native.go ]; then
+  echo "FAIL: --files with the worker's native run: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/native_test.go\ninternal/backup/native_internal_test.go\ninternal/backup/engines/native.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the worker's native run" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1

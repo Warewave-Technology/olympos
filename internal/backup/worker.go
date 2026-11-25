@@ -19,6 +19,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/store"
@@ -47,6 +48,9 @@ type Worker struct {
 	// Heartbeat refreshes running rows; runs without one for StaleAfter are
 	// failed by any replica (crashed worker). Defaults 30 s / 5 min.
 	Heartbeat, StaleAfter time.Duration
+	// Native is what native backups need; nil while the ingest endpoint is
+	// off (no ingest.url), when a native job's runs fail.
+	Native *NativeConfig
 
 	active atomic.Int32
 }
@@ -254,7 +258,16 @@ func skippedRepair(repair, enabled bool, paused string) (o outcome, ok bool) {
 	return outcome{}, false
 }
 
-// ReapStale fails running runs whose worker stopped heartbeating.
+// errNativeRestart fails a native run whose ingest credential start-up
+// recovery revoked: its server restarted, and the credential's secret,
+// which ClickHouse writes with, was lost with the process.
+const errNativeRestart = "interrupted: the server restarted during the native backup; its ingest credential is revoked, " +
+	"and the objects it wrote stay incomplete"
+
+// ReapStale fails running runs whose worker stopped heartbeating, and at
+// once a native run whose ingest credential start-up recovery revoked
+// (ingest.MarkInterrupted, reason ingest.ReasonRestart): a run of the
+// process before, which cannot go on.
 func (w *Worker) ReapStale(ctx context.Context) error {
 	stale := w.StaleAfter
 	if stale <= 0 {
@@ -263,24 +276,34 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 	var done []finished
 	err := store.Tx(ctx, w.DB, func(tx pgx.Tx) error {
 		// The olympos-self runner settles its own runs (SelfBackup).
-		rows, err := tx.Query(ctx, `SELECT id FROM backup_runs WHERE status = 'running' AND updated_at < now() - $1::interval
+		rows, err := tx.Query(ctx, `SELECT id, EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2)
+			FROM backup_runs r WHERE status = 'running'
+			AND (updated_at < now() - $1::interval OR EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2))
 			AND job_id NOT IN (SELECT id FROM backup_jobs WHERE system <> '')
-			FOR UPDATE SKIP LOCKED`, fmt.Sprintf("%d seconds", int(stale.Seconds())))
+			FOR UPDATE SKIP LOCKED`, fmt.Sprintf("%d seconds", int(stale.Seconds())), ingest.ReasonRestart)
 		if err != nil {
 			return err
 		}
-		var ids []uuid.UUID
+		type reaped struct {
+			id      uuid.UUID
+			restart bool
+		}
+		var ids []reaped
 		for rows.Next() {
-			var id uuid.UUID
-			if err := rows.Scan(&id); err != nil {
+			var r reaped
+			if err := rows.Scan(&r.id, &r.restart); err != nil {
 				rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			ids = append(ids, r)
 		}
 		rows.Close()
-		for _, id := range ids {
-			f, err := finishRunTx(ctx, tx, id, outcome{status: "failed", err: "interrupted: the worker running this backup stopped"})
+		for _, r := range ids {
+			o := outcome{status: "failed", err: "interrupted: the worker running this backup stopped"}
+			if r.restart {
+				o = outcome{status: "failed", err: errNativeRestart, native: true}
+			}
+			f, err := finishRunTx(ctx, tx, r.id, o)
 			if err != nil {
 				return err
 			}
@@ -312,6 +335,9 @@ type outcome struct {
 	// engineFailed: the run failed in the engine (or was interrupted), not
 	// in its copies; the dry-run checklist stops at the engine.
 	engineFailed bool
+	// native: a native run, which is never repaired (design §7): the next
+	// run is a full backup.
+	native bool
 }
 
 // fromFirstCopy fills the run's blob columns from its first succeeded copy
@@ -505,9 +531,12 @@ func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now
 	n := runNotice{RepairOf: repairOf}
 	switch {
 	case o.status == "partial" && repairOf == nil:
-		next, err := queueRepairTx(ctx, tx, runID, now)
-		if err != nil {
-			return runNotice{}, err
+		var next *time.Time
+		if !o.native {
+			var err error
+			if next, err = queueRepairTx(ctx, tx, runID, now); err != nil {
+				return runNotice{}, err
+			}
 		}
 		missing, err := missingDestinationsTx(ctx, tx, runID, false)
 		if err != nil {
@@ -872,7 +901,7 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	path := func(prefix string) string {
 		return BlobPath(prefix, job.Target.ClusterName, job.Target.Namespace, job.Target.Service, eng.Name(), r.startedAt, r.id, eng.Ext())
 	}
-	manifest := func(d destRef, b ManifestBlob, tier string) Manifest {
+	envelope := func(d destRef, b ManifestBlob, tier string) Manifest {
 		return Manifest{
 			Format: ManifestFormat, RunID: r.id, JobID: job.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
 			StartedAt: r.startedAt.UTC(), FinishedAt: time.Now().UTC(),
@@ -884,7 +913,18 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
 		}
 	}
-	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
+	if ne, ok := eng.(NativeEngine); ok {
+		// Options that do not parse fail in the engine's Run, as they always did.
+		if nj, err := ne.NativeJob(job.EngineOptions); err == nil && nj.Native {
+			if r.repairOf != nil {
+				return outcome{status: "failed", err: errNativeRepair, native: true}, nil, job
+			}
+			o, rr := w.runNative(ctx, r, job, nativeJob{eng: ne, opts: nj, ec: ec, dests: dests, tiers: tiers,
+				envelope: envelope, wire: wc.total, scrub: tr.scrub})
+			return o, rr, job
+		}
+	}
+	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, envelope, tr.scrub)
 	return copiesOutcome(ctx, copies, streamed, wc.total(), tiers[dests[0].ID], engErr, tr.scrub), rr, job
 }
 

@@ -44,6 +44,11 @@ func init() {
 			Blobs:  blobs,
 			Global: d.Cfg.Backup.GlobalConcurrency, PerCluster: d.Cfg.Backup.PerClusterConcurrency,
 		}
+		// Native ClickHouse backups, while the ingest endpoint is on (R14).
+		if d.Ingest != nil {
+			worker.Native = &backup.NativeConfig{Registry: d.Ingest, URL: d.Cfg.Ingest.URL, MaxRunDuration: d.Cfg.Ingest.MaxRunDuration,
+				KV: d.KV, ManifestKeyName: d.Cfg.KeyVault.ManifestKeyName}
+		}
 		// olympos-self: Olympos' own database (F17).
 		self := &backup.SelfBackup{DB: d.DB, Log: log.With("loop", "olympos-self"), Blobs: blobs,
 			DSN: d.SelfDB.DSN, Password: d.SelfDB.Password}

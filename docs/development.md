@@ -85,6 +85,7 @@ the security model when a commit since the previous final release touches one of
 `internal/backup/engines/clickhouse/native_manifest.go` (the signed native manifest),
 `internal/backup/engines/clickhouse/backupmeta.go` (what a native manifest lists),
 `internal/backup/engines/clickhouse/native.go` (the native run, which hands the run's credential to ClickHouse),
+`internal/backup/native.go` (the worker's native run: the credential's scope, the signed manifest, the objects' tags),
 or the agent chart's RBAC templates (`clusterrole.yaml`, `bench.yaml`).
 CI labels such pull requests `security-model`. Such a release:
 

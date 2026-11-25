@@ -2,12 +2,16 @@ package clickhouse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/ClickHouse/ch-go"
+
+	"github.com/Warewave-Technology/olympos/internal/backup"
 )
 
 const (
@@ -335,6 +339,43 @@ func TestOrphanResult(t *testing.T) {
 		err := orphanResult(why, tc.status, tc.err)
 		if errors.Is(err, ErrNativeOrphan) != tc.orphan || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), why) {
 			t.Errorf("status %q, error %v: %v", tc.status, tc.err, err)
+		}
+	}
+}
+
+// TestNativeEngine: the worker's side of the engine (backup.NativeEngine).
+func TestNativeEngine(t *testing.T) {
+	e := Engine{}
+	for raw, want := range map[string]backup.NativeJob{
+		`{"method":"native","databases":["b","a"]}`: {Native: true, Databases: []string{"a", "b"}},
+		`{"method":"native"}`:                       {Native: true, Databases: []string{}},
+		`{"method":"logical"}`:                      {Databases: []string{}},
+		`{}`:                                        {Databases: []string{}},
+	} {
+		got, err := e.NativeJob(json.RawMessage(raw))
+		if err != nil || got.Native != want.Native || !slices.Equal(got.Databases, want.Databases) {
+			t.Errorf("%s: %+v, %v", raw, got, err)
+		}
+	}
+	if _, err := e.NativeJob(json.RawMessage(`{"method":"native","tables":["a.b"]}`)); err == nil {
+		t.Error("native with tables is refused (R31)")
+	}
+
+	// The worker recognises a lost backup by backup.ErrNativeOrphan.
+	err := orphanResult("lost", statusCreating, nil)
+	if !errors.Is(err, ErrNativeOrphan) || !errors.Is(err, backup.ErrNativeOrphan) ||
+		!strings.HasPrefix(err.Error(), "clickhouse: the native backup may still be running on the target") {
+		t.Fatalf("orphan error: %v", err)
+	}
+
+	// The manifest records the settings the statement has.
+	stmt := backupStatement(testNativeRun())
+	for k, v := range statementSettings(nrRunID) {
+		if k == "id" {
+			v = quoteString(v)
+		}
+		if !strings.Contains(stmt, k+" = "+v) {
+			t.Errorf("setting %s = %s is not in %s", k, v, redactStatement(stmt))
 		}
 	}
 }

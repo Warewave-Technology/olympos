@@ -24,8 +24,9 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/targetid"
 )
 
-// fakeEngineName uses an engine name allowed by the targets CHECK; the
-// real ClickHouse engine is not linked into this test binary.
+// fakeEngineName uses an engine name allowed by the targets CHECK. The fake
+// is registered over the real ClickHouse engine, whose native manifest code
+// the native tests use (native_test.go).
 const fakeEngineName = "clickhouse"
 
 // fakeEngine dials the target twice, then writes payload.
@@ -174,7 +175,11 @@ type fakeBlobs struct {
 	// wrapReadErr wraps a read error without %w, as the Azure and S3
 	// writers do.
 	wrapReadErr bool
-	dests       map[uuid.UUID]*fakeBlobs
+	// failOn: fail and failAfter apply only to paths that contain it.
+	failOn string
+	// failTags is what SetTags returns.
+	failTags error
+	dests    map[uuid.UUID]*fakeBlobs
 }
 
 func newBlobs(prefix string) *fakeBlobs {
@@ -208,6 +213,9 @@ func (f *fakeBlobs) ForDestination(ctx context.Context, id uuid.UUID) (blob.Writ
 func (f *fakeBlobs) Prefix() string { return f.prefix }
 
 func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct string, tags map[string]string) (blob.UploadResult, error) {
+	if f.failOn != "" && !strings.Contains(path, f.failOn) {
+		return f.store(path, r, tags)
+	}
 	if f.failAfter > 0 {
 		_, _ = io.CopyN(io.Discard, r, f.failAfter)
 		if f.fail != nil {
@@ -229,6 +237,10 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
 		return blob.UploadResult{}, f.failManifest
 	}
+	return f.store(path, r, tags)
+}
+
+func (f *fakeBlobs) store(path string, r io.Reader, tags map[string]string) (blob.UploadResult, error) {
 	b, err := io.ReadAll(r)
 	if err != nil {
 		if f.wrapReadErr {
@@ -238,9 +250,26 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, ok := f.blobs[path]; ok {
+		return blob.UploadResult{}, fmt.Errorf("%s already exists; refusing to overwrite", path)
+	}
 	f.blobs[path] = b
 	f.tags[path] = tags
 	return blob.UploadResult{Bytes: int64(len(b))}, nil
+}
+
+// SetTags replaces the tags of a stored blob, as every real writer does.
+func (f *fakeBlobs) SetTags(ctx context.Context, path string, tags map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failTags != nil {
+		return f.failTags
+	}
+	if _, ok := f.blobs[path]; !ok {
+		return fmt.Errorf("%s does not exist", path)
+	}
+	f.tags[path] = tags
+	return nil
 }
 
 // fixture is a cluster with one target and a destination.

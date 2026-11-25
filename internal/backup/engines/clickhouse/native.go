@@ -9,6 +9,7 @@ package clickhouse
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -60,9 +61,35 @@ var (
 	// ErrNativeOrphan: the run lost track of its backup (a lost connection,
 	// a missing row, a KILL that did not end it), and a KILL on a new
 	// connection did not end it either. The backup may still run on the
-	// server, retrying its uploads with the revoked credential.
-	ErrNativeOrphan = errors.New("clickhouse: the native backup may still be running on the target")
+	// server, retrying its uploads with the revoked credential. It wraps
+	// backup.ErrNativeOrphan, which the worker looks for.
+	ErrNativeOrphan = fmt.Errorf("clickhouse: %w", backup.ErrNativeOrphan)
 )
+
+// Engine takes native backups for the worker.
+var _ backup.NativeEngine = Engine{}
+
+// NativeJob implements backup.NativeEngine: a job is native with method
+// "native", and backs up its databases option.
+func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
+	o, err := ParseOptions(raw)
+	if err != nil {
+		return backup.NativeJob{}, err
+	}
+	return backup.NativeJob{Native: o.Native(), Databases: o.Databases}, nil
+}
+
+// BackupNative implements backup.NativeEngine with RunNative.
+func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
+	return e.RunNative(ctx, ec, NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
+		Databases: run.Databases, Stop: run.Stop})
+}
+
+// statementSettings are the settings backupStatement writes into the BACKUP
+// statement of a full backup: what the manifest records.
+func statementSettings(runID string) map[string]string {
+	return map[string]string{"async": "1", "allow_s3_native_copy": "0", "id": runID}
+}
 
 // NativeRun is one native backup: where ClickHouse writes it, with which
 // ingest credential, and what it backs up.

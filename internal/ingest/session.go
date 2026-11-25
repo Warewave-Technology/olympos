@@ -43,11 +43,12 @@ const (
 	// Expiry ends the session like any stop, so that what still streams, and
 	// every open multipart upload, is aborted.
 	ReasonExpired = "expired"
+	// ReasonRestart is the revoke reason start-up recovery records
+	// (MarkInterrupted): the run belonged to the process before.
+	ReasonRestart = "server restart"
 )
 
 const (
-	// reasonRestart is the revoke reason start-up recovery records.
-	reasonRestart = "server restart"
 	// The capture limits: a kept .backup (it lists every file of the
 	// backup), a metadata/*.sql, a count.txt, and all kept bodies of one
 	// session together.
@@ -325,7 +326,7 @@ func (r *Registry) MarkInterrupted(ctx context.Context) error {
 // MarkInterrupted is Registry.MarkInterrupted without a registry, for a
 // server whose endpoint is off now but may have been on before the restart.
 func MarkInterrupted(ctx context.Context, db *store.DB, at time.Time) error {
-	if err := revokeAllCredentials(ctx, db, reasonRestart, at); err != nil {
+	if err := revokeAllCredentials(ctx, db, ReasonRestart, at); err != nil {
 		return fmt.Errorf("ingest: mark interrupted credentials: %w", err)
 	}
 	return nil

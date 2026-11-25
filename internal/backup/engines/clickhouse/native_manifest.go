@@ -31,6 +31,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"path"
 	"reflect"
 	"slices"
 	"strconv"
@@ -39,6 +40,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/secrets"
 )
@@ -86,7 +88,13 @@ type NativeManifest struct {
 	Settings           map[string]string // the BACKUP statement's settings
 	// Objects is every object of the run, as the ingest endpoint stored it,
 	// each under "<RunID>/".
-	Objects   []ingest.ObjectRecord
+	Objects []ingest.ObjectRecord
+	// PartRows is the row count of every part of the backup, by the path of
+	// its count.txt relative to the run ("data/<db>/<table>/<part>/count.txt"):
+	// the parts this run wrote, and those it holds in its base, whose
+	// count.txt it did not store (R27). A table's Rows is the sum over its
+	// parts.
+	PartRows  map[string]uint64
 	Databases []NativeDatabase
 }
 
@@ -150,8 +158,8 @@ func (s Signed) MarshalJSON() ([]byte, error) {
 // covers: object keys sorted, no whitespace, UTF-8 strings with only '"',
 // '\\' and control characters escaped, integers in decimal. Objects are
 // sorted by Key, databases by Name, the objects of a database by Name (ties,
-// which a valid manifest does not have, by their encoding). Nil and empty
-// collections are the same. The encoding is written here, not left to
+// which a valid manifest does not have, by their encoding), part rows by
+// path. Nil and empty collections are the same. The encoding is written here, not left to
 // encoding/json, so it does not change with Go versions. m is not modified.
 func (m *NativeManifest) Canonical() []byte {
 	var b bytes.Buffer
@@ -194,6 +202,17 @@ func (m *NativeManifest) Canonical() []byte {
 	}
 	b.WriteString(`,"objects":`)
 	writeArray(&b, objs)
+
+	b.WriteString(`,"part_rows":{`)
+	for i, p := range slices.Sorted(maps.Keys(m.PartRows)) {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		writeString(&b, p)
+		b.WriteByte(':')
+		b.WriteString(strconv.FormatUint(m.PartRows[p], 10))
+	}
+	b.WriteByte('}')
 
 	b.WriteString(`,"run_id":`)
 	writeString(&b, m.RunID)
@@ -330,6 +349,7 @@ func (m *NativeManifest) clone() *NativeManifest {
 	c := *m
 	c.Settings = maps.Clone(m.Settings)
 	c.Objects = slices.Clone(m.Objects)
+	c.PartRows = maps.Clone(m.PartRows)
 	c.Databases = slices.Clone(m.Databases)
 	for i := range c.Databases {
 		c.Databases[i].Objects = slices.Clone(c.Databases[i].Objects)
@@ -496,6 +516,259 @@ func VerifyChain(ctx context.Context, kv secrets.KeyVault, trustedKeyName, expec
 	return ms, nil
 }
 
+// NativeBuild is what a native run left when ClickHouse reported its backup
+// created: the input of BuildNativeManifest.
+type NativeBuild struct {
+	RunID, ServerVersion string
+	// Settings are the BACKUP statement's settings.
+	Settings map[string]string
+	// Objects are the objects the ingest endpoint stored (Session.Objects).
+	Objects []ingest.ObjectRecord
+	// Body returns a body by bucket-relative key: the run's .backup,
+	// metadata/*.sql and count.txt the ingest session kept
+	// (Session.Captured) and, for an incremental, objects of its base chain:
+	// the metadata/*.sql it did not write again and its base's .backup. Those
+	// are read from storage, so checked against the chain's manifests.
+	Body func(key string) ([]byte, bool)
+	// Base is an incremental's base chain, verified, base first
+	// (VerifyChain); nil for a full backup.
+	Base []*NativeManifest
+}
+
+// BuildNativeManifest builds the manifest of a native run from its .backup
+// (ParseBackupMeta), its metadata (ObjectsFromMetadata) and its count.txt
+// files (ParseCount). It checks that every file the .backup lists as written
+// by the run was stored whole. Every part's rows go into PartRows (R27): a
+// written count.txt is read, a deduplicated one (data_file) counts as the
+// file it names, one in the base counts as the base's count.txt of the same
+// content: ClickHouse takes a file from its base by size and checksum, not by
+// name, so it counts as the base's count.txt of that size and checksum
+// (whose rows the base's manifest holds, written or inherited). A table's
+// Rows is the sum over its parts: the count.txt files
+// directly under data/<db>/<table>/ (a Log table's) or one level below (a
+// MergeTree part's), not a projection's deeper down. A materialized view
+// without TO is counted for the view, which holds its inner table's data.
+// Anything that cannot be resolved for certain is ErrNativeMeta: the run
+// fails rather than sign a manifest that does not hold.
+func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
+	run := b.RunID + "/"
+	raw, ok := b.Body(run + ".backup")
+	if !ok {
+		return nil, metaErr("the run kept no .backup")
+	}
+	meta, err := ParseBackupMeta(raw)
+	if err != nil {
+		return nil, err
+	}
+	m := &NativeManifest{Format: NativeManifestFormat, RunID: b.RunID, ServerVersion: b.ServerVersion,
+		Settings: maps.Clone(b.Settings), Objects: slices.Clone(b.Objects), PartRows: map[string]uint64{}}
+	switch {
+	case meta.BaseBackup != "" && len(b.Base) == 0:
+		return nil, metaErr(".backup is an incremental's, and the run has no base")
+	case meta.BaseBackup == "" && len(b.Base) > 0:
+		return nil, metaErr(".backup is a full backup's, and the run has a base")
+	case len(b.Base) > 0:
+		last := b.Base[len(b.Base)-1]
+		m.BaseRunID, m.BaseManifestSHA256 = last.RunID, last.SHA256()
+	}
+
+	stored := map[string]int64{}
+	for _, o := range b.Objects {
+		stored[o.Key] = o.Size
+	}
+	if _, ok := stored[run+".backup"]; !ok {
+		return nil, metaErr("the run stored no .backup")
+	}
+	byName := map[string]MetaFile{}
+	for _, f := range meta.Files {
+		byName[f.Name] = f
+		if !f.Written() {
+			continue
+		}
+		size, ok := stored[run+f.Name]
+		switch {
+		case !ok:
+			return nil, metaErr("%s is in .backup but was not stored", clip(f.Name))
+		case size < 0 || uint64(size) != f.Size-f.BaseSize:
+			return nil, metaErr("%s: stored %d bytes, .backup says %d", clip(f.Name), size, f.Size-f.BaseSize)
+		}
+	}
+	body := func(key string) ([]byte, error) {
+		bb, ok := b.Body(key)
+		if !ok {
+			return nil, metaErr("%s was not kept", clip(key))
+		}
+		return bb, nil
+	}
+
+	metadata := map[string][]byte{}
+	for _, f := range meta.Files {
+		if !strings.HasPrefix(f.Name, "metadata/") || !strings.HasSuffix(f.Name, ".sql") {
+			continue
+		}
+		key := run + f.Name
+		if !f.Written() {
+			// Unchanged metadata is the base chain's object (R23).
+			if key, err = baseObject(b.Base, f); err != nil {
+				return nil, err
+			}
+		}
+		if metadata[key], err = body(key); err != nil {
+			return nil, err
+		}
+	}
+	if m.Databases, err = ObjectsFromMetadata(metadata); err != nil {
+		return nil, err
+	}
+
+	inBase := baseCounts(b.Base, body)
+	for _, f := range meta.Files {
+		if !strings.HasPrefix(f.Name, "data/") || path.Base(f.Name) != "count.txt" {
+			continue
+		}
+		if !isCountPath(f.Name) {
+			return nil, metaErr("%s is not a part's count.txt", clip(f.Name))
+		}
+		if m.PartRows[f.Name], err = partRows(b.RunID, byName, f, body, inBase); err != nil {
+			return nil, err
+		}
+	}
+	for i := range m.Databases {
+		d := &m.Databases[i]
+		for j := range d.Objects {
+			o := &d.Objects[j]
+			if o.Rows, err = tableRows(m.PartRows, d.Name, o.Name); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return m, nil
+}
+
+// baseObject is the key of the base chain's object that holds f, a file of
+// an incremental that is all in its base: the newest run of the chain that
+// stored a file of that name.
+func baseObject(base []*NativeManifest, f MetaFile) (string, error) {
+	if !f.UseBase || f.BaseSize != f.Size {
+		return "", metaErr("%s was not stored and is not in the base", clip(f.Name))
+	}
+	for i := len(base) - 1; i >= 0; i-- {
+		key := base[i].RunID + "/" + f.Name
+		if slices.ContainsFunc(base[i].Objects, func(o ingest.ObjectRecord) bool { return o.Key == key }) {
+			return key, nil
+		}
+	}
+	return "", metaErr("%s is in the base, and no run of the base chain stored it", clip(f.Name))
+}
+
+// baseCounts returns the rows of a count.txt of the base by its size and
+// checksum, read from the base's .backup and its manifest's part rows; it
+// reads the .backup on its first call. Without a base it finds nothing.
+func baseCounts(base []*NativeManifest, body func(string) ([]byte, error)) func(f MetaFile) (uint64, error) {
+	var byContent map[[2]string]uint64
+	var readErr error
+	return func(f MetaFile) (uint64, error) {
+		if len(base) == 0 {
+			return 0, metaErr("%s is in the base, and the run has none", clip(f.Name))
+		}
+		last := base[len(base)-1]
+		if byContent == nil && readErr == nil {
+			byContent = map[[2]string]uint64{}
+			raw, err := body(last.RunID + "/.backup")
+			var bm *BackupMeta
+			if err == nil {
+				bm, err = ParseBackupMeta(raw)
+			}
+			if err != nil {
+				readErr = fmt.Errorf("the base's .backup: %w", err)
+				return 0, readErr
+			}
+			for _, bf := range bm.Files {
+				if n, ok := last.PartRows[bf.Name]; ok && path.Base(bf.Name) == "count.txt" {
+					byContent[[2]string{strconv.FormatUint(bf.Size, 10), bf.Checksum}] = n
+				}
+			}
+		}
+		if readErr != nil {
+			return 0, readErr
+		}
+		n, ok := byContent[[2]string{strconv.FormatUint(f.Size, 10), f.Checksum}]
+		if !ok {
+			return 0, metaErr("%s is in the base, and the base has no rows for a count.txt of its size and checksum", clip(f.Name))
+		}
+		return n, nil
+	}
+}
+
+// partRows is the row count of the part whose count.txt is f, a file of run.
+func partRows(run string, byName map[string]MetaFile, f MetaFile, body func(string) ([]byte, error),
+	inBase func(MetaFile) (uint64, error)) (uint64, error) {
+	name := f.Name
+	switch {
+	case f.Written():
+	case f.DataFile != "":
+		// ParseBackupMeta checked that the data file is a written file of
+		// the same size and checksum: the same bytes.
+		name = byName[f.DataFile].Name
+	case f.UseBase && f.BaseSize == f.Size:
+		return inBase(f)
+	default:
+		return 0, metaErr("%s: the rows of an empty or partly stored count.txt cannot be read", clip(f.Name))
+	}
+	raw, err := body(run + "/" + name)
+	if err != nil {
+		return 0, err
+	}
+	n, err := ParseCount(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", clip(name), err)
+	}
+	return n, nil
+}
+
+// tableRows sums the rows of the parts of db.name: the count.txt files right
+// under data/<db>/<name>/ or one level below it.
+func tableRows(parts map[string]uint64, db, name string) (uint64, error) {
+	dir := "data/" + escapeForFileName(db) + "/" + escapeForFileName(name) + "/"
+	var total uint64
+	for p, n := range parts {
+		rest, ok := strings.CutPrefix(p, dir)
+		if !ok || rest != "count.txt" && strings.Count(rest, "/") != 1 {
+			continue
+		}
+		if total+n < total {
+			return 0, metaErr("%s.%s: more rows than a count holds", clip(db), clip(name))
+		}
+		total += n
+	}
+	return total, nil
+}
+
+// SignNativeManifest implements backup.NativeEngine: it builds the run's
+// manifest (BuildNativeManifest), signs it, and verifies the stored form, as
+// a reader will (VerifySigned, the trusted key and the run), before anything
+// writes it (R25).
+func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestInput) (*backup.NativeManifestResult, error) {
+	m, err := BuildNativeManifest(NativeBuild{RunID: in.RunID, ServerVersion: in.ServerVersion, Settings: statementSettings(in.RunID),
+		Objects: in.Objects, Body: in.Captured})
+	if err != nil {
+		return nil, err
+	}
+	s, err := Sign(ctx, in.KV, in.KeyName, m)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := s.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+	v, err := VerifySigned(ctx, in.KV, in.KeyName, in.RunID, raw)
+	if err != nil {
+		return nil, fmt.Errorf("the signed manifest does not verify: %w", err)
+	}
+	return &backup.NativeManifestResult{Signed: raw, SHA256: v.SHA256()}, nil
+}
+
 // manifestJSON is the manifest as it is parsed. Objects has its own type as
 // ingest.ObjectRecord carries no JSON names.
 type manifestJSON struct {
@@ -506,6 +779,7 @@ type manifestJSON struct {
 	ServerVersion      string            `json:"server_version"`
 	Settings           map[string]string `json:"settings"`
 	Objects            []objectJSON      `json:"objects"`
+	PartRows           map[string]uint64 `json:"part_rows"`
 	Databases          []NativeDatabase  `json:"databases"`
 }
 
@@ -528,7 +802,7 @@ func decodeManifest(raw []byte) (*NativeManifest, error) {
 	}
 	m := &NativeManifest{
 		Format: w.Format, RunID: w.RunID, BaseRunID: w.BaseRunID, BaseManifestSHA256: w.BaseManifestSHA256,
-		ServerVersion: w.ServerVersion, Settings: w.Settings, Databases: w.Databases,
+		ServerVersion: w.ServerVersion, Settings: w.Settings, PartRows: w.PartRows, Databases: w.Databases,
 	}
 	for _, o := range w.Objects {
 		m.Objects = append(m.Objects, ingest.ObjectRecord{Key: o.Key, Size: o.Size, SHA256: o.SHA256})
@@ -689,6 +963,12 @@ func (m *NativeManifest) validate() error {
 		}
 		keys[o.Key] = true
 	}
+	for p := range m.PartRows {
+		if !isCountPath(p) {
+			return bad("part rows of %s: not data/<db>/<table>/[<part>/…]count.txt", clip(p))
+		}
+		strs = append(strs, p)
+	}
 	dbs := map[string]bool{}
 	for _, d := range m.Databases {
 		if d.Name == "" || dbs[d.Name] {
@@ -750,6 +1030,14 @@ func isRunID(s string) bool {
 func (m *NativeManifest) ownKey(key string) bool {
 	rest, ok := strings.CutPrefix(key, m.RunID+"/")
 	return ok && validPath(rest)
+}
+
+// isCountPath reports whether p is the path of a part's count.txt relative to
+// the run: data/<db>/<table>/count.txt (a Log table), or deeper (a part's,
+// a projection's).
+func isCountPath(p string) bool {
+	segs := strings.Split(p, "/")
+	return len(segs) >= 4 && segs[0] == "data" && segs[len(segs)-1] == "count.txt" && validPath(p)
 }
 
 // validPath reports whether p is a relative path with no empty, "." or ".."
