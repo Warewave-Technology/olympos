@@ -1,6 +1,7 @@
 # ClickHouse native backup through an Olympos S3 endpoint (#62)
 
-Status: draft for the owner's review, 2026-11-25. The approach (ClickHouse writes to Olympos, which looks like
+Status: draft for the owner's review, 2026-11-25. The owner chose option 1 of *Owner decision* below (an
+allowlist on the parsed definitions, no opt-in) on 2026-11-25. The approach (ClickHouse writes to Olympos, which looks like
 S3) was approved in the v0.4 plan. This page turns it into a design, with the spike's findings
 ([clickhouse-native-spike.md](clickhouse-native-spike.md)) and the code as it is today.
 
@@ -195,8 +196,9 @@ The existing flow, with these changes for a native source:
 - **Check** (`POST /restores/check`):
   - Verify the manifest signature of the selected copy and of every base in its chain.
   - List the databases, tables, dictionaries and views from the manifest.
-  - Decide what is restored by the owner's rule on backup SQL text (below, *Owner decision*). Whatever is left
-    out goes into `EXCEPT TABLES` and is listed in the request and the result.
+  - Decide what is restored with the allowlist (*Owner decision*, option 1): Olympos parses each object's
+    `metadata/*.sql` from the verified manifest. Whatever is not allowed goes into `EXCEPT TABLES` and is
+    listed in the request and the result with the reason; the maker cannot select it.
 - **Names and targets.** As today: the databases keep their names, and the target is another service (a new
   target, never the source). Renaming is not part of this.
 - **Execute:**
@@ -274,7 +276,7 @@ The existing flow, with these changes for a native source:
   - `docs/security-model.md`: the new listener and the per-run credential entering the cluster.
   - A `docs/spec-changes.md` row (27), the CHANGELOG, OpenAPI.
 
-## Owner decision: SQL text from the backup on the target
+## Owner decision: SQL text from the backup on the target (decided: option 1)
 
 SPEC §10.4 says: "ClickHouse: no SQL text from the backup runs on the target." Olympos generates the DDL
 instead. It was decided for v0.2 (spec-changes row 20) because validating source DDL "could be bypassed again
@@ -283,7 +285,7 @@ and again in review". A native `RESTORE` cannot keep that rule: ClickHouse runs 
 the point of #62. The manifest's signature proves the DDL is what Olympos stored; it does not prove the source
 was not compromised when it was backed up.
 
-Options (one is needed before the build):
+Options; the owner chose **1** on 2026-11-25:
 
 1. **Allowlist on the parsed definitions (recommended).** Olympos parses every object in the manifest and
    restores only what it can prove harmless:
@@ -296,8 +298,9 @@ Options (one is needed before the build):
    engines, anything the parser cannot read with certainty, and anything that names a host, a URL, a file or a
    command. The parser gates what is allowed; it does not filter what is denied. A mistake can therefore only
    leave something out, never let something in. SPEC §10.4 gets a native rule, and spec-changes row 27.
-2. **Allowlist, with an opt-in.** As 1, but the maker may select a left-out object, and the checker sees it
-   flagged before approving.
+2. *Allowlist, with an opt-in.* As 1, but the maker may select a left-out object, and the checker sees it
+   flagged before approving. Not chosen: a left-out object is re-applied by the operator after the restore,
+   as today.
 3. **Denylist** (as #62 is written). Restore everything except known risky constructs. Rejected by me: it is
    the validation the v0.2 decision distrusted.
 
@@ -309,7 +312,8 @@ focused lab test plan and an independent review (#60). New in the model:
 - a listening port, authenticated per run;
 - a credential that enters the cluster: short-lived, scoped to one run prefix, write-only for a backup and
   read-only for a restore. It is a documented exception to "Cluster ↛ credentials";
-- a signing key in Key Vault.
+- a signing key in Key Vault;
+- backup SQL text running on the target, limited by the allowlist: SPEC §10.4 and spec-changes row 27.
 
 ## Tests
 
