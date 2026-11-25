@@ -67,6 +67,10 @@ if ! out=$(printf 'web/src/x.ts\ninternal/probe/run.go\n' | "$script" --files) |
   echo "FAIL: --files with a probe file: exit $?, output \"$out\"" >&2
   fail=1
 fi
+if ! out=$(printf 'web/src/x.ts\ninternal/ingest/sigv4.go\n' | "$script" --files) || [ "$out" != internal/ingest/sigv4.go ]; then
+  echo "FAIL: --files with an ingest file: exit $?, output \"$out\"" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1

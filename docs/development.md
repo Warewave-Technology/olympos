@@ -81,7 +81,8 @@ builds, signs and publishes it. Release candidates are `vX.Y.Z-rc.N`.
 **Security-model changes ship a release candidate first** (#60, `docs/design/rc-rule.md`). A release changes
 the security model when a commit since the previous final release touches one of the files that
 `scripts/security-model-paths.sh` lists: `docs/security-model.md`, `proto/`, `internal/secrets/`,
-`internal/probe/`, `internal/agent/`, or the agent chart's RBAC templates (`clusterrole.yaml`, `bench.yaml`).
+`internal/probe/`, `internal/agent/`, `internal/ingest/` (the native backup endpoint), or the agent chart's RBAC
+templates (`clusterrole.yaml`, `bench.yaml`).
 CI labels such pull requests `security-model`. Such a release:
 
 1. ships at least one release candidate, and its latest RC contains every one of those commits. `release.yml`

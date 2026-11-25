@@ -15,6 +15,7 @@ paths=(
   internal/secrets
   internal/probe
   internal/agent
+  internal/ingest
   deploy/helm/olympos-agent/templates/clusterrole.yaml
   deploy/helm/olympos-agent/templates/bench.yaml
 )
