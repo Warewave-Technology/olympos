@@ -100,8 +100,28 @@ A native restore, through MinIO and through the minimal endpoint alike:
   restored aggregate);
 - **dictionary and view:** both work.
 
-The spike did not cover `ReplicatedMergeTree` with Keeper: replica paths on restore stay open for the design
-(#57).
+### 8. A native restore joins the source's replica set
+
+A second run covered `ReplicatedMergeTree`. Two ClickHouse 24.8 servers shared one Keeper, as in #57's test,
+and the tables had an explicit Keeper path and a `{database}/{table}` macro path. `RESTORE DATABASE` on the
+second server created the tables with the **source's Keeper paths**:
+
+- they joined the source's replica set as `r2`, and the source showed `total_replicas = 2`;
+- the restore stopped only because the tables "already contain some data", which they had fetched from the
+  source through replication.
+
+Dropping the restored database took `r2` out of the set again.
+
+What worked: create the Replicated tables first, with the backup's DDL and a new Keeper path
+(`/olympos-restore/<request id>/<db>/<table>`, the layout of #57), then run
+`RESTORE … SETTINGS allow_different_table_def = 1`. The data went into the new tables, and the source kept one
+replica. `{uuid}` paths and empty `ReplicatedMergeTree` arguments are refused on an Atomic database outside
+`ON CLUSTER` (24.8), so explicit and macro paths are the cases to handle.
+
+So the native restore never lets ClickHouse create a Replicated table itself. Olympos writes the
+`CREATE TABLE` from the backup's metadata, with the path rewritten, and the restore only fills it.
+`allow_different_table_def` is set only for those tables, and the restore check compares the rest of the
+definition.
 
 ## Library or own handler
 
@@ -136,3 +156,5 @@ The spike's own handler covered the protocol in 277 lines and ClickHouse worked 
 - **Point 9:** stopping a run means `KILL QUERY` through the tunnel as well as refusing requests; rate limits
   are sized for ClickHouse's retries.
 - **Point 2, masking:** confirmed on 24.8 and 25.8; the agent must not log the statement.
+- **Point 6, Replicated tables:** Olympos creates them with a rewritten Keeper path before the `RESTORE`.
+  Otherwise the restored tables join the source's replica set.
