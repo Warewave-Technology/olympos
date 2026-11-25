@@ -6,12 +6,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.1] - unreleased
+## [0.3.1] - 2026-11-25
 
 One alert per synthetic credential that cannot be resolved, merged migrations that cannot change, a
-tighter secret scan, and a test for ClickHouse restores next to a shared Keeper. Release candidate:
-v0.3.1-rc.2 (v0.3.1-rc.1 plus the two fixes its lab test found,
-[#69](https://github.com/Warewave-Technology/olympos/issues/69)).
+tighter secret scan, and a test for ClickHouse restores next to a shared Keeper.
 
 ### Changed
 - **One alert per synthetic credential that cannot be resolved**
@@ -38,7 +36,7 @@ v0.3.1-rc.2 (v0.3.1-rc.1 plus the two fixes its lab test found,
 ### Added
 - Events `synthetic.credential_broken` (one per credential and episode) and `synthetic.credential_restored`
   (when it resolves again), a *Needs attention* item (*Synthetic credential*, API kind
-  `synthetic_credential_broken`), the matrix cell state *credential error*, and the credential's state on
+  `synthetic_credential_broken`), the matrix cell states *credential error* and *credential unavailable*, and the credential's state on
   *Settings › Synthetic monitoring › Credentials* and on the scenario page. The credential API gains
   `resolve_state`, `resolve_cause` and `resolve_failing_since`.
 - CI fails a pull request or a push to `main` that edits, renames or deletes a merged migration, or changes
@@ -54,6 +52,9 @@ v0.3.1-rc.2 (v0.3.1-rc.1 plus the two fixes its lab test found,
 
 ### Upgrade notes
 From v0.3.0 nothing needs action; the migration runs at start.
+- A credential that cannot be resolved is logged once per state change: `synthetic credential cannot be
+  resolved` (WARN) and `synthetic credential resolves again` (INFO). The `synthetic run credentials` line of
+  each run is now DEBUG; a log alert on it at WARN no longer fires, so move it to the new WARN line.
 - `resolve_failures_24h` of a credential now counts only temporary failures; permanent ones end the run as
   `credential_broken` errors and are not counted.
 - A `synthetic.failing` that is firing because of an expired credential stays firing until runs pass: runs that
@@ -349,7 +350,8 @@ For anyone testing the release candidates. Nothing here needs action when upgrad
   referenceable.
 - Findings of the independent review fixed or accepted: [docs/security-review-v0.1.md](docs/security-review-v0.1.md).
 
-[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.1.0
