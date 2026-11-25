@@ -68,7 +68,7 @@ func MinIO(t testing.TB) *MinIOServer {
 // StopMinIO removes the container if this binary started it.
 func StopMinIO() {
 	if minioStarted {
-		_ = exec.Command("docker", "rm", "-f", MinIOContainer).Run()
+		_ = exec.Command("docker", "rm", "-f", "-v", MinIOContainer).Run()
 	}
 }
 
@@ -76,7 +76,7 @@ func startMinIO() (*MinIOServer, error) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		return nil, fmt.Errorf("docker not available: %w", err)
 	}
-	_ = exec.Command("docker", "rm", "-f", MinIOContainer).Run()
+	_ = exec.Command("docker", "rm", "-f", "-v", MinIOContainer).Run()
 	pw := fmt.Sprintf("pw-%d-olympos", time.Now().UnixNano())
 	out, err := exec.Command("docker", "run", "-d", "--name", MinIOContainer, "-p", "127.0.0.1::9000",
 		"-e", "MINIO_ROOT_USER="+MinIORootUser, "-e", "MINIO_ROOT_PASSWORD="+pw, "-e", "MINIO_DOMAIN="+MinIODomain,

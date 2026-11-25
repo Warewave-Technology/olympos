@@ -141,7 +141,7 @@ func TestCaptureNativeTestdata(t *testing.T) {
 
 	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "network", "rm", network) })
 	mustDocker(t, time.Minute, "network", "create", network)
-	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", minio) })
+	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", "-v", minio) })
 	mustDocker(t, 2*time.Minute, "run", "-d", "--pull", "never", "--name", minio, "--network", network,
 		"--network-alias", "minio", "-e", "MINIO_ROOT_USER="+captureMinIOUser, "-e", "MINIO_ROOT_PASSWORD="+password,
 		"cgr.dev/chainguard/minio:latest", "server", "/data")
@@ -174,7 +174,7 @@ type captureKeys struct{ full, incr string }
 
 func captureVersion(t *testing.T, ver, image, wantServer, network, suffix string, keys captureKeys, secrets []string, mc *captureMC) {
 	ch := "olympos-capture-ch" + strings.ReplaceAll(ver, ".", "") + "-" + suffix
-	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", ch) })
+	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", "-v", ch) })
 	mustDocker(t, 2*time.Minute, "run", "-d", "--pull", "never", "--name", ch, "--network", network,
 		"--ulimit", "nofile=262144:262144", image)
 

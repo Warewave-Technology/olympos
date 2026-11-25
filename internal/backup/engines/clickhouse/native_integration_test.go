@@ -421,7 +421,7 @@ type nativeCH struct {
 func startNativeClickHouse(t *testing.T, image, wantServer string) *nativeCH {
 	t.Helper()
 	name := "olympos-native-" + randHex(t, 4)
-	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", name) })
+	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", "-v", name) })
 	// host-gateway makes host.docker.internal the host on Linux too.
 	mustDocker(t, 2*time.Minute, "run", "-d", "--pull", "never", "--name", name,
 		"--add-host", "host.docker.internal:host-gateway", "--ulimit", "nofile=262144:262144",
