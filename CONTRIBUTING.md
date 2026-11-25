@@ -37,6 +37,8 @@ Install the pre-commit hooks (gitleaks, gofmt): `pre-commit install`. A fake sec
   deleted, released or not: add a new one instead (`scripts/check-migrations.sh` fails the build).
 - UI copy is short, specific and English; code, commits and docs are English.
 - Keep the agent narrow: no new RBAC, no write verbs, no listening ports without a spec change.
+- A pull request labelled `security-model` (CI adds it) changes the security model: its release ships a
+  release candidate first ([development guide](docs/development.md#releases)).
 - Add a line under *Unreleased* in [CHANGELOG.md](CHANGELOG.md).
 
 By contributing you agree that your contribution is licensed under the [Apache License 2.0](LICENSE).

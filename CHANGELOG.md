@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Releases that change the security model ship a release candidate first
+  ([#60](https://github.com/Warewave-Technology/olympos/issues/60)): the release workflow refuses a final tag
+  whose security-model commits are not all in an RC of the same version, before anything is published. Such a
+  release is tested in the lab with a focused test plan and passes an independent security review. CI labels
+  the pull requests `security-model`. See `docs/development.md` › Releases.
+
 ## [0.3.1] - 2026-11-25
 
 One alert per synthetic credential that cannot be resolved, merged migrations that cannot change, a
