@@ -198,12 +198,29 @@ nothing was deleted, was rejected.
   key version).
   - `secrets.KeyVault` gains `Sign(ctx, name, digest)` and `Verify(ctx, keyID, digest, sig)`: `azkeys` in
     Azure, a key file in the dev Key Vault.
-  - The install docs add the key, and the managed identity's `sign` and `verify` permissions.
+  - The install docs add the key, and the managed identity's `keys/sign` and `keys/get` permissions on it.
 - **Key versions.** A version that signed a manifest stays enabled for as long as any backup it signed is
   within retention (the longest tier, plus the time a restore may take). The install docs say so, and
   rotation keeps old versions.
 - **No signature, no run.** A native run whose manifest does not verify does not exist for restore. Logical
   runs keep their unsigned sidecars, unchanged.
+- **Decided while building Milestone B.**
+  - The managed identity needs `keys/get`, not `keys/verify` (R25): Olympos verifies locally with the public
+    key it fetches (cached for an hour), and never calls the vault's verify.
+  - A DDL key may name an object of any run in the chain, not only the manifest's own run (R23): ClickHouse
+    stores unchanged metadata once and an incremental reuses its base's. A single manifest checks its own
+    keys: every object is under its run, every DDL key is `<run-id>/<path>`, and a DDL key under its own run
+    is one of its objects. `VerifyChain` verifies a chain, base first. It checks:
+    - the links: each base run ID and canonical SHA-256 is the previous manifest's;
+    - that the last manifest is the expected run;
+    - that every DDL key is one of the chain's objects;
+    - that no run is in the chain twice.
+
+    A full backup is a chain of one.
+  - `VerifySigned` takes the expected run ID and refuses another run's manifest before the vault is asked
+    (R24), so a sidecar copied from another run does not verify.
+  - Run IDs, base run IDs and the run part of a DDL key are canonical lower-case UUIDs (as `uuid.UUID.String()`
+    writes them), and a base is never the run itself.
 
 ### 6. Restore
 

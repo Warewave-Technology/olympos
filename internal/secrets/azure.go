@@ -2,10 +2,14 @@ package secrets
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -25,6 +29,20 @@ type AzureKeyVault struct {
 	mu      sync.Mutex
 	secrets map[string]*azsecrets.Client
 	keys    *azkeys.Client
+	// pub caches signing keys' public halves for pubKeyTTL, by key ID
+	// (<name>/<version>) with the name lower-cased: Key Vault key names are
+	// case-insensitive, so one version is one entry whatever the spelling.
+	pub map[string]cachedPub
+	now func() time.Time // time.Now; tests set it
+}
+
+// pubKeyTTL bounds how long a version disabled or deleted in the vault
+// still verifies here: Verify fetches the public key again after it.
+const pubKeyTTL = time.Hour
+
+type cachedPub struct {
+	key     *ecdsa.PublicKey
+	fetched time.Time
 }
 
 func (a *AzureKeyVault) url(vault string) string {
@@ -127,6 +145,136 @@ func (a *AzureKeyVault) SetSecret(ctx context.Context, vault, name string, value
 		return fmt.Errorf("set secret %s/%s: %s", vault, name, statusOnly(err))
 	}
 	return nil
+}
+
+// Sign signs digest with the newest version of keyName, a key in the KEK's
+// vault (keys/sign; the Managed Identity needs the sign permission).
+func (a *AzureKeyVault) Sign(ctx context.Context, keyName string, digest []byte) ([]byte, string, error) {
+	if err := checkDigest(digest); err != nil {
+		return nil, "", err
+	}
+	if !validKVName(keyName) {
+		return nil, "", fmt.Errorf("invalid key name %q", keyName)
+	}
+	c, err := a.keyClient()
+	if err != nil {
+		return nil, "", err
+	}
+	alg := azkeys.SignatureAlgorithmES256
+	resp, err := c.Sign(ctx, keyName, "", azkeys.SignParameters{Algorithm: &alg, Value: digest}, nil)
+	if err != nil {
+		return nil, "", keyError("sign with key "+keyName, err)
+	}
+	// Key Vault key names are case-insensitive; the key ID keeps the vault's
+	// spelling.
+	name, ver := kidParts(resp.KID)
+	if !strings.EqualFold(name, keyName) || !validKVName(name) || !validKVName(ver) {
+		return nil, "", fmt.Errorf("sign with key %s: the response names no version of the key", keyName)
+	}
+	if len(resp.Result) != 64 {
+		return nil, "", fmt.Errorf("sign with key %s: %d-byte signature, want 64 (ES256)", keyName, len(resp.Result))
+	}
+	return resp.Result, name + "/" + ver, nil
+}
+
+// Verify checks sig locally with the public key of the version keyID names.
+// The public key is fetched (keys/get) and cached for pubKeyTTL. A version
+// disabled in the vault is ErrKeyDisabled, a deleted one ErrKeyNotFound: at
+// once if it was not cached, otherwise when its cache entry expires.
+func (a *AzureKeyVault) Verify(ctx context.Context, keyID string, digest, sig []byte) error {
+	if err := checkDigest(digest); err != nil {
+		return err
+	}
+	pub, err := a.publicKey(ctx, keyID)
+	if err != nil {
+		return err
+	}
+	return verifyES256(pub, digest, sig)
+}
+
+func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.PublicKey, error) {
+	name, ver, err := parseKeyID(keyID)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now
+	if a.now != nil {
+		now = a.now
+	}
+	cacheKey := strings.ToLower(name) + "/" + ver
+	a.mu.Lock()
+	e, ok := a.pub[cacheKey]
+	if ok && now().Sub(e.fetched) >= pubKeyTTL {
+		delete(a.pub, cacheKey)
+		ok = false
+	}
+	a.mu.Unlock()
+	if ok {
+		return e.key, nil
+	}
+	c, err := a.keyClient()
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.GetKey(ctx, name, ver, nil)
+	if err != nil {
+		return nil, keyError("get key "+keyID, err)
+	}
+	k := resp.Key
+	if k == nil {
+		return nil, fmt.Errorf("get key %s: the response has no key", keyID)
+	}
+	if n, v := kidParts(k.KID); !strings.EqualFold(n, name) || v != ver {
+		return nil, fmt.Errorf("get key %s: the response is for another key", keyID)
+	}
+	if resp.Attributes != nil && resp.Attributes.Enabled != nil && !*resp.Attributes.Enabled {
+		return nil, fmt.Errorf("key %s: %w", keyID, ErrKeyDisabled)
+	}
+	if k.Kty == nil || (*k.Kty != azkeys.KeyTypeEC && *k.Kty != azkeys.KeyTypeECHSM) ||
+		k.Crv == nil || *k.Crv != azkeys.CurveNameP256 || len(k.X) != 32 || len(k.Y) != 32 {
+		return nil, fmt.Errorf("get key %s: not an EC P-256 key", keyID)
+	}
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, k.X...), k.Y...))
+	if err != nil {
+		return nil, fmt.Errorf("get key %s: %w", keyID, err)
+	}
+	a.mu.Lock()
+	if a.pub == nil {
+		a.pub = map[string]cachedPub{}
+	}
+	a.pub[cacheKey] = cachedPub{key: pub, fetched: now()}
+	a.mu.Unlock()
+	return pub, nil
+}
+
+// kidParts returns a key ID's name and version, "" for what it lacks.
+// azkeys.ID.Name panics on an ID without a name.
+func kidParts(id *azkeys.ID) (name, version string) {
+	if id == nil {
+		return "", ""
+	}
+	u, err := url.Parse(string(*id))
+	if err != nil {
+		return "", ""
+	}
+	p := strings.Split(strings.TrimPrefix(u.Path, "/"), "/")
+	if len(p) < 2 || p[0] != "keys" {
+		return "", ""
+	}
+	if len(p) > 2 {
+		version = p[2]
+	}
+	return p[1], version
+}
+
+// keyError maps a keys API error: 404 is ErrKeyNotFound, the rest keep only
+// the status (statusOnly).
+func keyError(what string, err error) error {
+	var re *azcore.ResponseError
+	if errors.As(err, &re) && re.StatusCode == 404 {
+		return fmt.Errorf("%s: %w", what, ErrKeyNotFound)
+	}
+	return fmt.Errorf("%s: %s", what, statusOnly(err))
 }
 
 // statusOnly keeps Azure errors from echoing request bodies into logs.

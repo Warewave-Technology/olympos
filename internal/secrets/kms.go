@@ -5,8 +5,11 @@ package secrets
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math/big"
 	"strings"
 )
 
@@ -22,6 +25,23 @@ type KeyVault interface {
 	GetSecret(ctx context.Context, vault, name string) ([]byte, error)
 	// SetSecret writes a new version of a secret.
 	SetSecret(ctx context.Context, vault, name string, value []byte) error
+	// Sign signs a SHA-256 digest with the newest version of the EC P-256
+	// key keyName (ES256, raw r||s, 64 bytes). keyID is <name>/<version>:
+	// what Verify needs to find the same version again.
+	Sign(ctx context.Context, keyName string, digest []byte) (sig []byte, keyID string, err error)
+	// Verify checks sig over digest with the key version keyID names. Every
+	// enabled version in the vault verifies, not only the newest: a version
+	// stays enabled while a backup it signed is within retention. A bad
+	// signature is ErrSignatureInvalid; an unknown key or version is
+	// ErrKeyNotFound; a disabled version is ErrKeyDisabled.
+	//
+	// Verify checks the signature against the key version keyID names; it
+	// does not decide which key is trusted. Callers MUST check that keyID's
+	// name is the key they trust (for manifests, keyVault.manifestKeyName)
+	// before calling it: a key ID read from storage can name any key in the
+	// vault. KeyIDName returns the name; compare it case-insensitively, as
+	// Key Vault key names are.
+	Verify(ctx context.Context, keyID string, digest, sig []byte) error
 }
 
 // ErrSecretNotFound is returned when a Key Vault secret does not exist.
@@ -30,6 +50,61 @@ var ErrSecretNotFound = errors.New("key vault secret not found")
 // ErrSecretForbidden is returned when the vault refuses Olympos access to a
 // secret (HTTP 401 or 403, or an unreadable local file).
 var ErrSecretForbidden = errors.New("key vault secret access denied")
+
+// ErrSignatureInvalid is returned when a signature does not verify.
+var ErrSignatureInvalid = errors.New("signature does not verify")
+
+// ErrKeyNotFound is returned when a Key Vault key, or the version a key ID
+// names, does not exist.
+var ErrKeyNotFound = errors.New("key vault key not found")
+
+// ErrKeyDisabled is returned when the key version a key ID names is
+// disabled in the vault: what it signed no longer verifies.
+var ErrKeyDisabled = errors.New("key vault key version disabled")
+
+// KeyIDName returns the key name in a key ID (<name>/<version>), for the
+// caller to pin before Verify.
+func KeyIDName(keyID string) (string, error) {
+	name, _, err := parseKeyID(keyID)
+	return name, err
+}
+
+// parseKeyID splits a key ID, <name>/<version>, as Sign returns it.
+func parseKeyID(keyID string) (name, version string, err error) {
+	name, version, ok := strings.Cut(keyID, "/")
+	if !ok || !validKVName(name) || !validKVName(version) {
+		return "", "", fmt.Errorf("invalid key id %q", keyID)
+	}
+	return name, version, nil
+}
+
+// checkDigest: Sign and Verify take a SHA-256 digest, not the message.
+func checkDigest(digest []byte) error {
+	if len(digest) != sha256.Size {
+		return fmt.Errorf("digest must be SHA-256 (%d bytes), got %d bytes", sha256.Size, len(digest))
+	}
+	return nil
+}
+
+// rawES256 encodes an ES256 signature as Key Vault does: r||s, 32 bytes each.
+func rawES256(r, s *big.Int) []byte {
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return sig
+}
+
+// verifyES256 checks a raw r||s signature with a P-256 public key.
+func verifyES256(pub *ecdsa.PublicKey, digest, sig []byte) error {
+	if len(sig) != 64 {
+		return ErrSignatureInvalid
+	}
+	r, s := new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])
+	if !ecdsa.Verify(pub, digest, r, s) {
+		return ErrSignatureInvalid
+	}
+	return nil
+}
 
 // Ref is a parsed kv://<vault>/<secret> reference.
 type Ref struct {

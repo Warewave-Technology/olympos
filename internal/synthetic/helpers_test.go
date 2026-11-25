@@ -74,6 +74,14 @@ func (*testKV) SetSecret(context.Context, string, string, []byte) error {
 	return errors.New("read only")
 }
 
+func (*testKV) Sign(context.Context, string, []byte) ([]byte, string, error) {
+	return nil, "", errors.New("testKV does not sign")
+}
+
+func (*testKV) Verify(context.Context, string, []byte, []byte) error {
+	return errors.New("testKV does not verify")
+}
+
 // setSecret puts a secret in the test Key Vault.
 func (k *testKV) setSecret(vault, name, value string) {
 	k.mu.Lock()
