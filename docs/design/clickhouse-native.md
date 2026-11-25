@@ -92,6 +92,12 @@ nothing was deleted, was rejected.
   middle of a body. The object has already streamed to the destinations, so the run fails: `400 BadDigest` (or
   nothing, on a dropped connection), then `KILL QUERY`. ClickHouse sends correct bodies over TLS, so either case
   means a fault worth stopping for.
+- **Decided while building Milestone A.**
+  - The endpoint is on only when `ingest.url` is set; `listen.ingest` is the address used then (R14). This
+    replaces "empty `listen.ingest` turns the endpoint off" above.
+  - An `http://` `ingest.url` serves plain HTTP and is accepted only with `devMode` (R16).
+  - The listener speaks HTTP/1.1 only, as ClickHouse does, and drops idle connections after 120 s. A body has no
+    read or write timeout; the session bounds the run.
 
 ### 2. Per-run credentials
 
@@ -131,6 +137,16 @@ nothing was deleted, was rejected.
   `Upload` per object. A part that arrives out of order is held on local disk, under a per-run byte limit, until
   its turn. `CompleteMultipartUpload` closes the stream. ClickHouse sends parts in order (spike), so the disk
   limit is a safeguard.
+- **Decided while building Milestone A (R18).** This replaces "ClickHouse sends parts in order, so the disk limit
+  is a safeguard" above.
+  - ClickHouse uploads parts in parallel, so parts do arrive out of order.
+  - An out-of-order part whose `Content-Length` would take the run's spill over its 1 GiB budget gets
+    `503 SlowDown` before its body is read. ClickHouse sends it again later; the run continues.
+  - The next part in order is always accepted, so an upload always moves on. One that arrives while the
+    previous part is still being written is held on disk without the budget check, so the spill can exceed
+    1 GiB by one part.
+  - An `UploadPart` without a `Content-Length` is refused `403`. A full budget never ends a run; a disk error
+    while holding a part still does.
 - **Lifecycle.** A lifecycle rule (Bicep and docs) deletes objects tagged `olympos-state=incomplete` after 7
   days. With the container's version-level immutability as it is today (the longest retention), that rule, like
   the existing 7-day daily rule, cannot delete before the immutability period ends. That is an existing issue of
@@ -256,6 +272,12 @@ The existing flow, with these changes for a native source:
 - **Over a limit.** The request gets `403`, and the run is ended with `KILL QUERY`.
 - **Metrics.** `/metrics`: `olympos_ingest_requests_total{op,code}`, `olympos_ingest_bytes_total`,
   `olympos_ingest_runs` and `olympos_ingest_refused_total{reason}`.
+- **Decided while building Milestone A.**
+  - Over the request rate the endpoint answers `503 SlowDown` before the body is read, and the run continues.
+    Only 30 s in a row over the rate stops the run (R17). For the rate, this replaces "over a limit → `403` and
+    `KILL`"; the byte quota keeps `403` and `KILL`.
+  - The endpoint is on only with `ingest.url`, plain HTTP only with `devMode` (R14, R16); see §1.
+  - An extra metric, `olympos_ingest_stops_total{reason}`, counts the runs the endpoint stopped, by reason.
 
 ### 10. Job setting, UI, docs
 

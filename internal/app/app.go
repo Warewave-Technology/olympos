@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -30,6 +29,7 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/authz"
 	"github.com/Warewave-Technology/olympos/internal/config"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/inventory"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/pki"
@@ -53,6 +53,9 @@ type Deps struct {
 	Inventory *inventory.Service
 	Cred      azcore.TokenCredential // nil in devMode without Azure
 	SelfDB    SelfDB
+	// Ingest holds the sessions of native ClickHouse runs; nil without
+	// ingest.url (the endpoint is off).
+	Ingest *ingest.Registry
 }
 
 // Worker is a background loop started with the server.
@@ -159,6 +162,7 @@ func CheckConfig(cfgPath string, db bool) error {
 	var problems []string
 	for what, f := range map[string]string{"listen.tlsCertFile": cfg.Listen.TLSCertFile, "listen.tlsKeyFile": cfg.Listen.TLSKeyFile,
 		"gateway.tlsCertFile": cfg.Gateway.TLSCertFile, "gateway.tlsKeyFile": cfg.Gateway.TLSKeyFile,
+		"ingest.tlsCertFile": cfg.Ingest.TLSCertFile, "ingest.tlsKeyFile": cfg.Ingest.TLSKeyFile,
 		"database.passwordFile": cfg.Database.PasswordFile, "targetTLS.caBundleFile": cfg.TargetTLS.CABundleFile} {
 		if f == "" {
 			continue
@@ -316,6 +320,10 @@ func Run(cfgPath string) error {
 		return fmt.Errorf("internal ca: %w", err)
 	}
 
+	if err := d.startIngest(ctx); err != nil {
+		return err
+	}
+
 	d.Gateway = gateway.New(d.DB, d.CA, log.With("component", "gateway"))
 	d.Inventory = &inventory.Service{DB: d.DB, Log: log.With("component", "inventory"), Started: time.Now(),
 		OfflineAlertAfter: cfg.Agents.OfflineAlertAfter, FlappingDisconnects: cfg.Agents.FlappingDisconnects, FlappingWindow: cfg.Agents.FlappingWindow}
@@ -393,6 +401,15 @@ func Run(cfgPath string) error {
 		return err
 	}
 	gs := d.Gateway.GRPCServer(gwTLS)
+	var ingestSrv *http.Server
+	var ingestCert *certFile
+	if d.Ingest != nil {
+		var unregister func()
+		if ingestSrv, ingestCert, unregister, err = d.ingestServer(); err != nil {
+			return err
+		}
+		defer unregister()
+	}
 	var uiCert *certFile
 	if cfg.Listen.TLSCertFile != "" {
 		if uiCert, err = loadCertFile(cfg.Listen.TLSCertFile, cfg.Listen.TLSKeyFile); err != nil {
@@ -409,7 +426,7 @@ func Run(cfgPath string) error {
 				return
 			case <-hup:
 			}
-			for _, c := range []*certFile{reloadGW, uiCert} {
+			for _, c := range []*certFile{reloadGW, uiCert, ingestCert} {
 				if c == nil {
 					continue
 				}
@@ -425,6 +442,12 @@ func Run(cfgPath string) error {
 	gl, err := net.Listen("tcp", cfg.Listen.Gateway)
 	if err != nil {
 		return err
+	}
+	var il net.Listener
+	if ingestSrv != nil {
+		if il, err = net.Listen("tcp", cfg.Listen.Ingest); err != nil {
+			return err
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -449,8 +472,17 @@ func Run(cfgPath string) error {
 		httpSrv.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12, GetCertificate: uiCert.get}
 	}
 	opsSrv := &http.Server{Addr: cfg.Listen.Metrics, Handler: srv.OpsHandler(), ReadHeaderTimeout: 10 * time.Second}
-	errc := make(chan error, 3)
+	errc := make(chan error, 4)
 	go func() { errc <- gs.Serve(gl) }()
+	if ingestSrv != nil {
+		go func() {
+			if ingestSrv.TLSConfig != nil {
+				errc <- ingestSrv.ServeTLS(il, "", "")
+				return
+			}
+			errc <- ingestSrv.Serve(il)
+		}()
+	}
 	go func() {
 		if uiCert != nil {
 			errc <- httpSrv.ListenAndServeTLS("", "")
@@ -459,7 +491,11 @@ func Run(cfgPath string) error {
 		errc <- httpSrv.ListenAndServe()
 	}()
 	go func() { errc <- opsSrv.ListenAndServe() }()
-	log.Info("olympos server started", "http", cfg.Listen.HTTP, "gateway", cfg.Listen.Gateway, "metrics", cfg.Listen.Metrics)
+	ingestAddr := "off"
+	if ingestSrv != nil {
+		ingestAddr = cfg.Listen.Ingest
+	}
+	log.Info("olympos server started", "http", cfg.Listen.HTTP, "gateway", cfg.Listen.Gateway, "metrics", cfg.Listen.Metrics, "ingest", ingestAddr)
 
 	select {
 	case <-ctx.Done():
@@ -473,8 +509,30 @@ func Run(cfgPath string) error {
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdown)
 	_ = opsSrv.Shutdown(shutdown)
+	if ingestSrv != nil {
+		// A run's stream may outlast the grace period: cut it, its session
+		// dies with the process.
+		if ingestSrv.Shutdown(shutdown) != nil {
+			_ = ingestSrv.Close()
+		}
+	}
 	gs.GracefulStop()
 	wg.Wait()
+	return nil
+}
+
+// startIngest revokes the ingest credentials the last process left open
+// (their secrets are gone with it), and opens the registry of ingest
+// sessions when the endpoint is on. The revoke runs with the endpoint off
+// too: the table is always there, and the endpoint may have been on before
+// the restart.
+func (d *Deps) startIngest(ctx context.Context) error {
+	if err := ingest.MarkInterrupted(ctx, d.DB, time.Now()); err != nil {
+		return err
+	}
+	if d.Cfg.IngestEnabled() {
+		d.Ingest = ingest.NewRegistry(d.DB, d.HMAC, d.Cfg.Ingest.MaxRuns, nil)
+	}
 	return nil
 }
 
@@ -520,36 +578,14 @@ func (d *Deps) gatewayTLS() (*tls.Config, *certFile, error) {
 		c.Certificates, c.GetCertificate = nil, cf.get
 		return c, cf, nil
 	}
-	// Internal CA: a 90-day certificate, re-issued when it has less than 30
-	// days left (a systemd service can run longer than that).
 	hosts := append([]string{d.Cfg.GatewayHost()}, d.Cfg.Gateway.ExtraSANs...)
-	var mu sync.Mutex
-	var cur *tls.Certificate
-	issue := func() error {
-		der, key, err := d.CA.IssueServerCert(hosts, 90*24*time.Hour)
-		if err != nil {
-			return err
-		}
-		leaf, _ := x509.ParseCertificate(der)
-		cur = &tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
-		d.Log.Info("issued gateway certificate from internal CA", "hosts", hosts, "not_after", leaf.NotAfter)
-		return nil
-	}
-	if err := issue(); err != nil {
+	get, err := d.internalServerCert("gateway", hosts, certValidity)
+	if err != nil {
 		return nil, nil, err
 	}
 	c := d.Gateway.TLSConfig(tls.Certificate{})
 	c.Certificates = nil
-	c.GetCertificate = func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-		mu.Lock()
-		defer mu.Unlock()
-		if time.Until(cur.Leaf.NotAfter) < 30*24*time.Hour {
-			if err := issue(); err != nil {
-				d.Log.Error("renew gateway certificate", "err", err)
-			}
-		}
-		return cur, nil
-	}
+	c.GetCertificate = get
 	return c, nil, nil
 }
 
