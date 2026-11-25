@@ -2127,3 +2127,31 @@ func TestHandlerOneWriterPerKey(t *testing.T) {
 		}
 	})
 }
+
+// R39: the bytes of a repeat are drained, not stored, and not charged to the
+// run's quota: a PutObject or a multipart upload sent again whole is no
+// second object.
+func TestHandlerRepeatNotCharged(t *testing.T) {
+	e := newEnv(t)
+	parts := []string{strings.Repeat("c", 64<<10), "end"}
+	size := int64(len(parts[0]) + len(parts[1]))
+	a := e.backup(t, func(o *ingest.OpenOptions) { o.MaxBytes = 2*size + 10 })
+	put := a.prefix + "data/small.bin"
+	body := strings.Repeat("p", int(size))
+	for range 3 {
+		wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+put, body), http.StatusOK)
+	}
+	key := a.prefix + "data/big.bin"
+	for range 3 {
+		m := e.createUpload(t, a, key)
+		var tags []string
+		for i, p := range parts {
+			tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+		}
+		wantStatus(t, m.complete(t, tags...), http.StatusOK)
+	}
+	notStopped(t, a.s)
+	if n := len(a.s.Objects()); n != 2 {
+		t.Fatalf("%d objects", n)
+	}
+}

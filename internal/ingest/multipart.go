@@ -294,7 +294,8 @@ func (q *request) uploadPart() *s3Error {
 // streamPart writes the part the object waits for straight into it, then
 // the waiting parts after it. It runs with u.busy set.
 func (q *request) streamPart(u *upload, p *part, wantMD5 []byte) *s3Error {
-	d, err := q.copyBody(u.obj, true)
+	// The parts of a repeat are drained, not stored, so not charged (R39).
+	d, err := q.copyBody(u.obj, u.repeat == nil)
 	if err != nil {
 		e := q.partFailed(u, err)
 		q.release(u)
@@ -400,7 +401,7 @@ func (q *request) spillPart(u *upload, n int, p *part, wantMD5 []byte) *s3Error 
 		q.stop(ReasonSpill)
 		return denied("The part could not be held until its turn.")
 	}
-	d, err := q.copyBody(f, true)
+	d, err := q.copyBody(f, u.repeat == nil)
 	if cerr := f.Close(); err == nil && cerr != nil {
 		err = fmt.Errorf("%w: %w", errWrite, cerr)
 	}

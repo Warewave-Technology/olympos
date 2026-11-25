@@ -82,7 +82,7 @@ func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
 // BackupNative implements backup.NativeEngine with RunNative.
 func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
 	return e.RunNative(ctx, ec, NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
-		Databases: run.Databases, Stop: run.Stop})
+		Databases: run.Databases, Stop: run.Stop, Before: run.Before})
 }
 
 // statementSettings are the settings backupStatement writes into the BACKUP
@@ -112,6 +112,10 @@ type NativeRun struct {
 	// storm, expiry). ClickHouse retries refused uploads almost forever, so
 	// the run is then ended with KILL QUERY (spike §3).
 	Stop <-chan string
+	// Before, when set, is called once the target is checked and before the
+	// BACKUP is sent, with what nativeTargetState read on the run's
+	// connection; an error ends the run there (backup.NativeRun.Before).
+	Before func(ctx context.Context, t backup.NativeTarget) error
 }
 
 // NativeBase is the backup an incremental is taken on.
@@ -400,7 +404,8 @@ func parseVersion(v string) (major, minor int, ok bool) {
 }
 
 // RunNative runs one native backup on the target and returns its server
-// version. It checks the target (checkNativeTarget), sends the BACKUP
+// version. It checks the target (checkNativeTarget), hands nr.Before what
+// the target holds (nativeTargetState), sends the BACKUP
 // statement with async = 1 and polls system.backups every 5 s until the
 // backup is created or failed, all on one connection from ec.Dial. When
 // nr.Stop delivers or ctx is cancelled, it KILLs the backup on that
@@ -439,8 +444,40 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 	if err := checkNativeTarget(ctx, s, dbs); err != nil {
 		return version, err
 	}
+	if nr.Before != nil {
+		t, err := nativeTargetState(ctx, s, dbs)
+		if err != nil {
+			return version, err
+		}
+		if err := nr.Before(ctx, t); err != nil {
+			return version, err
+		}
+	}
 	again := func(ctx context.Context) (*session, error) { return connect(ctx, ec, opts) }
 	return version, s.runBackup(ctx, nr, again)
+}
+
+// nativeTargetState reads what the worker decides on before the BACKUP
+// (backup.NativeTarget): the bytes on disk of the active parts of the run's
+// databases, which a BACKUP writes about as they are.
+func nativeTargetState(ctx context.Context, c querier, databases []string) (backup.NativeTarget, error) {
+	quoted := make([]string, len(databases))
+	for i, db := range databases {
+		quoted[i] = quoteString(db)
+	}
+	rows, err := c.queryStrings(ctx, "SELECT toString(sum(bytes_on_disk)) FROM system.parts WHERE active AND database IN ("+
+		strings.Join(quoted, ", ")+")")
+	if err != nil {
+		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %w", err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return backup.NativeTarget{}, errors.New("clickhouse: size of the databases: no result")
+	}
+	n, err := strconv.ParseInt(rows[0][0], 10, 64)
+	if err != nil || n < 0 {
+		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %q is not a size", clip(rows[0][0]))
+	}
+	return backup.NativeTarget{Bytes: n}, nil
 }
 
 // nativeDatabases is the run's databases, sorted: the ones named, each of

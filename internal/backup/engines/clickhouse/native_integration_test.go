@@ -114,12 +114,19 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		in := newIngest(t, db)
 		r := in.open(t, st, nil)
 		fullID = r.id
+		var target backup.NativeTarget
+		r.before = func(_ context.Context, nt backup.NativeTarget) error { target = nt; return nil }
 		v, err := runNative(t, chc, r, nil, "spike", "big")
 		if err != nil {
 			t.Fatalf("RunNative: %v", err)
 		}
 		if v != wantServer {
 			t.Fatalf("server version %q", v)
+		}
+		// R39: the size on disk of the databases, before the BACKUP; big.blob
+		// alone is 64 MiB of random strings.
+		if target.Bytes < 64<<20 || target.Bytes > 128<<20 {
+			t.Fatalf("the databases hold %d bytes on disk", target.Bytes)
 		}
 		chc.wantStatus(t, r.id, statusCreated)
 		r.s.Revoke("run ended")
@@ -340,6 +347,12 @@ CREATE TABLE dist.all AS dist.local ENGINE = Distributed(default, dist, local);`
 		if _, err := runNative(t, chc, r, nil, "spike", "nope"); err == nil || !strings.Contains(err.Error(), `"nope" does not exist`) {
 			t.Fatalf("a missing database: %v", err)
 		}
+		// An error from Before ends the run before its BACKUP.
+		r.before = func(context.Context, backup.NativeTarget) error { return errors.New("no, thanks") }
+		if _, err := runNative(t, chc, r, nil, "spike"); err == nil || err.Error() != "no, thanks" {
+			t.Fatalf("Before refused: %v", err)
+		}
+		r.before = nil
 		if n := len(in.rec.all()); n != 0 {
 			t.Fatalf("a refused run sent %d requests", n)
 		}
@@ -409,7 +422,7 @@ func runNativeCtx(t *testing.T, ctx context.Context, chc *nativeCH, r *nativeTes
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	nr := NativeRun{URL: r.url, AccessKey: r.cred.AccessKey, Secret: r.cred.Secret, RunID: r.id, Base: base,
-		Databases: dbs, Stop: r.s.Stopped()}
+		Databases: dbs, Stop: r.s.Stopped(), Before: r.before}
 	return Engine{}.RunNative(ctx, chc.ec(), nr)
 }
 
@@ -544,6 +557,8 @@ type nativeTestRun struct {
 	id, url string
 	s       *ingest.Session
 	cred    ingest.Credential
+	// before is the run's NativeRun.Before.
+	before func(context.Context, backup.NativeTarget) error
 }
 
 func (in *nativeIngest) open(t *testing.T, st *dirStore, read []string) *nativeTestRun {

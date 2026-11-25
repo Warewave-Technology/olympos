@@ -545,6 +545,27 @@ func (s *Session) AddBytes(n int64) error {
 	return nil
 }
 
+// MaxBytes is how many bytes the run may write in all.
+func (s *Session) MaxBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxBytes
+}
+
+// SetMaxBytes changes how many bytes the run may write in all: the run's
+// owner sets it when it knows more than at Open (a native run, the size of
+// the target's databases), before the client has the credential. A limit
+// under what the run already wrote stops it with ReasonQuota.
+func (s *Session) SetMaxBytes(n int64) {
+	s.mu.Lock()
+	s.maxBytes = n
+	over := s.written > n
+	s.mu.Unlock()
+	if over {
+		s.Stop(ReasonQuota)
+	}
+}
+
 // RecordObject records an object the Sink stored. Handler hook.
 func (s *Session) RecordObject(rec ObjectRecord) {
 	s.mu.Lock()

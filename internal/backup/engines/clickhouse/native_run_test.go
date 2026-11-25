@@ -379,3 +379,25 @@ func TestNativeEngine(t *testing.T) {
 		}
 	}
 }
+
+// nativeTargetState reads what the worker needs before the BACKUP: the
+// bytes on disk of the run's databases' active parts (R39).
+func TestNativeTargetState(t *testing.T) {
+	q := &fakeQuerier{answers: map[string][][]string{"system.parts": {{"214748364800"}}}}
+	got, err := nativeTargetState(context.Background(), q, []string{"db1", "web-shop"})
+	if err != nil || got.Bytes != 200<<30 {
+		t.Fatalf("state %+v, %v", got, err)
+	}
+	if len(q.asked) != 1 || !strings.Contains(q.asked[0], "active") || !strings.Contains(q.asked[0], "database IN ('db1', 'web-shop')") {
+		t.Fatalf("asked %q", q.asked)
+	}
+	for name, q := range map[string]*fakeQuerier{
+		"unreadable": {answers: map[string][][]string{"system.parts": {{"lots"}}}},
+		"no row":     {answers: map[string][][]string{}},
+		"refused":    {fail: map[string]error{"system.parts": errors.New("ACCESS_DENIED")}},
+	} {
+		if _, err := nativeTargetState(context.Background(), q, []string{"db1"}); err == nil || !strings.Contains(err.Error(), "size of the databases") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

@@ -174,7 +174,22 @@ because a run's session and its credential live in the one process that opened t
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
 | `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. |
+| `ingest.maxRunBytes` | int (bytes) | `0` (automatic) | no | How many bytes one native run may write, for every job alike. `0` is the automatic limit below; a positive value replaces it, for example `536870912000` for 500 GiB. |
 | `ingest.spillDir` | path | operating system's temporary directory | no | Where parts that arrive out of order wait for their turn: up to 1 GiB per run, so size the volume for `maxRuns` × 1 GiB. When a run's parts fill its 1 GiB, ClickHouse is told to send the next early part again later (`503 SlowDown`); the run goes on. Files a crash left here (`olympos-ingest-*.part`) are removed when the server starts. The Helm chart mounts a volume for it. |
+
+**The byte limit of a native run.** A run may write at most the largest of:
+
+- twice the job's last full native run that succeeded or partly succeeded;
+- 1.5 times what the run's databases hold on disk, the `bytes_on_disk` of their active parts in
+  `system.parts`, which the server reads on the target just before the `BACKUP`;
+- 1 GiB.
+
+So a large database is backed up the first time, and one that grew is backed up after its growth. A file
+that ClickHouse sends again whole (a retry) is not counted twice. The limit stops a client that writes far
+more than the database holds; it is not a retention or cost control. A run that goes over it is ended with
+`KILL QUERY` and fails with `native byte limit: the run wrote more than <limit> (…); set ingest.maxRunBytes to
+allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to
+every native job), or back to `0` for the automatic limit.
 
 ### `targetTLS`
 
@@ -284,6 +299,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `ingest.url must be https unless devMode is on` | Use an `https` URL. Plain HTTP is for a lab on a dev build (`devMode`). |
 | `ingest.tlsCertFile needs an https ingest.url` / `listen.ingest must not be empty while ingest.url is set` | Use an `https` URL with certificate files; set `listen.ingest` to an address or leave it out for `:9444`. |
 | `ingest.maxRuns must be positive` / `ingest.maxRunDuration must be positive` | Use a positive value, or leave the key out for the default. |
+| `ingest.maxRunBytes must be 0 (automatic) or positive` | Use a byte count, or `0` (or leave the key out) for the automatic limit. |
 | `ingest.url cannot be set while experimental.multiReplica is true: ingest sessions live in one server process` | Run one server instance for native ClickHouse backups, or leave `ingest.url` unset. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
@@ -342,7 +358,7 @@ The `olympos:` defaults in `values.yaml` are: `publicURL: https://olympos.contos
 `keyVault: {provider: azure, name: "", kekName: olympos-kek, hmacSecretName: olympos-hmac,
 managedIdentityClientID: ""}`, `database.dsnRef: ""`, `slack.botTokenRef: ""`, `deadMansSwitch.url: ""`,
 `backup: {globalConcurrency: 4, perClusterConcurrency: 2}`, `changeRequests.ttl: 72h`,
-`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h}`. Native ClickHouse backups are off until you set
+`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h, maxRunBytes: 0}`. Native ClickHouse backups are off until you set
 `olympos.ingest.url`, for example the in-cluster Service,
 `https://<release>-ingest.<namespace>.svc:9444` (in development, see [`ingest`](#ingest): not available yet). You must at least
 set `publicURL`, `agentGatewayURL`, `entra.tenantID`, `entra.clientID` and `keyVault.name`.

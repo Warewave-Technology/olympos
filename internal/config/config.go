@@ -287,6 +287,10 @@ type Ingest struct {
 	MaxRuns int `yaml:"maxRuns"`
 	// MaxRunDuration ends a native run's session (default 6h).
 	MaxRunDuration time.Duration `yaml:"maxRunDuration"`
+	// MaxRunBytes is how many bytes one native run may write. 0 (default)
+	// is automatic: the largest of twice the job's last full native run,
+	// 1.5 times the size on disk of the run's databases, and 1 GiB.
+	MaxRunBytes int64 `yaml:"maxRunBytes"`
 	// SpillDir holds out-of-order upload parts until their turn, up to 1 GiB
 	// per run. Default: the operating system's temporary directory.
 	SpillDir string `yaml:"spillDir"`
@@ -371,6 +375,9 @@ func (c *Server) Validate() error {
 	}
 	if c.Ingest.MaxRunDuration < 0 {
 		errs = append(errs, "ingest.maxRunDuration must be positive")
+	}
+	if c.Ingest.MaxRunBytes < 0 {
+		errs = append(errs, "ingest.maxRunBytes must be 0 (automatic) or positive")
 	}
 	if c.IngestEnabled() {
 		u, err := url.Parse(c.Ingest.URL)

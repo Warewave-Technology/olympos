@@ -68,7 +68,13 @@ func nativeBackup() []nativeObject {
 type nativeCall struct {
 	run    backup.NativeRun
 	killed string // the stop reason it was KILLed for
+	// quota is the session's byte limit after run.Before (R39).
+	quota int64
 }
+
+// nativeRegistry is the ingest registry of the test's endpoint, in which
+// the fake ClickHouse looks up its run's session.
+var nativeRegistry *ingest.Registry
 
 var nativeCalls = struct {
 	mu   sync.Mutex
@@ -131,10 +137,22 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		fakeOpts
 		// Repeat sends the first object again: "same" body or "other".
 		Repeat string `json:"native_repeat"`
+		// TargetBytes is what the databases hold on disk (run.Before).
+		TargetBytes int64 `json:"native_target_bytes"`
 	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
 		return "", errors.New("clickhouse: BACKUP: S3 secret " + run.Secret + " refused")
+	}
+	if run.Before != nil {
+		if err := run.Before(ctx, backup.NativeTarget{Bytes: o.TargetBytes}); err != nil {
+			return "", err
+		}
+	}
+	if s, _, ok := nativeRegistry.Lookup(run.AccessKey); ok {
+		nativeCalls.mu.Lock()
+		call.quota = s.MaxBytes()
+		nativeCalls.mu.Unlock()
 	}
 	steps := []nativeObject{{".lock", []byte("lock")}}
 	steps = append(steps, nativeBackup()...)
@@ -197,6 +215,7 @@ func seedNative(t *testing.T, db *store.DB) nativeEnv {
 	t.Cleanup(srv.Close)
 	kv := &secrets.LocalKeyVault{Dir: t.TempDir()}
 	g.W.Native = &backup.NativeConfig{Registry: reg, URL: srv.URL, KV: kv, ManifestKeyName: nativeKey}
+	nativeRegistry = reg
 	return nativeEnv{groupFixture: g, reg: reg, srv: srv, kv: kv}
 }
 
@@ -706,4 +725,50 @@ func TestNativeRunMethodAndObjects(t *testing.T) {
 	check("queued logical", queue(t, db, e.Job, "manual", nil), "logical", "null")
 	// A finished run of a logical job.
 	check("logical", insertFinishedRun(t, db, e.Job, "succeeded", time.Now().Add(-time.Hour), e.DestID), "logical", "null")
+}
+
+// R39: the byte limit of a native run is the largest of twice the last full
+// native run, 1.5 times the databases' size on disk, read before the BACKUP,
+// and 1 GiB; ingest.maxRunBytes replaces it. A run over its limit is KILLed
+// and fails with an error that names the limit and the way out.
+func TestNativeRunQuota(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+
+	// No full yet, a large database: 1.5 times its size, not a fixed cap.
+	setOptions(t, db, e.Job, `{"method":"native","native_target_bytes":214748364800}`)
+	big := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, big)
+	if r := loadRun(t, db, big); r.Status != "succeeded" {
+		t.Fatalf("run: %+v", r)
+	}
+	if q := nativeCallOf(t, big).quota; q != 300<<30 {
+		t.Fatalf("quota %d, want 1.5 x 200 GiB", q)
+	}
+
+	// After that full, a small database: twice the full.
+	var full int64
+	if err := db.QueryRow(context.Background(), `SELECT bytes FROM backup_runs WHERE id = $1`, big).Scan(&full); err != nil {
+		t.Fatal(err)
+	}
+	setOptions(t, db, e.Job, `{"method":"native","native_target_bytes":1024}`)
+	small := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, small)
+	if q := nativeCallOf(t, small).quota; q != max(2*full, 1<<30) {
+		t.Fatalf("quota %d, want max(2 x %d, 1 GiB)", q, full)
+	}
+
+	// ingest.maxRunBytes under what the run writes: KILLed for the quota.
+	e.W.Native.MaxRunBytes = 1000
+	over := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, over)
+	call := nativeCallOf(t, over)
+	if call.quota != 1000 || call.killed != ingest.ReasonQuota {
+		t.Fatalf("quota %d, killed for %q", call.quota, call.killed)
+	}
+	r := loadRun(t, db, over)
+	if r.Status != "failed" || !strings.HasPrefix(r.Error, "native byte limit: the run wrote more than 1000 B (ingest.maxRunBytes)") ||
+		!strings.Contains(r.Error, "raise ingest.maxRunBytes") {
+		t.Fatalf("run: %+v", r)
+	}
 }

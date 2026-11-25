@@ -182,9 +182,9 @@ func TestNativeSinkClosed(t *testing.T) {
 	}
 }
 
-// nativeQuota: twice the job's last full native run, at least 1 GiB, 50 GiB
-// before the first; logical runs and incrementals do not count.
-func TestNativeQuota(t *testing.T) {
+// nativeLastFull: the bytes of the job's last full native run, 0 before
+// the first; logical runs and incrementals do not count.
+func TestNativeLastFull(t *testing.T) {
 	db := testutil.DB(t)
 	ctx := context.Background()
 	var cluster, job, dest uuid.UUID
@@ -220,20 +220,42 @@ func TestNativeQuota(t *testing.T) {
 	}
 	want := func(n int64) {
 		t.Helper()
-		if got, err := nativeQuota(ctx, db, job); err != nil || got != n {
-			t.Fatalf("quota %d %v, want %d", got, err, n)
+		if got, err := nativeLastFull(ctx, db, job); err != nil || got != n {
+			t.Fatalf("last full %d %v, want %d", got, err, n)
 		}
 	}
-	want(50 << 30)
+	want(0)
 	finished("succeeded", 10<<30, "") // logical
-	want(50 << 30)
+	want(0)
 	finished("succeeded", 3<<30, `{"write": "x/"}`)
-	want(6 << 30)
+	want(3 << 30)
 	finished("failed", 20<<30, `{"write": "y/"}`)
 	finished("succeeded", 30<<30, `{"write": "z/", "read": ["x/"]}`) // an incremental
-	want(6 << 30)
+	want(3 << 30)
 	finished("partial", 1<<20, `{"write": "w/"}`)
-	want(1 << 30)
+	want(1 << 20)
+}
+
+// nativeQuota (R39): the largest of twice the last full native run, 1.5
+// times the databases' size on disk and 1 GiB; ingest.maxRunBytes, when
+// set, instead. A database with no full yet, or one that grew, is not
+// stopped by an earlier, smaller run.
+func TestNativeQuota(t *testing.T) {
+	for _, tc := range []struct {
+		last, size, override, want int64
+	}{
+		{0, 0, 0, 1 << 30},                       // an empty database, no full yet
+		{0, 200 << 30, 0, 300 << 30},             // a large database, no full yet
+		{100 << 20, 5 << 30, 0, 15 << 29},        // a tiny first full, then 5 GiB loaded
+		{3 << 30, 1 << 30, 0, 6 << 30},           // twice the last full
+		{1 << 20, 1 << 20, 0, 1 << 30},           // the floor
+		{3 << 30, 100 << 30, 10 << 30, 10 << 30}, // ingest.maxRunBytes
+		{0, 0, 1 << 20, 1 << 20},                 // under the floor too
+	} {
+		if got := nativeQuota(tc.last, tc.size, tc.override); got != tc.want {
+			t.Errorf("nativeQuota(%d, %d, %d) = %d, want %d", tc.last, tc.size, tc.override, got, tc.want)
+		}
+	}
 }
 
 // Minor 4: the worker's context does not cut the sink's uploads. A server

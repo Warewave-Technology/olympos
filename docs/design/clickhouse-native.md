@@ -282,8 +282,10 @@ The existing flow, with these changes for a native source:
 
 ### 9. Limits and metrics
 
-- **Bytes per run.** A run may write twice its job's last full backup, configurable, with 50 GiB when there is
-  no full yet.
+- **Bytes per run (R39).** A run may write the largest of twice its job's last full native run, 1.5
+  times the size on disk of its databases (`bytes_on_disk` of their active parts, read on the target
+  before the `BACKUP`) and 1 GiB. `ingest.maxRunBytes` replaces it when set. Bytes ClickHouse sends again for an
+  object already stored (a repeat, R35) are drained and not counted.
 - **Requests per run.** 200 per second.
 - **Concurrent runs.** At most `ingest.maxRuns` (default 4).
 - **Over a limit.** The request gets `403`, and the run is ended with `KILL QUERY`.

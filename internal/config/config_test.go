@@ -48,6 +48,9 @@ func TestIngestDefaults(t *testing.T) {
 	if c.KeyVault.ManifestKeyName != "olympos-manifest" {
 		t.Fatalf("manifestKeyName %q", c.KeyVault.ManifestKeyName)
 	}
+	if c.Ingest.MaxRunBytes != 0 {
+		t.Fatalf("maxRunBytes defaults to 0 (automatic), got %d", c.Ingest.MaxRunBytes)
+	}
 	if c.Ingest.SpillDir != "" {
 		t.Fatalf("spillDir defaults to the OS temp dir (empty), got %q", c.Ingest.SpillDir)
 	}
@@ -55,13 +58,13 @@ func TestIngestDefaults(t *testing.T) {
 
 func TestIngestYAML(t *testing.T) {
 	c := &Server{}
-	doc := "listen:\n  ingest: \":9555\"\ningest:\n  url: https://olympos-ingest.example:9555\n  maxRuns: 8\n  maxRunDuration: 12h\n  spillDir: /spill\n  tlsCertFile: /c.crt\n  tlsKeyFile: /c.key\n"
+	doc := "listen:\n  ingest: \":9555\"\ningest:\n  url: https://olympos-ingest.example:9555\n  maxRuns: 8\n  maxRunDuration: 12h\n  maxRunBytes: 536870912000\n  spillDir: /spill\n  tlsCertFile: /c.crt\n  tlsKeyFile: /c.key\n"
 	if err := yaml.Unmarshal([]byte(doc), c); err != nil {
 		t.Fatal(err)
 	}
 	c.defaults()
 	want := Ingest{URL: "https://olympos-ingest.example:9555", TLSCertFile: "/c.crt", TLSKeyFile: "/c.key",
-		MaxRuns: 8, MaxRunDuration: 12 * time.Hour, SpillDir: "/spill"}
+		MaxRuns: 8, MaxRunDuration: 12 * time.Hour, MaxRunBytes: 500 << 30, SpillDir: "/spill"}
 	if c.Listen.Ingest != ":9555" || c.Ingest != want {
 		t.Fatalf("got %q %+v", c.Listen.Ingest, c.Ingest)
 	}
@@ -109,15 +112,16 @@ func TestIngestOnlyWithURL(t *testing.T) {
 func TestIngestValidation(t *testing.T) {
 	const ok = "https://olympos-ingest.example:9444"
 	for name, mod := range map[string]func(*Server){
-		"cert without key":    func(c *Server) { c.Ingest.TLSCertFile = "/c.crt" },
-		"no scheme":           func(c *Server) { c.Ingest.URL = "olympos-ingest.example:9444" },
-		"other scheme":        func(c *Server) { c.Ingest.URL = "ftp://olympos-ingest.example" },
-		"no host":             func(c *Server) { c.Ingest.URL = "https://" },
-		"path":                func(c *Server) { c.Ingest.URL = ok + "/s3" },
-		"query":               func(c *Server) { c.Ingest.URL = ok + "?a=b" },
-		"empty listener":      func(c *Server) { c.Listen.Ingest = "" },
-		"negative maxRuns":    func(c *Server) { c.Ingest.MaxRuns = -1 },
-		"negative maxRunTime": func(c *Server) { c.Ingest.MaxRunDuration = -time.Hour },
+		"cert without key":     func(c *Server) { c.Ingest.TLSCertFile = "/c.crt" },
+		"no scheme":            func(c *Server) { c.Ingest.URL = "olympos-ingest.example:9444" },
+		"other scheme":         func(c *Server) { c.Ingest.URL = "ftp://olympos-ingest.example" },
+		"no host":              func(c *Server) { c.Ingest.URL = "https://" },
+		"path":                 func(c *Server) { c.Ingest.URL = ok + "/s3" },
+		"query":                func(c *Server) { c.Ingest.URL = ok + "?a=b" },
+		"empty listener":       func(c *Server) { c.Listen.Ingest = "" },
+		"negative maxRuns":     func(c *Server) { c.Ingest.MaxRuns = -1 },
+		"negative maxRunTime":  func(c *Server) { c.Ingest.MaxRunDuration = -time.Hour },
+		"negative maxRunBytes": func(c *Server) { c.Ingest.MaxRunBytes = -1 },
 	} {
 		c := validServer()
 		c.Ingest.URL = ok

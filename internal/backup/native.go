@@ -80,6 +80,17 @@ type NativeRun struct {
 	// Stop delivers why the run's ingest session stopped (a quota, a failed
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
+	// Before, when set, is called once the target is checked and before the
+	// BACKUP is sent, with what the engine read on the target. An error ends
+	// the run there, with no backup started.
+	Before func(ctx context.Context, t NativeTarget) error
+}
+
+// NativeTarget is what the engine reads on the target before its BACKUP.
+type NativeTarget struct {
+	// Bytes is what the run's databases hold on disk: the bytes of their
+	// active parts (R39).
+	Bytes int64
 }
 
 // String and LogValue keep the secret out of every print and log of a run.
@@ -131,6 +142,9 @@ type NativeConfig struct {
 	// KV and ManifestKeyName sign the manifests (keyVault.manifestKeyName).
 	KV              secrets.KeyVault
 	ManifestKeyName string
+	// MaxRunBytes is how many bytes a run may write (ingest.maxRunBytes);
+	// 0 is the automatic limit (nativeQuota).
+	MaxRunBytes int64
 }
 
 const (
@@ -145,10 +159,8 @@ const (
 
 	errIngestOff    = "the ingest endpoint is off: set ingest.url"
 	errNativeRepair = "a native run is not repaired; the next run is a full backup"
-	// nativeQuotaDefault is how much a run may write when the job has no
-	// full native run yet; nativeQuotaMin the least it may write after one.
-	nativeQuotaDefault = 50 << 30
-	nativeQuotaMin     = 1 << 30
+	// nativeQuotaMin is the least a run may write (nativeQuota).
+	nativeQuotaMin = 1 << 30
 	// nativeTTL is the credential's lifetime when MaxRunDuration is 0.
 	nativeTTL = 6 * time.Hour
 	// nativeTaggers is how many objects are re-tagged at once per
@@ -392,10 +404,13 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	fail := func(msg string) outcome {
 		return outcome{status: "failed", err: n.scrub(msg), engineFailed: true, native: true, wire: n.wire()}
 	}
-	quota, err := nativeQuota(ctx, w.DB, job.ID)
+	lastFull, err := nativeLastFull(ctx, w.DB, job.ID)
 	if err != nil {
 		return fail("native byte limit: " + err.Error()), nil
 	}
+	// Until the engine read the databases' size (Before), the limit leaves
+	// it out; no one has the credential yet.
+	quota := nativeQuota(lastFull, 0, cfg.MaxRunBytes)
 	ttl := cfg.MaxRunDuration
 	if ttl <= 0 {
 		ttl = nativeTTL
@@ -417,8 +432,15 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	scrub := func(s string) string { return n.scrub(strings.ReplaceAll(s, secret, "[HIDDEN]")) }
 	stopped := &stopForward{}
 	done := stopped.run(ctx, sess)
+	before := func(ctx context.Context, t NativeTarget) error {
+		quota = nativeQuota(lastFull, t.Bytes, cfg.MaxRunBytes)
+		sess.SetMaxBytes(quota)
+		w.Log.Info("native backup: byte limit", "run_id", r.id, "max_bytes", quota, "databases_bytes", t.Bytes,
+			"last_full_bytes", lastFull, "configured", cfg.MaxRunBytes > 0)
+		return nil
+	}
 	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: nativeURL(cfg.URL, runID), AccessKey: cred.AccessKey,
-		Secret: secret, RunID: runID, Databases: n.opts.Databases, Stop: stopped.ch})
+		Secret: secret, RunID: runID, Databases: n.opts.Databases, Stop: stopped.ch, Before: before})
 	cred = ingest.Credential{}
 	reason := done()
 	sess.Revoke(nativeRunEnded)
@@ -433,6 +455,9 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	rr := &RunResult{ServerVersion: version}
 	if runErr != nil {
 		msg := scrub(runErr.Error())
+		if reason == ingest.ReasonQuota {
+			msg = quotaError(quota, cfg.MaxRunBytes > 0) + ": " + msg
+		}
 		if errors.Is(runErr, ErrNativeOrphan) {
 			w.Log.Error("native backup: the BACKUP may still be running on the target, and its revoked credential does not end "+
 				"an upload in flight; end it with KILL QUERY", "run_id", r.id, "job_id", job.ID, "err", msg)
@@ -646,20 +671,38 @@ func (f *stopForward) run(ctx context.Context, sess *ingest.Session) func() stri
 	}
 }
 
-// nativeQuota is how many bytes a native run of the job may write (design
-// §9): twice the job's last full native run, at least nativeQuotaMin, or
-// nativeQuotaDefault before its first. A native run is one with an ingest
-// credential; a full one's credential reads nothing.
-func nativeQuota(ctx context.Context, q store.Querier, jobID uuid.UUID) (int64, error) {
+// nativeLastFull is the bytes of the job's last full native run that
+// succeeded or partly succeeded, 0 before its first. A native run is one with
+// an ingest credential; a full one's credential reads nothing.
+func nativeLastFull(ctx context.Context, q store.Querier, jobID uuid.UUID) (int64, error) {
 	var last int64
 	err := q.QueryRow(ctx, `SELECT r.bytes FROM backup_runs r WHERE r.job_id = $1 AND r.status IN ('succeeded', 'partial')
 		AND EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.scope -> 'read' IS NULL)
 		ORDER BY r.finished_at DESC LIMIT 1`, jobID).Scan(&last)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		return nativeQuotaDefault, nil
-	case err != nil:
-		return 0, err
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
 	}
-	return max(2*last, nativeQuotaMin), nil
+	return last, err
+}
+
+// nativeQuota is how many bytes a native run may write (design §9, R39):
+// the largest of twice the job's last full native run, 1.5 times what the
+// run's databases hold on disk and nativeQuotaMin; override
+// (ingest.maxRunBytes), when set, instead. The databases' size lets a large
+// database with no full yet, or one that grew since, be backed up.
+func nativeQuota(lastFull, databases, override int64) int64 {
+	if override > 0 {
+		return override
+	}
+	return max(2*lastFull, databases+databases/2, nativeQuotaMin)
+}
+
+// quotaError says that a run went over its byte limit, and how to allow more.
+func quotaError(quota int64, configured bool) string {
+	if configured {
+		return fmt.Sprintf("native byte limit: the run wrote more than %s (ingest.maxRunBytes); raise ingest.maxRunBytes, "+
+			"or set it to 0 for the automatic limit", humanBytes(quota))
+	}
+	return fmt.Sprintf("native byte limit: the run wrote more than %s (the largest of twice the last full native run, "+
+		"1.5 times the databases' size on disk, and 1 GiB); set ingest.maxRunBytes to allow more", humanBytes(quota))
 }
