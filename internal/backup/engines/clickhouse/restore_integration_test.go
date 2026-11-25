@@ -693,12 +693,7 @@ func startKeeperServer(t *testing.T, name, xml, network string) (*chEnv, func(st
 	env := &chEnv{native: strings.Split(port, "\n")[0]}
 	q := func(query string) string {
 		t.Helper()
-		cmd := exec.Command("docker", "exec", "-i", name, "clickhouse-client", "-u", chUser, "--password", chPassword, "-n", "-q", query)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("%s: %v\n%s", query, err, out)
-		}
-		return strings.TrimSpace(string(out))
+		return clickhouseClientIn(t, name, nil, chUser, chPassword, "-n", "-q", query)
 	}
 	ctx := context.Background()
 	deadline := time.Now().Add(90 * time.Second)
@@ -734,7 +729,10 @@ func TestRestoreReplicatedIntegration(t *testing.T) {
 	var rnd [4]byte
 	_, _ = rand.Read(rnd[:])
 	env, q := startKeeperServer(t, "olympos-t8-keeper-"+hex.EncodeToString(rnd[:]), keeperXML, "")
-	ctx := context.Background()
+	// The backup and the restore fail on a stuck server instead of
+	// running into the package timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 
 	q(`CREATE DATABASE rp;
 CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
@@ -809,7 +807,10 @@ func TestRestoreReplicatedSharedKeeper(t *testing.T) {
 	srcName := "olympos-t8-src-" + suffix
 	src, qs := startKeeperServer(t, srcName, keeperXML, network)
 	dst, qd := startKeeperServer(t, "olympos-t8-dst-"+suffix, sharedKeeperXML(srcName), network)
-	ctx := context.Background()
+	// The backup and the restore fail on a stuck server instead of
+	// running into the package timeout.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
 
 	qs(`CREATE DATABASE rp;
 CREATE TABLE rp.t UUID '3b0f6c1e-2d4a-4e5f-9a1b-7c8d9e0f1a2b' (x UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY x;
