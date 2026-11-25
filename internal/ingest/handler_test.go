@@ -43,7 +43,7 @@ type env struct {
 	spillDir string
 }
 
-func newEnv(t *testing.T) *env {
+func newEnv(t *testing.T, opts ...ingest.HandlerOption) *env {
 	t.Helper()
 	db := testutil.DB(t)
 	fp, err := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
@@ -55,9 +55,8 @@ func newEnv(t *testing.T) *env {
 	m := ingest.NewMetrics()
 	logs := &syncBuffer{}
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	h := ingest.NewHandler(reg, log, m)
 	dir := t.TempDir()
-	ingest.SetSpill(h, dir, 1<<30)
+	h := ingest.NewHandler(reg, log, m, append([]ingest.HandlerOption{ingest.WithSpillDir(dir)}, opts...)...)
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return &env{reg: reg, clock: c, metrics: m, handler: h, srv: srv, logs: logs, spillDir: dir}
@@ -212,10 +211,9 @@ func md5Header(body string) func(*http.Request) {
 	return withHeader("Content-MD5", base64.StdEncoding.EncodeToString(sum[:]))
 }
 
-func md5Hex(body string) string {
-	sum := md5.Sum([]byte(body))
-	return hex.EncodeToString(sum[:])
-}
+// shaTag is the ETag the endpoint gives a body: the first 32 hex characters
+// of its SHA-256, quoted.
+func shaTag(body string) string { return `"` + hexSHA256(body)[:32] + `"` }
 
 // fakeSink records every Put. With failAfter >= 0 it reads that many bytes
 // and fails without draining the reader, as a sink with no destination left.
@@ -341,6 +339,7 @@ type listResult struct {
 	IsTruncated bool
 	Contents    []struct {
 		Key  string
+		ETag string
 		Size int64
 	}
 }
@@ -485,7 +484,7 @@ func TestHandlerPutObject(t *testing.T) {
 	key := a.prefix + "data/all_1_1_0/data.bin"
 	r := e.do(t, a.cred, http.MethodPut, "/olympos/"+key, body, md5Header(body))
 	wantStatus(t, r, http.StatusOK)
-	if got, want := r.header.Get("ETag"), `"`+md5Hex(body)+`"`; got != want {
+	if got, want := r.header.Get("ETag"), shaTag(body); got != want {
 		t.Errorf("ETag %s, want %s", got, want)
 	}
 	puts := a.sink.all()
@@ -568,6 +567,7 @@ func TestHandlerScope(t *testing.T) {
 	})
 	t.Run("restore reads another prefix", func(t *testing.T) {
 		wantRefused(t, e.do(t, ro.cred, http.MethodGet, "/olympos/"+other+"secret.bin", ""), http.StatusForbidden, "AccessDenied")
+		wantRefused(t, e.do(t, ro.cred, http.MethodGet, "/olympos/"+other+"missing.bin", ""), http.StatusForbidden, "AccessDenied")
 		wantRefused(t, e.do(t, ro.cred, http.MethodGet, "/olympos/?prefix="+other, ""), http.StatusForbidden, "AccessDenied")
 	})
 	src.mu.Lock()
@@ -585,7 +585,10 @@ func TestHandlerLock(t *testing.T) {
 	lock := "/olympos/" + a.prefix + ".lock"
 
 	wantRefused(t, e.do(t, a.cred, http.MethodGet, lock, ""), http.StatusNotFound, "NoSuchKey")
-	wantStatus(t, e.do(t, a.cred, http.MethodPut, lock, "the-backup-uuid", md5Header("the-backup-uuid")), http.StatusOK)
+	if r := e.do(t, a.cred, http.MethodPut, lock, "the-backup-uuid", md5Header("the-backup-uuid")); r.status != http.StatusOK ||
+		r.header.Get("ETag") != shaTag("the-backup-uuid") {
+		t.Fatalf("PUT .lock: %s %s", r, r.header.Get("ETag"))
+	}
 	if r := e.do(t, a.cred, http.MethodGet, lock, ""); r.status != http.StatusOK || r.body != "the-backup-uuid" {
 		t.Fatalf("GET .lock: %s", r)
 	}
@@ -784,6 +787,16 @@ func TestHandlerListObjects(t *testing.T) {
 	if l.Contents[0].Size != int64(len("body of data/a.bin")) {
 		t.Errorf("size %d", l.Contents[0].Size)
 	}
+	l = e.list(t, a.cred, "prefix="+p)
+	for _, c := range l.Contents {
+		body := "body of " + strings.TrimPrefix(c.Key, p)
+		if c.Key == p+".lock" {
+			body = "lock"
+		}
+		if c.ETag != shaTag(body) {
+			t.Errorf("%s: ETag %s, want %s", c.Key, c.ETag, shaTag(body))
+		}
+	}
 	if l = e.list(t, a.cred, "prefix="+p+"data/"); !slices.Equal(l.keys(), all[2:4]) {
 		t.Errorf("data/ %v", l.keys())
 	}
@@ -881,14 +894,9 @@ func etagOf(t *testing.T, r reply) string {
 	return r.header.Get("ETag")
 }
 
+// multipartETag is the whole object's ETag with the part count.
 func multipartETag(parts ...string) string {
-	var sums []byte
-	for _, p := range parts {
-		s := md5.Sum([]byte(p))
-		sums = append(sums, s[:]...)
-	}
-	s := md5.Sum(sums)
-	return fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(s[:]), len(parts))
+	return fmt.Sprintf(`"%s-%d"`, hexSHA256(strings.Join(parts, ""))[:32], len(parts))
 }
 
 func spillFiles(t *testing.T, dir string) int {
@@ -911,7 +919,7 @@ func TestHandlerMultipart(t *testing.T) {
 		var tags []string
 		for i, p := range parts {
 			tag := etagOf(t, m.part(t, i+1, p))
-			if tag != `"`+md5Hex(p)+`"` {
+			if tag != shaTag(p) {
 				t.Errorf("part %d ETag %s", i+1, tag)
 			}
 			tags = append(tags, tag)
@@ -984,8 +992,7 @@ func TestHandlerMultipart(t *testing.T) {
 		}
 	})
 	t.Run("spill over the limit", func(t *testing.T) {
-		e := newEnv(t)
-		ingest.SetSpill(e.handler, e.spillDir, 10)
+		e := newEnv(t, ingest.WithSpillLimit(10))
 		a := e.backup(t)
 		m := e.createUpload(t, a, a.prefix+"data/big.bin")
 		etagOf(t, m.part(t, 2, "12345"))
@@ -1017,8 +1024,12 @@ func TestHandlerMultipart(t *testing.T) {
 		if n := spillFiles(t, e.spillDir); n != 0 {
 			t.Errorf("%d spill files left", n)
 		}
-		wantRefused(t, m.part(t, 2, parts[1]), http.StatusForbidden, "NoSuchUpload")
-		wantRefused(t, m.complete(t, "x"), http.StatusForbidden, "NoSuchUpload")
+		// The object is partly written and cannot be written again: the run
+		// cannot succeed, so the session stops.
+		if got := stopReason(t, a.s); got != ingest.ReasonUploadAborted {
+			t.Errorf("stop reason %q", got)
+		}
+		wantRefused(t, m.part(t, 2, parts[1]), http.StatusForbidden, "InvalidAccessKeyId")
 		if o := a.s.Objects(); len(o) != 0 {
 			t.Errorf("objects %+v", o)
 		}
@@ -1183,6 +1194,10 @@ func TestHandlerSessionsIsolated(t *testing.T) {
 		{"overwrite b's lock", http.MethodPut, "/olympos/" + b.prefix + ".lock", "x", "AccessDenied"},
 		{"read b's lock", http.MethodGet, "/olympos/" + b.prefix + ".lock", "", "AccessDenied"},
 		{"read b's .backup", http.MethodGet, "/olympos/" + b.prefix + ".backup", "", "AccessDenied"},
+		// Out of scope is 403 whether the key exists or not; 404 is only for
+		// keys in scope.
+		{"read a missing key of b", http.MethodGet, "/olympos/" + b.prefix + "data/none.bin", "", "AccessDenied"},
+		{"read a missing .lock of another run", http.MethodGet, "/olympos/" + uuid.NewString() + "/.lock", "", "AccessDenied"},
 		{"list b", http.MethodGet, "/olympos/?prefix=" + b.prefix, "", "AccessDenied"},
 		{"delete b's lock", http.MethodDelete, "/olympos/" + b.prefix + ".lock", "", "AccessDenied"},
 		{"upload into b", http.MethodPost, "/olympos/" + b.prefix + "data/evil.bin?uploads", "", "AccessDenied"},

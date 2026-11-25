@@ -1,9 +1,7 @@
 package ingest
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
 	"encoding/hex"
 	"encoding/xml"
 	"errors"
@@ -40,8 +38,9 @@ type upload struct {
 
 // part is a part received, or still arriving.
 type part struct {
-	size    int64
-	md5     []byte
+	size int64
+	// sha256 is the part's SHA-256 in hex; its ETag is made from it.
+	sha256  string
 	pending bool
 	// spill is the part's file while it waits for its turn.
 	spill string
@@ -200,13 +199,13 @@ func (q *request) streamPart(u *upload, p *part, wantMD5 []byte) *s3Error {
 		return e
 	}
 	u.mu.Lock()
-	p.size, p.md5, p.pending = d.n, d.md5.Sum(nil), false
+	p.size, p.sha256, p.pending = d.n, hex.EncodeToString(d.sha.Sum(nil)), false
 	u.next++
 	u.mu.Unlock()
 	if e := q.drain(u); e != nil {
 		return e
 	}
-	q.partOK(p.md5)
+	q.partOK(d.etag())
 	return nil
 }
 
@@ -296,7 +295,7 @@ func (w *spillWriter) Write(p []byte) (int, error) {
 // spillPart holds a part that came before its turn on disk. When its turn
 // came meanwhile and no request is streaming, it feeds the object itself.
 func (q *request) spillPart(u *upload, n int, p *part, wantMD5 []byte) *s3Error {
-	dir, limit := q.h.spill()
+	dir, limit := q.h.spillDir, q.h.spillLimit
 	f, err := os.CreateTemp(dir, "olympos-ingest-*.part")
 	if err != nil {
 		q.h.log.Warn("ingest: could not hold a part on disk", "run", q.s.RunID().String(), "key", q.key, "err", err)
@@ -338,7 +337,7 @@ func (q *request) spillPart(u *upload, n int, p *part, wantMD5 []byte) *s3Error 
 		discard()
 		return errNoSuchUpload
 	}
-	p.size, p.md5, p.pending, p.spill = d.n, d.md5.Sum(nil), false, f.Name()
+	p.size, p.sha256, p.pending, p.spill = d.n, hex.EncodeToString(d.sha.Sum(nil)), false, f.Name()
 	turn := n == u.next && !u.busy
 	if turn {
 		u.busy = true
@@ -349,7 +348,7 @@ func (q *request) spillPart(u *upload, n int, p *part, wantMD5 []byte) *s3Error 
 			return e
 		}
 	}
-	q.partOK(p.md5)
+	q.partOK(d.etag())
 	return nil
 }
 
@@ -372,15 +371,15 @@ func (q *request) repeatPart(u *upload, n int, seen part, wantMD5 []byte) *s3Err
 		q.stop(ReasonBadDigest)
 		return e
 	}
-	if d.n != seen.size || !bytes.Equal(d.md5.Sum(nil), seen.md5) {
+	if d.n != seen.size || hex.EncodeToString(d.sha.Sum(nil)) != seen.sha256 {
 		return q.brokenUpload(u, fmt.Sprintf("Part %d was sent again with another body.", n))
 	}
-	q.partOK(seen.md5)
+	q.partOK(etag(seen.sha256))
 	return nil
 }
 
-func (q *request) partOK(sum []byte) {
-	q.w.Header().Set("ETag", `"`+hex.EncodeToString(sum)+`"`)
+func (q *request) partOK(tag string) {
+	q.w.Header().Set("ETag", tag)
 	q.w.WriteHeader(http.StatusOK)
 }
 
@@ -424,14 +423,12 @@ func (q *request) completeUpload() *s3Error {
 	}
 	// Every part from 1 was streamed, in order, and none waits.
 	ok := !u.busy && len(list.Parts) > 0 && len(list.Parts) == u.next-1 && len(u.parts) == u.next-1
-	var sums []byte
 	for i, lp := range list.Parts {
 		p := u.parts[i+1]
-		if !ok || lp.PartNumber != i+1 || p == nil || p.pending || strings.Trim(lp.ETag, `"`) != hex.EncodeToString(p.md5) {
+		if !ok || lp.PartNumber != i+1 || p == nil || p.pending || strings.Trim(lp.ETag, `"`) != strings.Trim(etag(p.sha256), `"`) {
 			ok = false
 			break
 		}
-		sums = append(sums, p.md5...)
 	}
 	if !ok {
 		u.mu.Unlock()
@@ -450,10 +447,11 @@ func (q *request) completeUpload() *s3Error {
 	if e := q.stored(rec, u.obj.kept); e != nil {
 		return e
 	}
-	sum := md5.Sum(sums)
-	etag := fmt.Sprintf(`"%s-%d"`, hex.EncodeToString(sum[:]), len(list.Parts))
+	// The whole object's ETag, with the part count, as S3 marks a multipart
+	// ETag.
+	tag := fmt.Sprintf(`"%s-%d"`, rec.SHA256[:32], len(list.Parts))
 	writeXML(q.w, http.StatusOK, completeResult{Xmlns: s3Namespace, Location: "/" + bucket + "/" + q.key,
-		Bucket: bucket, Key: q.key, ETag: etag})
+		Bucket: bucket, Key: q.key, ETag: tag})
 	return nil
 }
 
@@ -470,6 +468,9 @@ func (q *request) abortUpload() *s3Error {
 		return e
 	}
 	q.h.failUpload(u, errAborted)
+	// The object is partly on the destinations and cannot be written again
+	// under its name: the run cannot succeed.
+	q.stop(ReasonUploadAborted)
 	q.w.WriteHeader(http.StatusNoContent)
 	return nil
 }

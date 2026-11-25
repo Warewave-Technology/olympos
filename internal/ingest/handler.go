@@ -48,6 +48,10 @@ const (
 	// ReasonMultipart: a multipart upload broke the protocol: a part sent
 	// again with another body, or a part list that does not match.
 	ReasonMultipart = "multipart"
+	// ReasonUploadAborted: the run aborted a multipart upload. Its object is
+	// partly on the destinations and cannot be written again under its name,
+	// so the run cannot succeed.
+	ReasonUploadAborted = "upload aborted"
 )
 
 const (
@@ -196,15 +200,27 @@ type handler struct {
 	log *slog.Logger
 	m   *Metrics
 
-	mu         sync.Mutex
 	spillDir   string // "" is the system's temporary directory
 	spillLimit int64
-	uploads    map[string]*upload
+
+	mu      sync.Mutex
+	uploads map[string]*upload
 }
+
+// HandlerOption configures NewHandler.
+type HandlerOption func(*handler)
+
+// WithSpillDir sets the directory that holds out-of-order parts until their
+// turn. The default is the system's temporary directory.
+func WithSpillDir(dir string) HandlerOption { return func(h *handler) { h.spillDir = dir } }
+
+// WithSpillLimit sets how many bytes of out-of-order parts one run may hold
+// on disk at once. The default is 1 GiB.
+func WithSpillLimit(n int64) HandlerOption { return func(h *handler) { h.spillLimit = n } }
 
 // NewHandler returns the ingest endpoint for the sessions of reg. A nil log
 // is slog.Default and nil metrics are not exported.
-func NewHandler(reg *Registry, log *slog.Logger, m *Metrics) http.Handler {
+func NewHandler(reg *Registry, log *slog.Logger, m *Metrics, opts ...HandlerOption) http.Handler {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -212,14 +228,24 @@ func NewHandler(reg *Registry, log *slog.Logger, m *Metrics) http.Handler {
 		m = NewMetrics()
 	}
 	m.attach(reg)
-	return &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, uploads: map[string]*upload{}}
+	h := &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, uploads: map[string]*upload{}}
+	for _, o := range opts {
+		o(h)
+	}
+	return h
 }
 
-func (h *handler) spill() (dir string, limit int64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.spillDir, h.spillLimit
+// etag is the ETag of a body: the first 32 hex characters of its SHA-256,
+// quoted. The spike's endpoint answered so, and ClickHouse took it; the
+// handler keeps no MD5 of stored objects.
+func etag(sha256Hex string) string {
+	if len(sha256Hex) < 32 {
+		return ""
+	}
+	return `"` + sha256Hex[:32] + `"`
 }
+
+func (d bodyDigest) etag() string { return etag(hex.EncodeToString(d.sha.Sum(nil))) }
 
 // request is one request on its way through the handler.
 type request struct {
@@ -677,7 +703,7 @@ func (q *request) put() *s3Error {
 	if e := q.stored(rec, obj.kept); e != nil {
 		return e
 	}
-	q.w.Header().Set("ETag", `"`+hex.EncodeToString(d.md5.Sum(nil))+`"`)
+	q.w.Header().Set("ETag", etag(rec.SHA256))
 	q.w.WriteHeader(http.StatusOK)
 	return nil
 }
@@ -716,7 +742,7 @@ func (q *request) putLock(wantMD5 []byte) *s3Error {
 		return e
 	}
 	q.s.PutLock(body)
-	q.w.Header().Set("ETag", `"`+hex.EncodeToString(d.md5.Sum(nil))+`"`)
+	q.w.Header().Set("ETag", d.etag())
 	q.w.WriteHeader(http.StatusOK)
 	return nil
 }
@@ -895,7 +921,8 @@ func (q *request) list() *s3Error {
 	case s.own(prefix):
 		found = s.Objects()
 		if lock, ok := s.Lock(); ok {
-			found = append(found, ObjectRecord{Key: s.LockKey(), Size: int64(len(lock))})
+			sum := sha256.Sum256(lock)
+			found = append(found, ObjectRecord{Key: s.LockKey(), Size: int64(len(lock)), SHA256: hex.EncodeToString(sum[:])})
 		}
 	case s.readable(prefix):
 		recs, err := s.Source().List(q.r.Context(), prefix)
@@ -929,7 +956,8 @@ func (q *request) list() *s3Error {
 	}
 	modified := q.h.reg.now().UTC().Format("2006-01-02T15:04:05.000Z")
 	for _, o := range keys {
-		res.Contents = append(res.Contents, listEntry{Key: o.Key, LastModified: modified, Size: o.Size, StorageClass: "STANDARD"})
+		res.Contents = append(res.Contents, listEntry{Key: o.Key, LastModified: modified, ETag: etag(o.SHA256),
+			Size: o.Size, StorageClass: "STANDARD"})
 	}
 	writeXML(q.w, http.StatusOK, res)
 	return nil

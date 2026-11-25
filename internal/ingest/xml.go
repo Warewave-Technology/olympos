@@ -63,6 +63,7 @@ type listBucketResult struct {
 type listEntry struct {
 	Key          string
 	LastModified string
+	ETag         string `xml:",omitempty"`
 	Size         int64
 	StorageClass string
 }
