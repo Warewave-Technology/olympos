@@ -7,6 +7,7 @@
 #   security-model-paths.sh --check <tag>   the rule, for the tag just pushed
 #   security-model-paths.sh --files         file names on stdin; prints the
 #                                           ones on the list, fails if none
+# An entry is a directory (everything under it) or a single file (only it).
 # Runs in the current directory's repository.
 set -euo pipefail
 paths=(
@@ -16,6 +17,7 @@ paths=(
   internal/probe
   internal/agent
   internal/ingest
+  internal/backup/engines/clickhouse/native_manifest.go
   deploy/helm/olympos-agent/templates/clusterrole.yaml
   deploy/helm/olympos-agent/templates/bench.yaml
 )

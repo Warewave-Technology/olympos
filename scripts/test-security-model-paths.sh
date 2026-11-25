@@ -57,6 +57,13 @@ git tag v1.3.0
 expect fail v1.3.0 "$late"
 expect fail v1.3.0 "docs/development.md"
 
+# A change to a single listed file (not a directory) after the last RC.
+git tag v1.3.1-rc.1
+change internal/backup/engines/clickhouse/native_manifest.go
+manifest=$(git rev-parse --short HEAD)
+git tag v1.3.1
+expect fail v1.3.1 "$manifest"
+
 # No RC at all.
 change deploy/helm/olympos-agent/templates/clusterrole.yaml
 git tag v1.4.0
@@ -69,6 +76,17 @@ if ! out=$(printf 'web/src/x.ts\ninternal/probe/run.go\n' | "$script" --files) |
 fi
 if ! out=$(printf 'web/src/x.ts\ninternal/ingest/sigv4.go\n' | "$script" --files) || [ "$out" != internal/ingest/sigv4.go ]; then
   echo "FAIL: --files with an ingest file: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+# A single file on the list matches as itself, and only itself.
+if ! out=$(printf 'internal/backup/engines/clickhouse/engine.go\ninternal/backup/engines/clickhouse/native_manifest.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/native_manifest.go ]; then
+  echo "FAIL: --files with the native manifest: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/native_manifest_test.go\ninternal/backup/engines/clickhouse/native_manifest.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the native manifest" >&2
   fail=1
 fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
