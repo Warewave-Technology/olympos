@@ -22,7 +22,9 @@ package clickhouse
 //     the base up to <base_size>, and the run stores only the rest.
 //   - Identical files of one run are stored once: <data_file> names the file
 //     whose object holds the bytes (two count.txt with the same count are one
-//     object).
+//     object). Files appended alike are too: two Log tables given the same
+//     rows have identical files, each partly in the base (use_base,
+//     base_size), and the second names the first.
 //   - An incremental does not write the metadata/*.sql of an object whose DDL
 //     did not change: it is use_base, and its DDL is the base's object (R23).
 //   - 24.8 writes the base's S3 credentials, secret included, into an
@@ -69,7 +71,12 @@ type BackupMeta struct {
 	// <base_backup>S3('<url>'[, '<key>', '<secret>'])</base_backup>, without
 	// the credentials; "" for a full backup.
 	BaseBackup string
-	Files      []MetaFile // in the order of the .backup
+	// UUID is the backup's own <uuid>; BaseBackupUUID an incremental's
+	// <base_backup_uuid>, the UUID of its base's .backup. Canonical
+	// lower-case UUIDs, "" when the element is absent.
+	UUID           string
+	BaseBackupUUID string
+	Files          []MetaFile // in the order of the .backup
 }
 
 // MetaFile is one <file> of a .backup.
@@ -83,7 +90,9 @@ type MetaFile struct {
 	UseBase  bool
 	BaseSize uint64
 	// DataFile is the file of this run whose object holds this file's bytes,
-	// when ClickHouse stored identical files once; "" otherwise.
+	// when ClickHouse stored identical files once; "" otherwise. That file
+	// has the same Size, Checksum, UseBase and BaseSize, and is Written: for
+	// a file partly in the base, its object holds the part after BaseSize.
 	DataFile string
 }
 
@@ -102,7 +111,7 @@ func (f MetaFile) Written() bool {
 // versions as decimal, checksums as 32 lower-case hex digits, names as
 // relative paths, UUIDs canonical. It also checks the file list itself:
 // use_base only in an incremental, a base_size below the size, a data_file
-// that names a file of the run with the same size and checksum.
+// that names a stored file of the run with the same size, checksum and base.
 func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 	if len(b) > MaxBackupMetaBytes {
 		return nil, metaErr(".backup is larger than %d bytes", MaxBackupMetaBytes)
@@ -120,7 +129,7 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 	m := &BackupMeta{}
 	seen := map[string]bool{}
 	var contents *xmlNode
-	var baseUUID, copyCreds bool
+	var copyCreds bool
 	for _, n := range root.kids {
 		if seen[n.name] {
 			return nil, metaErr(".backup: element %s twice", clip(n.name))
@@ -152,6 +161,7 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 			if !isRunID(v) {
 				return nil, metaErr(".backup: uuid %s", clip(v))
 			}
+			m.UUID = v
 		case "base_backup":
 			// The text can hold the base's secret (24.8): it is never quoted.
 			url, ok := s3URL(v)
@@ -163,7 +173,7 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 			if !isRunID(v) {
 				return nil, metaErr(".backup: base_backup_uuid %s", clip(v))
 			}
-			baseUUID = true
+			m.BaseBackupUUID = v
 		case "base_backup_copy_s3_credentials_from_backup":
 			if v != "true" && v != "false" {
 				return nil, metaErr(".backup: base_backup_copy_s3_credentials_from_backup %s", clip(v))
@@ -178,7 +188,7 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 		return nil, metaErr(".backup: no version")
 	case contents == nil:
 		return nil, metaErr(".backup: no contents")
-	case (m.BaseBackup != "") != baseUUID:
+	case (m.BaseBackup != "") != (m.BaseBackupUUID != ""):
 		return nil, metaErr(".backup: base_backup and base_backup_uuid go together")
 	case copyCreds && m.BaseBackup == "":
 		return nil, metaErr(".backup: base_backup_copy_s3_credentials_from_backup without base_backup")
@@ -206,10 +216,14 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 		if !ok || f.DataFile == f.Name {
 			return nil, metaErr(".backup: file %s: data_file %s is not another file of the backup", clip(f.Name), clip(f.DataFile))
 		}
-		// The object that holds the bytes is one this run wrote: the file it
-		// names is itself stored, whole, under its own name.
-		if t := m.Files[i]; t.DataFile != "" || t.UseBase || t.Size != f.Size || t.Checksum != f.Checksum {
-			return nil, metaErr(".backup: file %s: data_file %s is not a stored file with the same size and checksum", clip(f.Name), clip(f.DataFile))
+		// The object that holds the bytes is one this run wrote, under the
+		// name of the file data_file names, and the two files are the same
+		// bytes with the same part in the base. (Equal checksums of the
+		// whole files make their first BaseSize bytes, and so their
+		// base_checksum, equal too.)
+		if t := m.Files[i]; t.DataFile != "" || !t.Written() || t.Size != f.Size || t.Checksum != f.Checksum ||
+			t.UseBase != f.UseBase || t.BaseSize != f.BaseSize {
+			return nil, metaErr(".backup: file %s: data_file %s is not a stored file with the same size, checksum and base", clip(f.Name), clip(f.DataFile))
 		}
 	}
 	return m, nil
@@ -289,7 +303,12 @@ func parseMetaFile(n *xmlNode, incremental bool) (MetaFile, error) {
 		}
 	}
 	if d, ok := vals["data_file"]; ok {
-		if f.UseBase || !validBackupPath(d) {
+		// ClickHouse deduplicates files the base does not hold all of; a
+		// file partly in the base (an append) can have a data_file.
+		switch {
+		case f.UseBase && f.BaseSize == f.Size:
+			return f, bad("a data_file on a file the base holds all of")
+		case !validBackupPath(d):
 			return f, bad("data_file %s", clip(d))
 		}
 		f.DataFile = d

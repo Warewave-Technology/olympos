@@ -1,1 +1,1 @@
-CREATE TABLE spike.countries UUID 'f06a9329-8b75-4692-bf78-8d78ebdd8b73' (`id` UInt64, `name` String) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192
+CREATE TABLE spike.countries UUID 'dddefb2b-c772-431a-93aa-a655e1b282b7' (`id` UInt64, `name` String) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192

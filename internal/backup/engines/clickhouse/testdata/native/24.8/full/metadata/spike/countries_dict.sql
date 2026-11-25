@@ -1,1 +1,1 @@
-CREATE DICTIONARY spike.countries_dict UUID '347e78a3-e4b6-448a-9f2e-437e4d312072' (`id` UInt64, `name` String) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'spike' TABLE 'countries')) LIFETIME(MIN 0 MAX 300) LAYOUT(HASHED())
+CREATE DICTIONARY spike.countries_dict UUID '548f01bc-e9c4-468c-bc9f-3a7f29a3bf5a' (`id` UInt64, `name` String) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'spike' TABLE 'countries')) LIFETIME(MIN 0 MAX 300) LAYOUT(HASHED())

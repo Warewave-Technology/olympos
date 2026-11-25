@@ -286,9 +286,6 @@ func TestSignVerify(t *testing.T) {
 	}
 }
 
-// TestVerifyReordered: VerifySigned checks the manifest, not the bytes it
-// arrived as. The same manifest with its keys in another order, its lists
-// shuffled and whitespace added still verifies.
 // An object ObjectsFromMetadata cannot classify is kind "other" (R28): the
 // manifest lists it, so that the restore leaves it out.
 func TestSignVerifyOtherKind(t *testing.T) {
@@ -313,6 +310,9 @@ func TestSignVerifyOtherKind(t *testing.T) {
 	}
 }
 
+// TestVerifyReordered: VerifySigned checks the manifest, not the bytes it
+// arrived as. The same manifest with its keys in another order, its lists
+// shuffled and whitespace added still verifies.
 func TestVerifyReordered(t *testing.T) {
 	ctx := context.Background()
 	kv := newFakeVault()

@@ -85,7 +85,10 @@ func TestParseBackupMetaFull(t *testing.T) {
 				t.Fatalf("version %d, base %q", m.Version, m.BaseBackup)
 			}
 			// Every metadata object, with the size of the captured body.
-			for _, name := range []string{"spike.sql", "spike/applog.sql", "spike/big_amounts.sql", "spike/countries.sql",
+			if !isRunID(m.UUID) || m.BaseBackupUUID != "" {
+				t.Errorf("uuid %q, base uuid %q", m.UUID, m.BaseBackupUUID)
+			}
+			for _, name := range []string{"spike.sql", "spike/applog.sql", "spike/applog_copy.sql", "spike/big_amounts.sql", "spike/countries.sql",
 				"spike/countries_dict.sql", "spike/daily.sql", "spike/daily_mv.sql", "spike/events.sql", "spike/recent.sql"} {
 				f := fileOf(t, m, "metadata/"+name)
 				body := readNative(t, ver, "full", "metadata/"+name)
@@ -135,6 +138,10 @@ func TestParseBackupMetaIncremental(t *testing.T) {
 			if m.Version != 1 {
 				t.Fatalf("version %d", m.Version)
 			}
+			// The incremental names its base's .backup by its UUID.
+			if full := parseNative(t, ver, "full"); m.BaseBackupUUID != full.UUID || !isRunID(m.UUID) || m.UUID == full.UUID {
+				t.Errorf("uuid %q, base uuid %q; full's uuid %q", m.UUID, m.BaseBackupUUID, full.UUID)
+			}
 			// The base's URL, without the credentials 24.8 writes next to it.
 			if !strings.HasPrefix(m.BaseBackup, "http://minio:9000/backups/"+ver+"-") ||
 				!strings.HasSuffix(m.BaseBackup, "/"+captureFullRun+"/") || strings.ContainsAny(m.BaseBackup, "', ") {
@@ -150,6 +157,7 @@ func TestParseBackupMetaIncremental(t *testing.T) {
 				"metadata/spike.sql":                true,
 				"metadata/spike/added.sql":          false, // new
 				"metadata/spike/applog.sql":         true,
+				"metadata/spike/applog_copy.sql":    true,
 				"metadata/spike/big_amounts.sql":    true,
 				"metadata/spike/countries.sql":      true,
 				"metadata/spike/countries_dict.sql": true,
@@ -191,6 +199,16 @@ func TestParseBackupMetaIncremental(t *testing.T) {
 			if f := fileOf(t, m, "data/spike/applog/__marks.mrk"); !f.UseBase || f.Size != 64 || f.BaseSize != 32 || !f.Written() {
 				t.Errorf("applog __marks.mrk: %+v", f)
 			}
+			// Two Log tables appended alike: the second's file is the first's
+			// bytes, both partly in the base; only the first's rest is stored.
+			if f := fileOf(t, m, "data/spike/applog_copy/__marks.mrk"); !f.UseBase || f.Size != 64 || f.BaseSize != 32 ||
+				f.DataFile != "data/spike/applog/__marks.mrk" || f.Written() {
+				t.Errorf("applog_copy __marks.mrk: %+v", f)
+			}
+			if f := fileOf(t, m, "data/spike/applog_copy/msg.bin"); !f.UseBase || f.BaseSize == 0 || f.BaseSize >= f.Size ||
+				f.DataFile != "data/spike/applog/msg.bin" || f.Written() {
+				t.Errorf("applog_copy msg.bin: %+v", f)
+			}
 			// Two count.txt with the same count are stored once.
 			if f := fileOf(t, m, "data/spike/applog/count.txt"); f.DataFile != "data/spike/added/count.txt" || f.Written() {
 				t.Errorf("applog count.txt: %+v", f)
@@ -210,9 +228,11 @@ func metaXML(extra, files string) []byte {
 }
 
 const (
-	sumA    = "1dfd05dbe0d1ac5d5a3da12b084c2f7f"
-	sumB    = "41976a775685ccc5db50e8f4cfc663a0"
-	baseXML = `<base_backup>S3('http://h/olympos/r/')</base_backup><base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`
+	sumA = "1dfd05dbe0d1ac5d5a3da12b084c2f7f"
+	sumB = "41976a775685ccc5db50e8f4cfc663a0"
+	// partialXML: a file of 9 bytes whose first 4 are the base's.
+	partialXML = "<checksum>" + sumA + "</checksum><use_base>true</use_base><base_size>4</base_size><base_checksum>" + sumB + "</base_checksum>"
+	baseXML    = `<base_backup>S3('http://h/olympos/r/')</base_backup><base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`
 )
 
 func fileXML(name string, size int, rest string) string {
@@ -226,16 +246,22 @@ func TestParseBackupMetaAccepts(t *testing.T) {
 		want BackupMeta
 	}{
 		{"empty file has no checksum", metaXML("", fileXML("a", 0, "")),
-			BackupMeta{Version: 1, Files: []MetaFile{{Name: "a"}}}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", Files: []MetaFile{{Name: "a"}}}},
 		{"base with credentials", metaXML(`<base_backup>S3('http://h/olympos/r/', 'OLYKEY', 'it''s \x41 secret')</base_backup>`+
 			`<base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`, fileXML("a", 3, "<checksum>"+sumA+"</checksum><use_base>true</use_base>")),
-			BackupMeta{Version: 1, BaseBackup: "http://h/olympos/r/", Files: []MetaFile{{Name: "a", Size: 3, Checksum: sumA, UseBase: true, BaseSize: 3}}}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{{Name: "a", Size: 3, Checksum: sumA, UseBase: true, BaseSize: 3}}}},
 		{"base, credentials from the backup", metaXML(baseXML+`<base_backup_copy_s3_credentials_from_backup>true</base_backup_copy_s3_credentials_from_backup>`, ""),
-			BackupMeta{Version: 1, BaseBackup: "http://h/olympos/r/"}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45"}},
 		{"partial base", metaXML(baseXML, fileXML("a", 9, "<checksum>"+sumA+"</checksum><use_base>true</use_base><base_size>4</base_size><base_checksum>"+sumB+"</base_checksum>")),
-			BackupMeta{Version: 1, BaseBackup: "http://h/olympos/r/", Files: []MetaFile{{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4}}}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4}}}},
 		{"deduplicated", metaXML("", fileXML("b", 2, "<checksum>"+sumA+"</checksum><data_file>a</data_file>")+fileXML("a", 2, "<checksum>"+sumA+"</checksum>")),
-			BackupMeta{Version: 1, Files: []MetaFile{{Name: "b", Size: 2, Checksum: sumA, DataFile: "a"}, {Name: "a", Size: 2, Checksum: sumA}}}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", Files: []MetaFile{{Name: "b", Size: 2, Checksum: sumA, DataFile: "a"}, {Name: "a", Size: 2, Checksum: sumA}}}},
+		// Two files appended alike: the second's bytes are the first's, and
+		// both start with the base's.
+		{"deduplicated partial base", metaXML(baseXML, fileXML("b", 9, partialXML+"<data_file>a</data_file>")+fileXML("a", 9, partialXML)),
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{
+				{Name: "b", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4, DataFile: "a"},
+				{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4}}}},
 		{"xml declaration and whitespace", []byte("<?xml version=\"1.0\"?>\n<config>\n  <version>1</version>\n  <contents>\n    <file><name>x&amp;y</name><size>1</size><checksum>" + sumA + "</checksum></file>\n  </contents>\n</config>\n"),
 			BackupMeta{Version: 1, Files: []MetaFile{{Name: "x&y", Size: 1, Checksum: sumA}}}},
 	}
@@ -250,13 +276,15 @@ func TestParseBackupMetaAccepts(t *testing.T) {
 			}
 		})
 	}
-	written := map[string]bool{}
-	m, _ := ParseBackupMeta(cases[4].in)
-	for _, f := range m.Files {
-		written[f.Name] = f.Written()
-	}
-	if !reflect.DeepEqual(written, map[string]bool{"a": true, "b": false}) {
-		t.Errorf("written %v", written)
+	for _, i := range []int{4, 5} { // deduplicated, whole and partial base
+		written := map[string]bool{}
+		m, _ := ParseBackupMeta(cases[i].in)
+		for _, f := range m.Files {
+			written[f.Name] = f.Written()
+		}
+		if !reflect.DeepEqual(written, map[string]bool{"a": true, "b": false}) {
+			t.Errorf("%s: written %v", cases[i].name, written)
+		}
 	}
 	if (MetaFile{Name: "z"}).Written() {
 		t.Error("an empty file is written")
@@ -321,6 +349,12 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 			fileXML("a", 2, "<checksum>"+sumA+"</checksum><use_base>true</use_base>")),
 		"data_file and use_base": metaXML(baseXML, fileXML("b", 2, "<checksum>"+sumA+"</checksum><use_base>true</use_base><data_file>a</data_file>")+
 			fileXML("a", 2, "<checksum>"+sumA+"</checksum>")),
+		"partial data_file to a stored file": metaXML(baseXML, fileXML("b", 9, partialXML+"<data_file>a</data_file>")+
+			fileXML("a", 9, "<checksum>"+sumA+"</checksum>")),
+		"data_file to another base_size": metaXML(baseXML, fileXML("b", 9, partialXML+"<data_file>a</data_file>")+
+			fileXML("a", 9, "<checksum>"+sumA+"</checksum><use_base>true</use_base><base_size>5</base_size><base_checksum>"+sumB+"</base_checksum>")),
+		"stored data_file to a partial file": metaXML(baseXML, fileXML("b", 9, "<checksum>"+sumA+"</checksum><data_file>a</data_file>")+
+			fileXML("a", 9, partialXML)),
 		"base without uuid":       metaXML(`<base_backup>S3('http://h/olympos/r/')</base_backup>`, ok),
 		"uuid without base":       metaXML(`<base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`, ok),
 		"bad uuid":                []byte(`<config><version>1</version><uuid>x</uuid><contents></contents></config>`),
@@ -338,13 +372,94 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 		"unterminated":            []byte(`<config><version>1</version><contents>`),
 		"deduplicate_files other": []byte(`<config><version>1</version><deduplicate_files>2</deduplicate_files><contents></contents></config>`),
 	}
+	// Each case is refused for its own reason.
+	reasons := map[string]string{
+		"empty":                              "no root element",
+		"not xml":                            "text outside the root",
+		"other root":                         `root element "backup"`,
+		"trailing element":                   "an element after the root",
+		"trailing text":                      "text outside the root",
+		"no version":                         "no version",
+		"no contents":                        "no contents",
+		"version 2":                          `version "2"`,
+		"version text":                       `version "one"`,
+		"unknown config element":             `element "encryption"`,
+		"duplicate version":                  `element "version" twice`,
+		"duplicate contents":                 `element "contents" twice`,
+		"attribute":                          "has attributes",
+		"comment":                            "a comment or directive",
+		"directive":                          "a comment or directive",
+		"text in contents":                   `element "contents" holds text`,
+		"element in a value":                 "nested deeper than 4",
+		"unknown in contents":                `element "dir" in contents`,
+		"unknown file element":               `element "encrypted_by_disk" in a file`,
+		"duplicate file element":             `element "checksum" twice in a file`,
+		"no name":                            `a file without a valid name ("")`,
+		"no size":                            "no size",
+		"duplicate name":                     `file "a" twice`,
+		"empty name":                         `a file without a valid name ("")`,
+		"absolute name":                      `a file without a valid name ("/a")`,
+		"dot-dot name":                       `a file without a valid name ("a/../b")`,
+		"empty segment":                      `a file without a valid name ("a//b")`,
+		"control in name":                    "not XML Olympos reads (line 1)",
+		"size sign":                          `size "+2"`,
+		"size leading zero":                  `size "02"`,
+		"size overflow":                      `size "18446744073709551616"`,
+		"size space":                         `size " 2"`,
+		"no checksum":                        `checksum ""`,
+		"checksum on empty":                  "an empty file with more than its size",
+		"checksum upper":                     `checksum "1DFD05`,
+		"checksum short":                     `checksum "1dfd05dbe0d1ac5d5a3da12b084c2f"`,
+		"use_base without base":              "use_base in a backup without a base",
+		"use_base yes":                       `use_base "yes"`,
+		"use_base false":                     `use_base "false"`,
+		"base_size alone":                    "base_size without use_base",
+		"base_size = size":                   `base_size "9" of a file of 9 bytes`,
+		"base_size 0":                        `base_size "0" of a file of 9 bytes`,
+		"base_size no checksum":              "base_size and base_checksum go together",
+		"base_checksum alone":                "base_size and base_checksum go together",
+		"use_base on empty":                  "an empty file with more than its size",
+		"data_file missing":                  `data_file "a" is not another file of the backup`,
+		"data_file self":                     `data_file "a" is not another file of the backup`,
+		"data_file other sum":                `data_file "a" is not a stored file with the same size, checksum and base`,
+		"data_file other size":               `data_file "a" is not a stored file with the same size, checksum and base`,
+		"data_file chained":                  `data_file "b" is not a stored file with the same size, checksum and base`,
+		"data_file to base":                  `data_file "a" is not a stored file with the same size, checksum and base`,
+		"data_file and use_base":             "a data_file on a file the base holds all of",
+		"partial data_file to a stored file": `data_file "a" is not a stored file with the same size, checksum and base`,
+		"data_file to another base_size":     `data_file "a" is not a stored file with the same size, checksum and base`,
+		"stored data_file to a partial file": `data_file "a" is not a stored file with the same size, checksum and base`,
+		"base without uuid":                  "base_backup and base_backup_uuid go together",
+		"uuid without base":                  "base_backup and base_backup_uuid go together",
+		"bad uuid":                           `uuid "x"`,
+		"bad base uuid":                      `base_backup_uuid "x"`,
+		"copy credentials alone":             "base_backup_copy_s3_credentials_from_backup without base_backup",
+		"copy credentials 1":                 `base_backup_copy_s3_credentials_from_backup "1"`,
+		"base File":                          "base_backup is not S3(",
+		"base two args":                      "base_backup is not S3(",
+		"base four args":                     "base_backup is not S3(",
+		"base not a string":                  "base_backup is not S3(",
+		"base trailing":                      "base_backup is not S3(",
+		"base empty url":                     "base_backup is not S3(",
+		"base unterminated":                  "base_backup is not S3(",
+		"base empty":                         "base_backup is not S3(",
+		"unterminated":                       "not XML Olympos reads",
+		"deduplicate_files other":            `deduplicate_files "2"`,
+	}
+	for name := range reasons {
+		if _, ok := cases[name]; !ok {
+			t.Errorf("reason for no case %q", name)
+		}
+	}
 	for name, in := range cases {
 		t.Run(name, func(t *testing.T) {
 			m, err := ParseBackupMeta(in)
 			if !errors.Is(err, ErrNativeMeta) {
 				t.Fatalf("got %+v, %v; want ErrNativeMeta", m, err)
 			}
-			t.Log(err)
+			if why, ok := reasons[name]; !ok || !strings.Contains(err.Error(), why) {
+				t.Fatalf("error %q, want it to say %q", err, why)
+			}
 		})
 	}
 	t.Run("too large", func(t *testing.T) {
@@ -426,6 +541,7 @@ func TestObjectsFromMetadata(t *testing.T) {
 			f := captureFullRun
 			want := []NativeDatabase{{Name: "spike", Objects: []NativeObject{
 				{Name: "applog", Kind: KindTable, Engine: "Log", DDLKey: k(f, "applog")},
+				{Name: "applog_copy", Kind: KindTable, Engine: "Log", DDLKey: k(f, "applog_copy")},
 				// An MV without TO: its inner table has no metadata of its own.
 				{Name: "big_amounts", Kind: KindMaterializedView, Engine: "MaterializedView", DDLKey: k(f, "big_amounts")},
 				{Name: "countries", Kind: KindTable, Engine: "MergeTree", DDLKey: k(f, "countries")},
@@ -620,6 +736,35 @@ func TestObjectsFromMetadataRefuses(t *testing.T) {
 			"6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e61/metadata/db.sql": "CREATE DATABASE db ENGINE = Atomic",
 		},
 	}
+	// Each case is refused for its own reason.
+	escape := "a name not escaped as ClickHouse escapes it"
+	reasons := map[string]string{
+		"database as table":       "a database's metadata that is not CREATE DATABASE",
+		"database other name":     `it creates "other", not what its key names`,
+		"database no engine":      "no ENGINE = <name> after the database name",
+		"database comment":        `holds text Olympos does not read ("--"`,
+		"database too large":      "larger than 1048576 bytes",
+		"no run":                  "its segments",
+		"two prefixes":            "its segments",
+		"not metadata":            "its segments",
+		"not sql":                 "not .sql",
+		"too deep":                "its segments",
+		"empty table name":        escape,
+		"empty db segment":        escape,
+		"lower-case escape":       escape,
+		"needless escape":         escape,
+		"unescaped dot":           escape,
+		"broken escape":           escape,
+		"escape to bad utf8":      escape,
+		"same object twice":       `object "db"."t" twice`,
+		"same other object twice": `object "db"."lv" twice`,
+		"same database twice":     `database "db" twice`,
+	}
+	for name := range reasons {
+		if _, ok := cases[name]; !ok {
+			t.Errorf("reason for no case %q", name)
+		}
+	}
 	for name, files := range cases {
 		t.Run(name, func(t *testing.T) {
 			in := map[string][]byte{}
@@ -630,7 +775,9 @@ func TestObjectsFromMetadataRefuses(t *testing.T) {
 			if !errors.Is(err, ErrNativeMeta) {
 				t.Fatalf("got %+v, %v; want ErrNativeMeta", got, err)
 			}
-			t.Log(err)
+			if why, ok := reasons[name]; !ok || !strings.Contains(err.Error(), why) {
+				t.Fatalf("error %q, want it to say %q", err, why)
+			}
 		})
 	}
 }

@@ -28,17 +28,27 @@ import (
 //
 // It runs only with -update, and is skipped without Docker. Every docker
 // command has a timeout; the network and containers are removed by
-// t.Cleanup, registered before each is created. Nothing secret is captured:
-// ClickHouse's default user has no password (the dictionary's source names
-// no user), and the MinIO password is random and checked to appear in no
-// captured file. ClickHouse 24.8 writes the base backup's S3 credentials,
-// secret included, into an incremental's .backup (<base_backup>); the
-// capture replaces the secret with redactedSecret.
+// t.Cleanup, registered before each is created. The images are pinned by
+// digest (captureImages) and their version() is checked.
+//
+// The statements have the form Olympos sends (R26): each run has its own
+// MinIO key pair, as each Olympos run has its own credential, and the
+// incremental reads its base with its own, through
+// use_same_s3_credentials_for_base_backup = 1 and a base URL without
+// credentials.
+//
+// Nothing secret is captured: ClickHouse's default user has no password
+// (the dictionary's source names no user), and the MinIO secrets are random
+// and checked to appear in no captured file. ClickHouse 24.8 writes the
+// incremental's own S3 credentials, secret included, into its .backup
+// (<base_backup>); the capture replaces the secret with redactedSecret.
 
 var updateNative = flag.Bool("update", false, "capture testdata/native from Docker (TestCaptureNativeTestdata)")
 
 const (
-	captureMinIOUser = "olympos-capture"
+	captureMinIOUser = "olympos-capture" // MinIO's root, for mc only
+	captureFullUser  = "olympos-run-full"
+	captureIncrUser  = "olympos-run-incr"
 	captureBucket    = "backups"
 	// The run prefixes: fixed, so that the captured .backup of an
 	// incremental names the same base on every capture.
@@ -47,8 +57,17 @@ const (
 	redactedSecret = "REDACTED-SECRET"
 )
 
+// captureImages are the images captured, pinned by digest (the local
+// clickhouse/clickhouse-server:24.8 and :25.8 of the capture), with the
+// version() each must report.
+var captureImages = []struct{ ver, image, server string }{
+	{"24.8", "clickhouse/clickhouse-server@sha256:1ffa82edee000a42c09313bd9f1293d94c570aee74babc1b3ca9983a35fa597b", "24.8.14.39"},
+	{"25.8", "clickhouse/clickhouse-server@sha256:0152dd511befe6a2c2ef53e930726179669b08116da78500b37c51c96ff5ee77", "25.8.33.6"},
+}
+
 // captureSchema is the spike's schema (docs/design/clickhouse-native-spike.md)
-// plus a materialized view without TO, whose inner table is in the backup.
+// plus a materialized view without TO, whose inner table is in the backup,
+// and two Log tables that get the same rows (applog, applog_copy).
 const captureSchema = `
 CREATE DATABASE spike ENGINE = Atomic;
 CREATE TABLE spike.events (
@@ -80,8 +99,10 @@ CREATE DICTIONARY spike.countries_dict (id UInt64, name String)
     LIFETIME(MIN 0 MAX 300)
     LAYOUT(HASHED());
 CREATE TABLE spike.applog (id UInt64, msg String) ENGINE = Log;
+CREATE TABLE spike.applog_copy (id UInt64, msg String) ENGINE = Log;
 INSERT INTO spike.countries VALUES (1, 'Turkey'), (2, 'Netherlands'), (3, 'Germany');
 INSERT INTO spike.applog VALUES (1, 'started');
+INSERT INTO spike.applog_copy VALUES (1, 'started');
 INSERT INTO spike.events (id, ts, user_id, payload, amount)
     SELECT number, toDateTime('2026-11-01 00:00:00') + number, number % 1000, toString(number), number % 1000
     FROM numbers(400000);
@@ -89,7 +110,7 @@ INSERT INTO spike.events (id, ts, user_id, payload, amount)
 
 // captureChange runs between the full and the incremental: events gets new
 // rows (a new part) and a new column (new DDL), a table is added, the Log
-// table applog grows by an append, and countries, daily_mv, recent and
+// tables applog and applog_copy grow by the same append, and countries, daily_mv, recent and
 // countries_dict are left as they are.
 const captureChange = `
 INSERT INTO spike.events (id, ts, user_id, payload, amount)
@@ -99,6 +120,7 @@ ALTER TABLE spike.events ADD COLUMN note String DEFAULT '';
 CREATE TABLE spike.added (id UInt64) ENGINE = Log;
 INSERT INTO spike.added VALUES (1), (2);
 INSERT INTO spike.applog VALUES (2, 'appended');
+INSERT INTO spike.applog_copy VALUES (2, 'appended');
 `
 
 func TestCaptureNativeTestdata(t *testing.T) {
@@ -129,19 +151,32 @@ func TestCaptureNativeTestdata(t *testing.T) {
 		out, err := mc.run(t, 30*time.Second, "mb", "--ignore-existing", "local/"+captureBucket)
 		return string(out), err
 	})
+	// A key pair per run.
+	keys := captureKeys{full: "sk-" + randHex(t, 16), incr: "sk-" + randHex(t, 16)}
+	for user, secret := range map[string]string{captureFullUser: keys.full, captureIncrUser: keys.incr} {
+		for _, args := range [][]string{{"admin", "user", "add", "local", user, secret},
+			{"admin", "policy", "attach", "local", "readwrite", "--user", user}} {
+			if out, err := mc.run(t, 30*time.Second, args...); err != nil {
+				t.Fatalf("mc admin %s %s: %v %s", args[1], args[2], err, out)
+			}
+		}
+	}
+	secrets := []string{password, keys.full, keys.incr}
 
-	for _, ver := range []string{"24.8", "25.8"} {
-		t.Run(ver, func(t *testing.T) {
-			captureVersion(t, ver, network, suffix, password, mc)
+	for _, img := range captureImages {
+		t.Run(img.ver, func(t *testing.T) {
+			captureVersion(t, img.ver, img.image, img.server, network, suffix, keys, secrets, mc)
 		})
 	}
 }
 
-func captureVersion(t *testing.T, ver, network, suffix, password string, mc *captureMC) {
+type captureKeys struct{ full, incr string }
+
+func captureVersion(t *testing.T, ver, image, wantServer, network, suffix string, keys captureKeys, secrets []string, mc *captureMC) {
 	ch := "olympos-capture-ch" + strings.ReplaceAll(ver, ".", "") + "-" + suffix
 	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", ch) })
 	mustDocker(t, 2*time.Minute, "run", "-d", "--pull", "never", "--name", ch, "--network", network,
-		"--ulimit", "nofile=262144:262144", "clickhouse/clickhouse-server:"+ver)
+		"--ulimit", "nofile=262144:262144", image)
 
 	query := func(q string) (string, error) {
 		return dockerT(t, 5*time.Minute, "exec", ch, "clickhouse-client", "-n", "-q", q)
@@ -151,17 +186,19 @@ func captureVersion(t *testing.T, ver, network, suffix, password string, mc *cap
 	if err != nil {
 		t.Fatalf("version: %v %s", err, server)
 	}
+	if server != wantServer {
+		t.Fatalf("%s is ClickHouse %s, not %s", image, server, wantServer)
+	}
 	t.Logf("ClickHouse %s", server)
 
-	runURL := func(run string) string {
-		return "S3('http://minio:9000/" + captureBucket + "/" + run + "/', '" + captureMinIOUser + "', '" + password + "')"
-	}
-	backup := func(run, extra string) {
-		q := "BACKUP DATABASE spike TO " + runURL(run) + " SETTINGS allow_s3_native_copy = 0, id = '" + run + "'" + extra
+	url := func(run string) string { return "'http://minio:9000/" + captureBucket + "/" + run + "/'" }
+	backup := func(run, user, secret, extra string) {
+		q := "BACKUP DATABASE spike TO S3(" + url(run) + ", '" + user + "', '" + secret + "')" +
+			" SETTINGS allow_s3_native_copy = 0, id = '" + run + "'" + extra
 		out, err := query(q)
 		if err != nil || !strings.Contains(out, "BACKUP_CREATED") {
-			// The statement holds the password; it is not printed.
-			t.Fatalf("BACKUP %s: %v %s", run, err, strings.ReplaceAll(out, password, "[password]"))
+			// The statement holds a secret; it is not printed.
+			t.Fatalf("BACKUP %s: %v %s", run, err, redact(out, secrets))
 		}
 	}
 
@@ -170,11 +207,11 @@ func captureVersion(t *testing.T, ver, network, suffix, password string, mc *cap
 	if out, err := query(captureSchema); err != nil {
 		t.Fatalf("schema: %v %s", err, out)
 	}
-	backup(fullRun, "")
+	backup(fullRun, captureFullUser, keys.full, "")
 	if out, err := query(captureChange); err != nil {
 		t.Fatalf("change: %v %s", err, out)
 	}
-	backup(incrRun, ", base_backup = "+runURL(fullRun))
+	backup(incrRun, captureIncrUser, keys.incr, ", base_backup = S3("+url(fullRun)+"), use_same_s3_credentials_for_base_backup = 1")
 
 	dir := filepath.Join("testdata", "native", ver)
 	if err := os.RemoveAll(dir); err != nil {
@@ -198,7 +235,7 @@ func captureVersion(t *testing.T, ver, network, suffix, password string, mc *cap
 			default:
 				continue
 			}
-			written = append(written, copyObject(t, mc, run, k, filepath.Join(dir, name), password))
+			written = append(written, copyObject(t, mc, run, k, filepath.Join(dir, name), secrets))
 		}
 		if err := os.MkdirAll(filepath.Join(dir, name), 0o755); err != nil {
 			t.Fatal(err)
@@ -211,7 +248,7 @@ func captureVersion(t *testing.T, ver, network, suffix, password string, mc *cap
 		// One count.txt of the events table, at its own path.
 		for _, k := range counts {
 			if strings.HasPrefix(k, "data/spike/events/") {
-				written = append(written, copyObject(t, mc, run, k, filepath.Join(dir, name), password))
+				written = append(written, copyObject(t, mc, run, k, filepath.Join(dir, name), secrets))
 				break
 			}
 		}
@@ -224,8 +261,10 @@ func captureVersion(t *testing.T, ver, network, suffix, password string, mc *cap
 		if err != nil {
 			t.Fatal(err)
 		}
-		if bytes.Contains(b, []byte(password)) {
-			t.Fatalf("%s holds the MinIO password", f)
+		for _, secret := range secrets {
+			if bytes.Contains(b, []byte(secret)) {
+				t.Fatalf("%s holds a MinIO secret", f)
+			}
 		}
 	}
 	t.Logf("wrote %d files under %s", len(written), dir)
@@ -268,16 +307,18 @@ type capturedObject struct {
 }
 
 // copyObject writes run/key to dir/key and returns the local path. In a
-// .backup, the MinIO password is replaced with redactedSecret.
-func copyObject(t *testing.T, mc *captureMC, run, key, dir, password string) string {
+// .backup, every MinIO secret is replaced with redactedSecret.
+func copyObject(t *testing.T, mc *captureMC, run, key, dir string, secrets []string) string {
 	t.Helper()
 	b, err := mc.run(t, time.Minute, "cat", "local/"+captureBucket+"/"+run+"/"+key)
 	if err != nil {
 		t.Fatalf("mc cat %s: %v %s", key, err, b)
 	}
-	if key == ".backup" && bytes.Contains(b, []byte(password)) {
-		t.Logf("%s/.backup holds the base backup's secret; redacted", run)
-		b = bytes.ReplaceAll(b, []byte(password), []byte(redactedSecret))
+	if key == ".backup" {
+		if r := redact(string(b), secrets); r != string(b) {
+			t.Logf("%s/.backup holds an S3 secret; redacted", run)
+			b = []byte(r)
+		}
 	}
 	local := filepath.Join(dir, filepath.FromSlash(key))
 	if err := os.MkdirAll(filepath.Dir(local), 0o755); err != nil {
@@ -308,6 +349,14 @@ func (m *captureMC) run(t *testing.T, timeout time.Duration, args ...string) ([]
 		return stderr.Bytes(), err
 	}
 	return out, nil
+}
+
+// redact replaces every secret in s with redactedSecret.
+func redact(s string, secrets []string) string {
+	for _, secret := range secrets {
+		s = strings.ReplaceAll(s, secret, redactedSecret)
+	}
+	return s
 }
 
 func dockerT(t *testing.T, timeout time.Duration, args ...string) (string, error) {
