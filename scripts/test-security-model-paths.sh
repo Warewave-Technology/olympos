@@ -89,6 +89,18 @@ if printf 'internal/backup/engines/clickhouse/native_manifest_test.go\ninternal/
   echo "FAIL: --files matched a file next to the native manifest" >&2
   fail=1
 fi
+# The native backup's metadata parsers decide which objects the restore's
+# allowlist sees.
+if ! out=$(printf 'internal/backup/engines/clickhouse/ddl.go\ninternal/backup/engines/clickhouse/backupmeta.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/backupmeta.go ]; then
+  echo "FAIL: --files with the native metadata parsers: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/backupmeta_test.go\ninternal/backup/engines/clickhouse/backupmeta_capture_test.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a test next to the native metadata parsers" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1

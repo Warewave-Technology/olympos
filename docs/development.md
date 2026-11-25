@@ -82,7 +82,8 @@ builds, signs and publishes it. Release candidates are `vX.Y.Z-rc.N`.
 the security model when a commit since the previous final release touches one of the files that
 `scripts/security-model-paths.sh` lists: `docs/security-model.md`, `proto/`, `internal/secrets/`,
 `internal/probe/`, `internal/agent/`, `internal/ingest/` (the native backup endpoint),
-`internal/backup/engines/clickhouse/native_manifest.go` (the signed native manifest), or the agent chart's RBAC
+`internal/backup/engines/clickhouse/native_manifest.go` (the signed native manifest),
+`internal/backup/engines/clickhouse/backupmeta.go` (what a native manifest lists), or the agent chart's RBAC
 templates (`clusterrole.yaml`, `bench.yaml`).
 CI labels such pull requests `security-model`. Such a release:
 

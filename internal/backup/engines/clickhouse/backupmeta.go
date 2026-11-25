@@ -5,8 +5,9 @@ package clickhouse
 // metadata/*.sql and of each count.txt while they stream, and the manifest is
 // built from them with the parsers below. Nothing here evaluates SQL:
 // ObjectsFromMetadata reads the CREATE prefix and, for a table, the engine
-// name, by position, with the strict lexer of ddl.go. Whatever these parsers
-// cannot read with certainty is an ErrNativeMeta, never a guess.
+// name, by position, with the strict lexer of ddl.go. What these parsers
+// cannot read with certainty is never a guess: an ErrNativeMeta, or, for an
+// object whose CREATE is not classified, an object of kind other (R28).
 //
 // What ClickHouse 24.8 and 25.8 write (testdata/native, captured by
 // TestCaptureNativeTestdata):
@@ -491,16 +492,29 @@ func ParseCount(b []byte) (uint64, error) {
 //
 // A table of any engine is a table; the restore's allowlist decides what is
 // restored. A materialized view's inner table has no metadata of its own
-// (see the top of this file), so it is part of its view; a metadata file
-// named like one (.inner.<name>, .inner_id.<uuid>) is refused.
+// (see the top of this file), so it is part of its view.
 //
-// Everything else is refused rather than left out: a LIVE VIEW or WINDOW
-// VIEW, a table over a table function (CREATE TABLE … AS url(…)), any other
-// CREATE, and a statement the lexer does not read (comments, query
-// parameters, text outside ASCII outside quotes, more than one statement).
-// An object left out of the manifest would still be restored by RESTORE
-// DATABASE, unseen by the allowlist, so a backup the manifest cannot
-// describe fully must not be one.
+// Any other object is KindOther (R28), named from its key, so that the
+// manifest lists every object of the backup and the restore can leave it out
+// (an object missing from the manifest would still be restored by RESTORE
+// DATABASE, unseen by the allowlist). Its Engine is what was read at its
+// place, "" when nothing was:
+//
+//   - a LIVE VIEW or WINDOW VIEW: LiveView or WindowView;
+//   - a table over a table function (CREATE TABLE … AS url(…)): the
+//     function's name;
+//   - another CREATE (FUNCTION, TEMPORARY, OR REPLACE, …): the word after
+//     CREATE;
+//   - a statement that is not CREATE, or does not name db.name of its key;
+//     a table without a column list and ENGINE = <name>; a file named like
+//     an inner table (.inner.<name>, .inner_id.<uuid>), which ClickHouse does
+//     not write: the engine or kind text read before that, if any;
+//   - a statement the lexer does not read (comments, query parameters of a
+//     parameterized view, text outside ASCII outside quotes, not UTF-8, over
+//     1 MiB) or more than one statement: "".
+//
+// A database's own metadata must be read: Olympos creates the target
+// databases. A key whose names cannot be read is an error.
 func ObjectsFromMetadata(files map[string][]byte) ([]NativeDatabase, error) {
 	keys := make([]string, 0, len(files))
 	for k := range files {
@@ -516,8 +530,11 @@ func ObjectsFromMetadata(files map[string][]byte) ([]NativeDatabase, error) {
 			return nil, err
 		}
 		kind, engine, err := readCreate(key, db, name, files[key])
-		if err != nil {
+		switch {
+		case err != nil && name == "":
 			return nil, err
+		case err != nil || isInnerName(name):
+			kind = KindOther
 		}
 		d := dbs[db]
 		if d == nil {
@@ -546,6 +563,11 @@ func ObjectsFromMetadata(files map[string][]byte) ([]NativeDatabase, error) {
 	return out, nil
 }
 
+// isInnerName: the name of a materialized view's inner table.
+func isInnerName(name string) bool {
+	return strings.HasPrefix(name, ".inner.") || strings.HasPrefix(name, ".inner_id.")
+}
+
 // metadataPath reads "<run>/metadata/<db>.sql" (name "") or
 // "<run>/metadata/<db>/<name>.sql" and returns the unescaped names.
 func metadataPath(key string) (db, name string, err error) {
@@ -572,9 +594,6 @@ func metadataPath(key string) (db, name string, err error) {
 	if len(names) == 1 {
 		return names[0], "", nil
 	}
-	if strings.HasPrefix(names[1], ".inner.") || strings.HasPrefix(names[1], ".inner_id.") {
-		return bad("a materialized view's inner table, which ClickHouse does not write on its own")
-	}
 	return names[0], names[1], nil
 }
 
@@ -600,10 +619,11 @@ func unescapeFileName(seg string) (string, bool) {
 }
 
 // readCreate reads the kind and engine of key's statement, which must be a
-// CREATE of db.name (of database db when name is "").
+// CREATE of db.name (of database db when name is ""). On an error it still
+// returns the engine or kind text it read before the error (for KindOther).
 func readCreate(key, db, name string, body []byte) (kind, engine string, err error) {
 	bad := func(format string, a ...any) (string, string, error) {
-		return "", "", metaErr("%s: %s", clip(key), fmt.Sprintf(format, a...))
+		return "", engine, metaErr("%s: %s", clip(key), fmt.Sprintf(format, a...))
 	}
 	if len(body) > maxSchemaEntry {
 		return bad("larger than %d bytes", maxSchemaEntry)
@@ -636,9 +656,16 @@ func readCreate(key, db, name string, body []byte) (kind, engine string, err err
 		kind, engine, i = KindMaterializedView, "MaterializedView", 3
 	case at(1).is("DICTIONARY"):
 		kind, engine = KindDictionary, "Dictionary"
-	case at(1).is("LIVE") && at(2).is("VIEW"), at(1).is("WINDOW") && at(2).is("VIEW"):
-		return bad("a %s VIEW, which a native backup does not record", strings.ToUpper(at(1).val))
+	case at(1).is("LIVE") && at(2).is("VIEW"):
+		engine = "LiveView"
+		return bad("a LIVE VIEW")
+	case at(1).is("WINDOW") && at(2).is("VIEW"):
+		engine = "WindowView"
+		return bad("a WINDOW VIEW")
 	default:
+		if at(1).kind == tokWord {
+			engine = shortName(strings.ToUpper(at(1).val))
+		}
 		return bad("CREATE %s is not a database, table, view, materialized view or dictionary", clip(at(1).val))
 	}
 	switch {
@@ -685,7 +712,10 @@ func readCreate(key, db, name string, body []byte) (kind, engine string, err err
 		i = c + 1
 		switch {
 		case at(i).is("AS"):
-			return bad("a table over a table function, which a native backup does not record")
+			if at(i+1).kind == tokWord && at(i+2).punct("(") {
+				engine = shortName(at(i + 1).val)
+			}
+			return bad("a table over a table function")
 		case !at(i).is("ENGINE") || !at(i+1).punct("=") || at(i+2).kind != tokWord:
 			return bad("no ENGINE = <name> after the column list")
 		}

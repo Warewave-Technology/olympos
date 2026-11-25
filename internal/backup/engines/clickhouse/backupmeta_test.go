@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -520,46 +521,80 @@ func TestObjectsFromMetadataForms(t *testing.T) {
 	}
 }
 
+// TestObjectsFromMetadataOther: a CREATE the scanner does not classify
+// with certainty is an object of kind other (R28), named from its key, with
+// the engine or kind text read at its place ("" when none was). The restore
+// leaves other objects out; listing them makes sure it can.
+func TestObjectsFromMetadataOther(t *testing.T) {
+	const r = "6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60"
+	tbl := "CREATE TABLE db.t (`x` UInt8) ENGINE = Log"
+	cases := map[string]struct{ name, body, engine string }{
+		"live view":             {"lv", "CREATE LIVE VIEW db.lv UUID '1c78f33f-4038-4c07-af2d-4348f363be72' (`1` UInt8) AS SELECT 1", "LiveView"},
+		"window view":           {"wv", "CREATE WINDOW VIEW db.wv ENGINE = Memory AS SELECT 1", "WindowView"},
+		"function":              {"f", "CREATE FUNCTION db.f AS x -> x", "FUNCTION"},
+		"temporary":             {"t", "CREATE TEMPORARY TABLE db.t (`x` UInt8) ENGINE = Memory", "TEMPORARY"},
+		"or replace":            {"t", "CREATE OR REPLACE TABLE db.t (`x` UInt8) ENGINE = Log", "OR"},
+		"table function":        {"tf", "CREATE TABLE db.tf UUID '79888162-18be-4c43-a452-adf265d3405d' (`id` UInt64) AS url('http://example.invalid/y', CSV, 'id UInt64')", "url"},
+		"table function, odd":   {"tf", "CREATE TABLE db.tf (`id` UInt64) AS db.other", ""},
+		"table without columns": {"t", "CREATE TABLE db.t ENGINE = Log", ""},
+		"table without engine":  {"t", "CREATE TABLE db.t (`x` UInt8)", ""},
+		"quoted engine":         {"t", "CREATE TABLE db.t (`x` UInt8) ENGINE = `Log`", ""},
+		"engine without =":      {"t", "CREATE TABLE db.t (`x` UInt8) ENGINE Log", ""},
+		"attach":                {"t", "ATTACH TABLE db.t (`x` UInt8) ENGINE = Log", ""},
+		"if not exists":         {"t", "CREATE TABLE IF NOT EXISTS db.t (`x` UInt8) ENGINE = Log", ""},
+		"unqualified":           {"t", "CREATE TABLE t (`x` UInt8) ENGINE = Log", ""},
+		"other database":        {"t", "CREATE TABLE other.t (`x` UInt8) ENGINE = Log", ""},
+		"other name":            {"t", "CREATE TABLE db.u (`x` UInt8) ENGINE = Log", ""},
+		"name case":             {"t", "CREATE TABLE db.T (`x` UInt8) ENGINE = Log", ""},
+		"view of another name":  {"v", "CREATE VIEW db.w AS SELECT 1", "View"},
+		"uuid not a string":     {"t", "CREATE TABLE db.t UUID x (`x` UInt8) ENGINE = Log", ""},
+		"bad uuid":              {"v", "CREATE VIEW db.v UUID 'x' AS SELECT 1", "View"},
+		"comment":               {"t", tbl + " -- x", ""},
+		"parameterized view":    {"v", "CREATE VIEW db.v AS SELECT {p:UInt8}", ""},
+		"not utf-8":             {"t", "CREATE TABLE db.t (`\xff` UInt8) ENGINE = Log", ""},
+		"empty statement":       {"t", "", ""},
+		"two statements":        {"t", tbl + "; DROP TABLE db.t", ""},
+		"database statement":    {"t", "CREATE DATABASE db ENGINE = Atomic", ""},
+		"too large":             {"t", tbl + " COMMENT '" + strings.Repeat("x", maxSchemaEntry) + "'", ""},
+		// ClickHouse 24.8 and 25.8 write no metadata for an MV's inner table
+		// (it is in the MV's own statement, and its data under the MV's
+		// name), Atomic and Ordinary alike: a file named like one is not
+		// classified, whatever it holds.
+		".inner_id. table": {".inner_id.4b99399c-2e2e-41b9-9785-38b96b090af2", "CREATE TABLE db.`.inner_id.4b99399c-2e2e-41b9-9785-38b96b090af2` (`x` UInt8) ENGINE = MergeTree ORDER BY x", "MergeTree"},
+		".inner. table":    {".inner.mv", "CREATE TABLE db.`.inner.mv` (`x` UInt8) ENGINE = MergeTree ORDER BY x", "MergeTree"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			key := r + "/metadata/db/" + escapeForFileName(c.name) + ".sql"
+			got, err := ObjectsFromMetadata(map[string][]byte{
+				key:                      []byte(c.body),
+				r + "/metadata/db/k.sql": []byte("CREATE TABLE db.k (`x` UInt8) ENGINE = Log"),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []NativeObject{{Name: c.name, Kind: KindOther, Engine: c.engine, DDLKey: key},
+				{Name: "k", Kind: KindTable, Engine: "Log", DDLKey: r + "/metadata/db/k.sql"}}
+			slices.SortFunc(want, func(x, y NativeObject) int { return strings.Compare(x.Name, y.Name) })
+			if len(got) != 1 || got[0].Name != "db" || !reflect.DeepEqual(got[0].Objects, want) {
+				t.Errorf("got %+v\nwant %+v", got, want)
+			}
+		})
+	}
+}
+
 func TestObjectsFromMetadataRefuses(t *testing.T) {
 	const r = "6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60"
 	tbl := "CREATE TABLE db.t (`x` UInt8) ENGINE = Log"
 	cases := map[string]map[string]string{
-		// Kinds the manifest has no place for are refused, not left out: a
-		// RESTORE DATABASE would restore them without the allowlist seeing
-		// them.
-		"live view":             {r + "/metadata/db/lv.sql": "CREATE LIVE VIEW db.lv UUID '1c78f33f-4038-4c07-af2d-4348f363be72' (`1` UInt8) AS SELECT 1"},
-		"window view":           {r + "/metadata/db/wv.sql": "CREATE WINDOW VIEW db.wv ENGINE = Memory AS SELECT 1"},
-		"function":              {r + "/metadata/db/f.sql": "CREATE FUNCTION db.f AS x -> x"},
-		"temporary":             {r + "/metadata/db/t.sql": "CREATE TEMPORARY TABLE db.t (`x` UInt8) ENGINE = Memory"},
-		"table function":        {r + "/metadata/db/tf.sql": "CREATE TABLE db.tf UUID '79888162-18be-4c43-a452-adf265d3405d' (`id` UInt64) AS url('http://example.invalid/y', CSV, 'id UInt64')"},
-		"table without columns": {r + "/metadata/db/t.sql": "CREATE TABLE db.t ENGINE = Log"},
-		"table without engine":  {r + "/metadata/db/t.sql": "CREATE TABLE db.t (`x` UInt8)"},
-		"quoted engine":         {r + "/metadata/db/t.sql": "CREATE TABLE db.t (`x` UInt8) ENGINE = `Log`"},
-		"engine without =":      {r + "/metadata/db/t.sql": "CREATE TABLE db.t (`x` UInt8) ENGINE Log"},
-		"attach":                {r + "/metadata/db/t.sql": "ATTACH TABLE db.t (`x` UInt8) ENGINE = Log"},
-		"or replace":            {r + "/metadata/db/t.sql": "CREATE OR REPLACE TABLE db.t (`x` UInt8) ENGINE = Log"},
-		"if not exists":         {r + "/metadata/db/t.sql": "CREATE TABLE IF NOT EXISTS db.t (`x` UInt8) ENGINE = Log"},
-		"unqualified":           {r + "/metadata/db/t.sql": "CREATE TABLE t (`x` UInt8) ENGINE = Log"},
-		"other database":        {r + "/metadata/db/t.sql": "CREATE TABLE other.t (`x` UInt8) ENGINE = Log"},
-		"other name":            {r + "/metadata/db/t.sql": "CREATE TABLE db.u (`x` UInt8) ENGINE = Log"},
-		"name case":             {r + "/metadata/db/t.sql": "CREATE TABLE db.T (`x` UInt8) ENGINE = Log"},
-		"uuid not a string":     {r + "/metadata/db/t.sql": "CREATE TABLE db.t UUID x (`x` UInt8) ENGINE = Log"},
-		"bad uuid":              {r + "/metadata/db/t.sql": "CREATE TABLE db.t UUID 'x' (`x` UInt8) ENGINE = Log"},
-		"comment":               {r + "/metadata/db/t.sql": "CREATE TABLE db.t (`x` UInt8) ENGINE = Log -- x"},
-		"query parameter":       {r + "/metadata/db/v.sql": "CREATE VIEW db.v AS SELECT {p:UInt8}"},
-		"not utf-8":             {r + "/metadata/db/t.sql": "CREATE TABLE db.t (`\xff` UInt8) ENGINE = Log"},
-		"empty statement":       {r + "/metadata/db/t.sql": ""},
-		"two statements":        {r + "/metadata/db/t.sql": tbl + "; DROP TABLE db.t"},
-		"database as table":     {r + "/metadata/db.sql": tbl},
-		"database other name":   {r + "/metadata/db.sql": "CREATE DATABASE other ENGINE = Atomic"},
-		"database no engine":    {r + "/metadata/db.sql": "CREATE DATABASE db"},
-		"table as database":     {r + "/metadata/db/t.sql": "CREATE DATABASE db ENGINE = Atomic"},
-		// ClickHouse 24.8 and 25.8 write no metadata for an MV's inner table
-		// (it is in the MV's own statement, and its data under the MV's
-		// name), Atomic and Ordinary alike.
-		"inner_id table": {r + "/metadata/db/%2Einner_id%2E4b99399c%2D2e2e%2D41b9%2D9785%2D38b96b090af2.sql": "CREATE TABLE db.`.inner_id.4b99399c-2e2e-41b9-9785-38b96b090af2` (`x` UInt8) ENGINE = MergeTree ORDER BY x"},
-		"inner table":    {r + "/metadata/db/%2Einner%2Emv.sql": "CREATE TABLE db.`.inner.mv` (`x` UInt8) ENGINE = MergeTree ORDER BY x"},
-		// Keys.
+		// A database's own metadata is not an object: Olympos creates the
+		// target databases, so it must read them.
+		"database as table":   {r + "/metadata/db.sql": tbl},
+		"database other name": {r + "/metadata/db.sql": "CREATE DATABASE other ENGINE = Atomic"},
+		"database no engine":  {r + "/metadata/db.sql": "CREATE DATABASE db"},
+		"database comment":    {r + "/metadata/db.sql": "CREATE DATABASE db ENGINE = Atomic -- x"},
+		"database too large":  {r + "/metadata/db.sql": "CREATE DATABASE db ENGINE = Atomic COMMENT '" + strings.Repeat("x", maxSchemaEntry) + "'"},
+		// Keys: an object whose name cannot be read from its key.
 		"no run":             {"metadata/db/t.sql": tbl},
 		"two prefixes":       {"a/" + r + "/metadata/db/t.sql": tbl},
 		"not metadata":       {r + "/data/db/t.sql": tbl},
@@ -575,6 +610,10 @@ func TestObjectsFromMetadataRefuses(t *testing.T) {
 		"same object twice": {
 			r + "/metadata/db/t.sql":                                 tbl,
 			"6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e61/metadata/db/t.sql": tbl,
+		},
+		"same other object twice": {
+			r + "/metadata/db/lv.sql":                                 "CREATE LIVE VIEW db.lv AS SELECT 1",
+			"6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e61/metadata/db/lv.sql": "CREATE LIVE VIEW db.lv AS SELECT 1",
 		},
 		"same database twice": {
 			r + "/metadata/db.sql":                                 "CREATE DATABASE db ENGINE = Atomic",
@@ -594,10 +633,4 @@ func TestObjectsFromMetadataRefuses(t *testing.T) {
 			t.Log(err)
 		})
 	}
-	t.Run("too large", func(t *testing.T) {
-		in := map[string][]byte{r + "/metadata/db/t.sql": []byte(tbl + " COMMENT '" + strings.Repeat("x", maxSchemaEntry) + "'")}
-		if _, err := ObjectsFromMetadata(in); !errors.Is(err, ErrNativeMeta) {
-			t.Fatalf("err %v", err)
-		}
-	})
 }

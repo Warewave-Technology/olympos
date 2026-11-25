@@ -289,6 +289,30 @@ func TestSignVerify(t *testing.T) {
 // TestVerifyReordered: VerifySigned checks the manifest, not the bytes it
 // arrived as. The same manifest with its keys in another order, its lists
 // shuffled and whitespace added still verifies.
+// An object ObjectsFromMetadata cannot classify is kind "other" (R28): the
+// manifest lists it, so that the restore leaves it out.
+func TestSignVerifyOtherKind(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeVault()
+	m := testNativeManifest()
+	key := testRunID + "/metadata/sales/lv.sql"
+	m.Objects = append(m.Objects, ingest.ObjectRecord{Key: key, Size: 60, SHA256: sum("lv.sql")})
+	m.Databases[0].Objects = append(m.Databases[0].Objects, NativeObject{Name: "lv", Kind: KindOther, Engine: "LiveView", DDLKey: key})
+	raw := signedJSON(t, kv, testManifestKey, m)
+	got, err := VerifySigned(ctx, kv, testManifestKey, testRunID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := slices.ContainsFunc(got.Databases, func(d NativeDatabase) bool {
+		return d.Name == "sales" && slices.ContainsFunc(d.Objects, func(o NativeObject) bool {
+			return o.Name == "lv" && o.Kind == KindOther && o.Engine == "LiveView"
+		})
+	})
+	if !found {
+		t.Fatalf("no other object in %+v", got.Databases)
+	}
+}
+
 func TestVerifyReordered(t *testing.T) {
 	ctx := context.Background()
 	kv := newFakeVault()
@@ -463,6 +487,7 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 		"fractional size":        strings.Replace(raw, `"size":4096`, `"size":4096.0`, 1),
 		"duplicate object key":   strings.Replace(raw, `"key":"`+testRunID+`/.backup"`, `"key":"`+testRunID+`/data/sales/orders/all_1_1_0/data.bin"`, 1),
 		"unknown kind":           strings.Replace(raw, `"kind":"view"`, `"kind":"live_view"`, 1),
+		"inner table kind":       strings.Replace(raw, `"kind":"view"`, `"kind":"`+KindMVInner+`"`, 1),
 		"empty database name":    strings.Replace(raw, `"name":"dicts"`, `"name":""`, 1),
 		"duplicate database":     strings.Replace(raw, `"name":"dicts"`, `"name":"sales"`, 1),
 		"duplicate table":        strings.Replace(raw, `"name":"by_day"`, `"name":"orders"`, 1),

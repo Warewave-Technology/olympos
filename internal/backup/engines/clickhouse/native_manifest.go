@@ -97,12 +97,15 @@ type NativeDatabase struct {
 }
 
 // NativeObject is a table, view, materialized view or dictionary, read from
-// its metadata/*.sql object (DDLKey). DDLKey is an object of this run or, for
-// an incremental's unchanged metadata, of an earlier run of its chain. Rows
-// is the row count of the BACKUP snapshot, for tables.
+// its metadata/*.sql object (DDLKey), or an object of kind other: one whose
+// CREATE ObjectsFromMetadata does not classify with certainty (a LIVE or
+// WINDOW VIEW, a table over a table function, …, R28). The restore leaves
+// other objects out. DDLKey is an object of this run or, for an
+// incremental's unchanged metadata, of an earlier run of its chain. Rows is
+// the row count of the BACKUP snapshot, for tables.
 type NativeObject struct {
 	Name   string `json:"name"`
-	Kind   string `json:"kind"` // KindTable, KindView, KindMaterializedView or KindDictionary
+	Kind   string `json:"kind"` // KindTable, KindView, KindMaterializedView, KindDictionary or KindOther
 	Engine string `json:"engine"`
 	Rows   uint64 `json:"rows"`
 	DDLKey string `json:"ddl_key"`
@@ -699,7 +702,7 @@ func (m *NativeManifest) validate() error {
 			}
 			names[o.Name] = true
 			switch o.Kind {
-			case KindTable, KindView, KindMaterializedView, KindDictionary:
+			case KindTable, KindView, KindMaterializedView, KindDictionary, KindOther:
 			default:
 				return bad("%s.%s: kind %s", clip(d.Name), clip(o.Name), clip(o.Kind))
 			}
