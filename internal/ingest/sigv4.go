@@ -17,7 +17,10 @@ import (
 
 // Credential is one access key and its secret.
 type Credential struct {
-	AccessKey, Secret string
+	AccessKey string
+	// Secret goes to ClickHouse in the run's statement and nowhere else: it
+	// is never marshalled, printed or logged.
+	Secret string `json:"-"`
 }
 
 // Errors returned by Verify. The handler maps each to an S3 error code.

@@ -29,7 +29,9 @@ import (
 // Stop reasons the handler sets. The session sets ReasonQuota and
 // ReasonCaptureLimit itself.
 const (
-	// ReasonRate: the run sent more than 200 requests a second.
+	// ReasonRate: the run sent more than 200 requests a second for 30
+	// seconds in a row (rateStorm). A shorter burst is answered 503 SlowDown
+	// and the run goes on (R17).
 	ReasonRate = "rate"
 	// ReasonBadDigest: a body did not match its x-amz-content-sha256 or
 	// Content-MD5. The object had already streamed to the destinations.
@@ -41,9 +43,10 @@ const (
 	ReasonDestination = "destination failed"
 	// ReasonSource: an object the run reads could not be read.
 	ReasonSource = "source failed"
-	// ReasonSpill: the out-of-order parts on disk were over their limit, or
-	// could not be written.
-	ReasonSpill = "spill limit"
+	// ReasonSpill: a part that came before its turn could not be held on
+	// disk (a disk error). A full spill budget does not stop a run: the part
+	// is refused 503 SlowDown and sent again (R18).
+	ReasonSpill = "spill failed"
 	// ReasonMultipart: a multipart upload broke the protocol: a part sent
 	// again with another body, or a part list that does not match.
 	ReasonMultipart = "multipart"
@@ -57,6 +60,9 @@ const (
 	bucket = "olympos"
 	// maxRate is the requests a session may send per second, and its burst.
 	maxRate = 200
+	// rateStorm is how long a session may stay over its rate before it is
+	// stopped with ReasonRate.
+	rateStorm = 30 * time.Second
 	// maxKeyLen is S3's key limit.
 	maxKeyLen = 1024
 	// maxListKeys is S3's page size limit and the default max-keys.
@@ -108,7 +114,6 @@ var (
 	errDigest      = errors.New("ingest: the body does not match its digest")
 	errAborted     = errors.New("ingest: the multipart upload was aborted")
 	errMultipart   = errors.New("ingest: the multipart upload broke the protocol")
-	errSpillLimit  = errors.New("ingest: out-of-order parts are over the disk limit")
 	errTooLarge    = errors.New("ingest: the body is too large")
 	errSourceShort = errors.New("ingest: the source object ended early")
 )
@@ -119,6 +124,7 @@ type Metrics struct {
 	requests *prometheus.CounterVec
 	bytes    prometheus.Counter
 	refused  *prometheus.CounterVec
+	stops    *prometheus.CounterVec
 	runs     *prometheus.Desc
 
 	mu  sync.Mutex
@@ -138,6 +144,9 @@ func NewMetrics() *Metrics {
 		refused: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "olympos_ingest_refused_total", Help: "Ingest endpoint requests that failed, by S3 error code.",
 		}, []string{"reason"}),
+		stops: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "olympos_ingest_stops_total", Help: "Ingest sessions stopped before their run ended, by stop reason.",
+		}, []string{"reason"}),
 		runs: prometheus.NewDesc("olympos_ingest_runs", "Native runs with an open ingest session.", nil, nil),
 	}
 }
@@ -146,6 +155,8 @@ func (m *Metrics) attach(reg *Registry) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reg = reg
+	count := func(reason string) { m.stops.WithLabelValues(reason).Inc() }
+	reg.onStop.Store(&count)
 }
 
 // Describe implements prometheus.Collector.
@@ -153,6 +164,7 @@ func (m *Metrics) Describe(ch chan<- *prometheus.Desc) {
 	m.requests.Describe(ch)
 	m.bytes.Describe(ch)
 	m.refused.Describe(ch)
+	m.stops.Describe(ch)
 	ch <- m.runs
 }
 
@@ -161,6 +173,7 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	m.requests.Collect(ch)
 	m.bytes.Collect(ch)
 	m.refused.Collect(ch)
+	m.stops.Collect(ch)
 	m.mu.Lock()
 	reg := m.reg
 	m.mu.Unlock()
@@ -171,16 +184,19 @@ func (m *Metrics) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(m.runs, prometheus.GaugeValue, float64(n))
 }
 
-// rateBucket is a token bucket of maxRate requests a second, with bursts of
-// maxRate.
+// rateBucket is a token bucket of perSecond requests a second, with bursts
+// of perSecond. Its zero value is full at the first take.
 type rateBucket struct {
 	tokens float64
 	last   time.Time
 }
 
-func (b *rateBucket) take(now time.Time) bool {
+func (b *rateBucket) take(now time.Time, perSecond float64) bool {
+	if b.last.IsZero() {
+		b.tokens, b.last = perSecond, now
+	}
 	if d := now.Sub(b.last); d > 0 {
-		b.tokens = min(maxRate, b.tokens+d.Seconds()*maxRate)
+		b.tokens = min(perSecond, b.tokens+d.Seconds()*perSecond)
 		b.last = now
 	}
 	if b.tokens < 1 {
@@ -201,6 +217,9 @@ type handler struct {
 
 	spillDir   string // "" is the system's temporary directory
 	spillLimit int64
+	// rate is the requests a session may send per second (maxRate; a test
+	// changes it).
+	rate float64
 
 	mu      sync.Mutex
 	uploads map[string]*upload
@@ -227,7 +246,7 @@ func NewHandler(reg *Registry, log *slog.Logger, m *Metrics, opts ...HandlerOpti
 		m = NewMetrics()
 	}
 	m.attach(reg)
-	h := &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, uploads: map[string]*upload{}}
+	h := &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, rate: maxRate, uploads: map[string]*upload{}}
 	for _, o := range opts {
 		o(h)
 	}
@@ -259,6 +278,8 @@ type request struct {
 	payloadHash string
 	failed      *s3Error
 	aborted     bool
+	// unwatch stops watchEnd, when it runs.
+	unwatch func()
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +322,9 @@ func (q *request) serve() *s3Error {
 
 // finish counts and logs the request. It never logs a header or a body.
 func (q *request) finish() {
+	if q.unwatch != nil {
+		q.unwatch()
+	}
 	status := q.w.status
 	if status == 0 {
 		status = http.StatusOK
@@ -319,9 +343,14 @@ func (q *request) finish() {
 	if q.failed != nil {
 		q.h.m.refused.WithLabelValues(q.failed.code).Inc()
 		attrs = append(attrs, slog.String("error", q.failed.code))
-		level = slog.LevelWarn
-		if q.failed.status == http.StatusNotFound {
+		switch {
+		case q.s == nil:
+			// Refused before any session was found: anyone can send these,
+			// so they are counted but not logged above Debug.
+		case q.failed.status == http.StatusNotFound:
 			level = slog.LevelInfo
+		default:
+			level = slog.LevelWarn
 		}
 	}
 	if q.aborted {
@@ -337,8 +366,9 @@ func (q *request) stop(reason string) {
 }
 
 // classify finds the operation and the key, and refuses what is not served
-// before any credential is looked at: virtual-host addressing, another
-// bucket, an operation outside the table, and a key that is not plain.
+// before any credential is looked at: a path outside the bucket (another
+// bucket, or a virtual-host request, whose path lacks /olympos/), an
+// operation outside the table, and a key that is not plain.
 func (q *request) classify() *s3Error {
 	r := q.r
 	// Path style is the path rule below: a virtual-host request has no
@@ -513,14 +543,42 @@ func (q *request) authenticate() *s3Error {
 		return denied("Requests must be signed with AWS4-HMAC-SHA256 in the Authorization header.")
 	}
 	q.s, q.payloadHash = s, payloadHash
-	if !s.allow(now) {
-		q.stop(ReasonRate)
+	// Over the rate, the request is refused before its body is read, and
+	// the run goes on; only a storm stops it (R17).
+	if ok, storm := s.allow(now, q.h.rate); !ok {
+		if storm {
+			q.stop(ReasonRate)
+		}
 		return errSlowDown
 	}
 	if !s.live(now) {
 		return errStopped
 	}
+	q.watchEnd()
 	return nil
+}
+
+// watchEnd cuts the request's body when its session ends (a stop, a revoke,
+// expiry): a client that stopped sending in the middle of a body would
+// otherwise hold the handler in Body.Read. finish stops the watch before the
+// handler returns.
+func (q *request) watchEnd() {
+	rc := http.NewResponseController(q.w)
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		select {
+		case <-q.s.ended:
+			_ = rc.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+	q.unwatch = func() {
+		close(done)
+		wg.Wait()
+	}
 }
 
 // own reports whether key (or a prefix) lies in the run's own prefix.
@@ -574,6 +632,10 @@ func (q *request) copyBody(dst io.Writer, charge bool) (bodyDigest, error) {
 			return d, nil
 		}
 		if rerr != nil {
+			if !q.s.live(q.h.reg.now()) {
+				// watchEnd cut the read.
+				return d, errRunStopped
+			}
 			return d, errBodyLost
 		}
 	}
@@ -1070,6 +1132,9 @@ func (w *statusWriter) WriteHeader(code int) {
 	}
 	w.ResponseWriter.WriteHeader(code)
 }
+
+// Unwrap gives http.ResponseController the connection's writer.
+func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 func (w *statusWriter) Write(b []byte) (int, error) {
 	if w.status == 0 {

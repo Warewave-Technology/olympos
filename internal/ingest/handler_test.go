@@ -16,6 +16,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -144,29 +145,76 @@ func (r reply) String() string { return fmt.Sprintf("%d %s", r.status, r.body) }
 // before signing.
 func (e *env) do(t *testing.T, cred ingest.Credential, method, target, body string, mutate ...func(*http.Request)) reply {
 	t.Helper()
-	req, err := http.NewRequest(method, e.srv.URL+target, strings.NewReader(body))
+	r, err := e.tryDo(cred, method, target, body, mutate...)
 	if err != nil {
 		t.Fatal(err)
+	}
+	return r
+}
+
+// tryDo is do for other goroutines than the test's: it returns the error.
+func (e *env) tryDo(cred ingest.Credential, method, target, body string, mutate ...func(*http.Request)) (reply, error) {
+	req, err := http.NewRequest(method, e.srv.URL+target, strings.NewReader(body))
+	if err != nil {
+		return reply{}, err
 	}
 	req.Header.Set("X-Amz-Content-Sha256", hexSHA256(body))
 	for _, m := range mutate {
 		m(req)
 	}
-	return e.send(t, signer.SignV4(*req, cred.AccessKey, cred.Secret, "", testRegion))
+	return e.trySend(signer.SignV4(*req, cred.AccessKey, cred.Secret, "", testRegion))
 }
 
 func (e *env) send(t *testing.T, req *http.Request) reply {
 	t.Helper()
+	r, err := e.trySend(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func (e *env) trySend(req *http.Request) (reply, error) {
 	resp, err := e.srv.Client().Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: %v", req.Method, req.URL, err)
+		return reply{}, fmt.Errorf("%s %s: %w", req.Method, req.URL, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read body: %v", err)
+		return reply{}, fmt.Errorf("read body: %w", err)
 	}
-	return reply{status: resp.StatusCode, header: resp.Header, body: string(b)}
+	return reply{status: resp.StatusCode, header: resp.Header, body: string(b)}, nil
+}
+
+// metricValue is the value of the metric name with labels, or -1 when
+// there is none.
+func metricValue(t *testing.T, m *ingest.Metrics, name string, labels map[string]string) float64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	reg.MustRegister(m)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range families {
+		if f.GetName() != name {
+			continue
+		}
+	metric:
+		for _, m := range f.GetMetric() {
+			for _, l := range m.GetLabel() {
+				if labels[l.GetName()] != l.GetValue() {
+					continue metric
+				}
+			}
+			if m.Counter != nil {
+				return m.Counter.GetValue()
+			}
+			return m.Gauge.GetValue()
+		}
+	}
+	return -1
 }
 
 func wantRefused(t *testing.T, r reply, status int, code string) {
@@ -224,8 +272,9 @@ type fakeSink struct {
 	first     chan struct{}
 	firstOnce sync.Once
 
-	mu   sync.Mutex
-	puts []sinkPut
+	mu      sync.Mutex
+	puts    []sinkPut
+	started int
 }
 
 type sinkPut struct {
@@ -239,6 +288,9 @@ var errNoDestination = errors.New("fake sink: no destination left")
 func newSink() *fakeSink { return &fakeSink{failAfter: -1} }
 
 func (f *fakeSink) Put(ctx context.Context, key string, r io.Reader) (ingest.ObjectRecord, error) {
+	f.mu.Lock()
+	f.started++
+	f.mu.Unlock()
 	var buf bytes.Buffer
 	var err error
 	chunk := make([]byte, 32<<10)
@@ -273,6 +325,13 @@ func (f *fakeSink) record(p sinkPut) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.puts = append(f.puts, p)
+}
+
+// startedPuts counts the Puts that began.
+func (f *fakeSink) startedPuts() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
 }
 
 func (f *fakeSink) all() []sinkPut {
@@ -737,6 +796,9 @@ func TestHandlerQuota(t *testing.T) {
 	}
 }
 
+// TestHandlerRate (R17): a burst over the rate is answered 503 SlowDown
+// before its body is read, and the session keeps running; once under the
+// rate again, requests succeed.
 func TestHandlerRate(t *testing.T) {
 	e := newEnv(t)
 	a := e.backup(t)
@@ -747,13 +809,61 @@ func TestHandlerRate(t *testing.T) {
 			t.Fatalf("request %d: %s", i+1, r)
 		}
 	}
-	wantRefused(t, e.do(t, a.cred, http.MethodGet, "/olympos/?prefix="+a.prefix, ""), http.StatusForbidden, "SlowDown")
-	if got := stopReason(t, a.s); got != ingest.ReasonRate {
-		t.Errorf("stop reason %q", got)
+	for range 5 {
+		wantRefused(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/over.bin", "not read"),
+			http.StatusServiceUnavailable, "SlowDown")
+	}
+	notStopped(t, a.s)
+	if p := a.sink.all(); len(p) != 0 {
+		t.Errorf("a refused PUT reached the sink: %d puts", len(p))
 	}
 	// The limit is per session.
 	wantStatus(t, e.do(t, b.cred, http.MethodGet, "/olympos/?prefix="+b.prefix, ""), http.StatusOK)
+	// Under the rate again, the run goes on.
+	e.clock.add(time.Second)
+	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/later.bin", "stored"), http.StatusOK)
+	notStopped(t, a.s)
 	notStopped(t, b.s)
+}
+
+// TestHandlerRateStorm (R17): only a session over the rate for 30
+// consecutive seconds is stopped, with "rate". A second without a refused
+// request ends the streak.
+func TestHandlerRateStorm(t *testing.T) {
+	e := newEnv(t, ingest.WithRate(2))
+	a := e.backup(t)
+	get := func() reply { return e.do(t, a.cred, http.MethodGet, "/olympos/?prefix="+a.prefix, "") }
+	// storm sends 4 requests a second (2 over the rate) for d.
+	storm := func(d time.Duration) {
+		t.Helper()
+		for range int(d / (500 * time.Millisecond)) {
+			e.clock.add(500 * time.Millisecond)
+			wantStatus(t, get(), http.StatusOK)
+			wantRefused(t, get(), http.StatusServiceUnavailable, "SlowDown")
+		}
+	}
+	// atRate sends 2 requests a second, all taken, for d.
+	atRate := func(d time.Duration) {
+		t.Helper()
+		for range int(d / time.Second) {
+			e.clock.add(time.Second)
+			wantStatus(t, get(), http.StatusOK)
+			wantStatus(t, get(), http.StatusOK)
+		}
+	}
+	atRate(time.Second)
+	storm(20 * time.Second)
+	notStopped(t, a.s)
+	// Two seconds at the rate end the streak.
+	atRate(2 * time.Second)
+	// A new streak: its refusals run from t to t+29.5s, then t+30s.
+	storm(30 * time.Second)
+	notStopped(t, a.s)
+	storm(500 * time.Millisecond)
+	if got := stopReason(t, a.s); got != ingest.ReasonRate {
+		t.Errorf("stop reason %q, want %q", got, ingest.ReasonRate)
+	}
+	wantRefused(t, get(), http.StatusForbidden, "InvalidAccessKeyId")
 }
 
 func TestHandlerRateRefills(t *testing.T) {
@@ -1002,25 +1112,59 @@ func TestHandlerMultipart(t *testing.T) {
 			t.Error("the object was stored")
 		}
 	})
-	t.Run("spill over the limit", func(t *testing.T) {
+	t.Run("spill over the budget", func(t *testing.T) {
+		// R18: an early part that would take the spill over its budget is
+		// refused 503 SlowDown before its body is read, and is taken once
+		// the parts before it drained. The session never stops.
 		e := newEnv(t, ingest.WithSpillLimit(10))
 		a := e.backup(t)
 		m := e.createUpload(t, a, a.prefix+"data/big.bin")
-		etagOf(t, m.part(t, 2, "12345"))
-		wantRefused(t, m.part(t, 3, "678901"), http.StatusForbidden, "AccessDenied")
-		if got := stopReason(t, a.s); got != ingest.ReasonSpill {
-			t.Errorf("stop reason %q", got)
+		p := []string{"ab", "12345", "678901", "the last part, longer than the budget"}
+		tags := make([]string, len(p))
+		tags[1] = etagOf(t, m.part(t, 2, p[1]))
+		wantRefused(t, m.part(t, 3, p[2]), http.StatusServiceUnavailable, "SlowDown")
+		wantRefused(t, m.part(t, 4, p[3]), http.StatusServiceUnavailable, "SlowDown")
+		notStopped(t, a.s)
+		if n := spillFiles(t, e.spillDir); n != 1 {
+			t.Errorf("%d spill files, want 1", n)
 		}
-		if puts := a.sink.waitPuts(t, 1); puts[0].err == nil {
-			t.Error("the object was stored")
+		if n := ingest.Spilled(a.s); n != int64(len(p[1])) {
+			t.Errorf("%d bytes counted as spilled, want %d", n, len(p[1]))
 		}
-		deadline := time.Now().Add(5 * time.Second)
-		for spillFiles(t, e.spillDir) != 0 && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
+		// The part in order is always taken; it drains part 2.
+		tags[0] = etagOf(t, m.part(t, 1, p[0]))
+		if n := ingest.Spilled(a.s); n != 0 {
+			t.Errorf("%d bytes counted as spilled after the drain", n)
+		}
+		// Part 4 is still early, and over the budget on its own, until its turn.
+		wantRefused(t, m.part(t, 4, p[3]), http.StatusServiceUnavailable, "SlowDown")
+		tags[2] = etagOf(t, m.part(t, 3, p[2]))
+		tags[3] = etagOf(t, m.part(t, 4, p[3]))
+		wantStatus(t, m.complete(t, tags...), http.StatusOK)
+		puts := a.sink.all()
+		if len(puts) != 1 || puts[0].err != nil || string(puts[0].body) != strings.Join(p, "") {
+			t.Fatalf("sink puts: %+v", puts)
 		}
 		if n := spillFiles(t, e.spillDir); n != 0 {
 			t.Errorf("%d spill files left", n)
 		}
+		notStopped(t, a.s)
+	})
+	t.Run("a part without a length", func(t *testing.T) {
+		a := e.backup(t)
+		m := e.createUpload(t, a, a.prefix+"data/big.bin")
+		chunked := func(r *http.Request) {
+			r.Body = io.NopCloser(strings.NewReader("chunked part"))
+			r.ContentLength = -1
+		}
+		for _, n := range []int{1, 2} {
+			r := e.do(t, a.cred, http.MethodPut, fmt.Sprintf("/olympos/%s?partNumber=%d&uploadId=%s", m.key, n, m.id),
+				"chunked part", chunked)
+			wantRefused(t, r, http.StatusForbidden, "AccessDenied")
+		}
+		notStopped(t, a.s)
+		tag := etagOf(t, m.part(t, 1, "with a length"))
+		wantStatus(t, m.complete(t, tag), http.StatusOK)
 	})
 	t.Run("abort", func(t *testing.T) {
 		a := e.backup(t)
@@ -1327,32 +1471,6 @@ func TestHandlerMetricsAndLogs(t *testing.T) {
 	wantRefused(t, e.do(t, ingest.Credential{AccessKey: a.cred.AccessKey, Secret: "wrong"}, http.MethodGet, "/olympos/?prefix="+a.prefix, ""),
 		http.StatusForbidden, "SignatureDoesNotMatch")
 
-	reg := prometheus.NewPedanticRegistry()
-	reg.MustRegister(e.metrics)
-	families, err := reg.Gather()
-	if err != nil {
-		t.Fatal(err)
-	}
-	value := func(name string, labels map[string]string) float64 {
-		for _, f := range families {
-			if f.GetName() != name {
-				continue
-			}
-		metric:
-			for _, m := range f.GetMetric() {
-				for _, l := range m.GetLabel() {
-					if labels[l.GetName()] != l.GetValue() {
-						continue metric
-					}
-				}
-				if m.Counter != nil {
-					return m.Counter.GetValue()
-				}
-				return m.Gauge.GetValue()
-			}
-		}
-		return -1
-	}
 	checks := []struct {
 		name   string
 		labels map[string]string
@@ -1367,7 +1485,7 @@ func TestHandlerMetricsAndLogs(t *testing.T) {
 		{"olympos_ingest_runs", nil, 1},
 	}
 	for _, c := range checks {
-		if got := value(c.name, c.labels); got != c.want {
+		if got := metricValue(t, e.metrics, c.name, c.labels); got != c.want {
 			t.Errorf("%s%v = %v, want %v", c.name, c.labels, got, c.want)
 		}
 	}
@@ -1440,8 +1558,12 @@ func TestHandlerExpiryEndsUploads(t *testing.T) {
 
 	t.Run("the TTL passes", func(t *testing.T) {
 		e := newEnv(t)
-		// A real timer: the TTL passes with no request to notice it.
-		check(t, e, start(t, e, time.Second))
+		fire := ingest.ManualExpiry(e.reg)
+		a := start(t, e, time.Hour)
+		// The TTL passes with no request to notice it: the timer fires.
+		e.clock.add(2 * time.Hour)
+		fire()
+		check(t, e, a)
 	})
 	t.Run("an Open drops the expired session", func(t *testing.T) {
 		e := newEnv(t)
@@ -1465,20 +1587,30 @@ func TestHandlerConcurrentParts(t *testing.T) {
 		parts[i] = strings.Repeat(string(rune('a'+i)), 40<<10+i*1000)
 	}
 	tags := make([]string, n)
+	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for _, i := range rand.Perm(n) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := m.part(t, i+1, parts[i])
-			if r.status != http.StatusOK {
-				t.Errorf("part %d: %s", i+1, r)
-				return
+			r, err := e.tryDo(a.cred, http.MethodPut, fmt.Sprintf("/olympos/%s?partNumber=%d&uploadId=%s", m.key, i+1, m.id),
+				parts[i], md5Header(parts[i]))
+			switch {
+			case err != nil:
+				errs[i] = err
+			case r.status != http.StatusOK:
+				errs[i] = fmt.Errorf("reply %s", r)
+			default:
+				tags[i] = r.header.Get("ETag")
 			}
-			tags[i] = r.header.Get("ETag")
 		}()
 	}
 	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("part %d: %v", i+1, err)
+		}
+	}
 	if t.Failed() {
 		return
 	}
@@ -1503,4 +1635,204 @@ func TestHandlerConcurrentParts(t *testing.T) {
 		t.Errorf("%d uploads open", n)
 	}
 	notStopped(t, a.s)
+}
+
+// TestHandlerPreAuthLogsDebug: a request refused before any session is
+// found is counted, but logged at Debug only, so that unauthenticated
+// clients cannot flood the log.
+func TestHandlerPreAuthLogsDebug(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	wantRefused(t, e.send(t, mustRequest(t, http.MethodGet, e.srv.URL+"/olympos/?prefix="+a.prefix)), http.StatusForbidden, "AccessDenied")
+	wantRefused(t, e.do(t, ingest.Credential{AccessKey: "OLYAAAAAAAAAAAAAAAAA", Secret: "x"}, http.MethodGet, "/olympos/?prefix="+a.prefix, ""),
+		http.StatusForbidden, "InvalidAccessKeyId")
+	wantRefused(t, e.do(t, a.cred, http.MethodGet, "/other/x", ""), http.StatusForbidden, "AccessDenied")
+	if got := metricValue(t, e.metrics, "olympos_ingest_refused_total", map[string]string{"reason": "AccessDenied"}); got != 2 {
+		t.Errorf("refused AccessDenied = %v, want 2", got)
+	}
+	if got := metricValue(t, e.metrics, "olympos_ingest_refused_total", map[string]string{"reason": "InvalidAccessKeyId"}); got != 1 {
+		t.Errorf("refused InvalidAccessKeyId = %v, want 1", got)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(e.logs.String()), "\n") {
+		if strings.Contains(line, `"ingest request"`) && !strings.Contains(line, `"level":"DEBUG"`) {
+			t.Errorf("a refusal without a session logged above Debug: %s", line)
+		}
+	}
+	// A refusal of a known session still logs at Warn.
+	wantRefused(t, e.do(t, a.cred, http.MethodDelete, "/olympos/"+a.prefix+"data/x.bin", ""), http.StatusForbidden, "AccessDenied")
+	if !strings.Contains(e.logs.String(), `"level":"WARN","msg":"ingest request"`) {
+		t.Errorf("a refusal of a session is not logged at Warn:\n%s", e.logs.String())
+	}
+}
+
+func mustRequest(t *testing.T, method, url string) *http.Request {
+	t.Helper()
+	req, err := http.NewRequest(method, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return req
+}
+
+// TestHandlerRevokeCutsStalledBody: a client that stops sending in the middle
+// of a body does not hold its handler once the session ends: Revoke cuts the
+// read.
+func TestHandlerRevokeCutsStalledBody(t *testing.T) {
+	for name, end := range map[string]func(*ingest.Session){
+		"revoke": func(s *ingest.Session) { s.Revoke("run ended") },
+		"stop":   func(s *ingest.Session) { s.Stop("test stop") },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			a := e.backup(t)
+			a.sink.first = make(chan struct{})
+			body := strings.Repeat("s", 1<<20)
+			pr, pw := io.Pipe()
+			defer pw.Close()
+			req, err := http.NewRequest(http.MethodPut, e.srv.URL+"/olympos/"+a.prefix+"data/stalled.bin", pr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.ContentLength = int64(len(body))
+			req.Header.Set("X-Amz-Content-Sha256", hexSHA256(body))
+			signed := signer.SignV4(*req, a.cred.AccessKey, a.cred.Secret, "", testRegion)
+			done := make(chan int, 1)
+			go func() {
+				resp, err := e.srv.Client().Do(signed)
+				if err != nil {
+					done <- 0
+					return
+				}
+				_ = resp.Body.Close()
+				done <- resp.StatusCode
+			}()
+			if _, err := pw.Write([]byte(body[:4096])); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-a.sink.first:
+			case <-time.After(5 * time.Second):
+				t.Fatal("the body never reached the sink")
+			}
+			// The client sends nothing more and keeps the connection open.
+			end(a.s)
+			select {
+			case code := <-done:
+				if code == http.StatusOK {
+					t.Error("the stalled PUT succeeded")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the handler is still blocked reading the stalled body")
+			}
+			if puts := a.sink.waitPuts(t, 1); puts[0].err == nil {
+				t.Error("the object was stored")
+			}
+		})
+	}
+}
+
+// TestHandlerUploadCapStartsNoPut: a CreateMultipartUpload over the run's
+// open-upload cap is refused before it starts a Sink.Put.
+func TestHandlerUploadCapStartsNoPut(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	const maxUploads = 256
+	for i := range maxUploads {
+		e.clock.add(10 * time.Millisecond) // under the rate
+		e.createUpload(t, a, fmt.Sprintf("%sdata/f%d.bin", a.prefix, i))
+	}
+	if n := a.sink.startedPuts(); n != maxUploads {
+		t.Fatalf("%d puts started, want %d", n, maxUploads)
+	}
+	r := e.do(t, a.cred, http.MethodPost, "/olympos/"+a.prefix+"data/one-more.bin?uploads", "")
+	wantRefused(t, r, http.StatusForbidden, "AccessDenied")
+	if n := a.sink.startedPuts(); n != maxUploads {
+		t.Errorf("the refused upload started a put: %d puts started", n)
+	}
+	if n := ingest.OpenUploads(e.handler); n != maxUploads {
+		t.Errorf("%d uploads open", n)
+	}
+}
+
+// TestHandlerPercentKey: ClickHouse's escapeForFileName writes keys with a
+// literal %, sent on the wire as %25. PUT, GET and List keep the exact key.
+func TestHandlerPercentKey(t *testing.T) {
+	e := newEnv(t)
+	base := uuid.NewString() + "/"
+	const dataKey = "data/db/t/all_1_1_0/n%2Ex.bin"
+	const metaKey = "metadata/my%2Ddb/t%2E1.sql"
+	src := &fakeSource{objects: map[string]string{base + dataKey: "base part"}}
+	a := e.backup(t, func(o *ingest.OpenOptions) { o.Scope.Read = []string{base}; o.Source = src })
+	wire := func(k string) string { return strings.ReplaceAll(k, "%", "%25") }
+
+	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+wire(dataKey), "part data"), http.StatusOK)
+	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+wire(metaKey), "CREATE TABLE"), http.StatusOK)
+	var keys []string
+	for _, p := range a.sink.all() {
+		keys = append(keys, p.key)
+	}
+	slices.Sort(keys)
+	if want := []string{a.prefix + dataKey, a.prefix + metaKey}; !slices.Equal(keys, want) {
+		t.Errorf("sink keys %q, want %q", keys, want)
+	}
+	if r := e.do(t, a.cred, http.MethodGet, "/olympos/"+a.prefix+wire(metaKey), ""); r.status != http.StatusOK || r.body != "CREATE TABLE" {
+		t.Errorf("GET the kept body: %s", r)
+	}
+	if r := e.do(t, a.cred, http.MethodGet, "/olympos/"+base+wire(dataKey), ""); r.status != http.StatusOK || r.body != "base part" {
+		t.Errorf("GET from the base: %s", r)
+	}
+	if l := e.list(t, a.cred, "prefix="+url.QueryEscape(a.prefix)); !slices.Equal(l.keys(), []string{a.prefix + dataKey, a.prefix + metaKey}) {
+		t.Errorf("list own %q", l.keys())
+	}
+	if l := e.list(t, a.cred, "prefix="+url.QueryEscape(base+"data/db/t/")); !slices.Equal(l.keys(), []string{base + dataKey}) {
+		t.Errorf("list base %q", l.keys())
+	}
+	notStopped(t, a.s)
+}
+
+// TestHandlerStopMetric: olympos_ingest_stops_total counts each session
+// stop once, by its reason.
+func TestHandlerStopMetric(t *testing.T) {
+	e := newEnv(t)
+	fire := ingest.ManualExpiry(e.reg)
+	a := e.backup(t, func(o *ingest.OpenOptions) { o.MaxBytes = 4 })
+	b := e.backup(t, func(o *ingest.OpenOptions) { o.MaxBytes = 4 })
+	c := e.backup(t)
+	wantRefused(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/a.bin", "12345"), http.StatusForbidden, "AccessDenied")
+	wantRefused(t, e.do(t, b.cred, http.MethodPut, "/olympos/"+b.prefix+"data/b.bin", "12345"), http.StatusForbidden, "AccessDenied")
+	a.s.Stop("again") // only the first stop counts
+	e.clock.add(2 * time.Hour)
+	fire()
+	c.s.Revoke("run ended") // a revoke is not a stop
+	for reason, want := range map[string]float64{ingest.ReasonQuota: 2, ingest.ReasonExpired: 1, "again": -1} {
+		if got := metricValue(t, e.metrics, "olympos_ingest_stops_total", map[string]string{"reason": reason}); got != want {
+			t.Errorf("olympos_ingest_stops_total{reason=%q} = %v, want %v", reason, got, want)
+		}
+	}
+}
+
+// TestRemoveSpillFiles: the spill files a crash left behind are removed;
+// nothing else in the directory is.
+func TestRemoveSpillFiles(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"olympos-ingest-1.part", "olympos-ingest-22.part", "other.part", "olympos-ingest-3.txt"} {
+		if err := os.WriteFile(dir+"/"+name, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := ingest.RemoveSpillFiles(dir)
+	if err != nil || n != 2 {
+		t.Fatalf("removed %d, %v; want 2", n, err)
+	}
+	var left []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		left = append(left, e.Name())
+	}
+	if want := []string{"olympos-ingest-3.txt", "other.part"}; !slices.Equal(left, want) {
+		t.Errorf("left %q, want %q", left, want)
+	}
+	if n, err := ingest.RemoveSpillFiles(dir + "/missing"); err != nil || n != 0 {
+		t.Errorf("a missing directory: %d, %v", n, err)
+	}
 }

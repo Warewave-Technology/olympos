@@ -12,7 +12,8 @@ const s3Namespace = "http://s3.amazonaws.com/doc/2006-03-01/"
 
 // s3Error is a reply with an S3 error body. Every deliberate refusal is a 403,
 // which ClickHouse does not retry on List; a body that does not match its
-// digest is a 400, and the session is stopped as well.
+// digest is a 400, and the session is stopped as well. Back-pressure is a 503
+// SlowDown, which ClickHouse retries.
 type s3Error struct {
 	status  int
 	code    string
@@ -37,7 +38,11 @@ var (
 		"The provided 'x-amz-content-sha256' header does not match what was computed."}
 	errBadDigest  = &s3Error{http.StatusBadRequest, "BadDigest", "The Content-MD5 you specified did not match what we received."}
 	errIncomplete = &s3Error{http.StatusBadRequest, "IncompleteBody", "The body ended before its declared length."}
-	errSlowDown   = refused("SlowDown", "Too many requests for this run.")
+	// The two back-pressure answers (R17, R18): 503 SlowDown, which
+	// ClickHouse retries with backoff. Nothing of the request was read.
+	errSlowDown  = &s3Error{http.StatusServiceUnavailable, "SlowDown", "Too many requests for this run; send it again later."}
+	errSpillFull = &s3Error{http.StatusServiceUnavailable, "SlowDown",
+		"Too many parts of this run wait for their turn; send this part again later."}
 )
 
 type errorBody struct {

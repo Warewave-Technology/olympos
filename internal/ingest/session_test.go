@@ -520,3 +520,21 @@ func TestSecretNotPrinted(t *testing.T) {
 		t.Errorf("the access key is not printed: %s", cred)
 	}
 }
+
+// Neither a credential nor a session hands its secret to JSON.
+func TestSecretNotJSON(t *testing.T) {
+	reg, _, _, _ := newRegistry(t, 4)
+	s, cred := open(t, reg, backupOptions())
+	for _, v := range []any{cred, &cred, s, map[string]any{"cred": cred, "session": s}} {
+		b, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(b), cred.Secret) || strings.Contains(strings.ToLower(string(b)), "secret") {
+			t.Errorf("JSON with the secret: %s", b)
+		}
+	}
+	if b, _ := json.Marshal(cred); !strings.Contains(string(b), cred.AccessKey) {
+		t.Errorf("the access key is not in the JSON: %s", b)
+	}
+}

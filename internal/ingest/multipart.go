@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,8 +19,11 @@ import (
 
 // Multipart uploads are not stored as parts (design §3). Each upload is one
 // Sink.Put: parts stream into it in order. A part that arrives before its
-// turn waits in a file on disk, under a per-run byte limit, and the request
-// that brings the missing part feeds the waiting ones after it.
+// turn waits in a file on disk, and the request that brings the missing part
+// feeds the waiting ones after it. The disk is a per-run budget (R18): an
+// early part that does not fit is refused 503 SlowDown before its body is
+// read, and ClickHouse sends it again later. The part in order is always
+// taken, so the upload always moves on.
 
 // upload is one multipart upload of a session.
 type upload struct {
@@ -44,6 +49,9 @@ type part struct {
 	pending bool
 	// spill is the part's file while it waits for its turn.
 	spill string
+	// reserved is what the part holds of the run's spill budget (its
+	// Content-Length) from the time it is taken until it left the disk.
+	reserved int64
 }
 
 func (q *request) createUpload() *s3Error {
@@ -58,8 +66,7 @@ func (q *request) createUpload() *s3Error {
 		return denied("The .lock is not uploaded in parts.")
 	}
 	u := &upload{id: randomHex(16), s: s, key: q.key, next: 1, parts: map[int]*part{}}
-	// The upload outlives this request; the session's end aborts it.
-	u.obj = h.newObject(context.Background(), s, q.key, func() { h.failUpload(u, errRunStopped) })
+	// The cap is checked before the upload starts a Sink.Put.
 	h.mu.Lock()
 	open := 0
 	for _, other := range h.uploads {
@@ -69,11 +76,16 @@ func (q *request) createUpload() *s3Error {
 	}
 	if open >= maxUploads {
 		h.mu.Unlock()
-		_ = u.obj.abort(errAborted)
 		return denied("The run has too many open multipart uploads.")
 	}
 	h.uploads[u.id] = u
 	h.mu.Unlock()
+	// The upload outlives this request; the session's end aborts it. Its ID
+	// is not out yet, and u.mu keeps an early end (onEnd) waiting until obj
+	// is set.
+	u.mu.Lock()
+	u.obj = h.newObject(context.Background(), s, q.key, func() { h.failUpload(u, errRunStopped) })
+	u.mu.Unlock()
 	if !s.live(h.reg.now()) {
 		// It ended before the upload was in the map.
 		h.failUpload(u, errRunStopped)
@@ -112,12 +124,13 @@ func (h *handler) failUpload(u *upload, err error) {
 			spills = append(spills, p)
 		}
 	}
+	obj := u.obj
 	u.mu.Unlock()
 	for _, p := range spills {
 		_ = os.Remove(p.spill)
-		u.s.releaseSpill(p.size)
+		u.s.releaseSpill(p.reserved)
 	}
-	_ = u.obj.abort(err)
+	_ = obj.abort(err)
 }
 
 // partFailed is objectFailed for an upload: a failure that is not the
@@ -153,6 +166,11 @@ func (q *request) uploadPart() *s3Error {
 	if !s.own(q.key) {
 		return denied("The key is outside the run's prefix.")
 	}
+	// The length decides, before the body is read, whether an early part
+	// fits on disk.
+	if q.r.ContentLength < 0 || len(q.r.TransferEncoding) > 0 {
+		return denied("A part needs a Content-Length.")
+	}
 	wantMD5, e := q.contentMD5()
 	if e != nil {
 		return e
@@ -172,13 +190,27 @@ func (q *request) uploadPart() *s3Error {
 		u.mu.Unlock()
 		return q.repeatPart(u, n, seen, wantMD5)
 	}
-	p := &part{pending: true}
-	u.parts[n] = p
 	if n == u.next && !u.busy {
+		p := &part{pending: true}
+		u.parts[n] = p
 		u.busy = true
 		u.mu.Unlock()
 		return q.streamPart(u, p, wantMD5)
 	}
+	// The part waits on disk. An early part needs room in the run's budget,
+	// or it is refused unread and sent again later; the part in order (it
+	// came while another request still writes into the object) is always
+	// taken.
+	limit := q.h.spillLimit
+	if n == u.next {
+		limit = -1
+	}
+	if !s.reserveSpill(q.r.ContentLength, limit) {
+		u.mu.Unlock()
+		return errSpillFull
+	}
+	p := &part{pending: true, reserved: q.r.ContentLength}
+	u.parts[n] = p
 	u.mu.Unlock()
 	return q.spillPart(u, n, p, wantMD5)
 }
@@ -236,7 +268,7 @@ func (q *request) drain(u *upload) *s3Error {
 
 		err := q.feed(u.obj, path)
 		_ = os.Remove(path)
-		u.s.releaseSpill(p.size)
+		u.s.releaseSpill(p.reserved)
 		if err != nil {
 			e := q.partFailed(u, err)
 			q.release(u)
@@ -276,51 +308,37 @@ func (q *request) feed(obj *objectStream, path string) error {
 	}
 }
 
-// spillWriter holds a part on disk, under the run's spill limit.
-type spillWriter struct {
-	f     *os.File
-	s     *Session
-	limit int64
-	n     int64
-}
+// spillPattern names the files of parts that wait on disk (os.CreateTemp).
+const spillPattern = "olympos-ingest-*.part"
 
-func (w *spillWriter) Write(p []byte) (int, error) {
-	if !w.s.reserveSpill(int64(len(p)), w.limit) {
-		return 0, errSpillLimit
-	}
-	w.n += int64(len(p))
-	return w.f.Write(p)
-}
-
-// spillPart holds a part that came before its turn on disk. When its turn
-// came meanwhile and no request is streaming, it feeds the object itself.
+// spillPart holds a part that came before its turn on disk; it holds p's
+// reservation of the spill budget, which it gives back when the part does
+// not stay. When its turn came meanwhile and no request is streaming, it
+// feeds the object itself.
 func (q *request) spillPart(u *upload, n int, p *part, wantMD5 []byte) *s3Error {
-	dir, limit := q.h.spillDir, q.h.spillLimit
-	f, err := os.CreateTemp(dir, "olympos-ingest-*.part")
+	f, err := os.CreateTemp(q.h.spillDir, spillPattern)
 	if err != nil {
+		q.s.releaseSpill(p.reserved)
 		q.h.log.Warn("ingest: could not hold a part on disk", "run", q.s.RunID().String(), "key", q.key, "err", err)
 		q.h.failUpload(u, err)
 		q.stop(ReasonSpill)
 		return denied("The part could not be held until its turn.")
 	}
-	sw := &spillWriter{f: f, s: q.s, limit: limit}
-	d, err := q.copyBody(sw, true)
+	d, err := q.copyBody(f, true)
 	if cerr := f.Close(); err == nil && cerr != nil {
 		err = fmt.Errorf("%w: %w", errWrite, cerr)
 	}
 	discard := func() {
 		_ = os.Remove(f.Name())
-		q.s.releaseSpill(sw.n)
+		q.s.releaseSpill(p.reserved)
 	}
 	if err != nil {
 		discard()
 		if errors.Is(err, errWrite) {
-			if !errors.Is(err, errSpillLimit) {
-				q.h.log.Warn("ingest: could not hold a part on disk", "run", q.s.RunID().String(), "key", q.key, "err", err)
-			}
+			q.h.log.Warn("ingest: could not hold a part on disk", "run", q.s.RunID().String(), "key", q.key, "err", err)
 			q.h.failUpload(u, err)
 			q.stop(ReasonSpill)
-			return denied("The parts that came before their turn are over the run's disk limit.")
+			return denied("The part could not be held until its turn.")
 		}
 		return q.partFailed(u, err)
 	}
@@ -473,4 +491,27 @@ func (q *request) abortUpload() *s3Error {
 	q.stop(ReasonUploadAborted)
 	q.w.WriteHeader(http.StatusNoContent)
 	return nil
+}
+
+// RemoveSpillFiles removes the files of waiting parts that a previous
+// process left in dir ("" is the system's temporary directory) when it
+// ended without cleaning up, and returns how many it removed. Call it at
+// start-up, before the endpoint serves: those parts' uploads are gone. A
+// missing dir has none.
+func RemoveSpillFiles(dir string) (int, error) {
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	files, err := filepath.Glob(filepath.Join(dir, spillPattern))
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, f := range files {
+		if err := os.Remove(f); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return n, fmt.Errorf("ingest: remove a spill file: %w", err)
+		}
+		n++
+	}
+	return n, nil
 }

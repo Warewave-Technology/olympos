@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -70,8 +71,10 @@ var (
 
 // Scope says which prefixes a credential may use. Prefixes end in "/".
 type Scope struct {
-	// Write is a backup's own run prefix, "<run-id>/", which it may write,
-	// list and read back. It is empty for a restore.
+	// Write is a backup's own run prefix, "<run-id>/", which it may write
+	// and list. Of its own objects it reads back only its .lock and the
+	// bodies the session keeps (.backup, metadata, count.txt). It is empty
+	// for a restore.
 	Write string `json:"write,omitempty"`
 	// Read are the other prefixes it may read and list: a backup's base
 	// chain, a restore's chain.
@@ -183,6 +186,12 @@ type Registry struct {
 	maxRuns int
 	now     func() time.Time
 
+	// afterFunc starts a session's expiry timer and returns its stop
+	// function: time.AfterFunc, which a test replaces.
+	afterFunc func(d time.Duration, f func()) (stop func() bool)
+	// onStop counts a session's stop by its reason (the handler's metrics).
+	onStop atomic.Pointer[func(reason string)]
+
 	mu       sync.Mutex
 	sessions map[string]*Session
 	// opening counts the Opens that hold a slot while they write their row.
@@ -195,7 +204,11 @@ func NewRegistry(db *store.DB, fp *secrets.Fingerprinter, maxRuns int, now func(
 	if now == nil {
 		now = time.Now
 	}
-	return &Registry{db: db, fp: fp, maxRuns: maxRuns, now: now, sessions: map[string]*Session{}}
+	return &Registry{db: db, fp: fp, maxRuns: maxRuns, now: now, afterFunc: realAfterFunc, sessions: map[string]*Session{}}
+}
+
+func realAfterFunc(d time.Duration, f func()) func() bool {
+	return time.AfterFunc(d, f).Stop
 }
 
 // Open mints a credential for one run and opens its session. It returns
@@ -258,14 +271,14 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		source:   o.Source,
 		maxBytes: o.MaxBytes, accessKey: cred.AccessKey, expires: now.Add(o.TTL),
 		secret: cred.Secret, stopped: make(chan string, 1), captured: map[string][]byte{},
-		ended: make(chan struct{}), rate: rateBucket{tokens: maxRate, last: now},
+		ended: make(chan struct{}),
 	}
 	if err := insertCredential(ctx, r.db, cred.AccessKey, o.RunID, o.Kind, s.scope,
 		r.fp.Fingerprint([]byte(cred.Secret)), now, s.expires); err != nil {
 		return nil, Credential{}, fmt.Errorf("ingest: record credential: %w", err)
 	}
 	// The TTL ends the session even when no request comes to notice it.
-	s.expiry = time.AfterFunc(o.TTL, func() { s.Stop(ReasonExpired) })
+	s.stopExpiry = r.afterFunc(o.TTL, func() { s.Stop(ReasonExpired) })
 	return s, cred, nil
 }
 
@@ -306,7 +319,13 @@ func (r *Registry) Lookup(accessKey string) (*Session, string, bool) {
 // that is not revoked yet. It is called at start-up, before any Open: the
 // secrets of those credentials were lost with the previous process.
 func (r *Registry) MarkInterrupted(ctx context.Context) error {
-	if err := revokeAllCredentials(ctx, r.db, reasonRestart, r.now()); err != nil {
+	return MarkInterrupted(ctx, r.db, r.now())
+}
+
+// MarkInterrupted is Registry.MarkInterrupted without a registry, for a
+// server whose endpoint is off now but may have been on before the restart.
+func MarkInterrupted(ctx context.Context, db *store.DB, at time.Time) error {
+	if err := revokeAllCredentials(ctx, db, reasonRestart, at); err != nil {
 		return fmt.Errorf("ingest: mark interrupted credentials: %w", err)
 	}
 	return nil
@@ -324,6 +343,12 @@ func (r *Registry) openRuns() int {
 		}
 	}
 	return n
+}
+
+func (r *Registry) countStop(reason string) {
+	if f := r.onStop.Load(); f != nil {
+		(*f)(reason)
+	}
 }
 
 func (r *Registry) forget(accessKey string) {
@@ -355,9 +380,9 @@ type Session struct {
 	// goroutine can wait for it.
 	ended   chan struct{}
 	endOnce sync.Once
-	// expiry stops the session with ReasonExpired when the TTL passes; Revoke
-	// cancels it. Set once in open.
-	expiry *time.Timer
+	// stopExpiry cancels the timer that stops the session with ReasonExpired
+	// when the TTL passes; Revoke calls it. Set once in open.
+	stopExpiry func() bool
 
 	mu         sync.Mutex
 	secret     string // dropped on Revoke
@@ -370,10 +395,14 @@ type Session struct {
 	capturedBytes int64
 	lock          []byte
 	hasLock       bool
-	// rate limits the session's requests; spilled is how many bytes of
-	// out-of-order parts it holds on disk. Both are the handler's.
-	rate    rateBucket
-	spilled int64
+	// rate limits the session's requests; overSince is when its current
+	// streak of refused requests began, and lastRefused the latest of them.
+	// spilled is how many bytes of out-of-order parts it holds on disk. All
+	// are the handler's.
+	rate        rateBucket
+	overSince   time.Time
+	lastRefused time.Time
+	spilled     int64
 }
 
 // RunID is the run the session was opened for.
@@ -408,8 +437,8 @@ func (s *Session) Revoke(reason string) {
 	s.revoked = true
 	s.secret = ""
 	s.mu.Unlock()
-	if s.expiry != nil {
-		s.expiry.Stop()
+	if s.stopExpiry != nil {
+		s.stopExpiry()
 	}
 	s.end()
 	s.reg.forget(s.accessKey)
@@ -435,13 +464,15 @@ func (s *Session) Stop(reason string) {
 		reason = "stopped"
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.stopReason != "" {
+		s.mu.Unlock()
 		return
 	}
 	s.stopReason = reason
 	s.stopped <- reason // never blocks: the buffer holds the one reason
 	s.end()
+	s.mu.Unlock()
+	s.reg.countStop(reason)
 }
 
 func (s *Session) end() { s.endOnce.Do(func() { close(s.ended) }) }
@@ -454,19 +485,30 @@ func (s *Session) live(now time.Time) bool {
 	return !s.revoked && s.stopReason == "" && !s.expired(now)
 }
 
-// allow takes one request from the session's rate bucket.
-func (s *Session) allow(now time.Time) bool {
+// allow takes one request from the session's rate bucket of perSecond. A
+// refused request extends the session's over-rate streak, which a second
+// without a refused request ends; storm reports a streak of rateStorm or
+// longer (R17).
+func (s *Session) allow(now time.Time, perSecond float64) (ok, storm bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.rate.take(now)
+	if s.rate.take(now, perSecond) {
+		return true, false
+	}
+	if s.overSince.IsZero() || now.Sub(s.lastRefused) > time.Second {
+		s.overSince = now
+	}
+	s.lastRefused = now
+	return false, now.Sub(s.overSince) >= rateStorm
 }
 
 // reserveSpill counts n more bytes held on disk and reports whether they fit
-// under limit; when they do not, nothing is counted.
+// under limit (a negative limit has room for anything); when they do not,
+// nothing is counted.
 func (s *Session) reserveSpill(n, limit int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.spilled+n > limit {
+	if limit >= 0 && s.spilled+n > limit {
 		return false
 	}
 	s.spilled += n
