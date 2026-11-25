@@ -101,6 +101,18 @@ if printf 'internal/backup/engines/clickhouse/backupmeta_test.go\ninternal/backu
   echo "FAIL: --files matched a test next to the native metadata parsers" >&2
   fail=1
 fi
+# The native run puts the run's credential into the BACKUP statement and
+# keeps it out of the logs.
+if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/native.go ]; then
+  echo "FAIL: --files with the native run: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/native_run_test.go\ninternal/backup/engines/clickhouse/native_integration_test.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a test next to the native run" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1
