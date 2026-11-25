@@ -26,6 +26,7 @@ const (
 	testKeyName = "olympos-manifest"
 	testOldVer  = "0123456789abcdef0123456789abcdef"
 	testCurVer  = "fedcba9876543210fedcba9876543210"
+	testOffVer  = "00112233445566778899aabbccddeeff"
 )
 
 type fakeCred struct{}
@@ -41,6 +42,7 @@ type fakeKeyServer struct {
 	url  string
 	mu   sync.Mutex
 	keys map[string]*ecdsa.PrivateKey // by version
+	off  map[string]bool              // disabled versions
 	gets map[string]int
 	alg  string
 }
@@ -107,7 +109,14 @@ func (f *fakeKeyServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"key": map[string]any{
 		"kid": kid, "kty": "EC", "crv": "P-256", "key_ops": []string{"sign", "verify"},
 		"x": enc(pub[1:33]), "y": enc(pub[33:]),
-	}})
+	}, "attributes": map[string]any{"enabled": !f.off[ver]}})
+}
+
+// change edits the vault's keys, as an operator would.
+func (f *fakeKeyServer) change(fn func()) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	fn()
 }
 
 // fetched returns how often GetKey fetched each version, and the last sign alg.
@@ -147,8 +156,8 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 
 func TestAzureSignVerify(t *testing.T) {
 	ctx := context.Background()
-	f := &fakeKeyServer{gets: map[string]int{}, keys: map[string]*ecdsa.PrivateKey{
-		testOldVer: newKey(t), testCurVer: newKey(t),
+	f := &fakeKeyServer{gets: map[string]int{}, off: map[string]bool{testOffVer: true}, keys: map[string]*ecdsa.PrivateKey{
+		testOldVer: newKey(t), testCurVer: newKey(t), testOffVer: newKey(t),
 	}}
 	srv := httptest.NewTLSServer(f)
 	defer srv.Close()
@@ -160,7 +169,8 @@ func TestAzureSignVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	kv := &AzureKeyVault{keys: c}
+	clock := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	kv := &AzureKeyVault{keys: c, now: func() time.Time { return clock }}
 	d := sha256.Sum256([]byte(`{"format":"olympos.clickhouse.native/v1"}`))
 	digest := d[:]
 
@@ -201,6 +211,37 @@ func TestAzureSignVerify(t *testing.T) {
 	}
 	if gets, _ := f.fetched(); gets[testOldVer] != 1 {
 		t.Fatalf("verify fetches the version in keyID, got %v", gets)
+	}
+
+	// A disabled version is refused on the first fetch.
+	off := testKeyName + "/" + testOffVer
+	if err := kv.Verify(ctx, off, digest, rawSign(t, f.keys[testOffVer], digest)); !errors.Is(err, ErrKeyDisabled) {
+		t.Fatalf("disabled version: %v", err)
+	}
+
+	// A cached version disabled in the vault still verifies until the cache
+	// entry expires (1 hour), and is refused after it.
+	f.change(func() { f.off[testCurVer] = true })
+	clock = clock.Add(59 * time.Minute)
+	if err := kv.Verify(ctx, keyID, digest, sig); err != nil {
+		t.Fatalf("disabled, cached: %v", err)
+	}
+	clock = clock.Add(2 * time.Minute)
+	if err := kv.Verify(ctx, keyID, digest, sig); !errors.Is(err, ErrKeyDisabled) {
+		t.Fatalf("disabled, after the cache entry expired: %v", err)
+	}
+	f.change(func() { f.off[testCurVer] = false })
+	if err := kv.Verify(ctx, keyID, digest, sig); err != nil {
+		t.Fatalf("enabled again: %v", err)
+	}
+	if gets, _ := f.fetched(); gets[testCurVer] != 3 {
+		t.Fatalf("fetches of the current version: %v", gets)
+	}
+	// A version deleted from the vault is refused once its entry expires.
+	f.change(func() { delete(f.keys, testOldVer) })
+	clock = clock.Add(61 * time.Minute)
+	if err := kv.Verify(ctx, old, digest, rawSign(t, newKey(t), digest)); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("deleted version: %v", err)
 	}
 
 	if err := kv.Verify(ctx, testKeyName+"/00000000000000000000000000000000", digest, sig); !errors.Is(err, ErrKeyNotFound) {

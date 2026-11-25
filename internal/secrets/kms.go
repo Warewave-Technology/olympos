@@ -30,10 +30,10 @@ type KeyVault interface {
 	// what Verify needs to find the same version again.
 	Sign(ctx context.Context, keyName string, digest []byte) (sig []byte, keyID string, err error)
 	// Verify checks sig over digest with the key version keyID names. Every
-	// version still in the vault verifies, not only the newest: a version
+	// enabled version in the vault verifies, not only the newest: a version
 	// stays enabled while a backup it signed is within retention. A bad
 	// signature is ErrSignatureInvalid; an unknown key or version is
-	// ErrKeyNotFound.
+	// ErrKeyNotFound; a disabled version is ErrKeyDisabled.
 	Verify(ctx context.Context, keyID string, digest, sig []byte) error
 }
 
@@ -50,6 +50,10 @@ var ErrSignatureInvalid = errors.New("signature does not verify")
 // ErrKeyNotFound is returned when a Key Vault key, or the version a key ID
 // names, does not exist.
 var ErrKeyNotFound = errors.New("key vault key not found")
+
+// ErrKeyDisabled is returned when the key version a key ID names is
+// disabled in the vault: what it signed no longer verifies.
+var ErrKeyDisabled = errors.New("key vault key version disabled")
 
 // parseKeyID splits a key ID, <name>/<version>, as Sign returns it.
 func parseKeyID(keyID string) (name, version string, err error) {

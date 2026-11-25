@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -28,8 +29,19 @@ type AzureKeyVault struct {
 	mu      sync.Mutex
 	secrets map[string]*azsecrets.Client
 	keys    *azkeys.Client
-	// pub caches signing keys' public halves by key ID (<name>/<version>).
-	pub map[string]*ecdsa.PublicKey
+	// pub caches signing keys' public halves by key ID (<name>/<version>)
+	// for pubKeyTTL.
+	pub map[string]cachedPub
+	now func() time.Time // time.Now; tests set it
+}
+
+// pubKeyTTL bounds how long a version disabled or deleted in the vault
+// still verifies here: Verify fetches the public key again after it.
+const pubKeyTTL = time.Hour
+
+type cachedPub struct {
+	key     *ecdsa.PublicKey
+	fetched time.Time
 }
 
 func (a *AzureKeyVault) url(vault string) string {
@@ -163,9 +175,9 @@ func (a *AzureKeyVault) Sign(ctx context.Context, keyName string, digest []byte)
 }
 
 // Verify checks sig locally with the public key of the version keyID names.
-// The public key is fetched (keys/get) once per version and cached: a version
-// never changes. A version disabled or deleted in the vault therefore still
-// verifies here until the server restarts.
+// The public key is fetched (keys/get) and cached for pubKeyTTL. A version
+// disabled in the vault is ErrKeyDisabled, a deleted one ErrKeyNotFound: at
+// once if it was not cached, otherwise when its cache entry expires.
 func (a *AzureKeyVault) Verify(ctx context.Context, keyID string, digest, sig []byte) error {
 	if err := checkDigest(digest); err != nil {
 		return err
@@ -182,11 +194,19 @@ func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.Pub
 	if err != nil {
 		return nil, err
 	}
+	now := time.Now
+	if a.now != nil {
+		now = a.now
+	}
 	a.mu.Lock()
-	pub, ok := a.pub[keyID]
+	e, ok := a.pub[keyID]
+	if ok && now().Sub(e.fetched) >= pubKeyTTL {
+		delete(a.pub, keyID)
+		ok = false
+	}
 	a.mu.Unlock()
 	if ok {
-		return pub, nil
+		return e.key, nil
 	}
 	c, err := a.keyClient()
 	if err != nil {
@@ -203,19 +223,22 @@ func (a *AzureKeyVault) publicKey(ctx context.Context, keyID string) (*ecdsa.Pub
 	if n, v := kidParts(k.KID); n != name || v != ver {
 		return nil, fmt.Errorf("get key %s: the response is for another key", keyID)
 	}
+	if resp.Attributes != nil && resp.Attributes.Enabled != nil && !*resp.Attributes.Enabled {
+		return nil, fmt.Errorf("key %s: %w", keyID, ErrKeyDisabled)
+	}
 	if k.Kty == nil || (*k.Kty != azkeys.KeyTypeEC && *k.Kty != azkeys.KeyTypeECHSM) ||
 		k.Crv == nil || *k.Crv != azkeys.CurveNameP256 || len(k.X) != 32 || len(k.Y) != 32 {
 		return nil, fmt.Errorf("get key %s: not an EC P-256 key", keyID)
 	}
-	pub, err = ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, k.X...), k.Y...))
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, k.X...), k.Y...))
 	if err != nil {
 		return nil, fmt.Errorf("get key %s: %w", keyID, err)
 	}
 	a.mu.Lock()
 	if a.pub == nil {
-		a.pub = map[string]*ecdsa.PublicKey{}
+		a.pub = map[string]cachedPub{}
 	}
-	a.pub[keyID] = pub
+	a.pub[keyID] = cachedPub{key: pub, fetched: now()}
 	a.mu.Unlock()
 	return pub, nil
 }
