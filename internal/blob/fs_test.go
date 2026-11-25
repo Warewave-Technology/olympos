@@ -271,3 +271,58 @@ func TestFSWriter(t *testing.T) {
 		}
 	}
 }
+
+// TestFSSetTagsNativeRun: a native run's objects are tagged complete after
+// its manifest is signed, so SetTags rewrites the tags of an object inside a
+// run's directory (<…>/<run-id>/<key>) that exists; never of anything else.
+func TestFSSetTagsNativeRun(t *testing.T) {
+	root, _ := nfsRoot(t)
+	ctx := context.Background()
+	w, err := blob.OpenFS(blob.FSTarget{Name: "nas", Path: root + "/nas/olympos/backups", Prefix: "pfx"}, blob.StorageOptions{NFSRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const run = "0f6b2a4e-8d1c-4f3a-9b7e-2c5d8a1f6e30"
+	dir := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run)
+	obj := dir + "/data/sales/orders/all_1_1_0/data.bin"
+	incomplete := map[string]string{"olympos-tier": "daily", "olympos-state": "incomplete"}
+	if _, err := w.Upload(ctx, obj, strings.NewReader("part"), "application/octet-stream", incomplete); err != nil {
+		t.Fatal(err)
+	}
+	complete := map[string]string{"olympos-tier": "daily", "olympos-state": "complete"}
+	if err := w.SetTags(ctx, obj, complete); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := w.GetTags(ctx, obj); err != nil || got["olympos-state"] != "complete" || got["olympos-tier"] != "daily" {
+		t.Fatalf("tags: %v %v", got, err)
+	}
+	if b, err := w.Download(ctx, obj, 100); err != nil || string(b) != "part" {
+		t.Fatalf("the object changed: %q %v", b, err)
+	}
+	ents, _ := os.ReadDir(filepath.Dir(filepath.Join(w.Dir(), filepath.FromSlash(obj))))
+	if len(ents) != 2 {
+		t.Fatalf("left behind: %v", ents)
+	}
+
+	logical := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".zip")
+	if _, err := w.Upload(ctx, logical, strings.NewReader("zip"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+		t.Fatal(err)
+	}
+	for name, p := range map[string]string{
+		"a logical backup":            logical,
+		"a manifest":                  blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".manifest.json"),
+		"an object that is missing":   dir + "/data/sales/orders/all_1_1_0/missing.bin",
+		"the run's directory":         dir,
+		"under a name that is no run": blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/run-1/data.bin"),
+		"under an upper-case run":     blob.Join(w.Prefix(), "x/"+strings.ToUpper(run)+"/data.bin"),
+		"a tags sidecar":              obj + blob.TagsSuffix,
+		"climbing out":                dir + "/../" + run + ".zip",
+	} {
+		if err := w.SetTags(ctx, p, complete); err == nil {
+			t.Errorf("SetTags on %s (%s)", name, p)
+		}
+	}
+	if got, _ := w.GetTags(ctx, logical); got["olympos-state"] != "" {
+		t.Fatalf("the logical backup's tags changed: %v", got)
+	}
+}
