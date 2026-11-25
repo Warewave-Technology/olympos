@@ -353,6 +353,21 @@ Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:
 The Bicep module renders one lifecycle rule per tier. The server has no delete permission and no
 delete code path; *Settings › Destinations › Test destination* warns if the credential can delete.
 
+**Objects of runs that did not finish.** A native ClickHouse backup writes its objects with the tag
+`olympos-state=incomplete` and retags them `olympos-state=complete` only after the run's signed manifest is
+written, the manifest itself last; every object also carries its `olympos-tier`. A run that dies (a server
+restart, a lost network, a stopped ClickHouse) leaves incomplete objects behind, and Olympos does not delete
+them. The Bicep module renders the rule `olympos-incomplete`, which deletes objects tagged
+`olympos-state=incomplete` 7 days after creation (parameter `incompleteDays`); for S3 and NFS see
+[S3 and S3-compatible storage](#s3-and-s3-compatible-storage) and [NFS](#nfs). Retagging does not change an
+object's creation time, so the rule never touches a backup that completed.
+
+> **Time-based immutability defers the delete.** An object under a time-based immutability policy (the
+> container policy of the Bicep module, S3 Object Lock, WORM on an NFS share) cannot be deleted before its
+> period ends, so an incomplete object is kept until then, not for 7 days. With the Bicep module's container
+> policy that is the longest retention tier (400 days), for every tier rule alike; this is tracked in
+> [#79](https://github.com/Warewave-Technology/olympos/issues/79).
+
 ### SAS token option
 
 If Managed Identity is not possible, paste a **container-scoped SAS** with permissions `r c w t` only
@@ -433,6 +448,7 @@ shortened or removed, not even by the root user.
   {"ID": "monthly", "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "monthly"}}, "Expiration": {"Days": 366}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
   {"ID": "test",    "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "test"}},    "Expiration": {"Days": 7},   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
   {"ID": "audit",   "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "audit"}},   "Expiration": {"Days": 400}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "incomplete", "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-state", "Value": "incomplete"}}, "Expiration": {"Days": 7}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
   {"ID": "probe",   "Status": "Enabled", "Filter": {"Prefix": "olympos/.olympos-probe/"},                 "Expiration": {"Days": 1}},
   {"ID": "mpu",     "Status": "Enabled", "Filter": {}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2}}
 ]}
@@ -442,6 +458,14 @@ Apply with `aws s3api put-bucket-lifecycle-configuration --bucket olympos-backup
 (MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …) and adjust the
 probe prefix to your destination prefix. With Object Lock, an expiration only adds a delete marker
 until the lock period of the version has ended.
+
+The `incomplete` rule removes what a native ClickHouse backup left behind when its run died: the run writes
+every object with `olympos-state=incomplete` and replaces the tag with `olympos-state=complete` after the
+run's manifest is signed, so only unfinished objects match. It uses `Days: 7`, not `8`: a run is over long
+before then. The `mpu` rule above is separate: it aborts multipart uploads that were never completed, which
+are not objects yet and carry no tags. With Object Lock in compliance mode the delete waits until the
+retention of each object has ended
+([#79](https://github.com/Warewave-Technology/olympos/issues/79) covers the same effect on Azure).
 
 ### NFS
 
@@ -470,6 +494,31 @@ rename) → `.partial` removed; directories are 0750. Tags are stored next to ea
 Protect backups on the storage side with read-only **snapshots** on their own schedule or **WORM**
 (NetApp SnapLock, PowerScale SmartLock, ZFS snapshots with holds), and expire files by tier with a
 storage-side job that reads the `.tags.json` sidecars or the manifests.
+
+**Cleaning up incomplete runs.** A native ClickHouse backup writes its files with
+`{"olympos-state":"incomplete","olympos-tier":"daily"}` in the sidecar and rewrites the sidecar with
+`"olympos-state":"complete"` after the run's manifest is signed. A run that died leaves files whose sidecar
+still says `incomplete`. Run this as the storage administrator, on the NFS server or on any host that mounts
+the share with write access (the Olympos server keeps its no-delete permissions). First a dry run, which only lists
+the files of runs that ended more than 7 days ago:
+
+```sh
+cd /srv/backup-nas/olympos        # the destination path, on the share
+find . -name '*.tags.json' -mtime +7 -exec grep -q '"olympos-state":"incomplete"' {} \; -print0 > /tmp/olympos-incomplete.list
+tr '\0' '\n' < /tmp/olympos-incomplete.list
+```
+
+Read the list: each entry is a sidecar, and the file it describes is the same name without `.tags.json`.
+When it shows what you expect, delete the files and their sidecars:
+
+```sh
+xargs -0 -n1 sh -c 'rm -v -- "$1" "${1%.tags.json}"' _ < /tmp/olympos-incomplete.list
+```
+
+Run it from a scheduled job (cron, a systemd timer on the storage host) if you want it to keep up. On a
+share with WORM or snapshot protection the delete is refused or only affects the live view until the
+protection ends; the incomplete files then stay as long as that protection says
+([#79](https://github.com/Warewave-Technology/olympos/issues/79) tracks the same effect on Azure).
 
 ### Audit raw results
 
