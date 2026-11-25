@@ -341,7 +341,7 @@ func TestMarkInterrupted(t *testing.T) {
 }
 
 func TestCaptureLimits(t *testing.T) {
-	reg, _, _, _ := newRegistry(t, 4)
+	reg, _, _, _ := newRegistry(t, 10)
 	s, _ := open(t, reg, backupOptions())
 	run := s.RunID().String() + "/"
 	const mib = 1 << 20
@@ -351,15 +351,13 @@ func TestCaptureLimits(t *testing.T) {
 		size  int
 		kept  bool
 	}{
-		{run + ".backup", mib, mib, true},
+		{run + ".backup", 64 * mib, 2 * mib, true},
 		{run + "metadata/db1.sql", mib, 100, true},
 		{run + "metadata/db1/events.sql", mib, mib, true},
 		{run + "data/db1/events/all_1_1_0/count.txt", 64, 6, true},
 		{run + "data/db1/events/all_2_2_0/count.txt", 64, 64, true},
 
 		{run + ".backup.tmp", 0, 10, false},
-		{run + "metadata/db1/huge.sql", mib, mib + 1, false},
-		{run + "data/db1/events/all_3_3_0/count.txt", 64, 65, false},
 		{run + "data/db1/events/all_1_1_0/data.bin", 0, 10, false},
 		{run + "data/db1/events/all_1_1_0/checksums.txt", 0, 10, false},
 		{run + "metadata/db1/notes.txt", 0, 10, false},
@@ -380,12 +378,52 @@ func TestCaptureLimits(t *testing.T) {
 			t.Errorf("Captured(%s) = %d bytes, %v", tc.key, len(got), ok)
 		}
 	}
+	// Keys that are not kept do not stop the session.
+	select {
+	case r := <-s.Stopped():
+		t.Fatalf("stopped: %s", r)
+	default:
+	}
 
 	// Captured returns a copy.
 	got, _ := s.Captured(run + ".backup")
 	got[0] = 'y'
 	if again, _ := s.Captured(run + ".backup"); again[0] != 'x' {
 		t.Error("Captured returned the kept body itself")
+	}
+
+	// A body over its limit, or over the total, is not kept and stops the
+	// session: the manifest cannot be built without it.
+	for name, captures := range map[string][]struct {
+		rel  string
+		size int
+	}{
+		"backup over 64 MiB":    {{".backup", 64*mib + 1}},
+		"metadata over 1 MiB":   {{"metadata/db1/huge.sql", mib + 1}},
+		"count.txt over 64 B":   {{"data/db1/t/all_1_1_0/count.txt", 65}},
+		"total over 64 MiB":     {{".backup", 63 * mib}, {"metadata/db1.sql", mib}, {"metadata/db2.sql", 1}},
+		"total over at .backup": {{"metadata/db1.sql", mib}, {".backup", 64 * mib}},
+	} {
+		s, _ := open(t, reg, backupOptions())
+		run := s.RunID().String() + "/"
+		for i, c := range captures {
+			last := i == len(captures)-1
+			if kept := s.Capture(run+c.rel, bytes.Repeat([]byte("x"), c.size)); kept == last {
+				t.Errorf("%s: Capture(%s, %d bytes) = %v", name, c.rel, c.size, kept)
+			}
+			if _, ok := s.Captured(run + c.rel); ok == last {
+				t.Errorf("%s: Captured(%s) = %v", name, c.rel, ok)
+			}
+		}
+		select {
+		case r := <-s.Stopped():
+			if r != ingest.ReasonCaptureLimit {
+				t.Errorf("%s: stop reason %q, want %q", name, r, ingest.ReasonCaptureLimit)
+			}
+		default:
+			t.Errorf("%s: not stopped", name)
+		}
+		s.Revoke("test done")
 	}
 
 	// A restore writes nothing, so it keeps nothing.

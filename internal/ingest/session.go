@@ -31,16 +31,25 @@ const (
 	KindRestore = "restore"
 )
 
-// ReasonQuota is the stop reason of a run that wrote more than MaxBytes.
-const ReasonQuota = "quota"
+// Stop reasons the session sets itself.
+const (
+	// ReasonQuota: the run wrote more than MaxBytes.
+	ReasonQuota = "quota"
+	// ReasonCaptureLimit: a body the manifest needs was over its capture
+	// limit, or the kept bodies together were.
+	ReasonCaptureLimit = "capture limit"
+)
 
 const (
 	// reasonRestart is the revoke reason start-up recovery records.
 	reasonRestart = "server restart"
-	// maxCaptureMeta bounds a kept .backup or metadata/*.sql body, and
-	// maxCaptureCount a kept count.txt.
-	maxCaptureMeta  = 1 << 20
-	maxCaptureCount = 64
+	// The capture limits: a kept .backup (it lists every file of the
+	// backup), a metadata/*.sql, a count.txt, and all kept bodies of one
+	// session together.
+	maxCaptureBackup = 64 << 20
+	maxCaptureMeta   = 1 << 20
+	maxCaptureCount  = 64
+	maxCaptureTotal  = 64 << 20
 	// revokeTimeout bounds the audit write of a revoke.
 	revokeTimeout = 10 * time.Second
 	// base32Alphabet is RFC 4648 base32, the access key's characters.
@@ -67,19 +76,21 @@ type Scope struct {
 
 // ObjectRecord is one stored object.
 type ObjectRecord struct {
-	Key    string
+	Key    string // relative to the bucket: "<run-id>/<key>"
 	Size   int64
 	SHA256 string // lower-case hex
 }
 
-// Sink stores the objects a backup writes. Put reads r to EOF and returns
+// Sink stores the objects a backup writes, under bucket-relative keys
+// ("<run-id>/<key>"). Put reads r to EOF and returns
 // what it stored; an error from r (a bad digest, an aborted upload) must
 // abort the object.
 type Sink interface {
 	Put(ctx context.Context, key string, r io.Reader) (ObjectRecord, error)
 }
 
-// Source serves the objects a run may read.
+// Source serves the objects a run may read, by bucket-relative key and
+// prefix.
 type Source interface {
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectRecord, error)
 	List(ctx context.Context, prefix string) ([]ObjectRecord, error)
@@ -317,8 +328,10 @@ type Session struct {
 	written    int64
 	objects    []ObjectRecord
 	captured   map[string][]byte
-	lock       []byte
-	hasLock    bool
+	// capturedBytes is the size of all captured bodies.
+	capturedBytes int64
+	lock          []byte
+	hasLock       bool
 }
 
 // RunID is the run the session was opened for.
@@ -413,10 +426,12 @@ func (s *Session) Objects() []ObjectRecord {
 }
 
 // CaptureLimit returns how many bytes of key's body the session keeps, or 0
-// when it keeps none. Under the run's own prefix it keeps .backup and
-// metadata/*.sql (up to 1 MiB each) and data/.../count.txt (up to 64 bytes),
-// which the manifest is built from. The handler copies at most this much (and
-// one byte more, to see that a body is too large) while the body streams.
+// when it keeps none. key is bucket-relative ("<run-id>/.backup"). Under the
+// run's own prefix it keeps the bodies the manifest is built from: .backup (up
+// to 64 MiB), metadata/*.sql (up to 1 MiB each) and data/.../count.txt (up to
+// 64 bytes), and at most 64 MiB of them in all. The handler copies at most
+// this much, and one byte more so that Capture sees a body that is too large,
+// while the body streams.
 func (s *Session) CaptureLimit(key string) int64 {
 	if s.scope.Write == "" {
 		return 0
@@ -425,7 +440,9 @@ func (s *Session) CaptureLimit(key string) int64 {
 	switch {
 	case !ok:
 		return 0
-	case rel == ".backup", strings.HasPrefix(rel, "metadata/") && strings.HasSuffix(rel, ".sql"):
+	case rel == ".backup":
+		return maxCaptureBackup
+	case strings.HasPrefix(rel, "metadata/") && strings.HasSuffix(rel, ".sql"):
 		return maxCaptureMeta
 	case strings.HasPrefix(rel, "data/") && path.Base(rel) == "count.txt":
 		return maxCaptureCount
@@ -433,22 +450,32 @@ func (s *Session) CaptureLimit(key string) int64 {
 	return 0
 }
 
-// Capture keeps a copy of key's whole body when CaptureLimit allows it, and
-// reports whether it did. The handler calls it after the body's digest was
-// checked. A body over the limit is not kept, so the run's owner finds it
-// missing and fails the run. Handler hook.
+// Capture keeps a copy of key's body when CaptureLimit is not 0, and reports
+// whether it did. The handler calls it after the body's digest was checked.
+// A body over its limit, or one that would take the kept bodies over 64 MiB,
+// is not kept, and it stops the session with ReasonCaptureLimit: the manifest
+// cannot be built without it. Handler hook.
 func (s *Session) Capture(key string, body []byte) bool {
 	limit := s.CaptureLimit(key)
-	if limit == 0 || int64(len(body)) > limit {
+	if limit == 0 {
 		return false
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.captured[key] = bytes.Clone(body)
-	return true
+	total := s.capturedBytes + int64(len(body)) - int64(len(s.captured[key]))
+	ok := int64(len(body)) <= limit && total <= maxCaptureTotal
+	if ok {
+		s.captured[key] = bytes.Clone(body)
+		s.capturedBytes = total
+	}
+	s.mu.Unlock()
+	if !ok {
+		s.Stop(ReasonCaptureLimit)
+	}
+	return ok
 }
 
-// Captured returns a copy of the kept body of key.
+// Captured returns a copy of the kept body of key, a bucket-relative key
+// ("<run-id>/.backup").
 func (s *Session) Captured(key string) ([]byte, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
