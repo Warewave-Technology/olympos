@@ -68,20 +68,20 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <a href="monitoring-overview.html">Monitoring</a>
 <a href="settings.html">Settings</a>
 <div style="margin-top: auto; padding: 14px 10px 0; border-top: 1px solid #3c3836; font-size: 13px">
-<div style="color: #ebdbb2">Lab Admin</div>
-<div class="muted" style="font-size: 12px; margin-top: 2px">admin · dev login</div>
+<div style="color: #ebdbb2">yigit@contoso.com</div>
+<div class="muted" style="font-size: 12px; margin-top: 2px">admin · Entra ID</div>
 </div>
 </nav>
 <main style="flex: 999 1 560px; min-width: 0; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
 <header>
 <div class="muted" style="font-size: 13px"><a href="backups.html">Backups</a> / Configure</div>
-<h1 style="margin: 6px 0 0; font-size: 24px; font-weight: 600">Configure backup · <span class="mono" style="font-size: 20px">metrics-ch</span></h1>
-<p class="muted" style="margin: 4px 0 0; font-size: 13px">lab / lab · ClickHouse 25.8 · discovered by annotation 2 h ago</p>
+<h1 style="margin: 6px 0 0; font-size: 24px; font-weight: 600">Configure backup · <span class="mono" style="font-size: 20px">events-ch</span></h1>
+<p class="muted" style="margin: 4px 0 0; font-size: 13px">eks-fra-data / analytics · ClickHouse 24.8 · discovered by annotation 2 h ago</p>
 </header>
 
-<p class="state">The ingest endpoint is on (ingest.url is set): a new job starts on Native</p>
+<p class="state">The ingest endpoint is on (ingest.url is set) and the target runs ClickHouse 24.8 or later: a new job starts on Native, incrementals Off</p>
 <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
-<ol aria-label="Steps" class="card" style="flex: 1 1 240px; max-width: 300px; list-style: none; margin: 0; padding: 10px; display: flex; flex-direction: column; gap: 4px"><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-1-target.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Target</a><br><span class="muted" style="font-size: 12px">metrics-ch · no TLS</span></span></li><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-2-credentials.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Credentials</a><br><span class="muted" style="font-size: 12px">Where the password comes from</span></span></li><li class="step on" aria-current="step"><span class="num">3</span><span><a href="backup-wizard-clickhouse.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Backup method</a><br><span class="muted" style="font-size: 12px">Native or logical, incrementals</span></span></li><li class="step"><span class="num">4</span><span><a href="backup-wizard-3-schedule.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Destination &amp; schedule</a><br><span class="muted" style="font-size: 12px">Storage, cron, retention</span></span></li><li class="step"><span class="num">5</span><span><a href="backup-wizard-4-review.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Review &amp; test run</a><br><span class="muted" style="font-size: 12px">Dry run before enabling</span></span></li></ol>
+<ol aria-label="Steps" class="card" style="flex: 1 1 240px; max-width: 300px; list-style: none; margin: 0; padding: 10px; display: flex; flex-direction: column; gap: 4px"><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-1-target.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Target</a><br><span class="muted" style="font-size: 12px">events-ch · no TLS</span></span></li><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-2-credentials.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Credentials</a><br><span class="muted" style="font-size: 12px">Where the password comes from</span></span></li><li class="step on" aria-current="step"><span class="num">3</span><span><a href="backup-wizard-clickhouse.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Backup method</a><br><span class="muted" style="font-size: 12px">Native or logical, incrementals</span></span></li><li class="step"><span class="num">4</span><span><a href="backup-wizard-3-schedule.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Destination &amp; schedule</a><br><span class="muted" style="font-size: 12px">Storage, cron, retention</span></span></li><li class="step"><span class="num">5</span><span><a href="backup-wizard-4-review.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Review &amp; test run</a><br><span class="muted" style="font-size: 12px">Dry run before enabling</span></span></li></ol>
 <section class="card" style="flex: 999 1 560px; min-width: 0; max-width: 820px; padding: 28px; display: flex; flex-direction: column; gap: 22px">
 
 <div><h2 style="margin: 0; font-size: 18px; font-weight: 600">Backup method</h2>
@@ -93,8 +93,8 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </fieldset>
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
 <legend class="lbl">Incrementals</legend>
-<label class="opt"><input type="radio" name="inc" style="margin-top: 2px"><span><b style="font-weight: 500">Off</b><br><span class="muted" style="font-size: 12px">Every run is a full backup.</span></span></label>
-<label class="opt on"><input type="radio" name="inc" checked style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination.</span></span></label>
+<label class="opt on"><input type="radio" name="inc" checked style="margin-top: 2px"><span><b style="font-weight: 500">Off</b><br><span class="muted" style="font-size: 12px">Every run is a full backup.</span></span></label>
+<label class="opt"><input type="radio" name="inc" style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination.</span></span></label>
 </fieldset>
 <div class="note">
 <div class="note-title">Before the first native run</div>
@@ -112,7 +112,7 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 </section>
 </div>
 
-<p class="state">The ingest endpoint is off (no ingest.url): Native is disabled with the reason, a new job starts on Logical</p>
+<p class="state">The ingest endpoint is off (no ingest.url): Native is disabled with the reason, a new job starts on Logical. Native is disabled the same way below ClickHouse 24.8 ("Native backups need ClickHouse 24.8 or later; this server runs 24.3.") and for a job with a table filter</p>
 <section class="card" style="max-width: 820px; padding: 28px; display: flex; flex-direction: column; gap: 22px; box-sizing: border-box">
 <div><h2 style="margin: 0; font-size: 18px; font-weight: 600">Backup method</h2>
 <p class="muted" style="margin: 6px 0 0; font-size: 13px">How ClickHouse is backed up. Either way the backup goes to the job's destination, with the same tiers and retention.</p></div>
@@ -137,15 +137,15 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
 <div>
 <div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Backup run</div>
-<h2 id="r-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600"><span class="mono" style="font-size: 18px">metrics-ch</span></h2>
-<div class="muted" style="font-size: 13px; margin-top: 6px">lab · schedule · today 03:30</div>
+<h2 id="r-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600"><span class="mono" style="font-size: 18px">events-ch</span></h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">eks-fra-data · schedule · today 03:30</div>
 </div>
 <button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
 </div>
 <dl class="kv">
-<dt>Result</dt><dd><span class="badge warn">Partial</span> <span class="muted" style="font-size: 12px">1 of 2 copies</span><div style="font-size: 12.5px; margin-top: 4px; color: #fc7f6f">lab-azurite: upload data/analytics/events/202611_3_3_0/data.bin: dial tcp: i/o timeout</div></dd>
+<dt>Result</dt><dd><span class="badge warn">Partial</span> <span class="muted" style="font-size: 12px">1 of 2 copies</span><div style="font-size: 12.5px; margin-top: 4px; color: #fc7f6f">minio-factory: upload data/analytics/events/202611_3_3_0/data.bin: dial tcp: i/o timeout</div></dd>
 <dt>Method</dt><dd><span class="badge info">Native</span> <span class="muted" style="font-size: 12.5px">1,284 objects · ClickHouse <span class="mono">BACKUP</span></span></dd>
-<dt>Destination</dt><dd><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">lab-copies</span></span></dd>
+<dt>Destination</dt><dd><span class="grp"><svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="#fabd2f" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-label="Destination group" role="img"><rect x="5.5" y="1.5" width="9" height="9" rx="2"/><path d="M3.5 5.5h-0A2 2 0 0 0 1.5 7.5v5a2 2 0 0 0 2 2h5a2 2 0 0 0 2-2"/></svg><span class="mono">eu-offsite</span></span></dd>
 <dt>Size</dt><dd>2.4 GB</dd>
 <dt>Duration</dt><dd>1 m 25 s</dd>
 </dl>
@@ -155,18 +155,15 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 <table class="t">
 <thead><tr><th>Destination</th><th>Status</th><th style="text-align: right">Size</th><th>SHA-256</th><th>Tier</th><th>Error</th></tr></thead>
 <tbody>
-<tr><td><span class="mono">lab-minio</span> <span class="badge mute">S3</span></td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">2.4 GB</td><td><span class="mono">5d0e8a3c&hellip;19f2</span></td><td>daily</td><td class="muted">&mdash;</td></tr>
-<tr><td><span class="mono">lab-azurite</span> <span class="badge mute">Azure Blob</span></td><td><span class="badge crit">Failed</span></td><td style="text-align: right">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td style="color: #fc7f6f">upload data/analytics/events/202611_3_3_0/data.bin: dial tcp: i/o timeout</td></tr>
+<tr><td><span class="mono">blob-weu-backups</span> <span class="badge mute">Azure Blob</span></td><td><span class="badge ok">Succeeded</span></td><td style="text-align: right">2.4 GB</td><td><span class="mono">5d0e8a3c&hellip;19f2</span></td><td>daily</td><td class="muted">&mdash;</td></tr>
+<tr><td><span class="mono">minio-factory</span> <span class="badge mute">S3</span></td><td><span class="badge crit">Failed</span></td><td style="text-align: right">&mdash;</td><td class="muted">&mdash;</td><td class="muted">&mdash;</td><td style="color: #fc7f6f">upload data/analytics/events/202611_3_3_0/data.bin: dial tcp: i/o timeout</td></tr>
 </tbody>
 </table>
 </div>
 <div class="muted" style="font-size: 12px; margin-top: 8px">Each copy is verified by size and hash. A native copy is the run's directory; its SHA-256 is the signed manifest's.</div>
 </div>
 <div class="note warn">Not every copy was written. A native run is not repaired: the next run is a full backup.</div>
-<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px">
-<p style="margin: 0; font-size: 12.5px"><b style="font-weight: 500">Restore&hellip;</b> loads this backup into a new target after a second person approves it. A native backup has no commands to restore by hand.</p>
-<a href="backups.html#restore-dialog" class="btn pri">Restore&hellip;</a>
-</div>
+<p class="muted" style="margin: 0; font-size: 12.5px">Native restore is not available yet; the backup is kept. A native backup has no commands to restore by hand.</p>
 </section>
 </main>
 </div>
