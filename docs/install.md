@@ -359,8 +359,8 @@ written, the manifest itself last; every object also carries its `olympos-tier`.
 restart, a lost network, a stopped ClickHouse) leaves incomplete objects behind, and Olympos does not delete
 them. The Bicep module renders the rule `olympos-incomplete`, which deletes objects tagged
 `olympos-state=incomplete` 7 days after creation (parameter `incompleteDays`); for S3 and NFS see
-[S3 and S3-compatible storage](#s3-and-s3-compatible-storage) and [NFS](#nfs). Retagging does not change an
-object's creation time, so the rule never touches a backup that completed.
+[S3 and S3-compatible storage](#s3-and-s3-compatible-storage) and [NFS](#nfs). A backup that completed is not
+affected: the retag replaces the tag, so the rule's filter no longer matches its objects.
 
 > **Time-based immutability defers the delete.** An object under a time-based immutability policy (the
 > container policy of the Bicep module, S3 Object Lock, WORM on an NFS share) cannot be deleted before its
@@ -463,8 +463,8 @@ The `incomplete` rule removes what a native ClickHouse backup left behind when i
 every object with `olympos-state=incomplete` and replaces the tag with `olympos-state=complete` after the
 run's manifest is signed, so only unfinished objects match. It uses `Days: 7`, not `8`: a run is over long
 before then. The `mpu` rule above is separate: it aborts multipart uploads that were never completed, which
-are not objects yet and carry no tags. With Object Lock in compliance mode the delete waits until the
-retention of each object has ended
+are not objects yet and carry no tags. With Object Lock, the expiration only adds a delete marker until the
+lock period of the version has ended
 ([#79](https://github.com/Warewave-Technology/olympos/issues/79) covers the same effect on Azure).
 
 ### NFS
@@ -495,29 +495,70 @@ Protect backups on the storage side with read-only **snapshots** on their own sc
 (NetApp SnapLock, PowerScale SmartLock, ZFS snapshots with holds), and expire files by tier with a
 storage-side job that reads the `.tags.json` sidecars or the manifests.
 
-**Cleaning up incomplete runs.** A native ClickHouse backup writes its files with
-`{"olympos-state":"incomplete","olympos-tier":"daily"}` in the sidecar and rewrites the sidecar with
-`"olympos-state":"complete"` after the run's manifest is signed. A run that died leaves files whose sidecar
-still says `incomplete`. Run this as the storage administrator, on the NFS server or on any host that mounts
-the share with write access (the Olympos server keeps its no-delete permissions). First a dry run, which only lists
-the files of runs that ended more than 7 days ago:
+**Cleaning up incomplete runs.** A native ClickHouse backup writes each file, then its sidecar
+`<file>.tags.json` with `{"olympos-state":"incomplete","olympos-tier":"daily"}`, and rewrites the sidecars
+with `"olympos-state":"complete"` once the run's manifest is signed (the manifest's own sidecar last). A run
+that died can leave four kinds of files behind, and each has its own check below. Run them as the storage
+administrator, on the NFS server or on any host that mounts the share with write access (the Olympos server
+keeps its no-delete permissions). Every check lists first; delete only what the list shows you expect. The
+age is `-mtime +7`, files last changed at least 8 days ago, far longer than a run lasts.
 
 ```sh
-cd /srv/backup-nas/olympos        # the destination path, on the share
-find . -name '*.tags.json' -mtime +7 -exec grep -q '"olympos-state":"incomplete"' {} \; -print0 > /tmp/olympos-incomplete.list
-tr '\0' '\n' < /tmp/olympos-incomplete.list
+cd /srv/backup-nas/olympos &&     # the destination path, on the share
+list=$(mktemp)                    # private list files, not a fixed name in /tmp
 ```
 
-Read the list: each entry is a sidecar, and the file it describes is the same name without `.tags.json`.
-When it shows what you expect, delete the files and their sidecars:
+1. **Files whose sidecar says `incomplete`.** A died run, or a run that failed while writing the sidecars.
+   Dry run:
 
-```sh
-xargs -0 -n1 sh -c 'rm -v -- "$1" "${1%.tags.json}"' _ < /tmp/olympos-incomplete.list
-```
+   ```sh
+   find . -name '*.tags.json' -mtime +7 -exec grep -q '"olympos-state":"incomplete"' {} \; -print0 > "$list"
+   tr '\0' '\n' < "$list"
+   ```
 
-Run it from a scheduled job (cron, a systemd timer on the storage host) if you want it to keep up. On a
-share with WORM or snapshot protection the delete is refused or only affects the live view until the
-protection ends; the incomplete files then stay as long as that protection says
+   Each entry is a sidecar. Delete each file first and its sidecar second, so that an interrupted
+   delete never leaves a file without the sidecar that finds it again (`-r` is GNU xargs; on BSD and macOS
+   leave it out, `xargs` already does nothing for an empty list):
+
+   ```sh
+   xargs -0 -r -n1 sh -c 'rm -v -f -- "${1%.tags.json}" && rm -v -- "$1"' _ < "$list"
+   ```
+
+2. **`*.partial` files.** A write that was killed leaves `<file>.partial`, and a killed retag leaves
+   `<file>.tags.json.<id>.partial`. Olympos never publishes a name ending in `.partial`, so none of them is a
+   backup; one that is 8 days old belongs to no upload that is still running.
+
+   ```sh
+   find . -name '*.partial' -mtime +7 -print0 > "$list"
+   tr '\0' '\n' < "$list"
+   xargs -0 -r rm -v -- < "$list"      # after you have read the list
+   ```
+
+3. **Files with no sidecar.** If the process died after a file was written and before its sidecar, or the
+   sidecar write failed, the file stays with no tag at all, and check 1 cannot find it. This list is for
+   **review only**: a file without a sidecar is also what a backup made by another tool or by an older
+   Olympos looks like. It lists only files inside a run directory (a directory named by the run's UUID) whose
+   run is not complete, that is, whose manifest sidecar `<run-id>.manifest.json.tags.json` does not say
+   `complete`. Every object of a completed run has a sidecar, and a completed run is skipped as a whole.
+
+   ```sh
+   find . -type d -name '????????-????-????-????-????????????' | while IFS= read -r d; do
+     grep -q '"olympos-state":"complete"' "$d.manifest.json.tags.json" 2>/dev/null && continue
+     find "$d" -type f ! -name '*.tags.json' ! -name '*.partial' -mtime +7 | while IFS= read -r f; do
+       [ -e "$f.tags.json" ] || echo "$f"
+     done
+   done
+   ```
+
+   Check that each listed run really has no manifest or an incomplete one, then remove its files with
+   `rm`. Do not automate this check.
+
+4. **Empty directories** of removed runs stay. `find . -mindepth 1 -type d -empty` lists them; remove them
+   with `rmdir` if you want.
+
+`rm "$list"` when you are done. Run checks 1 and 2 from a scheduled job (cron, a systemd timer on the
+storage host) to keep up. On a share with WORM or snapshot protection the delete is refused, or only affects
+the live view, until the protection ends; the files then stay as long as that protection says
 ([#79](https://github.com/Warewave-Technology/olympos/issues/79) tracks the same effect on Azure).
 
 ### Audit raw results

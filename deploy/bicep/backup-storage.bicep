@@ -16,6 +16,7 @@ param longestRetentionDays int = 400
 param dailyDays int = 7
 param weeklyDays int = 28
 param monthlyDays int = 372
+@minValue(1)
 @description('Lifecycle: delete the objects of a native run that never completed (olympos-state=incomplete) after N days.')
 param incompleteDays int = 7
 param logAnalyticsWorkspaceId string = ''
@@ -69,8 +70,8 @@ resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers
 // Retention is done by lifecycle rules on the olympos-tier index tag (SPEC §10.3).
 // The same policy deletes what a native ClickHouse run left behind when it died: its objects carry
 // olympos-state=incomplete until the run's signed manifest is written, and are retagged complete after it.
-// Every rule uses daysAfterCreationGreaterThan, as the tier rules do: it counts from the blob's creation,
-// which retagging it complete does not change.
+// A run that completed is not touched: its objects are retagged olympos-state=complete, so the filter
+// no longer matches them. Every rule uses daysAfterCreationGreaterThan, as the tier rules do.
 // With the container's time-based immutability a delete waits until the immutability period of that
 // version ends (see https://github.com/Warewave-Technology/olympos/issues/79).
 resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
