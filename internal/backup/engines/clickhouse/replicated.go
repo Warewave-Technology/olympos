@@ -69,13 +69,16 @@ func replicatedErr(format string, a ...any) error {
 //
 // The engine is one of the allowlist's Replicated engines, named as
 // ClickHouse names it (unquoted, in its case), and the path and replica are
-// one non-empty string literal each. Refused, with no output: anything the
-// lexer does not read (comments, query parameters, …), more than one
-// statement, another statement or table, a path with {uuid} or a missing
-// path or replica (the server's defaults, refused on an Atomic database
-// outside ON CLUSTER, spike §8), a path or replica that is an expression,
-// a second ENGINE clause or a second Replicated…( call, and a request id
-// requestIDRe does not take.
+// one non-empty string literal each. What follows the engine call is not
+// read, except that it holds no AS at the top level. Refused, with no
+// output: anything the lexer does not read (comments, query parameters,
+// …), more than one statement, another statement or table, ON CLUSTER, a
+// path with {uuid} or a missing path or replica (the server's defaults,
+// refused on an Atomic database outside ON CLUSTER, spike §8), a path or
+// replica that is an expression, a second ENGINE clause or a second
+// Replicated…( call, a query after the engine (… AS SELECT, which would
+// fill the table from another; the allowlist refuses it too), and a request
+// id requestIDRe does not take.
 func rewriteReplicatedEngine(create string, requestID, db, table string) (string, error) {
 	if !requestIDRe.MatchString(requestID) {
 		return "", replicatedErr("the request id %q cannot be in a Keeper path", requestID)
@@ -110,6 +113,9 @@ func rewriteReplicatedEngine(create string, requestID, db, table string) (string
 			return "", replicatedErr("a UUID Olympos does not read")
 		}
 		i += 2
+	}
+	if at(i).is("ON") && at(i+1).is("CLUSTER") {
+		return "", replicatedErr("ON CLUSTER is not restored")
 	}
 	if !at(i).punct("(") {
 		return "", replicatedErr("no column list")
@@ -150,6 +156,14 @@ func rewriteReplicatedEngine(create string, requestID, db, table string) (string
 	}
 	if strings.Contains(strings.ToLower(path[0].val), "{uuid}") {
 		return "", replicatedErr("its Keeper path holds {uuid}")
+	}
+
+	// No query after the engine: CREATE TABLE … AS SELECT would fill the
+	// table from another one when it is created.
+	for _, t := range toks[end+1:] {
+		if t.depth == 0 && t.is("AS") {
+			return "", replicatedErr("a query after its engine (AS)")
+		}
 	}
 
 	// One engine: no other ENGINE clause, and no other Replicated…( call
