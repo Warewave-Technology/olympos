@@ -278,6 +278,27 @@ describe('restore requests on Approvals', () => {
     expect(screen.getByText('What a native restore creates')).toBeInTheDocument();
     expect(screen.queryByText('What a ClickHouse restore creates')).toBeNull();
     await screen.findByRole('button', { name: 'Approve restore' }, T);
+    // a native restore verifies its manifests first and each object while ClickHouse reads it, not one checksum
+    const note = screen.getByText(/^Approving lets the server restore this backup/);
+    expect(note).toHaveTextContent('The backup’s signed manifests are verified before anything is written, and each object while ClickHouse reads it');
+    expect(note).toHaveTextContent('the databases it created stay on the target');
+    expect(note).not.toHaveTextContent('checksum');
+  });
+
+  it('tells the checker of a logical restore that the checksum is verified first', async () => {
+    // the PostgreSQL request another person opened (an earlier test may have approved it)
+    const rq = db.restoreRequests.find((r) => r.engine === 'postgresql' && r.maker.object_id === db.people.selin.object_id)!;
+    const saved = rq.status;
+    rq.status = 'pending';
+    try {
+      await renderApp(`/approvals?view=all&restore=${rq.id}`);
+      await screen.findByRole('button', { name: 'Approve restore' }, T);
+      const note = screen.getByText(/^Approving lets the server restore this backup/);
+      expect(note).toHaveTextContent('The backup’s checksum is verified before anything is written, and the target is checked again when the restore starts.');
+      expect(note).not.toHaveTextContent('signed manifests');
+    } finally {
+      rq.status = saved;
+    }
   });
 
   it('says when a native request leaves nothing out', async () => {

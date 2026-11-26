@@ -274,7 +274,7 @@ request was approved: …*): open a new request.
 4. It runs `RESTORE DATABASE … EXCEPT TABLES <what is left out> FROM S3('<ingest.url>/olympos/<run id>/', …)`.
    ClickHouse reads the backup through the endpoint, which serves only the objects the verified manifests list,
    whole, and checks each one's SHA-256 while it streams; an object that does not match is cut off, and the
-   request fails naming it. ClickHouse's server-side copy for S3 disks is off (`allow_s3_native_copy = 0`), so
+   request fails naming it, with the databases of steps 2 and 3 left in place. ClickHouse's server-side copy for S3 disks is off (`allow_s3_native_copy = 0`), so
    nothing is copied past that check.
 5. When the `RESTORE` is done, the restored databases must hold exactly the allowed objects (and the inner tables
    of the allowed materialized views), and every allowed table the backup's row count. Anything else fails the

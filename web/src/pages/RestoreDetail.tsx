@@ -246,8 +246,10 @@ export function RestoreDetail({ id }: { id: string }) {
         {pending && mayDecide && (
           <>
             <div className="note">
-              Approving lets the server restore this backup into the target as soon as its agent is connected; it must start within 24 hours. The backup&apos;s checksum is verified before anything is written, and the
-              target is checked again when the restore starts.
+              Approving lets the server restore this backup into the target as soon as its agent is connected; it must start within 24 hours.{' '}
+              {rq.options.native
+                ? 'The backup’s signed manifests are verified before anything is written, and each object while ClickHouse reads it: a changed object fails the restore, and the databases it created stay on the target. The target is checked again when the restore starts.'
+                : 'The backup’s checksum is verified before anything is written, and the target is checked again when the restore starts.'}
             </div>
             <Field label="Comment (required to reject)" htmlFor="rs-comment" error={commentErr ?? fieldError(reject.error, 'comment')}>
               <textarea
