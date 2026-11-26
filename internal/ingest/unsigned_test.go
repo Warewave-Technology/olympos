@@ -1,13 +1,16 @@
 package ingest_test
 
 import (
-	"crypto/md5"
 	"crypto/tls"
-	"encoding/base64"
+	"encoding/xml"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/minio/minio-go/v7/pkg/signer"
 
 	"github.com/Warewave-Technology/olympos/internal/ingest"
 )
@@ -16,6 +19,8 @@ import (
 // PayloadSigningPolicy::Never sends UNSIGNED-PAYLOAD on every request), so
 // the endpoint takes UNSIGNED-PAYLOAD on its TLS listener and still refuses
 // it over plain HTTP (devMode only), where the signature must cover the body.
+// A PutObject or UploadPart with UNSIGNED-PAYLOAD needs a signed Content-MD5,
+// which ClickHouse 24.8 sends on both.
 
 func TestVerifyUnsignedPayloadOverTLSOnly(t *testing.T) {
 	unsigned := func(r *http.Request) { r.Header.Set("X-Amz-Content-Sha256", ingest.UnsignedPayload) }
@@ -47,14 +52,14 @@ func TestHandlerUnsignedPayloadOverTLS(t *testing.T) {
 	a := e.backup(t)
 	unsigned := withHeader("X-Amz-Content-Sha256", ingest.UnsignedPayload)
 	target := "/olympos/" + a.prefix + "data/x.bin"
-	if r := e.do(t, a.cred, http.MethodPut, target, "body", unsigned); r.status != http.StatusOK {
+	if r := e.do(t, a.cred, http.MethodPut, target, "body", unsigned, md5Header("body")); r.status != http.StatusOK {
 		t.Fatalf("PUT: %s", r)
 	}
 	if p := a.sink.all(); len(p) != 1 || string(p[0].body) != "body" || p[0].err != nil {
 		t.Fatalf("sink: %+v", p)
 	}
 	lock := "/olympos/" + a.prefix + ".lock"
-	if r := e.do(t, a.cred, http.MethodPut, lock, "lock-id", unsigned); r.status != http.StatusOK {
+	if r := e.do(t, a.cred, http.MethodPut, lock, "lock-id", unsigned, md5Header("lock-id")); r.status != http.StatusOK {
 		t.Fatalf("PUT .lock: %s", r)
 	}
 	if r := e.do(t, a.cred, http.MethodGet, lock, "", unsigned); r.status != http.StatusOK || r.body != "lock-id" {
@@ -65,9 +70,68 @@ func TestHandlerUnsignedPayloadOverTLS(t *testing.T) {
 	if r := e.do(t, a.cred, http.MethodDelete, lock, "", unsigned); r.status != http.StatusNoContent {
 		t.Fatalf("DELETE .lock: %s", r)
 	}
+
+	// Multipart, as ClickHouse sends it over HTTPS: parts with a signed
+	// Content-MD5, a Complete without one (its part list must match the
+	// parts received).
+	key := a.prefix + "data/big.bin"
+	rep := e.do(t, a.cred, http.MethodPost, "/olympos/"+key+"?uploads", "", unsigned)
+	var up struct{ UploadId string }
+	if err := xml.Unmarshal([]byte(rep.body), &up); err != nil || up.UploadId == "" {
+		t.Fatalf("initiate: %s", rep)
+	}
+	partURL := func(n int) string { return fmt.Sprintf("/olympos/%s?partNumber=%d&uploadId=%s", key, n, up.UploadId) }
+	if r := e.do(t, a.cred, http.MethodPut, partURL(1), "part-one", unsigned); r.status != http.StatusForbidden ||
+		!strings.Contains(r.body, "needs a Content-MD5") {
+		t.Errorf("part without Content-MD5: %s", r)
+	}
+	p1 := etagOf(t, e.do(t, a.cred, http.MethodPut, partURL(1), "part-one", unsigned, md5Header("part-one")))
+	p2 := etagOf(t, e.do(t, a.cred, http.MethodPut, partURL(2), "part-two", unsigned, md5Header("part-two")))
+	if r := e.do(t, a.cred, http.MethodPost, "/olympos/"+key+"?uploadId="+up.UploadId, completeXML(p1, p2), unsigned); r.status != http.StatusOK {
+		t.Fatalf("complete: %s", r)
+	}
+	found := false
+	for _, p := range a.sink.all() {
+		found = found || p.key == key && string(p.body) == "part-onepart-two" && p.err == nil
+	}
+	if !found {
+		t.Fatalf("multipart object not stored: %+v", a.sink.all())
+	}
+
+	// A PutObject with UNSIGNED-PAYLOAD needs a Content-MD5, and the
+	// signature must cover it.
+	noMD5 := e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/no-md5.bin", "body", unsigned)
+	wantRefused(t, noMD5, http.StatusForbidden, "AccessDenied")
+	if !strings.Contains(noMD5.body, "needs a Content-MD5") {
+		t.Errorf("no Content-MD5: %s", noMD5)
+	}
+	req, err := http.NewRequest(http.MethodPut, e.srv.URL+"/olympos/"+a.prefix+"data/unsigned-md5.bin", strings.NewReader("body"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Amz-Content-Sha256", ingest.UnsignedPayload)
+	signed := signer.SignV4(*req, a.cred.AccessKey, a.cred.Secret, "", testRegion)
+	md5Header("body")(signed) // after signing: not a signed header
+	notCovered := e.send(t, signed)
+	wantRefused(t, notCovered, http.StatusForbidden, "AccessDenied")
+	if !strings.Contains(notCovered.body, "needs a signed Content-MD5") {
+		t.Errorf("unsigned Content-MD5: %s", notCovered)
+	}
+	notStopped(t, a.s)
+
 	// Content-MD5 is still checked (a mismatch stops the run).
-	sum := md5.Sum([]byte("other"))
-	wrongMD5 := withHeader("Content-MD5", base64.StdEncoding.EncodeToString(sum[:]))
-	wantRefused(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/y.bin", "body", unsigned, wrongMD5),
+	wantRefused(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/y.bin", "body", unsigned, md5Header("other")),
 		http.StatusBadRequest, "BadDigest")
+}
+
+// Over plain HTTP (devMode) the endpoint refuses UNSIGNED-PAYLOAD, signed
+// Content-MD5 or not.
+func TestHandlerUnsignedPayloadOverHTTP(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	wantRefused(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+"data/x.bin", "body",
+		withHeader("X-Amz-Content-Sha256", ingest.UnsignedPayload), md5Header("body")), http.StatusForbidden, "AccessDenied")
+	if p := a.sink.all(); len(p) != 0 {
+		t.Fatalf("sink got %d puts", len(p))
+	}
 }
