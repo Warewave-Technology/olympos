@@ -103,7 +103,7 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 <li>allow egress from the ClickHouse pods to that host and port, for example with a NetworkPolicy (<a href="../install.md">docs/install.md</a>);</li>
 <li>ClickHouse must trust the endpoint's certificate: one from your PKI or a public CA, or else the Olympos CA in <span class="mono">openSSL.client.caConfig</span>.</li>
 </ul>
-<div style="margin-top: 6px">Each run gets its own credential for its own backup only, revoked when the run ends. The cluster's transfer mode does not apply: the backup does not pass through the agent.</div>
+<div style="margin-top: 6px">Each run gets its own credential for its own backup only, revoked when the run ends. The backup data does not pass through the agent; the <span class="mono">BACKUP</span> statement, with the run's credential, does, in the cluster's transfer mode (in the clear in <span class="mono">compressed</span> mode).</div>
 </div>
 <div style="display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid #3c3836">
 <a href="backup-wizard-2-credentials.html" class="btn">Back</a>
