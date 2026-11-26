@@ -2,6 +2,8 @@ image: {repository: olympos-server, tag: e2e, pullPolicy: Never}
 workloadIdentity: {enabled: false}
 service: {type: NodePort, port: 80, nodePort: 30080}
 gatewayService: {type: ClusterIP, annotations: {}}
+# ClickHouse pods in the lab cluster dial the ingest endpoint here (olympos.ingest.url).
+ingestService: {type: ClusterIP, port: 9444}
 localKeyVault: {persistence: {enabled: true}}
 # Olympos' own database: the chart's bundled PostgreSQL (default).
 postgresql: {size: 1Gi}
@@ -14,6 +16,10 @@ olympos:
   targetTLS: {caBundleFile: /etc/olympos/target-ca/ca.crt}
   # F18 e2e (M7): agent.offline after 20 s instead of 5 min.
   agents: {offlineAlertAfter: 20s}
+  # Native ClickHouse backups (docs/install.md §5): the ingest endpoint on its
+  # in-cluster Service olympos-ingest (ClusterIP, :9444), with a certificate
+  # from the internal CA. native-ch and restore-native-ch trust that CA.
+  ingest: {url: "https://olympos-ingest.olympos.svc:9444"}
 extraVolumes:
 - name: target-ca
   configMap: {name: target-ca}

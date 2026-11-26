@@ -57,7 +57,7 @@ source test/e2e/lib.sh
 reset_olympos
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
-for d in restore-pg restore-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
+for d in restore-pg restore-ch restore-native-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
 init_vault vault vault
 init_vault openbao bao
 init_vault restore-vault vault
@@ -118,6 +118,9 @@ Backup destinations (Settings > Destinations > New destination):
 - NFS: mount "lab" (a PVC standing in for an NFS export), path /var/lib/olympos/nfs/lab/olympos
 Credentials: orders-pg (lab) backup / CANARY-lab-pg-password; payments-pg (edge) backup / edge-pg-password;
              metrics-ch (lab) backup / CANARY-lab-ch-password
+             native-ch (lab, ClickHouse 24.8 for native backups) backup / CANARY-lab-native-ch-password
+               (only the privileges docs/clickhouse-backups.md lists, on the databases m10, m10wire and shop;
+               lab setup as admin / CANARY-lab-native-ch-admin-password)
 
 Vaults (TLS, raft) — root tokens for Vaults > Configure (used once, not stored by Olympos):
   lab/vault   (HashiCorp): $ROOT
@@ -127,11 +130,20 @@ Vaults (TLS, raft) — root tokens for Vaults > Configure (used once, not stored
 Restore targets (new, empty servers in lab; Backups > a run > Restore…, docs/restore.md):
 - restore-pg    PostgreSQL 16, TLS (lab CA): postgres / CANARY-lab-restore-pg-password (superuser)
 - restore-ch    ClickHouse, no TLS (set the lab cluster's transfer mode to compressed): restore / CANARY-lab-restore-ch-password
+- restore-native-ch  ClickHouse 24.8 for native restores of native-ch, shares native-ch's Keeper: restore / CANARY-lab-restore-native-ch-password
 - restore-vault Vault, raft, TLS, initialized and unsealed, NOT configured in Olympos; token for the restore:
   lab/restore-vault (HashiCorp, new Vault): $RESTORE_ROOT
   After a restore it holds lab/vault's data: unseal it with lab/vault's key ($WORK/vault-init.json):
     kubectl -n lab exec deploy/restore-vault -- vault operator unseal <unseal_keys_b64[0]>
-  ./test/e2e/env.sh empties all three again (and resets Olympos).
+  ./test/e2e/env.sh empties all four again (and resets Olympos).
+
+Native ClickHouse backups (docs/clickhouse-backups.md): the server's ingest endpoint is on
+(https://olympos-ingest.olympos.svc:9444, internal-CA certificate). native-ch and restore-native-ch trust the
+Olympos CA once it is in the ConfigMap lab/olympos-ca: after the lab cluster's agent is installed, copy it and
+restart both (the docs tour's clickhouseNative stage does this):
+  kubectl -n olympos-system get configmap olympos-agent-ca -o jsonpath='{.data.ca\.crt}' > /tmp/olympos-ca.crt
+  kubectl -n lab create configmap olympos-ca --from-file=ca.crt=/tmp/olympos-ca.crt --dry-run=client -o yaml | kubectl apply -f -
+  kubectl -n lab rollout restart deploy/native-ch deploy/restore-native-ch
 
 Synthetic monitoring (Monitoring > Synthetic; docs/synthetic-monitoring.md):
 - Settings > Synthetic monitoring: add the allowlist rule olympos-lab.test (suffix).

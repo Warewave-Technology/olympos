@@ -23,7 +23,7 @@ init_vault() { # deploy binary
 # reset_olympos: back to an empty installation — agents (and probes) removed
 # from both lab clusters, synth-web back to ok, Olympos database and local key vault wiped, lab Vault/OpenBao
 # uninitialized again and the restore targets (restore-pg, restore-ch,
-# restore-vault) empty again (their data is an emptyDir). Expects $WORK and the lab
+# restore-native-ch, restore-vault) empty again (their data is an emptyDir). Expects $WORK and the lab
 # kubeconfig in $KUBECONFIG. Safe to run when nothing is installed yet.
 # reset_olympos_db stops the server and drops its database and local key
 # vault: the bundled PostgreSQL and both volumes go, helm upgrade recreates
@@ -52,7 +52,7 @@ reset_olympos() {
   fi
   reset_olympos_db
   kubectl -n lab rollout restart deploy/vault deploy/openbao >/dev/null 2>&1 || true
-  kubectl -n lab rollout restart deploy/restore-pg deploy/restore-ch deploy/restore-vault >/dev/null 2>&1 || true
+  kubectl -n lab rollout restart deploy/restore-pg deploy/restore-ch deploy/restore-native-ch deploy/restore-vault >/dev/null 2>&1 || true
   # synth-web keeps its toggle (ok / 500 / slow) in memory: back to ok.
   kubectl -n lab rollout restart deploy/synth-web >/dev/null 2>&1 || true
   [ ! -f "$edge" ] || KUBECONFIG=$edge kubectl -n lab rollout restart deploy/synth-web >/dev/null 2>&1 || true

@@ -196,6 +196,120 @@ spec:
   selector: {app: metrics-ch}
   ports: [{name: native, port: 9000}, {name: http, port: 8123}]
 ---
+# native-ch: the lab's native-ready ClickHouse (docs/clickhouse-backups.md):
+# 24.8 with an embedded Keeper, trusting the Olympos CA through the config.d
+# file docs/install.md shows (olympos-ingest-ca.xml), with
+# select_from_system_db_requires_grant on and a backup user that has only the
+# privileges docs/clickhouse-backups.md lists. The CA itself is in the
+# ConfigMap olympos-ca, which the tests and the docs tour copy from the agent's
+# olympos-agent-ca (Olympos gets a new CA with every reset; the pods restart to
+# load it). Logins: admin (lab setup, SQL user management) and backup; the
+# user default answers only on localhost (a dictionary's local source).
+# TestM10ClickHouseNative owns the databases m10 and m10wire, the docs tour
+# shop. Data on an emptyDir: a new pod is an empty server.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: native-ch-config, namespace: lab}
+data:
+  olympos-ingest-ca.xml: |
+    <clickhouse>
+      <openSSL>
+        <client>
+          <caConfig>/etc/clickhouse-server/olympos-ca/ca.crt</caConfig>
+        </client>
+      </openSSL>
+    </clickhouse>
+  keeper.xml: |
+    <clickhouse>
+      <keeper_server>
+        <tcp_port>9181</tcp_port>
+        <server_id>1</server_id>
+        <log_storage_path>/var/lib/clickhouse/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse/coordination/snapshots</snapshot_storage_path>
+        <raft_configuration><server><id>1</id><hostname>localhost</hostname><port>9234</port></server></raft_configuration>
+      </keeper_server>
+      <zookeeper><node><host>localhost</host><port>9181</port></node></zookeeper>
+      <macros><shard>01</shard><replica>native-ch</replica></macros>
+    </clickhouse>
+  access.xml: |
+    <clickhouse>
+      <access_control_improvements>
+        <select_from_system_db_requires_grant>true</select_from_system_db_requires_grant>
+      </access_control_improvements>
+    </clickhouse>
+  # The backup user's grants are the list in docs/clickhouse-backups.md
+  # ("The backup user's privileges"); TestM10ClickHouseNative compares them.
+  users.xml: |
+    <clickhouse>
+      <users>
+        <default>
+          <networks replace="replace"><ip>::1</ip><ip>127.0.0.1</ip></networks>
+        </default>
+        <admin>
+          <password>CANARY-lab-native-ch-admin-password</password>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </admin>
+        <backup>
+          <password>CANARY-lab-native-ch-password</password>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <grants>
+            <query>GRANT BACKUP ON m10.*</query>
+            <query>GRANT BACKUP ON m10wire.*</query>
+            <query>GRANT BACKUP ON shop.*</query>
+            <query>GRANT SELECT ON system.tables</query>
+            <query>GRANT SELECT ON system.clusters</query>
+            <query>GRANT SELECT ON system.parts</query>
+            <query>GRANT SELECT ON system.processes</query>
+            <query>GRANT SELECT ON system.backups</query>
+          </grants>
+        </backup>
+      </users>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: native-ch, namespace: lab}
+spec:
+  selector: {matchLabels: {app: native-ch}}
+  template:
+    metadata: {labels: {app: native-ch}}
+    spec:
+      containers:
+      - name: ch
+        image: clickhouse/clickhouse-server:24.8
+        ports: [{containerPort: 9000, name: native}, {containerPort: 8123, name: http}, {containerPort: 9181, name: keeper}]
+        readinessProbe: {httpGet: {path: /ping, port: 8123}, periodSeconds: 3}
+        volumeMounts:
+        - {name: config, mountPath: /etc/clickhouse-server/config.d/olympos-ingest-ca.xml, subPath: olympos-ingest-ca.xml}
+        - {name: config, mountPath: /etc/clickhouse-server/config.d/keeper.xml, subPath: keeper.xml}
+        - {name: config, mountPath: /etc/clickhouse-server/config.d/access.xml, subPath: access.xml}
+        - {name: config, mountPath: /etc/clickhouse-server/users.d/lab-users.xml, subPath: users.xml}
+        - {name: olympos-ca, mountPath: /etc/clickhouse-server/olympos-ca, readOnly: true}
+        - {name: data, mountPath: /var/lib/clickhouse}
+      volumes:
+      - name: config
+        configMap: {name: native-ch-config}
+      - name: olympos-ca
+        configMap: {name: olympos-ca, optional: true}
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: native-ch
+  namespace: lab
+  annotations:
+    olympos.io/backup: clickhouse
+    olympos.io/port: native
+spec:
+  selector: {app: native-ch}
+  ports: [{name: native, port: 9000}, {name: http, port: 8123}, {name: keeper, port: 9181}]
+---
 # Restore targets (docs/restore.md "Restore from the UI"): new, empty servers
 # that a backup of the lab's sources is restored into. Their data is an
 # emptyDir (reset_olympos restarts them, which empties them again).
@@ -275,6 +389,76 @@ metadata:
     olympos.io/port: native
 spec:
   selector: {app: restore-ch}
+  ports: [{name: native, port: 9000}, {name: http, port: 8123}]
+---
+# restore-native-ch: the ClickHouse 24.8 that native backups of native-ch are
+# restored into (docs/restore.md "A native backup"). It trusts the Olympos CA
+# the same way (it reads the backup through the ingest endpoint) and uses
+# native-ch's Keeper, so a restore shows that it leaves the source's replicas
+# alone. Admin login restore; the user default answers only on localhost.
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: restore-native-ch-config, namespace: lab}
+data:
+  keeper.xml: |
+    <clickhouse>
+      <zookeeper><node><host>native-ch.lab.svc</host><port>9181</port></node></zookeeper>
+      <macros><shard>01</shard><replica>restore-native-ch</replica></macros>
+    </clickhouse>
+  users.xml: |
+    <clickhouse>
+      <users>
+        <default>
+          <networks replace="replace"><ip>::1</ip><ip>127.0.0.1</ip></networks>
+        </default>
+        <restore>
+          <password>CANARY-lab-restore-native-ch-password</password>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </restore>
+      </users>
+    </clickhouse>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: restore-native-ch, namespace: lab}
+spec:
+  selector: {matchLabels: {app: restore-native-ch}}
+  template:
+    metadata: {labels: {app: restore-native-ch}}
+    spec:
+      containers:
+      - name: ch
+        image: clickhouse/clickhouse-server:24.8
+        ports: [{containerPort: 9000, name: native}, {containerPort: 8123, name: http}]
+        readinessProbe: {httpGet: {path: /ping, port: 8123}, periodSeconds: 3}
+        volumeMounts:
+        - {name: native-config, mountPath: /etc/clickhouse-server/config.d/olympos-ingest-ca.xml, subPath: olympos-ingest-ca.xml}
+        - {name: config, mountPath: /etc/clickhouse-server/config.d/keeper.xml, subPath: keeper.xml}
+        - {name: config, mountPath: /etc/clickhouse-server/users.d/lab-users.xml, subPath: users.xml}
+        - {name: olympos-ca, mountPath: /etc/clickhouse-server/olympos-ca, readOnly: true}
+        - {name: data, mountPath: /var/lib/clickhouse}
+      volumes:
+      - name: native-config
+        configMap: {name: native-ch-config}
+      - name: config
+        configMap: {name: restore-native-ch-config}
+      - name: olympos-ca
+        configMap: {name: olympos-ca, optional: true}
+      - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: restore-native-ch
+  namespace: lab
+  annotations:
+    olympos.io/backup: clickhouse
+    olympos.io/port: native
+spec:
+  selector: {app: restore-native-ch}
   ports: [{name: native, port: 9000}, {name: http, port: 8123}]
 ---
 # restore-vault: a new Vault (raft, TLS from the lab CA; secret
