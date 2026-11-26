@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,7 +224,8 @@ func copyPaths(t *testing.T, r backup.Run, destID string) (manifest, dir string)
 
 // flipByte changes one byte of a blob (in place, same size) and returns how
 // to put it back, tags included: the destination's SAS cannot overwrite,
-// Azurite's account key can.
+// Azurite's account key can. Putting it back runs once; it is also a
+// cleanup of t, so a failure leaves the shared lab's backup unchanged.
 func flipByte(t *testing.T, az *azblob.Client, path string, at func([]byte) int) (restore func()) {
 	t.Helper()
 	ctx := context.Background()
@@ -243,15 +245,20 @@ func flipByte(t *testing.T, az *azblob.Client, path string, at func([]byte) int)
 	if _, err := az.UploadBuffer(ctx, "backups", path, changed, nil); err != nil {
 		t.Fatalf("overwrite %s: %v", path, err)
 	}
-	return func() {
-		t.Helper()
-		if _, err := az.UploadBuffer(ctx, "backups", path, orig, nil); err != nil {
-			t.Fatalf("put back %s: %v", path, err)
-		}
-		if _, err := bc.SetTags(ctx, keep, nil); err != nil {
-			t.Fatalf("tags of %s: %v", path, err)
-		}
+	var once sync.Once
+	restore = func() {
+		once.Do(func() {
+			if _, err := az.UploadBuffer(ctx, "backups", path, orig, nil); err != nil {
+				t.Errorf("put back %s: %v", path, err)
+				return
+			}
+			if _, err := bc.SetTags(ctx, keep, nil); err != nil {
+				t.Errorf("tags of %s: %v", path, err)
+			}
+		})
 	}
+	t.Cleanup(restore)
+	return restore
 }
 
 // signedFromClickHouse sends one SigV4-signed request with a run's
@@ -302,10 +309,15 @@ func TestM10ClickHouseNative(t *testing.T) {
 	maker := grantedUser(t, admin, "native-maker", "operator")
 	checker := grantedUser(t, admin, "native-checker", "operator")
 
-	// The lab ClickHouse servers have no TLS on the native port.
+	// The lab ClickHouse servers have no TLS on the native port. The cluster
+	// gets its own transfer mode back afterwards.
+	var cluster struct {
+		TransferMode string `json:"transfer_mode"`
+	}
+	admin.must("GET", "/clusters/"+labClusterID, nil, &cluster, 200)
 	admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "compressed"}, nil, 200)
 	t.Cleanup(func() {
-		admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": "e2e-tls"}, nil, 200)
+		admin.must("PATCH", "/clusters/"+labClusterID, map[string]any{"transfer_mode": cluster.TransferMode}, nil, 200)
 	})
 	syncNativeCA(t)
 
@@ -473,6 +485,9 @@ spec:
 		return chQuery(t, nativeRestoreCH, "restore", nativeRestorePW, sql)
 	}
 	dropTarget := func(t *testing.T) { dstQ(t, "DROP DATABASE IF EXISTS m10 SYNC") }
+	// A failed subtest leaves no restored database (and with it, no
+	// /olympos-restore/… znode in native-ch's Keeper).
+	t.Cleanup(func() { dropTarget(t) })
 	target := restoreTargetID(t, admin, nativeRestoreCH)
 	restoreIn := func(r backup.Run, destID string) map[string]any {
 		return map[string]any{"run_id": r.ID, "copy_destination_id": destID, "target_id": target, "databases": []string{"m10"},
@@ -512,7 +527,7 @@ spec:
 			for _, o := range ck.Native.Objects {
 				decided[o.Name] = o
 			}
-			for _, name := range []string{"events", "daily", "daily_mv", "events_repl", "events_by_service", "services", "service_team"} {
+			for _, name := range []string{"events", "daily", "daily_mv", "events_repl", "events_by_service", "events_definer", "services", "service_team"} {
 				if !decided[name].Allowed {
 					t.Errorf("%s left out: %+v", name, decided[name])
 				}
@@ -520,7 +535,6 @@ spec:
 			if f := decided["feed"]; f.Allowed || f.Reason == "" {
 				t.Errorf("the URL table is not left out with a reason: %+v", f)
 			}
-			t.Logf("events_definer: %+v", decided["events_definer"])
 
 			rq := openRestore(t, maker, in)
 			var seen nativeRequest
@@ -538,9 +552,6 @@ spec:
 				t.Errorf("restored data %v, source at the run %v", got, tc.want)
 			}
 			for o, want := range srcDDL {
-				if o == "events_definer" && !decided[o].Allowed {
-					continue
-				}
 				if got := dstQ(t, "SHOW CREATE m10."+o+" FORMAT TSVRaw"); got != want {
 					t.Errorf("m10.%s on the target:\n%s\nsource:\n%s", o, got, want)
 				}
@@ -559,12 +570,11 @@ spec:
 			if got := dstQ(t, "SELECT countMerge(n) FROM m10.daily WHERE d = '2030-01-01'"); got != "123" {
 				t.Errorf("materialized view on the target: %q rows for the new day", got)
 			}
-			// The DEFINER does not exist on the target (it has no user admin).
-			if decided["events_definer"].Allowed {
-				if out, err := chQueryOK(t, nativeRestoreCH, "restore", nativeRestorePW, "SELECT count() FROM m10.events_definer"); err == nil ||
-					!strings.Contains(out, "UNKNOWN_USER") {
-					t.Errorf("a view whose DEFINER is missing on the target: %v %s", err, out)
-				}
+			// The DEFINER view is restored, and its definer does not exist on
+			// the target (it has no user admin): docs/restore.md, Definers.
+			if out, err := chQueryOK(t, nativeRestoreCH, "restore", nativeRestorePW, "SELECT count() FROM m10.events_definer"); err == nil ||
+				!strings.Contains(out, "UNKNOWN_USER") {
+				t.Errorf("a view whose DEFINER is missing on the target: %v %s", err, out)
 			}
 			// The Replicated table has its own Keeper path; the source's
 			// replica set is untouched.
@@ -798,8 +808,9 @@ func nativeCredential(t *testing.T, admin *client, destID string) {
 	if masked == "0" {
 		t.Errorf("no masked BACKUP of run %s in system.query_log", queued.ID)
 	}
-	files, _ := runOK(t, "kubectl", "-n", "lab", "exec", "deploy/"+nativeCH, "-c", "ch", "--", "sh", "-c",
-		"cat /var/log/clickhouse-server/*.log 2>/dev/null | grep -c -F -e '"+secret+"' || true")
+	// The secret goes in on stdin, not on the exec request's command line.
+	files, _ := runStdin(t, secret+"\n", "kubectl", "-n", "lab", "exec", "-i", "deploy/"+nativeCH, "-c", "ch", "--", "sh", "-c",
+		`read -r s; cat /var/log/clickhouse-server/*.log 2>/dev/null | grep -c -F -e "$s" || true`)
 	if strings.TrimSpace(files) != "0" {
 		t.Errorf("the run's secret in native-ch's log files: %s", files)
 	}
