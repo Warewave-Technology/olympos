@@ -48,25 +48,33 @@ func TestNativeRestoreCheck(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		want := []backup.NativeDecision{{Database: "shop", Name: "orders", Kind: "table", Allowed: true}}
+		// The check keeps the databases and the decisions only: nothing of
+		// the parsed chain outlives its slot.
 		got, err := backup.CheckNativeRestore(ctx, db, b, fakeEngine{}, restoreCfg(e), src, nil, quietLog())
-		if err != nil {
-			t.Fatalf("copy %d: %v", i, err)
+		if err != nil || !reflect.DeepEqual(got.Databases, []string{"shop"}) || !reflect.DeepEqual(got.Objects, want) || got.Manifests != nil {
+			t.Fatalf("copy %d: %+v, %v", i, got, err)
 		}
-		if !reflect.DeepEqual(got.Runs, []uuid.UUID{full, inc}) || !reflect.DeepEqual(got.Databases, []string{"shop"}) ||
-			len(got.Manifests) != 2 {
-			t.Fatalf("copy %d: %+v", i, got)
-		}
-		if want := []backup.NativeDecision{{Database: "shop", Name: "orders", Kind: "table", Allowed: true}}; !reflect.DeepEqual(got.Objects, want) {
-			t.Fatalf("copy %d decisions: %+v", i, got.Objects)
-		}
-		// The source serves the chain: the full's metadata, under its run.
-		rc, rec, err := got.Source().Open(ctx, full.String()+"/metadata/shop/orders.sql")
-		if err != nil || rec.Size == 0 {
-			t.Fatalf("copy %d: the full's metadata: %v", i, err)
-		}
-		_ = rc.Close()
-		if _, _, err := got.Source().Open(ctx, uuid.NewString()+"/.backup"); err == nil {
-			t.Fatalf("copy %d: the source serves an object outside the chain", i)
+		// Inside the slot: the chain, the full first, and its source.
+		used := false
+		err = backup.WithNativeRestore(ctx, db, b, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
+			used = true
+			if !reflect.DeepEqual(n.Runs, []uuid.UUID{full, inc}) || len(n.Manifests) != 2 || !reflect.DeepEqual(n.Objects, want) {
+				t.Fatalf("copy %d: %+v", i, n)
+			}
+			// The source serves the chain: the full's metadata, under its run.
+			rc, rec, err := n.Source().Open(ctx, full.String()+"/metadata/shop/orders.sql")
+			if err != nil || rec.Size == 0 {
+				t.Fatalf("copy %d: the full's metadata: %v", i, err)
+			}
+			_ = rc.Close()
+			if _, _, err := n.Source().Open(ctx, uuid.NewString()+"/.backup"); err == nil {
+				t.Fatalf("copy %d: the source serves an object outside the chain", i)
+			}
+			return nil
+		})
+		if err != nil || !used {
+			t.Fatalf("copy %d: %v (used %v)", i, err, used)
 		}
 	}
 
@@ -113,9 +121,12 @@ func TestNativeRestoreBaseDoesNotVerify(t *testing.T) {
 	if want := []backup.NativeDecision{{Database: "shop", Name: "orders", Kind: "table", Reason: "the backup's manifest does not verify"}}; !reflect.DeepEqual(got.Objects, want) {
 		t.Fatalf("decisions: %+v", got.Objects)
 	}
-	if got.Manifests != nil || got.Source() != nil {
-		t.Fatal("a chain that does not verify is bound for reads")
-	}
+	_ = backup.WithNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
+		if n.Manifests != nil || n.Source() != nil {
+			t.Fatal("a chain that does not verify is bound for reads")
+		}
+		return nil
+	})
 	// The other destination's copies are intact: that copy restores.
 	src2, err := backup.FindRestoreSource(ctx, db, inc, &e.Dest2)
 	if err != nil {
@@ -226,5 +237,71 @@ func TestNativeRunKeptAs(t *testing.T) {
 		if r, err := backup.LoadRun(ctx, db, run); err != nil || r.KeptAs != want {
 			t.Fatalf("run %s kept as %q, want %q (%v)", run, r.KeptAs, want, err)
 		}
+	}
+}
+
+// TestNativeRestoreCredentialRecords: a run with two records of its chain
+// that differ is refused; two that agree are the chain.
+func TestNativeRestoreCredentialRecords(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedIncremental(t, db)
+	full := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(ctx, db, inc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(key, scope string) {
+		if _, err := db.Exec(ctx, `INSERT INTO ingest_credentials (access_key, run_id, kind, scope, fingerprint, expires_at)
+			VALUES ($1, $2, 'backup', $3, 'hm:test', now())`, key, inc, scope); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add("OLYSAMESCOPE00000001", `{"read": ["`+full.String()+`/"], "write": "`+inc.String()+`/"}`)
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); err != nil {
+		t.Fatalf("two records that agree: %v", err)
+	}
+	add("OLYOTHERSCOPE0000001", `{"write": "`+inc.String()+`/"}`)
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+		!strings.Contains(err.Error(), "more than one chain") {
+		t.Fatalf("records that differ: %v", err)
+	}
+}
+
+// TestNativeRestoreContextEnded: a request that went away is its context's
+// error, not a manifest that does not verify.
+func TestNativeRestoreContextEnded(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(context.Background(), db, inc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Another check holds the slot until this request ends.
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = backup.WithNativeRestore(context.Background(), db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(*backup.NativeRestore) error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err = backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog())
+	close(release)
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, backup.ErrNativeNotVerified) {
+		t.Fatalf("waiting for the slot: %v", err)
+	}
+	// Ended while it reads: the same.
+	ctx, cancel = context.WithCancel(context.Background())
+	cancel()
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, context.Canceled) ||
+		errors.Is(err, backup.ErrNativeNotVerified) {
+		t.Fatalf("a cancelled request: %v", err)
 	}
 }

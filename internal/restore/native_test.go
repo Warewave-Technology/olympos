@@ -12,6 +12,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -230,4 +231,63 @@ func TestNativeExecuteNotYet(t *testing.T) {
 	}
 	x.wiped(rq.ID)
 	x.noCanary()
+}
+
+// TestNativeCheckClientGone: a request that goes away while its chain is
+// read ends quietly: no "does not verify" warning, no internal error, the
+// target not contacted.
+func TestNativeCheckClientGone(t *testing.T) {
+	e := newEnv(t)
+	src := e.target(e.prod, "events-ch", "clickhouse", "")
+	tgt := e.target(e.stage, "events-ch-new", "clickhouse", "")
+	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
+	run, sidecar := e.nativeRun(src, nativeSchema[:1])
+	reached, done := make(chan struct{}), make(chan struct{})
+	e.blobs.mu.Lock()
+	e.blobs.hold = func(ctx context.Context, path string) error {
+		if path != sidecar {
+			return nil
+		}
+		close(reached)
+		<-ctx.Done() // the client is gone
+		defer close(done)
+		return ctx.Err()
+	}
+	e.blobs.mu.Unlock()
+	t.Cleanup(func() {
+		e.blobs.mu.Lock()
+		e.blobs.hold = nil
+		e.blobs.mu.Unlock()
+	})
+	in := map[string]any{"run_id": run, "target_id": tgt, "credential": map[string]any{"source": "stored", "username": "default", "password": canaryPassword}}
+	ctx, cancel := context.WithCancel(context.Background())
+	b, _ := json.Marshal(in)
+	req, _ := http.NewRequestWithContext(ctx, "POST", e.Srv.URL+"/api/v1/restores/check", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", maker.CSRF)
+	sent := make(chan error, 1)
+	go func() {
+		resp, err := maker.HTTP.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+		sent <- err
+	}()
+	<-reached
+	calls := chInspector.calls
+	cancel()
+	if err := <-sent; err == nil {
+		t.Fatal("the request was answered")
+	}
+	<-done
+	// The handler ends right after the read; give its log lines time to land.
+	time.Sleep(300 * time.Millisecond)
+	for _, s := range []string{"does not verify", "request failed"} {
+		if strings.Contains(e.LogBuf.String(), s) {
+			t.Fatalf("a request that went away logged %q: %s", s, e.LogBuf.String())
+		}
+	}
+	if chInspector.calls != calls {
+		t.Fatal("the target was contacted")
+	}
 }

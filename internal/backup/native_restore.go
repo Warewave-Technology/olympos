@@ -22,7 +22,6 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/ingest"
@@ -50,8 +49,9 @@ type NativeRestoreInput struct {
 	// KV and KeyName verify the manifests (keyVault.manifestKeyName).
 	KV      secrets.KeyVault
 	KeyName string
-	// RunID is the copy's run, the chain's last.
-	RunID string
+	// RunID is the copy's run, the chain's last, and SHA256 the SHA-256 of
+	// its manifest as its copy row records it.
+	RunID, SHA256 string
 	// Signed are the chain's signed manifests as stored, the full first.
 	Signed [][]byte
 	// IngestURL is ingest.url: an incremental's .backup names its base by
@@ -115,6 +115,7 @@ type NativeRestoreConfig struct {
 // NativeRestore is a native copy checked for a restore: the chain, read
 // from the copy's destination and verified, and the decisions for the
 // selected databases. Source serves the chain to the restore's ClickHouse.
+// It lives only inside WithNativeRestore's callback.
 type NativeRestore struct {
 	NativeRestoreCheck
 	// Runs are the chain's runs, the full first, the copy's run last.
@@ -132,35 +133,55 @@ func (n *NativeRestore) Source() ingest.Source {
 	return n.src
 }
 
-// nativeRestoreSlots bounds how many native checks read their chain at
-// once: a chain holds up to nativeMaxChain sidecars of up to
-// MaxNativeSidecarBytes in memory while it is verified.
+// nativeRestoreSlots bounds how many native chains are held at once: a
+// chain holds up to nativeMaxChain sidecars of up to MaxNativeSidecarBytes
+// in memory while it is verified, and its verified manifests while it is
+// used. A parsed chain lives only while its caller holds the slot.
 var nativeRestoreSlots = make(chan struct{}, 1)
 
-// CheckNativeRestore resolves the chain of the native copy src, reads its
-// sidecars from r (the copy's destination), and has eng verify and decide
-// for databases (empty: every one). Errors are ErrNativeChain or
-// ErrNativeNotVerified, with the cause, and internal errors of q. With
-// ErrNativeNotVerified the result may list the decisions eng could make
-// (every object left out); the caller shows ErrNativeNotVerified's message
-// only and logs the cause.
+// CheckNativeRestore is the restore check of the native copy src for
+// databases (empty: every one): WithNativeRestore, keeping only the
+// databases and the decisions, so nothing of the parsed chain outlives the
+// slot (Manifests is nil). Errors are as WithNativeRestore's.
 func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
-	src *RestoreSource, databases []string, log *slog.Logger) (*NativeRestore, error) {
+	src *RestoreSource, databases []string, log *slog.Logger) (*NativeRestoreCheck, error) {
+	var out *NativeRestoreCheck
+	err := WithNativeRestore(ctx, q, r, eng, cfg, src, databases, log, func(n *NativeRestore) error {
+		if n != nil {
+			out = &NativeRestoreCheck{Databases: n.Databases, Objects: n.Objects}
+		}
+		return nil
+	})
+	return out, err
+}
+
+// WithNativeRestore resolves the chain of the native copy src, reads its
+// sidecars from r (the copy's destination), has eng verify and decide for
+// databases (empty: every one), and calls use with the result while it
+// holds a slot (nativeRestoreSlots); the result must not be kept after use
+// returns. use is called with the chain verified and its source bound, or,
+// with ErrNativeNotVerified, with the decisions eng could list (every
+// object left out, no source); not at all on other errors, and use's error
+// is returned as it is. Errors are ErrNativeChain or ErrNativeNotVerified,
+// with the cause, an internal error of q, or the context's error when ctx
+// ended (the caller is gone: nothing to show or log).
+func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
+	src *RestoreSource, databases []string, log *slog.Logger, use func(*NativeRestore) error) error {
 	runs, copies, err := restoreChain(ctx, q, src)
 	if err != nil {
-		return nil, err
+		return ended(ctx, err)
 	}
 	select {
 	case nativeRestoreSlots <- struct{}{}:
 		defer func() { <-nativeRestoreSlots }()
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		return ctx.Err()
 	}
 	signed := make([][]byte, len(runs))
 	for i, run := range runs {
 		raw, err := readSidecarManifest(ctx, r, ManifestPath(copies[i].dir, run))
 		if err != nil {
-			return nil, fmt.Errorf("%w: the manifest of run %s: %v", ErrNativeNotVerified, run, err)
+			return ended(ctx, fmt.Errorf("%w: the manifest of run %s: %v", ErrNativeNotVerified, run, err))
 		}
 		signed[i] = raw
 	}
@@ -184,21 +205,43 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 		return s.read, nil
 	}
 	check, err := eng.CheckNativeRestore(ctx, NativeRestoreInput{KV: cfg.KV, KeyName: cfg.ManifestKeyName, RunID: src.CopyRunID.String(),
-		Signed: signed, IngestURL: cfg.URL, Bind: bind, Databases: databases})
+		SHA256: copies[len(copies)-1].sha256, Signed: signed, IngestURL: cfg.URL, Bind: bind, Databases: databases})
 	var out *NativeRestore
 	if check != nil {
 		out = &NativeRestore{NativeRestoreCheck: *check, Runs: runs}
 	}
 	switch {
-	case err == nil && (check == nil || cs == nil):
-		return out, fmt.Errorf("%w: the engine did not bind the chain", ErrNativeNotVerified)
-	case errors.Is(err, ErrNativeChain) || errors.Is(err, ErrNativeNotVerified):
-		return out, err
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case errors.Is(err, ErrNativeChain):
+		return err
 	case err != nil:
-		return out, fmt.Errorf("%w: %v", ErrNativeNotVerified, err)
+		if !errors.Is(err, ErrNativeNotVerified) {
+			err = fmt.Errorf("%w: %v", ErrNativeNotVerified, err)
+		}
+		// What eng could list of a chain that did not verify: no
+		// manifests, no source.
+		if out != nil {
+			out.Manifests = nil
+			if uerr := use(out); uerr != nil {
+				return uerr
+			}
+		}
+		return err
+	case check == nil || cs == nil:
+		return fmt.Errorf("%w: the engine did not bind the chain", ErrNativeNotVerified)
 	}
 	out.src = cs
-	return out, nil
+	return use(out)
+}
+
+// ended is ctx's error when ctx ended (what failed then is the request
+// going away), else err.
+func ended(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
 }
 
 // restoreChain is the chain of the native copy src, the full first, and
@@ -207,13 +250,21 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 // at most nativeMaxChain runs.
 func restoreChain(ctx context.Context, q store.Querier, src *RestoreSource) ([]uuid.UUID, []chainCopy, error) {
 	run := src.CopyRunID
+	// ingest_credentials has no uniqueness on (run_id, kind): one run has
+	// one backup credential, and a run with records that differ is refused
+	// rather than one of them picked.
 	var read []byte
-	err := q.QueryRow(ctx, `SELECT COALESCE(scope -> 'read', '[]'::jsonb) FROM ingest_credentials WHERE run_id = $1 AND kind = 'backup'`, run).Scan(&read)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, nil, fmt.Errorf("%w: run %s has no record of the chain it was taken on", ErrNativeChain, run)
-	}
+	var scopes int
+	err := q.QueryRow(ctx, `SELECT count(DISTINCT COALESCE(scope -> 'read', '[]'::jsonb)), min(COALESCE(scope -> 'read', '[]'::jsonb)::text)
+		FROM ingest_credentials WHERE run_id = $1 AND kind = 'backup'`, run).Scan(&scopes, &read)
 	if err != nil {
 		return nil, nil, err
+	}
+	switch {
+	case scopes == 0:
+		return nil, nil, fmt.Errorf("%w: run %s has no record of the chain it was taken on", ErrNativeChain, run)
+	case scopes > 1:
+		return nil, nil, fmt.Errorf("%w: run %s has records of more than one chain it was taken on", ErrNativeChain, run)
 	}
 	var prefixes []string
 	if err := json.Unmarshal(read, &prefixes); err != nil {

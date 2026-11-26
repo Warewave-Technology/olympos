@@ -273,8 +273,9 @@ The existing flow, with these changes for a native source:
   - The chain of the selected copy is its run's backup credential's read scope (the base chain the run was
     taken on, the full first) and the run, at most 32 runs. Every run of it needs a succeeded copy on the
     copy's destination; the sidecars are read from there, each at most 65 MiB, and verified with
-    `VerifyChain`, one check at a time per server. Each verified manifest must be the one its copy row
-    records. Any failure to read or verify refuses the check with "the backup's manifest does not verify" on
+    `VerifyChain`, one chain held at a time per server: the check keeps only the databases and the
+    decisions once it gives the slot back. Each verified manifest must be the one its copy row records, and a
+    run with records of more than one chain is refused. Any failure to read or verify refuses the check with "the backup's manifest does not verify" on
     the copy (the cause is logged, never shown); the objects the copy's own manifest lists, when it verifies
     by itself, are shown, every one left out with that reason, and nothing is read on its strength.
   - Each object's definition is read through the chain's checked source (only objects of the verified

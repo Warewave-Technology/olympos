@@ -82,15 +82,17 @@ func (Engine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInp
 }
 
 // unverifiedCheck lists the objects of the selected databases that the
-// copy's own manifest holds, when it verifies alone, every one left out;
-// nil when it does not.
+// copy's own manifest holds, when it verifies alone and is the one its copy
+// row records (in.SHA256), every one left out; none otherwise.
 func unverifiedCheck(ctx context.Context, in backup.NativeRestoreInput) *backup.NativeRestoreCheck {
 	check := &backup.NativeRestoreCheck{Databases: []string{}, Objects: []backup.NativeDecision{}}
 	if len(in.Signed) == 0 {
 		return check
 	}
+	// It must also be the manifest the copy row records: a sidecar copied
+	// from another copy of the run, or one written again, lists nothing.
 	m, err := VerifySigned(ctx, in.KV, in.KeyName, in.RunID, in.Signed[len(in.Signed)-1])
-	if err != nil {
+	if err != nil || m.SHA256() != in.SHA256 {
 		return check
 	}
 	selected := selectedDatabases(in.Databases)

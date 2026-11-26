@@ -173,10 +173,9 @@ type evaluation struct {
 	databases []string
 	opts      Options
 	report    *TargetReport
-	// native: a native source's chain, verified, and its decisions; nil
-	// otherwise or when the chain was not verified. nativeCheck is what the
-	// check shows of it (the decisions also when it did not verify).
-	native      *backup.NativeRestore
+	// nativeCheck: a native source's decisions, what the check shows (also
+	// when its chain did not verify). Nothing of the parsed chain is kept:
+	// it lives only inside backup.CheckNativeRestore's slot.
 	nativeCheck *NativeCheck
 }
 
@@ -305,7 +304,11 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 	// The databases the backup holds (read from the copy). A native copy's
 	// are its verified chain's, with what the restore does with each object.
 	if ev.src != nil && ev.run.native {
-		if err := a.checkNative(ctx, in, ev, fields); err != nil {
+		switch err := a.checkNative(ctx, in, ev, fields); {
+		case errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded):
+			// The request is gone: nothing to show, nothing to log.
+			return ev, &evalError{code: http.StatusServiceUnavailable, msg: "the request ended before the backup was checked"}
+		case err != nil:
 			return ev, internalErr(err)
 		}
 	} else if ev.src != nil && hasDatabases(engine) {
@@ -632,7 +635,8 @@ func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.Re
 // selected databases are decided. A chain that does not verify is refused
 // on the copy with exactly backup.ErrNativeNotVerified's message (the cause
 // is logged, never shown), with the decisions the engine could list; one
-// that cannot be restored here says why. err is an internal error only.
+// that cannot be restored here says why. err is an internal error, or the
+// context's error when the request ended.
 func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields map[string]string) error {
 	if a.Native == nil {
 		fields["run_id"] = errNativeIngestOff
@@ -651,6 +655,9 @@ func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields
 	}
 	rd, err := a.Blobs.ReaderFor(ctx, ev.src.DestinationID)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		notVerified(err)
 		return nil
 	}
@@ -666,7 +673,7 @@ func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields
 	case err != nil:
 		return err
 	default:
-		ev.native, ev.inBackup = nr, nonNil(nr.Databases)
+		ev.inBackup = nonNil(nr.Databases)
 	}
 	return nil
 }

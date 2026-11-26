@@ -40,6 +40,7 @@ type nrChain struct {
 	kv     *fakeVault
 	signed [][]byte
 	runs   []string
+	sums   []string          // each run's manifest SHA-256, as its copy row records it
 	bodies map[string][]byte // by bucket-relative key
 	bound  [][]backup.NativeChainManifest
 }
@@ -106,12 +107,13 @@ func (c *nrChain) sign(t *testing.T, m *NativeManifest) {
 	t.Helper()
 	c.signed = append(c.signed, signedJSON(t, c.kv, nrManifestKey, m))
 	c.runs = append(c.runs, m.RunID)
+	c.sums = append(c.sums, m.SHA256())
 }
 
 // input is the check of the chain's last run for databases.
 func (c *nrChain) input(databases ...string) backup.NativeRestoreInput {
 	return backup.NativeRestoreInput{
-		KV: c.kv, KeyName: nrManifestKey, RunID: c.runs[len(c.runs)-1], Signed: c.signed, IngestURL: nrURL, Databases: databases,
+		KV: c.kv, KeyName: nrManifestKey, RunID: c.runs[len(c.runs)-1], SHA256: c.sums[len(c.sums)-1], Signed: c.signed, IngestURL: nrURL, Databases: databases,
 		Bind: func(ms []backup.NativeChainManifest) (backup.NativeObjectReader, error) {
 			c.bound = append(c.bound, ms)
 			listed := map[string]bool{}
@@ -256,6 +258,14 @@ func TestCheckNativeRestoreNotVerified(t *testing.T) {
 	}
 	if len(c.bound) != 0 || got.Manifests != nil {
 		t.Fatalf("an unverified chain was bound for reads: %d, %+v", len(c.bound), got.Manifests)
+	}
+	// The copy's manifest verifies alone but is not the one its copy row
+	// records (a sidecar from elsewhere): nothing is listed.
+	in := c.input("shop")
+	in.SHA256 = sum("another manifest")
+	got, err = Engine{}.CheckNativeRestore(context.Background(), in)
+	if !errors.Is(err, backup.ErrNativeNotVerified) || got == nil || len(got.Objects) != 0 || len(got.Databases) != 0 {
+		t.Fatalf("a copy row with another SHA-256: %+v, %v", got, err)
 	}
 
 	c = newNRChain(t, nrSchema[:3], nil, "")

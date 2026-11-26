@@ -175,7 +175,7 @@ if printf 'internal/backup/native_chain_test.go\ninternal/backup/native_chain.go
 fi
 # The restore check of a native copy: which chain a restore reads, from
 # where, whether it verifies, and what of it the restore creates.
-if ! out=$(printf 'internal/backup/restore_guide.go\ninternal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go\n' |
+if ! out=$(printf 'internal/backup/copies.go\ninternal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go\n' |
   "$script" --files) || [ "$out" != $'internal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go' ]; then
   echo "FAIL: --files with the native restore check: exit $?, output \"$out\"" >&2
   fail=1
@@ -183,6 +183,18 @@ fi
 if printf 'internal/backup/native_restore_test.go\ninternal/backup/engines/clickhouse/native_restore_test.go\ninternal/backup/native_restore.go.orig\n' |
   "$script" --files >/dev/null; then
   echo "FAIL: --files matched a file next to the native restore check" >&2
+  fail=1
+fi
+# Which copy a restore reads (FindRestoreSource), and the open-time rules
+# that keep a native run whose chain does not verify from being restored.
+if ! out=$(printf 'internal/backup/restore_guide.go\ninternal/restore/executor.go\ninternal/restore/api.go\n' | "$script" --files) ||
+  [ "$out" != $'internal/backup/restore_guide.go\ninternal/restore/api.go' ]; then
+  echo "FAIL: --files with the restore source and open-time rules: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/restore_guide_test.go\ninternal/restore/api_test.go\ninternal/restore/rules.go\ninternal/restore/api.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore source or the open-time rules" >&2
   fail=1
 fi
 # The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,

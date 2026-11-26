@@ -149,11 +149,21 @@ func (memObject) Close() error { return nil }
 type fakeBlobs struct {
 	mu    sync.Mutex
 	blobs map[string][]byte
+	// hold, when set, runs before a blob is opened; an error fails the open.
+	hold func(ctx context.Context, path string) error
 }
 
 func (f *fakeBlobs) ReaderFor(context.Context, uuid.UUID) (blob.Reader, error) { return f, nil }
 
-func (f *fakeBlobs) Open(_ context.Context, path string) (blob.Object, error) {
+func (f *fakeBlobs) Open(ctx context.Context, path string) (blob.Object, error) {
+	f.mu.Lock()
+	hold := f.hold
+	f.mu.Unlock()
+	if hold != nil {
+		if err := hold(ctx, path); err != nil {
+			return nil, err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	b, ok := f.blobs[path]
