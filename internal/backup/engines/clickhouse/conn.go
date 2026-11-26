@@ -43,6 +43,14 @@ type session struct {
 // when the transfer mode is e2e-tls and performs the native handshake with
 // zstd network compression (used in both transfer modes, SPEC §7).
 func connect(ctx context.Context, ec backup.EngineContext, opts Options) (*session, error) {
+	// All queries are fully qualified; "system" always exists, so the
+	// handshake does not depend on the user's databases.
+	return connectIn(ctx, ec, opts, "system")
+}
+
+// connectIn is connect with database as the session's default database: the
+// one ClickHouse qualifies a definition's unqualified names with.
+func connectIn(ctx context.Context, ec backup.EngineContext, opts Options, database string) (*session, error) {
 	if ec.Dial == nil {
 		return nil, errors.New("clickhouse: no tunnel dialer")
 	}
@@ -95,9 +103,7 @@ func connect(ctx context.Context, ec backup.EngineContext, opts Options) (*sessi
 		user = ch.DefaultUser
 	}
 	client, err := ch.Connect(ctx, conn, ch.Options{
-		// All queries are fully qualified; "system" always exists, so the
-		// handshake does not depend on the user's databases.
-		Database: "system",
+		Database: database,
 		User:     user,
 		// ch-go only accepts a string: the []byte secret is zeroed when
 		// connect returns, but ch-go keeps the string in its (private) client

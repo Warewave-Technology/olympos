@@ -448,12 +448,13 @@ func restoreStatement(p *nativeRestorePlan, nr NativeRestore, requestID string) 
 }
 
 // RestoreNative restores a native copy into the target of rc (design §6,
-// Execute), on one connection: it creates the selected databases that do
+// Execute): it creates the selected databases that do
 // not exist (an existing one must be empty), then every allowed Replicated
 // table from the backup's own CREATE TABLE with its Keeper path rewritten
 // and its UUID dropped (replicatedCreate), then sends RESTORE … EXCEPT
-// TABLES <every object left out> with async = 1, which fills the tables it
-// finds and creates the others, and polls system.backups every 5 s. When
+// TABLES <every object left out> with async = 1, on a new connection in the
+// first restored database, which fills the tables it finds and creates the
+// others, and polls system.backups every 5 s. When
 // nr.Stop delivers or ctx is cancelled, it KILLs the RESTORE on that
 // connection, and on a new one when it lost track of it (an error wrapping
 // backup.ErrNativeOrphan says that did not end it either). After RESTORED,
@@ -542,7 +543,17 @@ func (Engine) RestoreNative(ctx context.Context, rc backup.RestoreContext, nr Na
 		}
 	}
 
-	// 3. RESTORE, polled as a backup is.
+	// 3. RESTORE, polled as a backup is, on a connection whose default
+	// database is the first restored one (security review v0.4, finding 4):
+	// RESTORE qualifies a definition's unqualified names with the session's
+	// database, and that one held nothing before this restore (it created it
+	// or found it empty), so such a name can only reach what the restore
+	// creates, never system's tables. The allowlist refuses such a name, and
+	// the definitions are compared after the restore, besides.
+	s.close()
+	if s, err = connectIn(ctx, rc.EngineContext, opts, plan.databases[0]); err != nil {
+		return res, err
+	}
 	again := func(ctx context.Context) (*session, error) { return connect(ctx, rc.EngineContext, opts) }
 	if err := s.runRestore(ctx, log, plan, nr, rc.RequestID, again); err != nil {
 		return res, err

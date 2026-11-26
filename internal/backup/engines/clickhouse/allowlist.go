@@ -33,10 +33,15 @@ package clickhouse
 // or joinGet names. A FROM clause goes on past a table's
 // alias, FINAL and SAMPLE k [OFFSET m] to the next source; only a clause
 // word of its own level ends it, never an alias. A source followed by "(" is a table
-// function, and so is "IN f(…)" unless f is tuple or array. An unqualified name is of the object's own database, as
-// ClickHouse qualifies a view's names when it creates it; a CTE's name is
-// not a table within the SELECT that defines it. An object is restored only
-// when everything it reads is, to a fixed point.
+// function, and so is "IN f(…)" unless f is tuple or array. A table named
+// without its database is refused (security review v0.4, finding 4):
+// ClickHouse resolves it against the session's database when RESTORE
+// creates the object, not against the object's own, and it writes the
+// definitions it stores itself qualified. A CTE's name is not a table
+// within the SELECT that defines it, and a dictionary's CLICKHOUSE source
+// without DB reads the dictionary's own database (24.8 and 25.8 bind it so,
+// whatever the session's). An object is restored only when everything it
+// reads is, to a fixed point.
 
 import (
 	"fmt"
@@ -310,7 +315,7 @@ func (d definition) deps() []objRef {
 type reader struct {
 	toks     []token
 	match    []int  // the index of the bracket closing each opening one
-	db       string // the object's database: an unqualified name is of it
+	db       string // the object's database (a dictionary source's DB when it names none)
 	embedded bool   // a dictionary source's query: every table must be qualified
 	def      *definition
 }
@@ -610,8 +615,12 @@ func (r *reader) materializedView(i int) {
 			inner, i = true, i+4
 		} else {
 			t, j, ok := r.name(i + 1)
-			if !ok {
+			switch {
+			case !ok:
 				r.uncertain()
+				return
+			case j-i == 2:
+				r.fail("it writes to " + shortName(t.name) + " without naming its database")
 				return
 			}
 			r.def.target, i = &t, j
@@ -874,7 +883,8 @@ func (r *reader) queryAt(i int) bool {
 	return t.is("SELECT") || t.is("WITH") || t.punct("(") && r.queryAt(i+1)
 }
 
-// name reads "db.name" or "name" at i, and returns the index after it.
+// name reads "db.name" or "name" at i, and returns the index after it; an
+// unqualified name gets db, the object's database.
 func (r *reader) name(i int) (objRef, int, bool) {
 	if !r.at(i).ident() {
 		return objRef{}, i, false
@@ -889,12 +899,16 @@ func (r *reader) name(i int) (objRef, int, bool) {
 }
 
 // read records that the definition reads o, unless o is an unqualified
-// CTE's name.
+// CTE's name. Any other unqualified name is refused (security review v0.4,
+// finding 4): ClickHouse resolves it against the database of the session
+// that creates the object, which on a restore is not the object's own.
 func (r *reader) read(o objRef, unqualified bool, ctes map[string]bool) {
 	switch {
 	case unqualified && ctes[o.name]:
 	case unqualified && r.embedded:
 		r.uncertain()
+	case unqualified:
+		r.fail("it reads " + shortName(o.name) + " without naming its database")
 	default:
 		r.def.reads = append(r.def.reads, o)
 	}
