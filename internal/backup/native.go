@@ -198,6 +198,9 @@ const (
 	// nativeTaggers is how many objects are re-tagged at once per
 	// destination.
 	nativeTaggers = 16
+	// nativeCompleteTimeout bounds completeNative, which a server shutting
+	// down does not cut (about 250,000 objects at 16 at a time).
+	nativeCompleteTimeout = 30 * time.Minute
 	// The revoke reason of a run that ended, and the stop reason of one
 	// whose server shuts down.
 	nativeRunEnded = "run ended"
@@ -542,6 +545,12 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		total += o.Size
 	}
 	stored = len(objects)
+	// A shutdown does not cut the copies' completion: a copy left half
+	// tagged has complete objects under an incomplete manifest, so the
+	// incomplete rule removes the manifest, and those objects stay until
+	// their tier's rule removes them.
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), nativeCompleteTimeout)
+	defer cancel()
 	var wg sync.WaitGroup
 	for _, d := range live {
 		wg.Add(1)
@@ -552,7 +561,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 				c.Err, c.FinishedAt = n.scrub(err.Error()), time.Now().UTC()
 				return
 			}
-			err := w.completeNative(ctx, d, r.id, objects, total, version, res, n.envelope)
+			err := w.completeNative(cctx, d, r.id, objects, total, version, res, n.envelope)
 			c.FinishedAt = time.Now().UTC()
 			c.BlobPath, c.Bytes, c.SHA256 = d.dir, total, res.SHA256
 			if err != nil {

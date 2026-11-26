@@ -942,3 +942,38 @@ func TestNativeRunEarlyFailures(t *testing.T) {
 		}
 	}
 }
+
+// A server shutting down while a copy is re-tagged complete does not cut the
+// retag: a copy left half tagged keeps complete objects under an incomplete
+// manifest. completeNative runs to its end, within its own time limit.
+func TestNativeRunShutdownMidRetag(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	run := queue(t, db, e.Job, "manual", nil)
+	id, err := e.W.Claim(context.Background())
+	if err != nil || id != run {
+		t.Fatalf("claimed %s %v", id, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var once sync.Once
+	e.B1.tagHook = func(tctx context.Context) error {
+		once.Do(cancel)
+		return tctx.Err()
+	}
+	e.W.Execute(ctx, run)
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "succeeded" || len(cs) != 2 || cs[0].Status != "succeeded" {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	dir := runDir(t, db, "a", run)
+	for _, o := range nativeBackup() {
+		if tg := e.B1.tags[dir+"/"+o.rel]; tg[backup.StateTag] != backup.StateComplete {
+			t.Fatalf("%s tagged %v", o.rel, tg)
+		}
+	}
+	if tg := e.B1.tags[backup.ManifestPath(dir, run)]; tg[backup.StateTag] != backup.StateComplete {
+		t.Fatalf("manifest tagged %v", tg)
+	}
+}

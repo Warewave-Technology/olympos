@@ -360,7 +360,12 @@ restart, a lost network, a stopped ClickHouse) leaves incomplete objects behind,
 them. The Bicep module renders the rule `olympos-incomplete`, which deletes objects tagged
 `olympos-state=incomplete` 7 days after creation (parameter `incompleteDays`); for S3 and NFS see
 [S3 and S3-compatible storage](#s3-and-s3-compatible-storage) and [NFS](#nfs). A backup that completed is not
-affected: the retag replaces the tag, so the rule's filter no longer matches its objects.
+affected: the retag replaces the tag, so the rule's filter no longer matches its objects. A server that shuts
+down does not cut a retag under way: it goes on for up to 30 minutes, or until the process is killed (on
+Kubernetes, at the end of the pod's termination grace period). A retag cut that way leaves some objects
+tagged `complete` under a manifest still tagged `incomplete`. The `incomplete` rule then removes the
+manifest and the objects still incomplete, and the run is failed; the objects already tagged `complete` are
+removed by their tier's rule (for example `olympos-daily`), not after 7 days.
 
 > **Time-based immutability defers the delete.** An object under a time-based immutability policy (the
 > container policy of the Bicep module, S3 Object Lock, WORM on an NFS share) cannot be deleted before its

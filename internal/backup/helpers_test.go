@@ -189,6 +189,9 @@ type fakeBlobs struct {
 	holdOn   string
 	held     chan struct{}
 	holdOnce sync.Once
+	// tagHook, when set, runs before every SetTags with its context; an
+	// error fails it, as a cancelled request does.
+	tagHook func(ctx context.Context) error
 	// uploads counts the stored uploads.
 	uploads int
 	dests   map[uuid.UUID]*fakeBlobs
@@ -282,6 +285,11 @@ func (f *fakeBlobs) storeCtx(ctx context.Context, path string, r io.Reader, tags
 
 // SetTags replaces the tags of a stored blob, as every real writer does.
 func (f *fakeBlobs) SetTags(ctx context.Context, path string, tags map[string]string) error {
+	if f.tagHook != nil {
+		if err := f.tagHook(ctx); err != nil {
+			return err
+		}
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.failTags != nil {
