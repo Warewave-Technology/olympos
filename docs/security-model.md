@@ -16,7 +16,7 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 | Native ClickHouse ingest credentials (one per backup or restore run) | Server memory only, for the run; the database keeps the key ID, scope, expiry and an HMAC fingerprint | ClickHouse, for its own run's prefix only ([below](#native-clickhouse-backups-the-ingest-endpoint)) |
 | Manifest signing key (`olympos-manifest`) | Key Vault, in the KEK's vault; never leaves it | Server: signs (`keys/sign`) and reads the public key (`keys/get`) |
 | Registry credentials | Key Vault ref or envelope-encrypted | Server (trivy child env) |
-| Backups | Azure Blob, immutable versions, lifecycle retention | Written by the server; deleted only by lifecycle rules |
+| Backups | Azure Blob or S3 (versioned, lifecycle retention, immutable only where the storage owner turns it on), or NFS | Written by the server; deleted only by lifecycle rules (on NFS, by the storage) |
 | Synthetic monitoring credentials (bearer, basic, header, OAuth2 client) | Key Vault ref, or a `credentials` row (envelope-encrypted) that `synthetic_credentials` names with its bound hosts | Server, per run; sealed to one probe connection for that run ([below](#synthetic-monitoring-credentials-in-the-cluster)) |
 | Agent identity | Client cert + key in the agent's own Secret | The agent |
 | Probe identity | Client cert + key in `olympos-probe-identity`, written and renewed by the agent | The probe (read-only mount) |
@@ -105,11 +105,49 @@ transaction as the change; notifications go through a transactional outbox.
 ## Backups
 
 The server is the only writer to Blob and has no delete permission (custom role without
-`blobs/delete`); retention is lifecycle rules on the `olympos-tier` tag; versions are immutable for the
-longest retention. *Test destination* verifies delete is refused and warns otherwise. Native ClickHouse
+`blobs/delete`; on S3, a policy without `s3:DeleteObject`); retention is lifecycle rules on the
+`olympos-tier` tag. *Test destination* verifies delete is refused and warns otherwise. Native ClickHouse
 backups keep this: ClickHouse writes to the server's ingest endpoint, never to storage, and the server writes
 each object to the destinations itself, never over an existing one
 ([below](#native-clickhouse-backups-the-ingest-endpoint)).
+
+No delete permission is not, on its own, "a compromised server cannot destroy the backups". The server needs
+`blobs/write` and `blobs/tags/write` (S3: `s3:PutObject`, `s3:PutObjectTagging`) to write backups and set
+their tier, and with them a compromised server, or a stolen credential, can re-tag a backup to a short tier
+such as `test`, or overwrite it, and let the lifecycle rules delete it. Storage immutability is what closes
+that gap. It is the storage owner's choice, off in the Bicep module by default
+([install › Immutability (optional)](install.md#immutability-optional), SPEC §10.3.1 step 4,
+`docs/spec-changes.md` #29):
+
+- **With immutability on** (an Azure container default policy, an S3 Object Lock default retention in
+  compliance mode), no version can be deleted or overwritten during the policy's period, so neither a re-tag
+  nor an overwrite destroys a backup within it. A default applies to every object, whatever its tier: it holds
+  every backup, dry run and probe for at least that long, and the lifecycle rules wait for it. Only a default
+  of at least the longest tier protects every backup for its whole retention; a shorter one protects each
+  backup for its first days. Who can weaken it:
+  - Azure: an unlocked container policy can be shortened by its owner and removed once the module's
+    `CanNotDelete` resource lock is lifted; the version policies under it can be shortened or removed by a
+    holder of `blobs/immutableStorage/runAsSuperUser/action`; a locked policy by no one.
+  - S3: the compliance retention of each object version can be shortened or removed by no one, not even root.
+    The bucket's default retention, though, is a bucket setting that a principal allowed
+    `s3:PutBucketObjectLockConfiguration` can lower or remove for new versions; the documented bucket policy
+    leaves that to the break-glass role.
+
+  The server has none of these permissions.
+- **With it off**, the server still cannot delete, but a re-tag or an overwrite leads to a deletion through
+  the lifecycle rules: a backup re-tagged `test` at the rules' next runs, usually within a day or two (the
+  rules count from when the backup was written); an overwritten version when the version rules reach it, or
+  sooner if the old version is re-tagged too (on S3, 1 day after the overwrite in the documented rules). On
+  Azure the deleted version stays soft-deleted for the soft-delete period (30 days in the module) and can be
+  restored in that time; S3 has no soft delete. A new Azure install without a policy has a plain container;
+  an account deployed with the module before v0.4.0 keeps version-level support on the account and the
+  container, where lifecycle deletes are expected to work once no policy covers a version, including a
+  version whose shortened 1-day policy has expired (to be verified on a real account, #79).
+- **On NFS** the server can delete files itself (`docs/spec-changes.md` #13); protection is storage-side
+  snapshots or WORM, and the destination shows a permanent warning.
+
+Per-tier locks, in which the server locks each object for its own tier at write time, are planned for v0.5
+([#79](https://github.com/Warewave-Technology/olympos/issues/79)).
 
 ## ConfigMaps and Secrets in clusters
 
@@ -330,6 +368,10 @@ What the allowlist does **not** check, by design or because it cannot:
 - A compromised server can *write* Vault secrets (create/patch) but still cannot read them; drift
   detection only catches writes that bypass Olympos, so the change-request trail is the control here.
 - In `compressed` transfer mode the agent can observe backup data in cleartext (visible finding).
+- **Backups without storage immutability** can be destroyed by a compromised server through a re-tag or an
+  overwrite and the lifecycle rules, though it cannot delete them ([Backups](#backups)). Immutability is the
+  storage owner's choice in v0.4, and a default keeps every object at least its period; per-tier locks are
+  planned for v0.5 ([#79](https://github.com/Warewave-Technology/olympos/issues/79)).
 - **Restores write to clusters.** A restore is the one path where the server writes data into a target:
   the new server it restores into, through that target's agent tunnel, with the admin login or Vault
   token given for the request. Controls: only targets the agent discovered, never the backup's own, no

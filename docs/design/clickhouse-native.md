@@ -154,9 +154,10 @@ nothing was deleted, was rejected.
   - An `UploadPart` without a `Content-Length` is refused `403`. A full budget never ends a run; a disk error
     while holding a part still does.
 - **Lifecycle.** A lifecycle rule (Bicep and docs) deletes objects tagged `olympos-state=incomplete` after 7
-  days. With the container's version-level immutability as it is today (the longest retention), that rule, like
-  the existing 7-day daily rule, cannot delete before the immutability period ends. That is an existing issue of
-  the storage template, tracked on its own; native backups add nothing to it. NFS has no tags-based lifecycle: incomplete runs are listed
+  days. With a container default immutability policy, that rule, like the existing 7-day daily rule, cannot
+  delete before the immutability period ends. The storage template used to set one of the longest retention;
+  since [#79](https://github.com/Warewave-Technology/olympos/issues/79) the policy is the storage owner's
+  choice and off by default. Native backups add nothing to it. NFS has no tags-based lifecycle: incomplete runs are listed
   in the docs' NFS cleanup procedure, like today's partial files.
 
 ### 4. The backup run

@@ -138,15 +138,21 @@ so the check covers `olympos-manifest` as well.
 ## 4. Backup storage (Azure Blob)
 
 `deploy/bicep/backup-storage.bicep` creates a storage account hardened for backups: a private endpoint,
-version-level immutability at least as long as the longest retention, soft delete, lifecycle rules that
-delete each tier (by the `olympos-tier` index tag) after its retention, a resource lock, optional
-diagnostics, and a **custom data-plane role that can read, write and tag blobs but not delete them**,
-assigned to the server's identity:
+versioning, soft delete, lifecycle rules that delete each tier (by the `olympos-tier` index tag) after its
+retention, a resource lock, optional diagnostics, and a **custom data-plane role that can read, write and tag
+blobs but not delete them**, assigned to the server's identity. A container default immutability policy is
+optional (`defaultImmutabilityDays`, 0 by default, which also leaves version-level immutability support off on
+the container; the account setting is sent only with `accountVersionLevelSupport=true`, for accounts deployed
+with the module before v0.4.0). Within its period it keeps a compromised server from
+having backups deleted by re-tagging or overwriting them, and it keeps every backup at least that long,
+whatever its tier. A container gets version-level support when it is created, or later only by a migration,
+so decide per container ([install › Immutability (optional)](install.md#immutability-optional)):
 
 ```bash
 az deployment group create -g $RG -f deploy/bicep/backup-storage.bicep \
   -p accountName=$SA serverIdentityPrincipalId=$PRINCIPAL_ID privateEndpointSubnetId=<subnet id>
-#   dailyDays=7 weeklyDays=28 monthlyDays=372 longestRetentionDays=400 logAnalyticsWorkspaceId=<id>
+#   dailyDays=7 weeklyDays=28 monthlyDays=372 defaultImmutabilityDays=0 logAnalyticsWorkspaceId=<id>
+#   accountVersionLevelSupport=true   # only for an account deployed with the module before v0.4.0
 ```
 
 Creating the custom role needs *Owner* or *User Access Administrator*. The private endpoint's DNS zone link
