@@ -679,6 +679,8 @@ const stages = {
     const approver = await signIn('approver');
     await apiCall(page, 'POST', '/grants', { object_id: PEOPLE.approver.oid, roles: ['operator'], scope: 'env=lab' }, [201, 409]);
     const lab = (await apiCall(page, 'GET', '/clusters')).items.find((c) => c.name === 'lab');
+    if (!lab) throw new Error('no lab cluster: run the clusters stage first');
+    const mode = lab.transfer_mode; // put back afterwards
     // A second run of the stage: the job of the first one goes, so the wizard offers the target again.
     for (const j of (await apiCall(page, 'GET', '/backup/jobs')).items.filter((x) => x.target.id === target.id)) await apiCall(page, 'DELETE', `/backup/jobs/${j.id}`, undefined, [204]);
     syncNativeCA();
@@ -757,7 +759,7 @@ const stages = {
       await approver.getByRole('button', { name: 'Approve restore' }).click();
       await waitRestoreDone(approver, id);
     } finally {
-      await apiCall(page, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+      await apiCall(page, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: mode });
       for (const j of (await apiCall(page, 'GET', '/backup/jobs')).items.filter((x) => x.target.id === target.id)) await apiCall(page, 'DELETE', `/backup/jobs/${j.id}`, undefined, [204]);
       dropCH();
       await approver.context().close();
