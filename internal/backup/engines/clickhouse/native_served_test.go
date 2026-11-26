@@ -103,7 +103,10 @@ func TestNativeServed(t *testing.T) {
 	}
 	want := []string{
 		testBaseRunID + "/.backup", testRunID + "/.backup",
-		testBaseRunID + "/metadata/a.sql", testBaseRunID + "/metadata/a/t.sql", testBaseRunID + "/metadata/a/t2.sql", testBaseRunID + "/metadata/a/x.sql",
+		// Not a.x's definition: a definition left out can hold an external
+		// source's credentials, and RESTORE … EXCEPT TABLES does not read it
+		// (fix round 1, B).
+		testBaseRunID + "/metadata/a.sql", testBaseRunID + "/metadata/a/t.sql", testBaseRunID + "/metadata/a/t2.sql",
 		testBaseRunID + "/data/a/t/p1/data.bin", testBaseRunID + "/data/a/t/p1/count.txt", testBaseRunID + "/data/a/t/log.bin",
 		testBaseRunID + "/data/b/u/data.bin",
 		testRunID + "/data/a/t/p2/data.bin", testRunID + "/data/a/t/log.bin",
@@ -127,8 +130,8 @@ func TestNativeServed(t *testing.T) {
 			t.Errorf("every database: %s not served", k)
 		}
 	}
-	if got[testBaseRunID+"/data/a/x/data.bin"] {
-		t.Error("every database: the data of an object left out is served")
+	if got[testBaseRunID+"/data/a/x/data.bin"] || got[testBaseRunID+"/metadata/a/x.sql"] {
+		t.Error("every database: the definition or data of an object left out is served")
 	}
 
 	// What cannot be resolved refuses the restore.

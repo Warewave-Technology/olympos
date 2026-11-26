@@ -418,12 +418,14 @@ func TestNativeExecute(t *testing.T) {
 	}
 	// So is what the restore does not read (security review v0.4, finding
 	// 5): the database left unselected, the data of an object left out.
-	for _, rel := range []string{"metadata/stats.sql", "metadata/stats/daily.sql", "data/stats/daily/all_1_1_0/data.bin", "data/shop/ext/all_1_1_0/data.bin"} {
+	// Nor the definition of an object left out (fix round 1, B).
+	for _, rel := range []string{"metadata/stats.sql", "metadata/stats/daily.sql", "data/stats/daily/all_1_1_0/data.bin", "data/shop/ext/all_1_1_0/data.bin",
+		"metadata/shop/ext.sql", "metadata/shop/report.sql"} {
 		if _, _, err := sess.Source().Open(context.Background(), run.String()+"/"+rel); !errors.Is(err, ingest.ErrNotServed) {
 			t.Errorf("%s, which the restore does not read: %v", rel, err)
 		}
 	}
-	for _, rel := range []string{".backup", "metadata/shop.sql", "metadata/shop/ext.sql", "data/shop/orders/all_1_1_0/data.bin"} {
+	for _, rel := range []string{".backup", "metadata/shop.sql", "metadata/shop/orders.sql", "data/shop/orders/all_1_1_0/data.bin"} {
 		rc, _, err := sess.Source().Open(context.Background(), run.String()+"/"+rel)
 		if err != nil {
 			t.Errorf("%s, which the restore reads: %v", rel, err)

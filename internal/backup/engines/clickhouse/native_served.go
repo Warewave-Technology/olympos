@@ -17,9 +17,10 @@ import (
 
 // NativeServed implements backup.NativeRestoreEngine: the keys of the objects of the
 // chain ms (the full first) that the RESTORE of decisions reads, resolved as
-// ClickHouse resolves them. A file of the last run is needed when it is a
-// definition of a selected database (metadata/<db>.sql, metadata/<db>/…) or
-// a file of an allowed object's data (data/<db>/<name>/…). ClickHouse reads
+// ClickHouse resolves them. A file of the last run is needed when it is the
+// definition of a selected database (metadata/<db>.sql) or of an allowed
+// object (metadata/<db>/<name>.sql), or a file of an allowed object's data
+// (data/<db>/<name>/…). ClickHouse reads
 // a file by its size and checksum, from the first file of its .backup with
 // them: that file's own object, or the one its data_file names, and for
 // what the base holds (all of it, or the first base_size bytes) the base's
@@ -32,20 +33,28 @@ func (Engine) NativeServed(ctx context.Context, read backup.NativeObjectReader, 
 		return nil, fmt.Errorf("%w: no manifest", backup.ErrNativeChain)
 	}
 	selected := selectedDatabases(databases)
-	data := map[string]bool{} // "data/<db>/<name>/" of every allowed object
+	data := map[string]bool{}        // "data/<db>/<name>/" of every allowed object
+	definitions := map[string]bool{} // "metadata/<db>/<name>.sql" of every allowed object
 	for _, d := range decisions {
 		if selected != nil && !selected[d.Database] {
 			return nil, fmt.Errorf("%w: a decision for %s.%s, of a database not selected", backup.ErrNativeChain, clip(d.Database), clip(d.Name))
 		}
 		if d.Allowed {
 			data["data/"+escapeForFileName(d.Database)+"/"+escapeForFileName(d.Name)+"/"] = true
+			definitions[restoreKey(d.Database, d.Name)] = true
 		}
 	}
+	// A definition is served for a selected database itself and for an
+	// allowed object only: RESTORE … EXCEPT TABLES does not read the
+	// definitions of what it leaves out, and those can hold an external
+	// source's credentials in plain text (fix round 1, B).
 	needed := func(name string) bool {
 		if rest, ok := strings.CutPrefix(name, "metadata/"); ok {
-			db, _, _ := strings.Cut(strings.TrimSuffix(rest, ".sql"), "/")
-			n, ok := unescapeFileName(db)
-			return ok && (selected == nil || selected[n])
+			if db, ok := strings.CutSuffix(rest, ".sql"); ok && !strings.Contains(db, "/") {
+				n, ok := unescapeFileName(db)
+				return ok && (selected == nil || selected[n])
+			}
+			return definitions[name]
 		}
 		if rest, ok := strings.CutPrefix(name, "data/"); ok {
 			segs := strings.SplitN(rest, "/", 3)
