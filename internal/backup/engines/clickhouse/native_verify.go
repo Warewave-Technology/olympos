@@ -61,11 +61,70 @@ func definitionTokens(text string) ([]token, bool) {
 
 // sameDefinition reports whether got, a create_table_query, is approved, the
 // definition decided on, as ClickHouse writes it: the same tokens, but for
-// the UUIDs and a PASSWORD shown as '[HIDDEN]'.
+// the UUIDs and a PASSWORD shown as '[HIDDEN]', or the same tokens as
+// approved with the encrypt functions' secret arguments masked
+// (maskSecretArguments).
 func sameDefinition(approved, got string) bool {
 	a, ok1 := definitionTokens(approved)
 	g, ok2 := definitionTokens(got)
-	if !ok1 || !ok2 || len(a) != len(g) {
+	if !ok1 || !ok2 {
+		return false
+	}
+	return sameTokens(a, g) || sameTokens(maskSecretArguments(a), g)
+}
+
+// secretArgumentFunctions are the functions whose arguments from the second
+// on ClickHouse 24.8 and 25.8 show as one '[HIDDEN]' in system.tables (fix
+// round 1 of the security review v0.4, C): f('mode', x, 'key', …) is shown
+// as f('mode', '[HIDDEN]'). The names are case-sensitive, as ClickHouse's.
+var secretArgumentFunctions = map[string]bool{"encrypt": true, "decrypt": true, "tryDecrypt": true,
+	"aes_encrypt_mysql": true, "aes_decrypt_mysql": true}
+
+// maskSecretArguments is toks with the arguments of every call of a
+// secretArgumentFunctions function from the second on replaced by one
+// '[HIDDEN]', as ClickHouse shows it; a call with one argument is kept. What
+// was in those arguments is not compared: it is the one part of a definition
+// the target does not show.
+func maskSecretArguments(toks []token) []token {
+	closing := make([]int, len(toks))
+	var open []int
+	for i, t := range toks {
+		closing[i] = -1
+		switch {
+		case t.punct("(") || t.punct("["):
+			open = append(open, i)
+		case (t.punct(")") || t.punct("]")) && len(open) > 0:
+			closing[open[len(open)-1]] = i
+			open = open[:len(open)-1]
+		}
+	}
+	out := make([]token, 0, len(toks))
+	for i := 0; i < len(toks); i++ {
+		out = append(out, toks[i])
+		if !toks[i].ident() || !secretArgumentFunctions[toks[i].val] || !tokenAt(toks, i+1).punct("(") || closing[i+1] < 0 {
+			continue
+		}
+		o, c := i+1, closing[i+1]
+		comma := -1
+		for j := o + 1; j < c; j++ {
+			if toks[j].punct(",") && toks[j].depth == toks[o].depth+1 {
+				comma = j
+				break
+			}
+		}
+		if comma < 0 {
+			continue
+		}
+		out = append(out, maskSecretArguments(toks[o:comma+1])...)
+		out = append(out, token{kind: tokString, val: hiddenSecret}, toks[c])
+		i = c
+	}
+	return out
+}
+
+// sameTokens is sameDefinition on lexed definitions.
+func sameTokens(a, g []token) bool {
+	if len(a) != len(g) {
 		return false
 	}
 	for i := range a {

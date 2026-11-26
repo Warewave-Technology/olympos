@@ -584,6 +584,14 @@ func TestRestoredObjects(t *testing.T) {
 	check("the password shown", with(restoredObject{"shop", "d", "", "Dictionary", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id " +
 		"SOURCE(CLICKHOUSE(DB 'shop' TABLE 'orders' USER 'u' PASSWORD 'pw')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"}), nil)
 	check("the UUIDs shown", with(restoredObject{"shop", "orders", "", "MergeTree", defs["orders"]}), nil)
+	// A view calling decrypt, as ClickHouse shows it (fix round 1, C); its
+	// shown first argument changed is not what was approved.
+	p.allowed[objRef{"shop", "dec"}] = Decision{Database: "shop", Name: "dec", Kind: KindView, Allowed: true}
+	p.approved[objRef{"shop", "dec"}] = "CREATE VIEW shop.dec UUID '55555555-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`p` String) AS SELECT decrypt('aes-256-ofb', toString(id), '12345678901234567890123456789012') AS p FROM shop.orders"
+	check("a decrypt view", with(restoredObject{"shop", "dec", "", "View", "CREATE VIEW shop.dec (`p` String) AS SELECT decrypt('aes-256-ofb', '[HIDDEN]') AS p FROM shop.orders"}), nil)
+	check("a decrypt view of another mode", with(restoredObject{"shop", "dec", "", "View", "CREATE VIEW shop.dec (`p` String) AS SELECT decrypt('aes-128-ecb', '[HIDDEN]') AS p FROM shop.orders"}),
+		[]string{"dec"}, "shop.dec is not what was approved (its definition is not the approved one)")
+	delete(p.allowed, objRef{"shop", "dec"})
 	check("an inner table on an S3 disk", with(restoredObject{"shop", inner.name, inner.uuid, "MergeTree",
 		"CREATE TABLE shop.`" + inner.name + "` (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = 's3'"}),
 		[]string{"mv"}, "shop..inner_id."+mvUUID+", the inner table of shop.mv, is not what was approved (the allowlist refuses its definition on the target: "+
@@ -615,6 +623,26 @@ func TestSameDefinition(t *testing.T) {
 			"CREATE VIEW s2.v3 (`id` UInt64) SQL SECURITY INVOKER AS WITH x AS (SELECT id FROM s2.t) SELECT * FROM x UNION ALL WITH x AS (SELECT id FROM s2.t) SELECT id FROM s2.t SAMPLE 1 / 2 OFFSET 1 / 2", true},
 		{"CREATE TABLE s2.t UUID 'cdf07f2a-b886-4c95-9106-dc7273b57ad6' (`id` UInt64, `e` Enum8('a' = 1, 'b' = 2), INDEX i2 n TYPE bloom_filter GRANULARITY 1, PROJECTION p (SELECT id, count() GROUP BY id)) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (id, ts) SAMPLE BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 4096 COMMENT 'hello'",
 			"CREATE TABLE s2.t (`id` UInt64, `e` Enum8('a' = 1, 'b' = 2), INDEX i2 n TYPE bloom_filter GRANULARITY 1, PROJECTION p (SELECT id, count() GROUP BY id)) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (id, ts) SAMPLE BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 4096 COMMENT 'hello'", true},
+		// ClickHouse 24.8 and 25.8 show the arguments of the encrypt functions
+		// from the second on as one '[HIDDEN]' (fix round 1, C).
+		{"CREATE TABLE e.t UUID '31a18b2d-80c8-4023-b266-25e99ee28a06' (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, '12345678901234567890123456789012')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192",
+			"CREATE TABLE e2.t (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', '[HIDDEN]')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192", false},
+		{"CREATE TABLE e.t UUID '31a18b2d-80c8-4023-b266-25e99ee28a06' (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, '12345678901234567890123456789012')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192",
+			"CREATE TABLE e.t (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', '[HIDDEN]')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192", true},
+		{"CREATE VIEW e.v2 UUID 'f902cbd2-9990-4f62-9ca6-6830d9892ff6' (`x` String, `y` Nullable(String)) AS SELECT encrypt('aes-256-gcm', s, '12345678901234567890123456789012', 'iviviviviviv', 'aad') AS x, tryDecrypt('aes-256-ofb', c, '12345678901234567890123456789012') AS y FROM e.t",
+			"CREATE VIEW e.v2 (`x` String, `y` Nullable(String)) AS SELECT encrypt('aes-256-gcm', '[HIDDEN]') AS x, tryDecrypt('aes-256-ofb', '[HIDDEN]') AS y FROM e.t", true},
+		{"CREATE VIEW e.v3 UUID '71c4b1c0-eb9c-4afc-84ed-06039c4a43b9' (`a` String, `b` String, `l` UInt64) AS SELECT aes_encrypt_mysql('aes-128-ecb', s, 'k') AS a, aes_decrypt_mysql('aes-128-ecb', unhex(c), concat('k', s)) AS b, length(encrypt('aes-128-ecb', s, '1234567890123456')) AS l FROM e.t",
+			"CREATE VIEW e.v3 (`a` String, `b` String, `l` UInt64) AS SELECT aes_encrypt_mysql('aes-128-ecb', '[HIDDEN]') AS a, aes_decrypt_mysql('aes-128-ecb', '[HIDDEN]') AS b, length(encrypt('aes-128-ecb', '[HIDDEN]')) AS l FROM e.t", true},
+		// A first argument of any form is kept, and compared.
+		{"CREATE VIEW f.v AS SELECT decrypt(concat('aes-256', '-ofb'), s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt(concat('aes-256', '-ofb'), '[HIDDEN]') AS a FROM f.t", true},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-128-ecb', '[HIDDEN]') AS a FROM f.t", false},
+		// The arguments shown are compared, and only these functions' are
+		// masked: not another function's, not a call with one argument.
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'other') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT concat('a', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT concat('a', '[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT Decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT Decrypt('aes-256-ofb', '[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', '[HIDDEN]', '[HIDDEN]') AS a FROM f.t", false},
 		// A UUID elsewhere is not the object's.
 		{"CREATE VIEW s.v AS SELECT 'x' AS UUID", "CREATE VIEW s.v AS SELECT 'y' AS UUID", false},
 		{"CREATE VIEW s.v AS SELECT toUUID('6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60') AS u", "CREATE VIEW s.v AS SELECT toUUID('7f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60') AS u", false},

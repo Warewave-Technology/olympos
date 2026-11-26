@@ -71,7 +71,9 @@ func TestRestoreNativeAgainstIngest(t *testing.T) {
 // allowlist leaves out (a URL table, and a table over a table function,
 // which the manifest lists as "other"), two views on the database other,
 // which is not backed up (findings 2 and 3 of the security review v0.4),
-// and spike.users, named like a table of system.
+// spike.users, named like a table of system, and a table and a view that
+// call encrypt and decrypt, whose secret arguments ClickHouse hides in
+// system.tables (fix round 1, C).
 const restoreSchema = `
 CREATE TABLE spike.rep (id UInt64, v String) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/spike_rep', '{replica}') ORDER BY id;
 INSERT INTO spike.rep SELECT number, toString(number) FROM numbers(1000);
@@ -91,6 +93,9 @@ CREATE VIEW spike.sampled AS SELECT s.id FROM spike.sampletab AS s SAMPLE 1/2 OF
 CREATE VIEW spike.inview AS SELECT id FROM spike.countries WHERE in(id, other.ids);
 CREATE TABLE spike.users (name String) ENGINE = Log;
 INSERT INTO spike.users VALUES ('harmless');
+CREATE TABLE spike.enc (id UInt64, c String DEFAULT encrypt('aes-256-ofb', toString(id), '12345678901234567890123456789012')) ENGINE = Log;
+INSERT INTO spike.enc (id) VALUES (1);
+CREATE VIEW spike.decv AS SELECT id, decrypt('aes-256-ofb', c, '12345678901234567890123456789012') AS p FROM spike.enc;
 `
 
 // restoreHashed are the tables whose content is compared, with the query
@@ -295,6 +300,16 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 				t.Errorf("%s: left out %q, want %q", name, left[name], want)
 			}
 		}
+		// Honest objects that call encrypt and decrypt are restored, as
+		// approved, though the target hides their secret arguments.
+		for _, name := range []string{"enc", "decv"} {
+			if _, out := left[name]; out {
+				t.Errorf("%s is left out: %s", name, left[name])
+			}
+		}
+		if got := dst.query(t, "SELECT p FROM spike.decv WHERE id = 1"); got != "1" {
+			t.Errorf("spike.decv on the target: %q", got)
+		}
 		for _, name := range []string{"ext", "nums", "sampled", "inview"} {
 			if !strings.Contains(skipped, name+": "+left[name]) {
 				t.Errorf("%s is not listed as left out: %q", name, skipped)
@@ -383,13 +398,18 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 		if bigData == "" {
 			t.Fatal("no data of big in the full")
 		}
-		for _, key := range []string{bigData, full.id + "/metadata/big.sql", full.id + "/metadata/big/blob.sql"} {
+		// And the definition of an object left out, which can hold an
+		// external source's credentials (fix round 1, B).
+		for _, key := range []string{bigData, full.id + "/metadata/big.sql", full.id + "/metadata/big/blob.sql", full.id + "/metadata/spike/ext.sql",
+			full.id + "/metadata/spike/sampled.sql"} {
 			if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+key); code != http.StatusForbidden {
 				t.Errorf("%s, of a database not selected: %d", key, code)
 			}
 		}
-		if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+inc.id+"/metadata/spike/events.sql"); code != http.StatusOK {
-			t.Errorf("a definition the restore reads: %d", code)
+		for _, key := range []string{inc.id + "/metadata/spike/events.sql", full.id + "/metadata/spike.sql"} {
+			if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+key); code != http.StatusOK {
+				t.Errorf("%s, which the restore reads: %d", key, code)
+			}
 		}
 		r.sess.Revoke("restore ended")
 	})
