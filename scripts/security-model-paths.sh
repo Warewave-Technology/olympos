@@ -21,6 +21,8 @@ paths=(
   internal/backup/engines/clickhouse/backupmeta.go
   internal/backup/engines/clickhouse/native.go
   internal/backup/native.go
+  internal/app/ingest.go
+  internal/blob/fs.go
   deploy/helm/olympos-agent/templates/clusterrole.yaml
   deploy/helm/olympos-agent/templates/bench.yaml
 )

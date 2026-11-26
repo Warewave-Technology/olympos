@@ -125,6 +125,20 @@ if printf 'internal/backup/native_test.go\ninternal/backup/native_internal_test.
   echo "FAIL: --files matched a file next to the worker's native run" >&2
   fail=1
 fi
+# The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,
+# whose SetTags rewrites the tags of stored backups.
+if ! out=$(printf 'internal/app/app.go\ninternal/app/ingest.go\n' | "$script" --files) || [ "$out" != internal/app/ingest.go ]; then
+  echo "FAIL: --files with the ingest listener: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if ! out=$(printf 'internal/blob/s3.go\ninternal/blob/fs.go\n' | "$script" --files) || [ "$out" != internal/blob/fs.go ]; then
+  echo "FAIL: --files with the NFS writer: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/app/ingest_test.go\ninternal/blob/fs_test.go\ninternal/blob/fs.go.orig\n' | "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the ingest listener or the NFS writer" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1
