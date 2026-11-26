@@ -113,9 +113,9 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 			changed = true
 			return nil
 		}
-		s, err := n.RestoreSource()
+		s, err := n.RestoreSource(ctx)
 		if err != nil {
-			return err // ErrNativeChain: why the chain is not served
+			return err // ErrNativeChain or ErrNativeNotVerified: why the chain is not served
 		}
 		source = s
 		run.Decisions, run.DDL, run.Rows, run.Definitions = n.Objects, n.DDL, n.Rows, n.Definitions

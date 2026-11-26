@@ -137,19 +137,30 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 	chainSHA := []string{mFull.SHA256(), mInc.SHA256()}
 
 	// check is the restore check of the incremental for databases, as the
-	// executor runs it: the chain verified and bound to a restore source.
+	// executor runs it: the chain verified and read whole for the check,
+	// then served by a restore source of what the restore reads only
+	// (NativeServed).
 	check := func(t *testing.T, databases ...string) (*backup.NativeRestoreCheck, *backup.NativeRestoreSource) {
 		t.Helper()
-		var rs *backup.NativeRestoreSource
+		var whole *backup.NativeRestoreSource
+		dirs := []string{full.id, inc.id}
 		c, err := Engine{}.CheckNativeRestore(context.Background(), backup.NativeRestoreInput{KV: kv, KeyName: testManifestKey,
 			RunID: inc.id, SHA256: chainSHA[1], Signed: signed, IngestURL: in.url, Databases: databases,
 			Bind: func(ms []backup.NativeChainManifest) (backup.NativeObjectReader, error) {
 				var err error
-				rs, err = backup.NewNativeRestoreSource(dirReader{st.root}, ms, []string{ms[0].RunID, ms[1].RunID}, slog.Default())
-				return readWhole(rs), err
+				whole, err = backup.NewNativeRestoreSource(dirReader{st.root}, ms, dirs, everyObject(ms), slog.Default())
+				return readWhole(whole), err
 			}})
 		if err != nil {
 			t.Fatalf("check: %v", err)
+		}
+		served, err := Engine{}.NativeServed(context.Background(), readWhole(whole), c.Manifests, databases, c.Objects)
+		if err != nil {
+			t.Fatalf("what the restore reads: %v", err)
+		}
+		rs, err := backup.NewNativeRestoreSource(dirReader{st.root}, c.Manifests, dirs, served, slog.Default())
+		if err != nil {
+			t.Fatalf("the restore source: %v", err)
 		}
 		return c, rs
 	}
@@ -293,6 +304,29 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 		// A key in the scope that the manifests do not list is refused.
 		if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+full.id+"/data/spike/events/nope.bin"); code != http.StatusForbidden {
 			t.Fatalf("a key the manifests do not list: %d", code)
+		}
+		// So is a key of the database left unselected (security review v0.4,
+		// finding 5): the target holds the credential, and reads only what
+		// the restore restores. (A small file of big whose bytes a file of
+		// spike has, a part's metadata_version.txt, is served: ClickHouse
+		// reads spike's from it, by size and checksum.)
+		var bigData string
+		for _, o := range mFull.Objects {
+			if strings.HasPrefix(o.Key, full.id+"/data/big/") && o.Size > 1<<20 {
+				bigData = o.Key
+				break
+			}
+		}
+		if bigData == "" {
+			t.Fatal("no data of big in the full")
+		}
+		for _, key := range []string{bigData, full.id + "/metadata/big.sql", full.id + "/metadata/big/blob.sql"} {
+			if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+key); code != http.StatusForbidden {
+				t.Errorf("%s, of a database not selected: %d", key, code)
+			}
+		}
+		if code := in.signed(t, r.cred, http.MethodGet, "/olympos/"+inc.id+"/metadata/spike/events.sql"); code != http.StatusOK {
+			t.Errorf("a definition the restore reads: %d", code)
 		}
 		r.sess.Revoke("restore ended")
 	})
@@ -485,6 +519,18 @@ type fileObject struct {
 }
 
 func (f fileObject) Size() int64 { return f.size }
+
+// everyObject is the set of every object of ms: a source that serves the
+// whole chain, as the check's reader.
+func everyObject(ms []backup.NativeChainManifest) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range ms {
+		for _, o := range m.Objects {
+			out[o.Key] = true
+		}
+	}
+	return out
+}
 
 // readWhole is a NativeObjectReader over src.
 func readWhole(src ingest.Source) backup.NativeObjectReader {

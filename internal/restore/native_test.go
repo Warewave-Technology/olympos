@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"reflect"
@@ -58,14 +59,17 @@ func (e *env) nativeRun(target string, objs []nativeObj) (uuid.UUID, string) {
 	dir := "p/c/shop/" + run.String()
 	m := &clickhouse.NativeManifest{Format: clickhouse.NativeManifestFormat, RunID: run.String(), ServerVersion: "25.8.1.1",
 		Settings: map[string]string{"async": "1", "id": run.String()}, PartRows: map[string]uint64{}}
+	// .backup lists every file put, with the first half of its SHA-256 as
+	// its checksum: what the restore reads is resolved from it.
+	var files strings.Builder
 	put := func(rel string, body []byte) string {
 		h := sha256.Sum256(body)
 		key := run.String() + "/" + rel
 		m.Objects = append(m.Objects, ingest.ObjectRecord{Key: key, Size: int64(len(body)), SHA256: hex.EncodeToString(h[:])})
 		e.blobs.put(dir+"/"+rel, body)
+		fmt.Fprintf(&files, "<file><name>%s</name><size>%d</size><checksum>%s</checksum></file>", rel, len(body), hex.EncodeToString(h[:16]))
 		return key
 	}
-	put(".backup", []byte("<config/>"))
 	at := map[string]int{}
 	for _, o := range objs {
 		if _, ok := at[o.db]; !ok {
@@ -76,6 +80,9 @@ func (e *env) nativeRun(target string, objs []nativeObj) (uuid.UUID, string) {
 			put("metadata/"+o.db+".sql", []byte("CREATE DATABASE "+o.db+" ENGINE = "+engine))
 		}
 		key := put("metadata/"+o.db+"/"+o.name+".sql", []byte(o.ddl))
+		if o.kind == clickhouse.KindTable {
+			put("data/"+o.db+"/"+o.name+"/all_1_1_0/data.bin", []byte("the rows of "+o.db+"."+o.name))
+		}
 		i, ok := at[o.db]
 		if !ok {
 			i = len(m.Databases)
@@ -84,6 +91,7 @@ func (e *env) nativeRun(target string, objs []nativeObj) (uuid.UUID, string) {
 		}
 		m.Databases[i].Objects = append(m.Databases[i].Objects, clickhouse.NativeObject{Name: o.name, Kind: o.kind, DDLKey: key})
 	}
+	put(".backup", []byte("<config><version>1</version><uuid>"+uuid.NewString()+"</uuid><contents>"+files.String()+"</contents></config>"))
 	s, err := clickhouse.Sign(ctx, e.KV, nativeKeyName, m)
 	if err != nil {
 		e.T.Fatal(err)
@@ -408,6 +416,22 @@ func TestNativeExecute(t *testing.T) {
 	if _, _, err := sess.Source().Open(context.Background(), run.String()+"/data/shop/x.bin"); !errors.Is(err, ingest.ErrNotServed) {
 		t.Fatalf("a key the manifest does not list: %v", err)
 	}
+	// So is what the restore does not read (security review v0.4, finding
+	// 5): the database left unselected, the data of an object left out.
+	for _, rel := range []string{"metadata/stats.sql", "metadata/stats/daily.sql", "data/stats/daily/all_1_1_0/data.bin", "data/shop/ext/all_1_1_0/data.bin"} {
+		if _, _, err := sess.Source().Open(context.Background(), run.String()+"/"+rel); !errors.Is(err, ingest.ErrNotServed) {
+			t.Errorf("%s, which the restore does not read: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{".backup", "metadata/shop.sql", "metadata/shop/ext.sql", "data/shop/orders/all_1_1_0/data.bin"} {
+		rc, _, err := sess.Source().Open(context.Background(), run.String()+"/"+rel)
+		if err != nil {
+			t.Errorf("%s, which the restore reads: %v", rel, err)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, rc)
+		_ = rc.Close()
+	}
 	// The credential is revoked at the end.
 	if _, _, ok := f.reg.Lookup(nr.AccessKey); ok {
 		t.Fatal("the credential lives on after the restore")
@@ -465,9 +489,10 @@ func TestNativeExecuteChanged(t *testing.T) {
 func TestNativeExecuteObjectChanged(t *testing.T) {
 	x, f := nativeExec(t)
 	id, run := x.approvedNative(nativeSchema, "shop")
-	key := run.String() + "/.backup"
+	// A data file: the check reads the definitions and the .backup, not it.
+	key := run.String() + "/data/shop/orders/all_1_1_0/data.bin"
 	f.read = []string{key}
-	x.blobs.put("p/c/shop/"+run.String()+"/.backup", []byte("<config/!"))
+	x.blobs.put("p/c/shop/"+run.String()+"/data/shop/orders/all_1_1_0/data.bin", []byte("the rows of shop.orderX"))
 	x.claim(id)
 	x.ex.Execute(context.Background(), id)
 	s := x.stored(id)

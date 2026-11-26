@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,6 +29,32 @@ import (
 // CheckNativeRestore is the real engine's.
 func (fakeEngine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInput) (*backup.NativeRestoreCheck, error) {
 	return clickhouse.Engine{}.CheckNativeRestore(ctx, in)
+}
+
+// NativeServed is the real engine's.
+func (fakeEngine) NativeServed(ctx context.Context, read backup.NativeObjectReader, ms []backup.NativeChainManifest, databases []string,
+	decisions []backup.NativeDecision) (map[string]bool, error) {
+	return clickhouse.Engine{}.NativeServed(ctx, read, ms, databases, decisions)
+}
+
+// everyKey serves keys.
+func everyKey(keys ...string) map[string]bool {
+	out := map[string]bool{}
+	for _, k := range keys {
+		out[k] = true
+	}
+	return out
+}
+
+// everyObject serves every object of ms.
+func everyObject(ms []backup.NativeChainManifest) map[string]bool {
+	out := map[string]bool{}
+	for _, m := range ms {
+		for _, o := range m.Objects {
+			out[o.Key] = true
+		}
+	}
+	return out
 }
 
 func restoreCfg(e nativeEnv) backup.NativeRestoreConfig {
@@ -327,7 +354,7 @@ func TestNativeRestoreServes(t *testing.T) {
 	var rs *backup.NativeRestoreSource
 	err = backup.WithNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
 		var err error
-		rs, err = n.RestoreSource()
+		rs, err = n.RestoreSource(ctx)
 		return err
 	})
 	if err != nil || rs == nil {
@@ -379,19 +406,100 @@ func TestNativeRestoreServes(t *testing.T) {
 	}
 }
 
+// servingEngine is fakeEngine with what the restore reads given.
+type servingEngine struct {
+	fakeEngine
+	served func(ms []backup.NativeChainManifest) map[string]bool
+}
+
+func (e servingEngine) NativeServed(_ context.Context, _ backup.NativeObjectReader, ms []backup.NativeChainManifest, _ []string,
+	_ []backup.NativeDecision) (map[string]bool, error) {
+	return e.served(ms), nil
+}
+
+// TestNativeRestoreServesWhatTheRestoreReads (security review v0.4, finding
+// 5): the restore's source serves only what the engine says the RESTORE
+// reads; every other object of the chain is refused (403), and listed by
+// no LIST. A key the engine names that the manifests do not list refuses
+// the source.
+func TestNativeRestoreServesWhatTheRestoreReads(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedIncremental(t, db)
+	full := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(ctx, db, inc, &e.DestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := []string{full.String() + "/.backup", inc.String() + "/.backup", full.String() + "/metadata/shop.sql"}
+	source := func(eng backup.NativeRestoreEngine) (*backup.NativeRestoreSource, []backup.NativeChainManifest, error) {
+		var rs *backup.NativeRestoreSource
+		var ms []backup.NativeChainManifest
+		err := backup.WithNativeRestore(ctx, db, e.B1, eng, restoreCfg(e), src, []string{"shop"}, quietLog(), func(n *backup.NativeRestore) error {
+			var err error
+			ms = n.Manifests
+			rs, err = n.RestoreSource(ctx)
+			return err
+		})
+		return rs, ms, err
+	}
+	rs, ms, err := source(servingEngine{served: func([]backup.NativeChainManifest) map[string]bool { return everyKey(served...) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rs.Objects() != len(served) {
+		t.Fatalf("serves %d objects, want %d", rs.Objects(), len(served))
+	}
+	for _, m := range ms {
+		for _, o := range m.Objects {
+			rc, _, err := rs.Open(ctx, o.Key)
+			switch {
+			case slices.Contains(served, o.Key) && err != nil:
+				t.Errorf("%s: %v", o.Key, err)
+			case !slices.Contains(served, o.Key) && !errors.Is(err, ingest.ErrNotServed):
+				t.Errorf("%s, which the restore does not read: %v, want ErrNotServed", o.Key, err)
+			}
+			if rc != nil {
+				_, _ = io.Copy(io.Discard, rc)
+				_ = rc.Close()
+			}
+		}
+	}
+	listed, _ := rs.List(ctx, "")
+	var keys []string
+	for _, o := range listed {
+		keys = append(keys, o.Key)
+	}
+	slices.Sort(served)
+	if !slices.Equal(keys, served) {
+		t.Fatalf("listed %v, want %v", keys, served)
+	}
+	// With the real engine, everything of the one database is read.
+	rs, ms, err = source(fakeEngine{})
+	if err != nil || rs.Objects() != len(everyObject(ms)) {
+		t.Fatalf("the real engine: %v", err)
+	}
+	if _, _, err := source(servingEngine{served: func([]backup.NativeChainManifest) map[string]bool {
+		return everyKey(full.String() + "/data/not-in-the-manifest.bin")
+	}}); !errors.Is(err, backup.ErrNativeChain) {
+		t.Fatalf("a key the manifests do not list: %v", err)
+	}
+}
+
 // TestNativeRestoreSourceKeys: a manifest key the endpoint would not serve
 // refuses the restore's source.
 func TestNativeRestoreSourceKeys(t *testing.T) {
 	for _, bad := range []string{`a\b.bin`, "a/../b.bin", "a//b.bin", "a/\x01.bin"} {
 		run := uuid.NewString()
 		if _, err := backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{
-			{Key: run + "/" + bad, Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, nil); err == nil {
+			{Key: run + "/" + bad, Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, everyKey(run+"/"+bad), nil); err == nil {
 			t.Fatalf("%q: a restore source", bad)
 		}
 	}
 	run := uuid.NewString()
 	if _, err := backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{
-		{Key: run + "/data/%2e%2e/x.bin", Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, nil); err != nil {
+		{Key: run + "/data/%2e%2e/x.bin", Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, everyKey(run+"/data/%2e%2e/x.bin"), nil); err != nil {
 		t.Fatalf("a %% sequence is a plain name: %v", err)
 	}
 }
@@ -411,7 +519,8 @@ func TestNativeRestoreSourceBound(t *testing.T) {
 		objs[i] = ingest.ObjectRecord{Key: fmt.Sprintf("%s/data/%d.bin", run, i), Size: 1, SHA256: sum}
 	}
 	src := func(objs []ingest.ObjectRecord) (*backup.NativeRestoreSource, error) {
-		return backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: objs}}, []string{"p/" + run}, nil)
+		ms := []backup.NativeChainManifest{{RunID: run, Objects: objs}}
+		return backup.NewNativeRestoreSource(nil, ms, []string{"p/" + run}, everyObject(ms), nil)
 	}
 	if _, err := src(objs); err == nil || !strings.Contains(err.Error(), "the chain holds 101 objects") || !strings.Contains(err.Error(), "more than the 100 objects") {
 		t.Fatalf("past the object bound: %v", err)

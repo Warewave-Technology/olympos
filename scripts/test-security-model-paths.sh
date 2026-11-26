@@ -197,6 +197,18 @@ if printf 'internal/backup/engines/clickhouse/native_verify_test.go\ninternal/ba
   echo "FAIL: --files matched a file next to the native restore's comparison" >&2
   fail=1
 fi
+# What a native restore's credential may read (security review v0.4,
+# finding 5).
+if ! out=$(printf 'internal/backup/engines/clickhouse/native.go\ninternal/backup/engines/clickhouse/native_served.go\n' | "$script" --files) ||
+  [ "$out" != $'internal/backup/engines/clickhouse/native.go\ninternal/backup/engines/clickhouse/native_served.go' ]; then
+  echo "FAIL: --files with what a native restore serves: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/native_served_test.go\ninternal/backup/engines/clickhouse/native_served.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to what a native restore serves" >&2
+  fail=1
+fi
 # Which copy a restore reads (FindRestoreSource), and the open-time rules
 # that keep a native run whose chain does not verify from being restored.
 if ! out=$(printf 'internal/backup/restore_guide.go\ninternal/restore/executor.go\ninternal/restore/api.go\n' | "$script" --files) ||

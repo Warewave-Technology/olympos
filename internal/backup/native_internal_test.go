@@ -686,7 +686,7 @@ func TestSourcesKeepTheRequestsEnd(t *testing.T) {
 			return newChainSourceOn(r, []string{"p/" + run}, ms, slog.New(slog.DiscardHandler))
 		},
 		"restore": func(r blob.Reader) (ingest.Source, error) {
-			return NewNativeRestoreSource(r, ms, []string{"p/" + run}, slog.New(slog.DiscardHandler))
+			return NewNativeRestoreSource(r, ms, []string{"p/" + run}, map[string]bool{key: true}, slog.New(slog.DiscardHandler))
 		},
 	}
 	for name, mk := range sources {
