@@ -153,6 +153,14 @@ func TestClassifyTables(t *testing.T) {
 			{"db", "gv", KindView, "CREATE VIEW db.gv AS SELECT Path FROM db.x"},
 		}},
 		{name: "an MV with an inner Graphite table", reason: "the GraphiteMergeTree engine needs the graphite_rollup configuration on the target server", objs: mv("CREATE MATERIALIZED VIEW db.x (`Path` String, `Time` DateTime, `Value` Float64, `Version` UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY (Path, Time) AS SELECT toString(id) AS Path, now() AS Time, 0. AS Value, 1 AS Version FROM db.events")},
+		// R49: an encryption codec needs the target's keys.
+		{name: "AES_128_GCM_SIV", reason: "its AES_128_GCM_SIV codec needs encryption keys on the target server", objs: tbl("CREATE TABLE db.x (`id` UInt64, `secret` String CODEC(AES_128_GCM_SIV)) ENGINE = MergeTree ORDER BY id")},
+		{name: "AES_256_GCM_SIV after other codecs", reason: "its AES_256_GCM_SIV codec needs encryption keys on the target server", objs: tbl("CREATE TABLE db.x (`id` UInt64 CODEC(Delta(8), ZSTD(3), AES_256_GCM_SIV)) ENGINE = Log")},
+		{name: "a view on an encrypted table", check: "ev", reason: "it reads db.x, which is not restored", objs: []alObj{
+			{"db", "x", KindTable, "CREATE TABLE db.x (`id` UInt64, `secret` String CODEC(AES_128_GCM_SIV)) ENGINE = MergeTree ORDER BY id"},
+			{"db", "ev", KindView, "CREATE VIEW db.ev AS SELECT id FROM db.x"},
+		}},
+		{name: "a column named like an encryption codec", allowed: true, objs: tbl("CREATE TABLE db.x (`AES_128_GCM_SIV` String CODEC(ZSTD(1)), `s` String DEFAULT 'AES_256_GCM_SIV') ENGINE = MergeTree ORDER BY AES_128_GCM_SIV")},
 		{name: "inline disk", reason: "its settings define a disk inline", objs: tbl(
 			"CREATE TABLE db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = disk(type = s3, endpoint = 'http://example.invalid/b/', access_key_id = 'a', secret_access_key = 'b'), index_granularity = 8192")},
 		{name: "inline disk on a Log", reason: "its settings define a disk inline", objs: tbl("CREATE TABLE db.x (`id` UInt64) ENGINE = Log SETTINGS disk = disk(type = local, path = '/tmp/x/')")},
@@ -229,6 +237,8 @@ func TestClassifyViews(t *testing.T) {
 		{name: "a function named like a column", allowed: true, objs: view("CREATE VIEW db.x AS SELECT format('{} {}', id, id) AS f, arrayMap(x -> (x + 1), arr) AS a FROM db.events FINAL")},
 		{name: "definer and SQL security", allowed: true, objs: view("CREATE VIEW db.x (`id` UInt64) DEFINER = alice SQL SECURITY DEFINER AS SELECT id FROM db.events")},
 		{name: "APPLY with a lambda and a parametric function", allowed: true, objs: view("CREATE VIEW db.x AS SELECT * APPLY(x -> toString(x)) APPLY(quantile(0.9)) FROM db.logs")},
+		{name: "IN tuple(", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN tuple(1, 2) AND id NOT IN array(3)")},
+		{name: "IN a tuple", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN (1, 2) AND (id, id) IN ((1, 1), (2, 2))")},
 		{name: "no table at all", allowed: true, objs: view("CREATE VIEW db.x AS SELECT 1 AS one")},
 
 		{name: "url(", reason: "it reads the table function url", objs: view("CREATE VIEW db.x AS SELECT * FROM url('http://example.invalid/x', CSV, 'id UInt64')")},
@@ -244,7 +254,13 @@ func TestClassifyViews(t *testing.T) {
 		{name: "a table function inside a subquery", reason: "it reads the table function remoteSecure", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN (SELECT id FROM remoteSecure('h:9440', db.events))")},
 		{name: "a table function inside a scalar subquery", reason: "it reads the table function clusterAllReplicas", objs: view("CREATE VIEW db.x AS SELECT (SELECT count() FROM clusterAllReplicas('c', system.one)) AS n FROM db.events")},
 		{name: "a table function in a CTE", reason: "it reads the table function s3", objs: view("CREATE VIEW db.x AS WITH a AS (SELECT * FROM s3('http://example.invalid/b/x')) SELECT * FROM a")},
-		{name: "a table function after IN", reason: "it calls url, which reads outside the restored set", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN url('http://example.invalid/ids', CSV, 'id UInt64')")},
+		{name: "a table function after IN", reason: "it reads the table function url", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN url('http://example.invalid/ids', CSV, 'id UInt64')")},
+		{name: "IN merge(", reason: "it reads the table function merge", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN merge('db', '^ex')")},
+		{name: "IN numbers(", reason: "it reads the table function numbers", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id NOT IN numbers(10)")},
+		{name: "IN a table function not on any list", reason: "it reads the table function someNewFn", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id GLOBAL IN someNewFn(1)")},
+		{name: "IN view(", reason: "it reads the table function view", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN view(SELECT id FROM db.events)")},
+		{name: "IN dictionary(", reason: "it reads the table function dictionary", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN dictionary('db.extdict')")},
+		{name: "IN a qualified function", reason: "it reads the table function f", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN db.f(1)")},
 		{name: "file() as a scalar", reason: "it calls file, which reads outside the restored set", objs: view("CREATE VIEW db.x AS SELECT file('secret.txt') AS s FROM db.events")},
 		{name: "hasColumnInTable with a host", reason: "it calls hasColumnInTable, which reads outside the restored set", objs: view("CREATE VIEW db.x AS SELECT hasColumnInTable('h', 'db', 't', 'c') AS h")},
 		{name: "APPLY(file)", reason: "it calls file, which reads outside the restored set", objs: view("CREATE VIEW db.x AS SELECT * APPLY(file) FROM db.logs")},
@@ -284,7 +300,12 @@ func TestClassifyMaterializedViews(t *testing.T) {
 		{name: "TO a restored table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID 'f0128b77-346e-4f76-b6ad-18eb944a2104' TO db.logs (`id` UInt64, `msg` String) AS SELECT id, toString(id) AS msg FROM db.events")},
 		{name: "TO an unqualified table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x TO logs AS SELECT id, '' AS msg FROM events")},
 		{name: "an inner table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID '73f0f9df-cd2d-4d2f-b190-88f9be7a8aae' TO INNER UUID 'e24ac6f2-3215-4237-b418-e0ef2c318dde' (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id FROM db.events WHERE id > 900")},
-		{name: "an inner table, no TO INNER", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/x', '{replica}') ORDER BY id AS SELECT id FROM db.events")},
+		{name: "an inner table, no TO INNER", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id AS SELECT id FROM db.events")},
+		{name: "an inner table with a codec", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64 CODEC(Delta(8), ZSTD(1))) ENGINE = ReplacingMergeTree ORDER BY id AS SELECT id FROM db.events")},
+		{name: "TO a Replicated table", allowed: true, objs: []alObj{
+			{"db", "rt", KindTable, "CREATE TABLE db.rt (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/rt', '{replica}') ORDER BY id"},
+			{"db", "x", KindMaterializedView, "CREATE MATERIALIZED VIEW db.x TO db.rt (`id` UInt64) AS SELECT id FROM db.events"},
+		}},
 		{name: "definer", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x TO db.logs (`id` UInt64) DEFINER = alice SQL SECURITY DEFINER AS SELECT id FROM db.events")},
 		{name: "a target named file", allowed: true, objs: []alObj{
 			{"db", "file", KindTable, "CREATE TABLE db.file (`id` UInt64) ENGINE = Log"},
@@ -298,6 +319,15 @@ func TestClassifyMaterializedViews(t *testing.T) {
 		{name: "TO a view", reason: "its target db.v is not a table", objs: mv("CREATE MATERIALIZED VIEW db.x TO db.v (`id` UInt64) AS SELECT id FROM db.events")},
 		{name: "refreshable", reason: "a refreshable materialized view runs its query on a schedule", objs: mv("CREATE MATERIALIZED VIEW db.x REFRESH EVERY 1 HOUR TO db.logs (`id` UInt64) AS SELECT id FROM db.events")},
 		{name: "refreshable, append", reason: "a refreshable materialized view runs its query on a schedule", objs: mv("CREATE MATERIALIZED VIEW db.x REFRESH AFTER 1 MINUTE APPEND TO db.logs (`id` UInt64) AS SELECT id FROM db.events")},
+		// R48: RESTORE creates an inner table from the backup's statement,
+		// with the source's Keeper path.
+		{name: "an inner ReplicatedMergeTree", reason: "its inner table's Replicated engine keeps the backup's Keeper path", objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/x', '{replica}') ORDER BY id AS SELECT id FROM db.events")},
+		{name: "an inner Replicated table, TO INNER", reason: "its inner table's Replicated engine keeps the backup's Keeper path", objs: mv("CREATE MATERIALIZED VIEW db.x TO INNER UUID 'e24ac6f2-3215-4237-b418-e0ef2c318dde' (`id` UInt64) ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY id AS SELECT id FROM db.events")},
+		{name: "a view on an MV with an inner Replicated table", check: "mvv", reason: "it reads db.x, which is not restored", objs: []alObj{
+			{"db", "x", KindMaterializedView, "CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/x', '{replica}') ORDER BY id AS SELECT id FROM db.events"},
+			{"db", "mvv", KindView, "CREATE VIEW db.mvv AS SELECT id FROM db.x"},
+		}},
+		{name: "an inner table with an encryption codec", reason: "its AES_256_GCM_SIV codec needs encryption keys on the target server", objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64 CODEC(Delta(8), ZSTD(1), AES_256_GCM_SIV)) ENGINE = MergeTree ORDER BY id AS SELECT id FROM db.events")},
 		{name: "an inner Kafka table", reason: "the Kafka engine is not on the restore allowlist", objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = Kafka('k:9092', 't', 'g', 'JSONEachRow') AS SELECT id FROM db.events")},
 		{name: "an inner table on a disk", reason: "its settings define a disk inline", objs: mv("CREATE MATERIALIZED VIEW db.x TO INNER UUID 'e24ac6f2-3215-4237-b418-e0ef2c318dde' (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = disk(type = s3, endpoint = 'http://example.invalid/b/') AS SELECT id FROM db.events")},
 		{name: "an inner table on a storage policy", reason: "its storage policy tiered is not the default", objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS storage_policy = 'tiered' AS SELECT id FROM db.events")},

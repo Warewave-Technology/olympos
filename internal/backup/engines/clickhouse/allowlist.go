@@ -5,20 +5,22 @@ package clickhouse
 // metadata/*.sql on the target, so Olympos reads each object's definition
 // and lets only what it can prove harmless be created:
 //
-//   - MergeTree-family (Replicated too), Log-family and Memory tables, with
-//     any column or table feature, but not on a disk or storage policy of
-//     their own (SETTINGS disk = …, storage_policy = …), which can reach
-//     outside the server;
+//   - MergeTree-family (Replicated too, not Graphite: R47), Log-family and
+//     Memory tables, with any column or table feature, but not on a disk or
+//     storage policy of their own (SETTINGS disk = …, storage_policy = …),
+//     which can reach outside the server, nor with an encryption codec
+//     (R49);
 //   - views and materialized views whose query reads only objects restored,
 //     with no table function; a materialized view's TO table is restored
-//     too; a refreshable one is not;
+//     too; its inner table is not Replicated (R48); a refreshable one is
+//     not restored;
 //   - dictionaries with a local ClickHouse source (no HOST or PORT) on an
 //     object restored.
 //
 // Everything else is left out (RESTORE … EXCEPT TABLES) and listed with the
 // reason. The manifest's Kind and Engine come from the statement's prefix
 // only (ObjectsFromMetadata) and are never trusted: Classify reads the whole
-// definition behind each object's DDLKey with the strict lexer of ddl.go
+// definition behind each object's DDLKey with the strict lexer of sqllex.go
 // (no comments, no query parameters, nothing it does not read). A rule
 // allows only what it matches positively; what it does not read with
 // certainty is "cannot be parsed with certainty". A mistake here can only
@@ -27,7 +29,7 @@ package clickhouse
 // What a definition reads is collected from every FROM and JOIN source (the
 // subqueries, CTEs and unions in it too), every "IN <table>", and the
 // object a dictGet* or joinGet names. A source followed by "(" is a table
-// function. An unqualified name is of the object's own database, as
+// function, and so is "IN f(…)" unless f is tuple or array. An unqualified name is of the object's own database, as
 // ClickHouse qualifies a view's names when it creates it; a CTE's name is
 // not a table within the SELECT that defines it. An object is restored only
 // when everything it reads is, to a fixed point.
@@ -444,6 +446,7 @@ func (r *reader) table(i int) {
 		}
 	}
 	r.storage(e, len(r.toks))
+	r.encryptedCodecs(cols, len(r.toks))
 	r.noQueries(cols, len(r.toks))
 	r.walk(cols, len(r.toks), nil, false)
 }
@@ -504,6 +507,23 @@ func (r *reader) storage(lo, hi int) {
 	}
 }
 
+// encryptedCodecs refuses, in toks[lo:hi], a column CODEC with an
+// encryption codec (R49): it encrypts with keys from the server's
+// configuration, which the target may not have.
+func (r *reader) encryptedCodecs(lo, hi int) {
+	for j := lo; j < hi && !r.failed(); j++ {
+		if !r.toks[j].is("CODEC") || !r.at(j+1).punct("(") {
+			continue
+		}
+		for k, c := j+2, r.closing(j+1); k < c; k++ {
+			if t := r.toks[k]; t.is("AES_128_GCM_SIV") || t.is("AES_256_GCM_SIV") {
+				r.fail("its " + strings.ToUpper(t.val) + " codec needs encryption keys on the target server")
+				return
+			}
+		}
+	}
+}
+
 // noQueries refuses a query in a table's definition (a column's default,
 // a TTL's WHERE, …), other than a projection's.
 func (r *reader) noQueries(lo, hi int) {
@@ -556,11 +576,12 @@ func (r *reader) materializedView(i int) {
 			r.def.target, i = &t, j
 		}
 	}
+	cols, colsEnd := i, i
 	if at(i).punct("(") {
 		c := r.closing(i)
 		r.noQueries(i, c+1)
 		r.walk(i, c+1, nil, false)
-		i = c + 1
+		i, colsEnd = c+1, c+1
 	}
 	if !at(i).is("ENGINE") {
 		if r.def.target == nil || inner {
@@ -577,6 +598,17 @@ func (r *reader) materializedView(i int) {
 	e := i
 	k := r.engine(i)
 	if r.failed() {
+		return
+	}
+	// RESTORE creates the inner table from the backup's own statement (R48):
+	// a Replicated one would keep the source's Keeper path and, on a Keeper
+	// the target shares, join the source's replication. Task 15 rewrites the
+	// path of a CREATE TABLE only.
+	if strings.HasPrefix(at(e+2).val, "Replicated") {
+		r.fail("its inner table's Replicated engine keeps the backup's Keeper path")
+		return
+	}
+	if r.encryptedCodecs(cols, colsEnd); r.failed() {
 		return
 	}
 	q := -1
@@ -676,6 +708,11 @@ func (r *reader) dictionary(i int) {
 	if r.layout(layout); r.failed() {
 		return
 	}
+	// The arguments of LIFETIME, RANGE, SETTINGS and LAYOUT are not walked,
+	// deliberately: they hold numbers, column names, format settings and
+	// layout sizes, none of which reads data (the layout's name is checked
+	// above). What a dictionary reads is its source and its columns'
+	// expressions.
 	r.walk(cols, r.closing(cols)+1, nil, false)
 }
 
@@ -962,12 +999,21 @@ func (r *reader) from(i int, ctes map[string]bool) int {
 	return j - 1
 }
 
-// inTable reads "IN db.t" (a table, not a tuple or a subquery) at toks[i]
-// and returns the index of its last token.
+// inTable reads what follows IN at toks[i] and returns the index of its
+// last token read: a table ("IN db.t"), or "IN f(…)", where f is a table
+// function unless it is tuple or array. A bracket (a tuple or a subquery)
+// is left to walk.
 func (r *reader) inTable(i int, ctes map[string]bool) int {
 	o, j, ok := r.name(i + 1)
-	if !ok || r.at(j).punct("(") {
+	switch {
+	case !ok:
 		return i
+	case r.at(j).punct("("):
+		if f := strings.ToLower(r.at(j - 1).val); j-i == 2 && (f == "tuple" || f == "array") {
+			return i
+		}
+		r.fail("it reads the table function " + shortName(r.at(j-1).val))
+		return j
 	}
 	r.read(o, j-i == 2, ctes)
 	return j - 1
