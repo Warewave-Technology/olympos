@@ -15,7 +15,7 @@ are required. To try Olympos first, without Azure, see [Getting started](getting
 | **Azure Key Vault** | Holds the KEK (RSA key), the HMAC key and every `kv://` secret |
 | **Azure Blob Storage** | Backup destination, hardened as in §4 below |
 | **Entra ID app registration** | Web platform, redirect URI `https://<publicURL>/auth/callback`, ID tokens |
-| Network | Users → server `:443`; agents → server gateway `:8443` (mTLS). Nothing else inbound. |
+| Network | Users → server `:443`; agents → server gateway `:8443` (mTLS). With native ClickHouse backups (§5), ClickHouse → server ingest `:9444` (HTTPS). Nothing else inbound. |
 
 ### Entra ID
 
@@ -45,6 +45,8 @@ Crypto User*) and shows "Key Vault · purge protection is off" in *Needs attenti
 az keyvault update --name kv-platform-weu --enable-purge-protection true   # existing vault
 az keyvault key create --vault-name kv-platform-weu --name olympos-kek --kty RSA --size 3072 --ops wrapKey unwrapKey
 az keyvault secret set --vault-name kv-platform-weu --name olympos-hmac --value "$(openssl rand -hex 32)"
+# only for native ClickHouse backups (§5):
+az keyvault key create --vault-name kv-platform-weu --name olympos-manifest --kty EC --curve P-256 --ops sign verify
 # only for an external database (postgresql.bundled=false):
 az keyvault secret set --vault-name kv-platform-weu --name olympos-db-dsn \
   --value 'postgres://olympos:<password>@<server>.postgres.database.azure.com:5432/olympos?sslmode=verify-full'
@@ -52,7 +54,8 @@ az keyvault secret set --vault-name kv-platform-weu --name olympos-db-dsn \
 
 Grant the server identity: *Key Vault Crypto User* on the key (wrap/unwrap), *Key Vault Secrets User*
 on the secrets it reads, and *Key Vault Secrets Officer* if Vault AppRole secret IDs should be stored
-there (Vaults › Configure writes `olympos-vault-<id>-secret-id`).
+there (Vaults › Configure writes `olympos-vault-<id>-secret-id`). For native ClickHouse backups, also *Key
+Vault Crypto User* on `olympos-manifest` ([The manifest key](#the-manifest-key)); the Bicep template does both.
 
 ## 2. Server
 
@@ -353,12 +356,15 @@ Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:
 The Bicep module renders one lifecycle rule per tier. The server has no delete permission and no
 delete code path; *Settings › Destinations › Test destination* warns if the credential can delete.
 
-**Weekly retention must be at least daily retention plus 7 days** for native ClickHouse jobs with incrementals.
-A chain of native backups (a full and the daily incrementals on it) spans at most one week, and the server
-re-tags the chain's daily runs `weekly` when it takes an incremental on them, so a week's incrementals are
-kept as long as the weekly tier ([configuration.md](configuration.md#ingest), *Retention of incrementals*).
-The first run of a month is a full, so monthly backups never depend on a chain. The same holds for the S3 and
-NFS rules below.
+**Weekly retention must be at least daily retention plus 7 days, plus the job's retry window**, for native
+ClickHouse jobs with incrementals. A chain of native backups (a full and the daily incrementals on it) spans at
+most one week, and the server re-tags the chain's daily runs `weekly` when it takes an incremental on them, so
+a week's incrementals are kept as long as the weekly tier ([configuration.md](configuration.md#ingest),
+*Retention of incrementals*). The week is counted by the runs' scheduled times, and lifecycle rules count from
+when an object was written: a run retried after an agent disconnect keeps its scheduled time and can be written
+up to the retry window later (half the time to the job's next scheduled run, 12 hours for a daily job). The
+first run of a month is a full, so monthly backups never depend on a chain. The same holds for the S3 and NFS
+rules below; the Bicep module's defaults (7 and 28 days) meet it.
 
 **Objects of runs that did not finish.** A native ClickHouse backup writes its objects with the tag
 `olympos-state=incomplete` and retags them `olympos-state=complete` only after the run's signed manifest is
@@ -468,7 +474,8 @@ shortened or removed, not even by the root user.
 
 Apply with `aws s3api put-bucket-lifecycle-configuration --bucket olympos-backups --lifecycle-configuration file://lifecycle.json`
 (MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …), with the weekly
-`Days` at least the daily ones plus 7 for native incrementals, and adjust the probe prefix to your destination
+`Days` at least the daily ones plus 8 for native incrementals of a daily job (7 days and the retry window, see
+above), and adjust the probe prefix to your destination
 prefix. With Object Lock, an expiration only adds a delete marker
 until the lock period of the version has ended.
 
@@ -588,13 +595,140 @@ data, literal env values), at `<prefix>/audit/{cluster}/{tool}/{run_id}.json`. C
 are kept. Olympos never deletes raw reports: add a lifecycle rule deleting `audit/` after 400 days (the
 objects carry the tag `olympos-tier=audit` for tag-filtered rules).
 
-## 5. Notifications
+## 5. Native ClickHouse backups (optional)
+
+A ClickHouse job can take **native** backups: ClickHouse runs its own `BACKUP` and sends the files to the
+Olympos server, which stores them in the job's destinations ([ClickHouse backups](clickhouse-backups.md)
+compares the two methods). This needs four things: the server's ingest endpoint, a certificate ClickHouse
+trusts, egress from the ClickHouse pods to the endpoint, and a Key Vault key that signs the backups. Until
+`ingest.url` is set the server opens no ingest port, and ClickHouse jobs use the logical method.
+
+### The endpoint
+
+The ingest endpoint is a small S3 server in the Olympos server (`listen.ingest`, `:9444`): ClickHouse writes a
+backup to it and reads one back for a restore, and every run signs its requests with its own short-lived
+credential ([security model](security-model.md#native-clickhouse-backups-the-ingest-endpoint)). Turn it on with
+the URL ClickHouse reaches it by:
+
+```yaml
+olympos:
+  ingest:
+    url: https://olympos-ingest.contoso.internal:9444
+ingestService:                    # the Service <release>-ingest, rendered only with olympos.ingest.url
+  type: LoadBalancer
+  annotations:
+    service.beta.kubernetes.io/azure-load-balancer-internal: "true"
+# ingestTLSSecret: olympos-ingest-tls   # optional: your own certificate (below)
+```
+
+When ClickHouse runs in the same cluster as the server, the default `ClusterIP` Service is enough:
+`url: https://olympos-ingest.olympos.svc:9444` (release `olympos` in namespace `olympos`). Clusters elsewhere
+need an address they can reach, such as an internal LoadBalancer and a DNS name for it. The endpoint needs one
+server instance (`ingest.url` is refused with `experimental.multiReplica`). The chart also mounts a spill
+volume for parts that arrive out of order; the limits of a run (`ingest.maxRuns`, `maxRunDuration`,
+`maxRunBytes`) are in [configuration › `ingest`](configuration.md#ingest). On a VM (systemd) set
+`ingest.url` in `/etc/olympos/config.yaml` and open the port in the host's firewall.
+
+### Its certificate
+
+By default the internal CA issues the endpoint's certificate for the host of `ingest.url` and renews it
+itself (90 days, re-issued when fewer than 30 are left). ClickHouse then has to trust the Olympos CA (next
+section). A certificate from your PKI or a public CA, which ClickHouse already trusts, is simpler: put it in a
+`kubernetes.io/tls` Secret and name it in `ingestTLSSecret` (on a VM: `ingest.tlsCertFile` and
+`ingest.tlsKeyFile`, reloaded on `SIGHUP`). Its name must match the host of `ingest.url`.
+
+### ClickHouse trusts the endpoint
+
+With the internal-CA certificate, add the Olympos CA to ClickHouse's own TLS client settings. The CA is in the
+agent's ConfigMap of every cluster with an agent:
+
+```bash
+kubectl -n olympos-system get configmap olympos-agent-ca -o jsonpath='{.data.ca\.crt}' > olympos-ca.crt
+```
+
+Mount it into the ClickHouse pods (for example from a ConfigMap at `/etc/clickhouse-server/olympos-ca/`) and add
+a file under `config.d`:
+
+```xml
+<!-- /etc/clickhouse-server/config.d/olympos-ingest-ca.xml -->
+<clickhouse>
+  <openSSL>
+    <client>
+      <caConfig>/etc/clickhouse-server/olympos-ca/ca.crt</caConfig>
+    </client>
+  </openSSL>
+</clickhouse>
+```
+
+`openSSL.client` is ClickHouse's setting for every TLS connection it opens (S3 disks, `url()`, other
+servers), so a `caConfig` already set there must hold the Olympos CA too; with `loadDefaultCAFile` (on by
+default) the system CAs stay trusted. The pods restart when the volume is added, which also loads the file.
+A restore target needs the same: it reads the backup through the endpoint.
+
+### Egress from the ClickHouse pods
+
+ClickHouse connects to the endpoint directly, not through the agent, so the ClickHouse pods need egress to the
+host and port of `ingest.url`. Where the ClickHouse namespace restricts egress with NetworkPolicies, allow it
+(the labels are examples; use your ClickHouse pods' labels and the endpoint's address):
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: clickhouse-to-olympos-ingest, namespace: analytics}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: clickhouse}
+  policyTypes: [Egress]
+  egress:
+  - to:
+    - ipBlock: {cidr: 10.20.30.40/32}          # the internal LoadBalancer of <release>-ingest
+    # in the server's cluster, the server pods instead:
+    # - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: olympos}}
+    #   podSelector: {matchLabels: {app.kubernetes.io/name: olympos-server}}
+    ports:
+    - {protocol: TCP, port: 9444}
+```
+
+A pod's first `Egress` policy denies all its other egress (DNS, Keeper, the other replicas), so add this only
+next to the egress rules the namespace already has. If the server's namespace restricts ingress, allow the
+ClickHouse pods to the server pods on `9444` there too. Firewalls between the clusters need the same port.
+
+### The manifest key
+
+Every native run's manifest is signed with the Key Vault key `olympos-manifest` (`keyVault.manifestKeyName`;
+EC P-256), in the vault of the KEK (`keyVault.name`). `deploy/bicep/keyvault.bicep` creates it and its role;
+by hand ([§1 Key Vault](#key-vault)):
+
+```bash
+az keyvault key create --vault-name kv-platform-weu --name olympos-manifest --kty EC --curve P-256 --ops sign verify
+az role assignment create --role "Key Vault Crypto User" --assignee-object-id <managed identity principal id> \
+  --assignee-principal-type ServicePrincipal \
+  --scope "$(az keyvault show --name kv-platform-weu --query id -o tsv)/keys/olympos-manifest"
+```
+
+The server's identity needs **`keys/sign`** (to sign) and **`keys/get`** (to read the public key) on it, both
+in *Key Vault Crypto User*. It does not need `keys/verify`: the server verifies locally with the public key,
+which it keeps for an hour. Purge protection is a setting of the vault, so the server's KEK check (*Key Vault ·
+purge protection is off*) covers this key as well.
+
+**Keep every version of the key.** The server signs with the newest version, and a manifest verifies only
+with the version that signed it. Rotate by adding a version (`az keyvault key rotate`); never disable or
+delete a version while a backup it signed is within retention, that is, for the longest tier plus the time a
+restore may take. A disabled or deleted version takes effect within the hour: backups it signed can no longer
+be restored or used as the base of an incremental.
+
+**Verification fails closed.** When Key Vault does not answer while the server needs a public key (a version it
+has not read in the last hour), the manifest does not verify: an incremental that was due is taken as a full
+backup (the server log says *the base chain cannot be used*), and a restore check answers *the backup's
+manifest does not verify*. Nothing is lost; check again once Key Vault answers.
+
+## 6. Notifications
 
 Create a Slack app with the `chat:write` bot scope, store the bot token in Key Vault, invite the bot to
 the channels, then add channels and routes in *Settings › Notifications*. Messages contain links only —
 no buttons, never secret values.
 
-## 6. Operating
+## 7. Operating
 
 - `/metrics` on `:9090` (agents online, tunnels, backup durations/results, backup copies per
   destination, scheduler lag, outbox backlog, change requests). `/healthz`, `/readyz`.

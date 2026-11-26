@@ -156,13 +156,14 @@ At start the server retries the connection for up to two minutes.
 
 ### `ingest`
 
-> **Native ClickHouse backups are in development
-> ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).** With `ingest.url` set, a ClickHouse job
-> can use the native method: ClickHouse runs `BACKUP` to this endpoint, and the server stores the backup, with
-> a signed manifest, in the job's destinations, as full backups or as weekly fulls with daily incrementals.
-> New ClickHouse jobs on 24.8 or later start on the native method. A native backup is restored from its run's
-> **Restore…** (the check verifies the signed manifests and lists what is restored); a native restore reads the
-> backup through this endpoint, so it needs `ingest.url` too.
+> **Native ClickHouse backups.** With `ingest.url` set, a ClickHouse job can use the native method: ClickHouse
+> runs `BACKUP` to this endpoint, and the server stores the backup, with a signed manifest, in the job's
+> destinations, as full backups or as weekly fulls with daily incrementals. New ClickHouse jobs on 24.8 or later
+> start on the native method. A native backup is restored from its run's **Restore…** (the check verifies the
+> signed manifests and lists what is restored); a native restore reads the backup through this endpoint, so it
+> needs `ingest.url` too. [ClickHouse backups](clickhouse-backups.md) compares the methods; [Installing ›
+> Native ClickHouse backups](install.md#5-native-clickhouse-backups-optional) sets up the endpoint, its
+> certificate, egress and the manifest key.
 
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
 listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS
@@ -191,13 +192,19 @@ because a run's session and its credential live in the one process that opened t
   the tables `system.parts` does not hold (Log, TinyLog, StripeLog, Memory);
 - 1 GiB.
 
-When `ingest.maxRunBytes` is set, the server does not read the databases' size. So a large database is
-backed up the first time, and one that grew is backed up after its growth. A file
-that ClickHouse sends again whole (a retry) is not counted twice. The limit stops a client that writes far
-more than the database holds; it is not a retention or cost control. A run that goes over it is ended with
-`KILL QUERY` and fails with `native byte limit: the run wrote more than <limit> (…); set ingest.maxRunBytes to
-allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to
-every native job), or back to `0` for the automatic limit.
+Because the limit follows the databases' size, a large database is backed up the first time, and one that
+grew is backed up after its growth, as far as ClickHouse reports their size: a table whose `total_bytes`
+ClickHouse does not know counts as empty, so a database made mostly of such tables can go over the limit on its
+first run. Reading the size needs `SELECT` on `system.parts` and `system.tables` when the server sets
+`select_from_system_db_requires_grant`; without it the run fails with `clickhouse: size of the databases: …`
+([ClickHouse backups](clickhouse-backups.md#what-a-native-backup-needs)). When `ingest.maxRunBytes` is set, the
+server does not read the databases' size at all. A file that ClickHouse sends again whole (a retry) is not
+counted twice.
+
+The limit stops a client that writes far more than the database holds; it is not a retention or cost control.
+A run that goes over it is ended with `KILL QUERY` and fails with `native byte limit: the run wrote more than
+<limit> (…); set ingest.maxRunBytes to allow more`. The way out is `ingest.maxRunBytes`: set it above the
+largest backup you expect (it applies to every native job), or back to `0` for the automatic limit.
 
 **Incrementals.** A native job with *Weekly full, daily incrementals* (`engine_options.incremental:
 weekly_full_daily`) takes a full backup on the first run of each week (Monday, in the job's time zone), on the
@@ -214,8 +221,10 @@ make the chain longer than 32 runs. A dry run is always a full, structure only, 
 written, and an incremental needs every run of its chain. So when an incremental is taken, the server re-tags
 the runs of its chain that are tagged `daily` to `weekly`, objects and manifests, on every destination: a
 week's incrementals are kept as long as the weekly tier, and the newest one, still daily, is never kept longer
-than its chain. This holds when the weekly retention is at least the daily retention plus 7 days (the Bicep
-module's defaults, 7 and 28 days, do; see [install.md](install.md) for the lifecycle rules). A copy whose
+than its chain. This holds when the weekly retention is at least the daily retention plus 7 days plus the
+job's retry window (half the time to its next scheduled run: a run retried after an agent disconnect keeps its
+scheduled time, so it can be written that much later). The Bicep module's defaults, 7 and 28 days, do; see
+[install.md](install.md#4-backup-storage-hardening-required) for the lifecycle rules. A copy whose
 chain cannot be re-tagged fails, and so does one whose chain holds a tier the server does not know. The
 run's manifest and the run page show the tier the run was written with, not the tier its objects are
 re-tagged to.

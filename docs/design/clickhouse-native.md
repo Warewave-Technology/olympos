@@ -454,7 +454,9 @@ Options; the owner chose **1** on 2026-11-25:
 1. **Allowlist on the parsed definitions (recommended).** Olympos parses every object in the manifest and
    restores only what it can prove harmless:
    - MergeTree-family, Replicated, Log and Memory tables, with any column and table features (codecs, TTL,
-     defaults, indexes, projections, settings). These cannot reach outside the server;
+     defaults, indexes, projections, settings), on the `default` disk and storage policy only. These cannot
+     reach outside the server; another disk or policy (an S3 disk, one defined inline) can, and is left out
+     (Task 14);
    - views and materialized views whose query reads only tables in the restored set, with no table functions;
    - dictionaries with a local ClickHouse source in the restored set.
 

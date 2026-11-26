@@ -13,6 +13,8 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 | Restore target credentials (admin login of the new database) | Key Vault ref, or a `credentials` row envelope-encrypted; deleted at every terminal state of the restore request | Server, at the check and while the restore runs; never returned by the API |
 | Vault restore tokens (token of the new Vault) | `restore_requests.sealed_token` (envelope, AAD `restore_requests:<id>`), wiped at every terminal state | Server, at the check and for `snapshot-force` only |
 | Blob credentials (MI or SAS) | MI: none stored. SAS: Key Vault ref or envelope-encrypted | Server only |
+| Native ClickHouse ingest credentials (one per backup or restore run) | Server memory only, for the run; the database keeps the key ID, scope, expiry and an HMAC fingerprint | ClickHouse, for its own run's prefix only ([below](#native-clickhouse-backups-the-ingest-endpoint)) |
+| Manifest signing key (`olympos-manifest`) | Key Vault, in the KEK's vault; never leaves it | Server: signs (`keys/sign`) and reads the public key (`keys/get`) |
 | Registry credentials | Key Vault ref or envelope-encrypted | Server (trivy child env) |
 | Backups | Azure Blob, immutable versions, lifecycle retention | Written by the server; deleted only by lifecycle rules |
 | Synthetic monitoring credentials (bearer, basic, header, OAuth2 client) | Key Vault ref, or a `credentials` row (envelope-encrypted) that `synthetic_credentials` names with its bound hosts | Server, per run; sealed to one probe connection for that run ([below](#synthetic-monitoring-credentials-in-the-cluster)) |
@@ -24,7 +26,8 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
 
 ```
  user ──HTTPS──▶ server (BFF) ──Managed Identity──▶ Key Vault / Blob / Graph
-                    ▲
+                    ▲      ▲
+                    │      └── HTTPS, SigV4 per run: ClickHouse (native backups, when ingest.url is set)
                     │ gRPC, mTLS, agent dials out
                  agent (per cluster) ──TCP──▶ discovered Service only
                     │ gRPC, mTLS, probe dials out (own identity)
@@ -39,7 +42,10 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
    `tls.missing` finding. `compressed` mode trades that for egress cost; enabling it always opens
    the `transfer.compressed_mode` finding. Second exception: synthetic monitoring sends the credentials
    a scenario uses to the cluster's probe for each run
-   ([below](#synthetic-monitoring-credentials-in-the-cluster)). The agent still never receives one.
+   ([below](#synthetic-monitoring-credentials-in-the-cluster)). Third exception: a native ClickHouse backup
+   or restore gives ClickHouse a credential of its own, for that run's prefix of the ingest endpoint only,
+   short-lived and never a storage credential ([below](#native-clickhouse-backups-the-ingest-endpoint)).
+   The agent still never receives one.
 2. **Server ↛ arbitrary hosts in a cluster.** `OpenTunnel` carries a `target_id`, never `host:port`.
    The agent looks it up in its *own* discovered set (annotated Services) and refuses anything else.
    The server also recomputes target IDs and ignores agent-supplied IDs that do not match. Tested in unit
@@ -100,7 +106,10 @@ transaction as the change; notifications go through a transactional outbox.
 
 The server is the only writer to Blob and has no delete permission (custom role without
 `blobs/delete`); retention is lifecycle rules on the `olympos-tier` tag; versions are immutable for the
-longest retention. *Test destination* verifies delete is refused and warns otherwise.
+longest retention. *Test destination* verifies delete is refused and warns otherwise. Native ClickHouse
+backups keep this: ClickHouse writes to the server's ingest endpoint, never to storage, and the server writes
+each object to the destinations itself, never over an existing one
+([below](#native-clickhouse-backups-the-ingest-endpoint)).
 
 ## ConfigMaps and Secrets in clusters
 
@@ -182,6 +191,105 @@ A probe makes requests from inside the cluster network, so where it may go is bo
 - The chart renders `olympos-probe-identity` with what is in it on every upgrade, so the probe's key ends up
   in the Helm release history; `helm rollback` or a GitOps renderer without `lookup` can overwrite the
   Secret. The agent's Secret has the same limitations.
+
+## Native ClickHouse backups: the ingest endpoint
+
+A native ClickHouse backup ([ClickHouse backups](clickhouse-backups.md)) is taken by ClickHouse's own `BACKUP`,
+which writes to the Olympos server as if it were S3; a native restore is ClickHouse's `RESTORE`, reading back
+through the same endpoint. This adds four things to the model (SPEC §0 principle 1 and §10.4, spec-changes
+#27). It is all off until `ingest.url` is set.
+
+**A listening port.** `listen.ingest` (`:9444`) speaks a small part of S3 on one bucket: list, put, the
+multipart upload calls, get, and the delete of a run's `.lock`, which lives in the run's memory and never
+reaches storage. Everything else (other deletes, copies, bucket operations) is refused `403`. Every request is
+signed (SigV4) with the credential of one run; the signature is checked before a body is read, and the body's
+SHA-256 (and `Content-MD5` when sent) while it streams. Unsigned payloads and `aws-chunked` are refused. The
+port serves HTTPS (TLS 1.2 or later, HTTP/1.1 only), plain HTTP only in a dev build with `devMode`. Limits per
+run bound what a misbehaving client can do: bytes written ([configuration](configuration.md#ingest)), 200
+requests a second (30 seconds over it stops the run), the run's duration, and `ingest.maxRuns` runs at once.
+
+**A credential that enters the cluster** (the third exception to [Cluster ↛ credentials](#trust-boundaries)).
+Each backup or restore run mints an access key and secret just before it sends its statement, and sends them
+inside the `BACKUP` or `RESTORE` statement over the run's connection to the target (through the agent tunnel,
+TLS end to end in `e2e-tls`). Its scope is the run:
+
+- a backup writes and lists its own run prefix, and reads its base chain (an incremental);
+- a restore reads only the chain of the copy it restores.
+
+It can never delete (except its own `.lock`) or overwrite: a stored object is written once, a repeat with the
+same body is answered with the stored one, and another body stops the run. It ends when the run ends, or after
+`ingest.maxRunDuration` (6 hours), and a server restart ends every one. The secret lives only in the server's
+memory; the database keeps the key ID, the scope, the expiry and an HMAC fingerprint, and the secret is never
+logged, stored or returned by the API (Olympos logs the statement with the secret replaced). ClickHouse 24.8
+and 25.8 mask it themselves (`[HIDDEN]`) in `query_log`, `system.backups`, the process list and their log, and
+the server checks that a target runs 24.8 or later before it sends the statement, so an older one never
+receives a secret. A stolen credential can
+write into its own run, up to that run's limits, or read the chain it was given, until its run ends; it reaches
+no other run and no storage credential.
+
+**A signing key.** The server signs every native run's manifest (the objects ClickHouse declared, with sizes
+and SHA-256, the databases, objects and rows) with the Key Vault key `olympos-manifest` (EC P-256, ES256,
+`keys/sign`), and verifies locally with its public key (`keys/get`, kept for an hour). Verification pins the key
+name and the run: a manifest signed by another key of the vault, or copied from another run, does not verify,
+and neither does a chain whose links (each base's run and manifest hash) do not hold. A native run whose
+manifests do not verify is not restored and is not a base. Verification fails closed: when Key Vault does not
+answer, an incremental becomes a full and a restore check is refused. A disabled key version stops verifying
+within the hour. The signature proves that the backup is what Olympos stored; it does not prove that the source
+was healthy when it was backed up.
+
+**SQL text from the backup runs on the target.** A native `RESTORE` runs the backup's own `metadata/*.sql`, so
+the rule of logical restores, "no SQL text from the backup runs on the target", is replaced for native ones by
+an allowlist (SPEC §10.4). Before a restore is checked, Olympos reads every object's definition from the
+verified manifests with a strict lexer (no comments, no query parameters, nothing it does not read) and lets an
+object be created only when a rule matches it:
+
+- table engines: MergeTree-family, their Replicated variants, Log-family and Memory, by name, and only on the
+  `default` disk and storage policy (another disk or policy, or a disk defined inline, can be outside the
+  server: an S3 disk, for example). GraphiteMergeTree and encryption codecs, which need the target's
+  configuration, are left out;
+- what views, materialized views and dictionaries read: every `FROM` and `JOIN` source, `IN <table>`, and the
+  object of a `dictGet*` or `joinGet` must be an object that is restored; a source followed by `(` is a table
+  function and is refused, whatever its name; a dictionary's source must be the local ClickHouse (no `HOST` or
+  `PORT`), with a layout from a list.
+
+Everything else is left out with `EXCEPT TABLES` and listed with the reason. The request records that list
+when it is opened and shows it to the checker; when the restore starts, the chain is checked again and the
+restore refuses to start when it would leave out anything else. Replicated tables are created by Olympos from
+the backup's own text with only the Keeper path and replica rewritten (`/olympos-restore/<request id>/…`) and
+the backup's UUID removed, so a restored table never joins the source's replicas; a materialized view whose
+inner table is Replicated is left out, because `RESTORE` would create that table with the source's path. Only
+`Atomic` databases are restored. The `RESTORE` reads only the objects of the verified manifests, each checked
+against its SHA-256 while it streams (and served whole: a ranged read is refused), and ClickHouse's server-side
+S3 copy is off (`allow_s3_native_copy = 0`), so nothing reaches the target past that check. ClickHouse's error
+messages, which can quote the DDL, are kept only as code, name and the start of their first line.
+
+What the allowlist does **not** check, by design or because it cannot:
+
+- **Scalar functions** are checked against a list of functions known to read outside the server (`url`, `s3`,
+  `file`, `remote`, `mysql`, `executable` and the other table-function names, `hasColumnInTable`, the model
+  evaluation functions), not against an allowlist. A function outside that list that reads outside the server
+  is not caught. **Executable user-defined functions** are defined in the target's own configuration, so a
+  call to one looks like any other function call: the allowlist cannot tell. They exist only on a target whose
+  administrator configured them.
+- `x IN f(…)` is read as a table function for any `f` other than `tuple` and `array`, so an object that uses a
+  scalar function there (`IN range(10)`) is left out although it is harmless: the safe direction.
+- A dictionary with a local ClickHouse source keeps its `USER` and `PASSWORD`: they are part of the backup's DDL
+  and are restored with it.
+
+### Residual risks
+
+- **A compromised source** can write what it wants into its own run, up to the run's byte limit, and declare it
+  in its `.backup`; the signature then vouches for what it sent. The allowlist bounds what that DDL can do on a
+  target, and a restore never goes into the source itself.
+- **ClickHouse 24.8 stores a dead secret.** An incremental's `.backup` on 24.8 keeps the run's own secret in its
+  `<base_backup>` setting, so the stored backup holds a credential. It was revoked when the run ended and lived
+  only in that run's session, so it opens nothing. 25.8 stores none.
+- **In `compressed` transfer mode** the statement, and with it the run's credential, crosses the agent and the
+  node network in the clear, as the backup data does there for logical backups (the `transfer.compressed_mode`
+  finding). The backup data of a native run never crosses the agent: ClickHouse sends it to the endpoint over
+  HTTPS.
+- **New egress from the cluster.** The ClickHouse pods connect to the server's ingest port, a path into the
+  server besides the agents' gateway. It accepts only signed requests of a running run.
 
 ## Residual risks / accepted trade-offs
 
