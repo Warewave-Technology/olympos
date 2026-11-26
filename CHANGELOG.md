@@ -68,8 +68,9 @@ v0.4.0-rc.1.
   cannot be deleted, so no lifecycle rule deleted anything before day 400: every backup and dry run was kept,
   and billed, for 400 days, whatever its tier. The module now takes `defaultImmutabilityDays`, 0 by default,
   which sets no policy and leaves version-level immutability support off, so a new install has a plain
-  versioned container; versioning and soft delete stay. A value of 1 or more turns support on and sets the
-  policy; decide before the first deployment, because an account gets support only when it is created. The
+  versioned container; versioning and soft delete stay. A value of 1 or more turns support on for the
+  container and sets the policy. The module no longer sets support on the account, which Azure allows only
+  when an account is created; a container gets support when it is created, or later by a migration. The
   S3 docs no longer ask for an Object Lock default of at least the longest tier: Object Lock is optional.
   `docs/install.md` (*Immutability (optional)*) and `docs/security-model.md` say what a policy protects (a
   compromised server cannot have backups deleted by re-tagging or overwriting them within its period), what it
@@ -92,19 +93,24 @@ v0.4.0-rc.1.
   `olympos-state=incomplete`.
 - **An Azure account deployed with the old Bicep module keeps holding new backups for 400 days** until you
   change its policy. Deploying the new module does not remove the policy (a deployment in incremental mode,
-  the default, leaves resources that the template no longer has), and version-level support stays on, since it
-  cannot be turned off. The module created the policy **unlocked**; nothing in Olympos locks it. The steps are in
-  `docs/install.md` › *Immutability (optional)*, *Accounts deployed before v0.4.0*:
-  - Unlocked: **shorten** it to 1 day, the minimum (`az storage container immutability-policy create … --period 1
-    --if-match <etag>`). That is an update, which the module's `CanNotDelete` resource lock allows; new
-    versions then follow their tiers after a day. Removing it instead is a delete, which that lock refuses:
-    someone with *Owner* or *User Access Administrator* lifts the lock `olympos-backups-cannot-delete` first and
-    puts it back afterwards.
+  the default, leaves resources that the template no longer has). Version-level support stays on, on the
+  account and on the container, since it cannot be turned off. The new module no longer sends the account
+  setting, and sends the container setting only with a value: that a redeploy goes through on such an account
+  is not verified yet ([#79](https://github.com/Warewave-Technology/olympos/issues/79)). The module created the
+  policy **unlocked**; nothing in Olympos locks it. The steps are in `docs/install.md` › *Immutability
+  (optional)*, *Accounts deployed before v0.4.0*:
+  - Unlocked: **shorten** it to 1 day, the minimum. The safer way is to redeploy with
+    `defaultImmutabilityDays=1` and keep that value: the module shortens the policy with its own update, which
+    the module's `CanNotDelete` resource lock allows, and keeps sending the container setting that is already
+    on. By hand instead: `az storage container immutability-policy create … --period 1 --if-match <etag>`. New
+    versions are then expected to follow their tiers after a day (to be verified, #79). Removing the policy
+    instead is a delete, which that lock refuses: someone with *Owner* or *User Access Administrator* lifts the
+    lock `olympos-backups-cannot-delete` first and puts it back afterwards.
   - Locked (only if someone locked it by hand): it can only be extended, and new backups stay held for 400
     days.
   - Either way, versions already written keep their own 400-day policy until it ends. Shortening them one
     version at a time needs *Storage Blob Data Owner* and is impractical: expect existing backups to stay until
-    400 days after they were written, and new ones to follow their tiers.
+    400 days after they were written; new ones are expected to follow their tiers (to be verified, #79).
   - That lifecycle deletes work on such a container once no policy covers a version is expected, but still to
     be verified on a real account ([#79](https://github.com/Warewave-Technology/olympos/issues/79)).
 - A deployment command or parameter file that passes `longestRetentionDays` fails with the new module: remove

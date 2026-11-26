@@ -140,8 +140,9 @@ that gap. It is the storage owner's choice, off in the Bicep module by default
   sooner if the old version is re-tagged too (on S3, 1 day after the overwrite in the documented rules). On
   Azure the deleted version stays soft-deleted for the soft-delete period (30 days in the module) and can be
   restored in that time; S3 has no soft delete. A new Azure install without a policy has a plain container;
-  an account deployed with the module before v0.4.0 keeps version-level support, where lifecycle deletes are
-  expected to work once no policy covers a version (to be verified on a real account, #79).
+  an account deployed with the module before v0.4.0 keeps version-level support on the account and the
+  container, where lifecycle deletes are expected to work once no policy covers a version, including a
+  version whose shortened 1-day policy has expired (to be verified on a real account, #79).
 - **On NFS** the server can delete files itself (`docs/spec-changes.md` #13); protection is storage-side
   snapshots or WORM, and the destination shows a permanent warning.
 

@@ -346,7 +346,7 @@ Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:
    `blobs/add/action`, `blobs/tags/read`, `blobs/tags/write` — **no `blobs/delete`**. No human data-plane
    roles; break-glass through a PIM time-bound assignment.
 4. Blob **versioning + soft delete**. An immutability policy, with version-level immutability support on the
-   account and the container, is your choice and off by default: see
+   container, is your choice and off by default: see
    [Immutability (optional)](#immutability-optional).
 5. Resource lock `CanNotDelete` on the account.
 6. Azure Policy: deny public network access and shared-key re-enablement.
@@ -392,8 +392,8 @@ removed by their tier's rule (for example `olympos-daily`), not after 7 days.
 
 ### Immutability (optional)
 
-Whether backup versions are immutable is the storage owner's decision, best made **before the first
-deployment**. Olympos works either way; this section says what each choice protects and what it costs.
+Whether backup versions are immutable is the storage owner's decision, best made **when the container is
+created** (see *Turning it on*). Olympos works either way; this section says what each choice protects and what it costs.
 
 **What it protects.** The server's role cannot delete, but it has to write and tag: it writes every backup and
 sets its `olympos-tier`. A compromised server, or anyone holding its credential, can therefore still have a
@@ -427,16 +427,21 @@ a version ID). A version that a rule deletes is then kept **soft-deleted** for 3
 delete), and an administrator can restore it in that time: without a policy, this is the real recovery margin.
 The diagnostic logs of step 7 record every tag change and write, which is how you would notice one.
 
-**Turning it on.** Pass `defaultImmutabilityDays=<days>` (1 or more) to the first deployment of the module. It
-then turns on version-level immutability support on the account and the container and sets the container's
-default policy. Microsoft documents that support cannot be turned off once it is on, and that an account can
-get it only when it is created. So for an account first deployed with `0`, redeploying with a value is expected
-to fail rather than turn immutability on (not verified, [#79](https://github.com/Warewave-Technology/olympos/issues/79)).
-For an existing container, Microsoft's procedure is a container policy followed by a migration of the
-container to version-level support (`az storage container immutability-policy create`, then
-`az storage container-rm migrate-vlw`, see
-[Configure immutability policies for blob versions](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-policy-configure-version-scope));
-it has not been tried with this module.
+**Turning it on.** Pass `defaultImmutabilityDays=<days>` (1 or more). The module then turns on version-level
+immutability support on the **container**, never on the account, and sets the container's default policy.
+The account's own setting is not used: Microsoft lets an account get it only when the account is created, and
+a container can have support without it. A container's support cannot be turned off once it is on, and a
+container gets it either when it is created or by a migration, so it is decided per container:
+
+- **A new container** gets it from the deployment that creates it with a value: the first deployment, or a
+  deployment with a new `containerName`, after which you point the destination at the new container.
+- **An existing plain container** (deployed with `0`) does not get it by redeploying with a value, which is
+  expected to fail (not verified, [#79](https://github.com/Warewave-Technology/olympos/issues/79)).
+  Microsoft's procedure is a container policy followed by a migration of the container to version-level
+  support (`az storage container immutability-policy create`, then `az storage container-rm migrate-vlw`, see
+  [Configure immutability policies for blob versions](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-policy-configure-version-scope)).
+  During the migration that policy holds every blob already in the container for its period, so keep it
+  short. This has not been tried with this module.
 
 The policy is created **unlocked**. An unlocked policy already blocks deletes and overwrites. It can be
 shortened or extended (an update, which the module's `CanNotDelete` resource lock allows) and removed (a
@@ -448,15 +453,17 @@ extended, never shortened or removed, and new versions get locked policies. Lock
 the period. A changed or removed default applies to new versions only; existing versions keep the policy they
 were written with until it ends.
 
-**Accounts deployed before v0.4.0.** The module used to turn version-level support on and set a 400-day
-default policy (`longestRetentionDays`), unlocked: nothing in the module or in Olympos locks it. Support stays
-on, since it cannot be turned off; the new module with `0` simply no longer sends that setting (that such a
-redeploy goes through cleanly is still to be verified). The policy stays until you change it: deploying the
-new module does not remove it, because a deployment in incremental mode (the default) leaves resources that
-the template no longer has. Lifecycle deletes on such a container are expected to work once no policy covers a version,
-because support alone makes nothing immutable; this is still to be verified on a real account
-([#79](https://github.com/Warewave-Technology/olympos/issues/79)). To stop new backups from being held for 400
-days:
+**Accounts deployed before v0.4.0.** The module used to turn version-level support on for both the account
+and the container and set a 400-day default policy (`longestRetentionDays`), unlocked: nothing in the module or
+in Olympos locks it. Both settings stay on, since support cannot be turned off; with account-level support,
+every container in the account can take version-level policies. The new module no longer sends the account
+setting at all, and sends the container setting only with a value. That a redeploy goes through on such an
+account with the account setting left out is still to be verified
+([#79](https://github.com/Warewave-Technology/olympos/issues/79)). The policy stays until you change it:
+deploying the new module does not remove it, because a deployment in incremental mode (the default) leaves
+resources that the template no longer has. Lifecycle deletes on such a container are expected to work once no
+policy covers a version, because support alone makes nothing immutable; this is still to be verified on a real
+account (#79). To stop new backups from being held for 400 days:
 
 1. Look at the policy:
 
@@ -465,8 +472,11 @@ days:
      --query "{state:state, days:immutabilityPeriodSinceCreationInDays}"
    ```
 
-2. If it is `Unlocked`, **shorten** it to 1 day, the minimum. This is an update, which the resource lock
-   allows:
+2. If it is `Unlocked`, **shorten** it to 1 day, the minimum. The safer way is to redeploy the module with
+   `defaultImmutabilityDays=1`: the module shortens the policy with its own update, which the resource lock
+   allows, and keeps sending the container setting that is already on. Keep deploying with `1` from then on;
+   with `0` the module would also stop sending the container setting, which is the untested case above. By
+   hand instead:
 
    ```bash
    etag=$(az storage container immutability-policy show -g $RG --account-name $SA \
@@ -475,8 +485,9 @@ days:
      --container-name olympos-backups --period 1 --if-match "$etag"
    ```
 
-   New versions are then held for 1 day and follow their tiers after that. Keep deploying the module with
-   `defaultImmutabilityDays=0`; it leaves the policy as it is.
+   New versions are then held for 1 day, and after that they are expected to follow their tiers (to be
+   verified, [#79](https://github.com/Warewave-Technology/olympos/issues/79): a container with a default
+   policy is the case that Microsoft's lifecycle known issue names).
 3. Removing the policy instead (`az storage container immutability-policy delete … --if-match "$etag"`) is a
    delete, which the module's lock `olympos-backups-cannot-delete` refuses. Someone with *Owner* or *User
    Access Administrator* (`Microsoft.Authorization/locks/*`) must lift the lock first
@@ -488,7 +499,21 @@ days:
 Either way, **versions already written keep their own 400-day policy until it ends**. Shortening them one
 version at a time needs *Storage Blob Data Owner*, which step 3 of the hardening keeps from people outside a
 break-glass assignment, and is impractical for a backup container. Expect existing backups to stay until 400
-days after they were written, and new ones to follow their tiers.
+days after they were written; new ones are expected to follow their tiers (to be verified, #79).
+
+**Still to be verified on a real account** ([#79](https://github.com/Warewave-Technology/olympos/issues/79)).
+Azurite has no immutability, so these are checked in a test storage account before they are stated as fact:
+
+1. A container with version-level support and no policy: a version tagged `test` and older than 2 days is
+   deleted by `olympos-test` (current version, then previous version, then soft-deleted).
+2. A container with a 1-day default policy that has expired for a version: the same deletion happens.
+3. Under the `CanNotDelete` lock, shortening the policy (a redeploy with `defaultImmutabilityDays=1`, and
+   `immutability-policy create --period 1 --if-match`) works, and deleting it is refused.
+4. A redeploy of the new module on an account from before v0.4.0, which leaves out the account setting, goes
+   through: with `1`, and with `0`.
+5. A redeploy with a value over an existing plain container fails, and Microsoft's policy-and-migration
+   procedure works on one.
+6. A new container with support, in an account without account-level support, takes a default policy.
 
 **Planned for v0.5** ([#79](https://github.com/Warewave-Technology/olympos/issues/79)): the server locks each
 object for its own tier when it writes it, so every backup is protected for its whole retention and kept no

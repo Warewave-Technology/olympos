@@ -141,11 +141,11 @@ so the check covers `olympos-manifest` as well.
 versioning, soft delete, lifecycle rules that delete each tier (by the `olympos-tier` index tag) after its
 retention, a resource lock, optional diagnostics, and a **custom data-plane role that can read, write and tag
 blobs but not delete them**, assigned to the server's identity. A container default immutability policy is
-optional (`defaultImmutabilityDays`, 0 by default, which also leaves version-level immutability support off).
-Within its period it keeps a compromised server from having backups deleted by re-tagging or overwriting
-them, and it keeps every backup at least that long, whatever its tier. Decide before the first deployment:
-an account can get version-level support only when it is created
-([install › Immutability (optional)](install.md#immutability-optional)):
+optional (`defaultImmutabilityDays`, 0 by default, which also leaves version-level immutability support off on
+the container; the module never sets it on the account). Within its period it keeps a compromised server from
+having backups deleted by re-tagging or overwriting them, and it keeps every backup at least that long,
+whatever its tier. A container gets version-level support when it is created, or later only by a migration,
+so decide per container ([install › Immutability (optional)](install.md#immutability-optional)):
 
 ```bash
 az deployment group create -g $RG -f deploy/bicep/backup-storage.bicep \
