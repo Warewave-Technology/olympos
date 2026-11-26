@@ -14,6 +14,8 @@ param privateEndpointSubnetId string
 @maxValue(146000)
 @description('Days the container default immutability policy keeps every new blob version from delete and overwrite (1 or more). 0 (the default) sets no policy and leaves version-level immutability support off on the container. A policy holds every version that long, whatever its tier, so lifecycle rules cannot delete it earlier. The policy is created unlocked. A container gets support when it is created: docs/install.md#immutability-optional.')
 param defaultImmutabilityDays int = 0
+@description('Send version-level immutability support on the account, as the module did before v0.4.0. Set true only for an account deployed with the module before v0.4.0, which has it on; a new account leaves it false (docs/install.md#immutability-optional).')
+param accountVersionLevelSupport bool = false
 @description('Lifecycle: delete by tier after N days.')
 param dailyDays int = 7
 param weeklyDays int = 28
@@ -23,19 +25,21 @@ param monthlyDays int = 372
 param incompleteDays int = 7
 param logAnalyticsWorkspaceId string = ''
 
-// 4. Version-level immutability support on the container only, and only with a policy. The module never sets
-// it on the account (an account can get it only at creation, and a container can have it without the account).
-// Support cannot be turned off once it is on; an existing container gets it only by migration. With 0 the
-// container is plain.
+// 4. Version-level immutability support on the container only, and only with a policy. On the account only with
+// accountVersionLevelSupport, for accounts deployed before v0.4.0, so that their redeploy sends the payload they
+// were created with (an account can get support only at creation, and a container can have it without the
+// account). Support cannot be turned off once it is on; an existing container gets it only by migration.
+// With 0 the container is plain.
 var immutable = defaultImmutabilityDays > 0
 var versionLevelSupport = immutable ? { immutableStorageWithVersioning: { enabled: true } } : {}
+var accountSupport = accountVersionLevelSupport ? { immutableStorageWithVersioning: { enabled: true } } : {}
 
 resource sa 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: accountName
   location: location
   kind: 'StorageV2'
   sku: { name: 'Standard_ZRS' }
-  properties: {
+  properties: union({
     publicNetworkAccess: 'Disabled'          // 1. private endpoint only
     allowSharedKeyAccess: false              // 2. MI option: no shared key
     allowBlobPublicAccess: false
@@ -43,7 +47,7 @@ resource sa 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     supportsHttpsTrafficOnly: true
     defaultToOAuthAuthentication: true
     networkAcls: { defaultAction: 'Deny', bypass: 'None' }
-  }
+  }, accountSupport)                         // 4. account-level support: accounts from before v0.4.0 only
 }
 
 resource blobSvc 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {

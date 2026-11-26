@@ -428,17 +428,17 @@ delete), and an administrator can restore it in that time: without a policy, thi
 The diagnostic logs of step 7 record every tag change and write, which is how you would notice one.
 
 **Turning it on.** Pass `defaultImmutabilityDays=<days>` (1 or more). The module then turns on version-level
-immutability support on the **container**, never on the account, and sets the container's default policy.
-The account's own setting is not used: Microsoft lets an account get it only when the account is created, and
-a container can have support without it. A container's support cannot be turned off once it is on, and a
+immutability support on the **container** and sets the container's default policy. A new account does not use
+the account's own setting (`accountVersionLevelSupport`, `false` by default): Microsoft lets an account get it
+only when the account is created, and a container can have support without it. Only accounts deployed before
+v0.4.0 set it to `true` (below). A container's support cannot be turned off once it is on, and a
 container gets it either when it is created or by a migration, so it is decided per container:
 
 - **A new container** gets it from the deployment that creates it with a value: the first deployment, or a
   deployment with a new `containerName`, after which you point the destination at the new container.
-- **An existing plain container** (deployed with `0`) does not get it by redeploying with a value, which is
-  expected to fail (not verified, [#79](https://github.com/Warewave-Technology/olympos/issues/79)).
-  Microsoft's procedure is a container policy followed by a migration of the container to version-level
-  support (`az storage container immutability-policy create`, then `az storage container-rm migrate-vlw`, see
+- **An existing plain container** (deployed with `0`): do not redeploy it with a value; use the migration
+  procedure. Microsoft's procedure is a container policy followed by a migration of the container to
+  version-level support (`az storage container immutability-policy create`, then `az storage container-rm migrate-vlw`, see
   [Configure immutability policies for blob versions](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-policy-configure-version-scope)).
   During the migration that policy holds every blob already in the container for its period, so keep it
   short. This has not been tried with this module.
@@ -456,10 +456,16 @@ were written with until it ends.
 **Accounts deployed before v0.4.0.** The module used to turn version-level support on for both the account
 and the container and set a 400-day default policy (`longestRetentionDays`), unlocked: nothing in the module or
 in Olympos locks it. Both settings stay on, since support cannot be turned off; with account-level support,
-every container in the account can take version-level policies. The new module no longer sends the account
-setting at all, and sends the container setting only with a value. That a redeploy goes through on such an
-account with the account setting left out is still to be verified
-([#79](https://github.com/Warewave-Technology/olympos/issues/79)). The policy stays until you change it:
+every container in the account can take version-level policies. **Always redeploy such an account with
+`accountVersionLevelSupport=true`**, so that the module sends the account setting it was created with. The
+container setting is sent with any `defaultImmutabilityDays` of 1 or more.
+
+Without the flag, the module's account update leaves out a setting that is on. What Azure does then is not
+verified ([#79](https://github.com/Warewave-Technology/olympos/issues/79)): the expected outcome is that it
+refuses the account update and changes nothing, since support cannot be turned off, but that is unverified
+too. It is the first thing such an install meets on its next deployment of the new module, so pass the flag.
+
+The policy stays until you change it:
 deploying the new module does not remove it, because a deployment in incremental mode (the default) leaves
 resources that the template no longer has. Lifecycle deletes on such a container are expected to work once no
 policy covers a version, because support alone makes nothing immutable; this is still to be verified on a real
@@ -472,11 +478,11 @@ account (#79). To stop new backups from being held for 400 days:
      --query "{state:state, days:immutabilityPeriodSinceCreationInDays}"
    ```
 
-2. If it is `Unlocked`, **shorten** it to 1 day, the minimum. The safer way is to redeploy the module with
-   `defaultImmutabilityDays=1`: the module shortens the policy with its own update, which the resource lock
-   allows, and keeps sending the container setting that is already on. Keep deploying with `1` from then on;
-   with `0` the module would also stop sending the container setting, which is the untested case above. By
-   hand instead:
+2. If it is `Unlocked`, **shorten** it to 1 day, the minimum. Redeploy the module with
+   `accountVersionLevelSupport=true defaultImmutabilityDays=1`: it shortens the policy with its own update,
+   which the resource lock allows, and sends the account and container settings as they already are. Keep both
+   values in every later deployment: with `defaultImmutabilityDays=0` the module leaves out the container
+   setting, which is on, the same unverified case for the container. By hand instead:
 
    ```bash
    etag=$(az storage container immutability-policy show -g $RG --account-name $SA \
@@ -507,12 +513,14 @@ Azurite has no immutability, so these are checked in a test storage account befo
 1. A container with version-level support and no policy: a version tagged `test` and older than 2 days is
    deleted by `olympos-test` (current version, then previous version, then soft-deleted).
 2. A container with a 1-day default policy that has expired for a version: the same deletion happens.
-3. Under the `CanNotDelete` lock, shortening the policy (a redeploy with `defaultImmutabilityDays=1`, and
-   `immutability-policy create --period 1 --if-match`) works, and deleting it is refused.
-4. A redeploy of the new module on an account from before v0.4.0, which leaves out the account setting, goes
-   through: with `1`, and with `0`.
-5. A redeploy with a value over an existing plain container fails, and Microsoft's policy-and-migration
-   procedure works on one.
+3. Under the `CanNotDelete` lock, shortening the policy (a redeploy with `accountVersionLevelSupport=true
+   defaultImmutabilityDays=1`, and `immutability-policy create --period 1 --if-match`) works, and deleting it
+   is refused.
+4. On an account from before v0.4.0: a redeploy with `accountVersionLevelSupport=true
+   defaultImmutabilityDays=1` goes through, and what a redeploy without the flag, or with
+   `defaultImmutabilityDays=0`, does (expected: the update that leaves out a setting is refused and nothing
+   changes).
+5. Microsoft's policy-and-migration procedure works on an existing plain container.
 6. A new container with support, in an account without account-level support, takes a default policy.
 
 **Planned for v0.5** ([#79](https://github.com/Warewave-Technology/olympos/issues/79)): the server locks each

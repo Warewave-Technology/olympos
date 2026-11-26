@@ -69,8 +69,9 @@ v0.4.0-rc.1.
   and billed, for 400 days, whatever its tier. The module now takes `defaultImmutabilityDays`, 0 by default,
   which sets no policy and leaves version-level immutability support off, so a new install has a plain
   versioned container; versioning and soft delete stay. A value of 1 or more turns support on for the
-  container and sets the policy. The module no longer sets support on the account, which Azure allows only
-  when an account is created; a container gets support when it is created, or later by a migration. The
+  container and sets the policy. The module sets support on the account only with the new
+  `accountVersionLevelSupport=true`, which accounts deployed before v0.4.0 pass (Azure allows it only when an
+  account is created); a container gets support when it is created, or later by a migration. The
   S3 docs no longer ask for an Object Lock default of at least the longest tier: Object Lock is optional.
   `docs/install.md` (*Immutability (optional)*) and `docs/security-model.md` say what a policy protects (a
   compromised server cannot have backups deleted by re-tagging or overwriting them within its period), what it
@@ -94,15 +95,17 @@ v0.4.0-rc.1.
 - **An Azure account deployed with the old Bicep module keeps holding new backups for 400 days** until you
   change its policy. Deploying the new module does not remove the policy (a deployment in incremental mode,
   the default, leaves resources that the template no longer has). Version-level support stays on, on the
-  account and on the container, since it cannot be turned off. The new module no longer sends the account
-  setting, and sends the container setting only with a value: that a redeploy goes through on such an account
-  is not verified yet ([#79](https://github.com/Warewave-Technology/olympos/issues/79)). The module created the
-  policy **unlocked**; nothing in Olympos locks it. The steps are in `docs/install.md` › *Immutability
-  (optional)*, *Accounts deployed before v0.4.0*:
-  - Unlocked: **shorten** it to 1 day, the minimum. The safer way is to redeploy with
-    `defaultImmutabilityDays=1` and keep that value: the module shortens the policy with its own update, which
-    the module's `CanNotDelete` resource lock allows, and keeps sending the container setting that is already
-    on. By hand instead: `az storage container immutability-policy create … --period 1 --if-match <etag>`. New
+  account and on the container, since it cannot be turned off. **Redeploy such an account with
+  `accountVersionLevelSupport=true`** in every deployment, so that the module sends the account setting it was
+  created with. Without the flag the account update leaves out a setting that is on; the expected outcome, a
+  refused account update that changes nothing, is not verified
+  ([#79](https://github.com/Warewave-Technology/olympos/issues/79)), and it is the first thing such an install
+  meets. The module created the policy **unlocked**; nothing in Olympos locks it. The steps are in
+  `docs/install.md` › *Immutability (optional)*, *Accounts deployed before v0.4.0*:
+  - Unlocked: **shorten** it to 1 day, the minimum: redeploy with `accountVersionLevelSupport=true
+    defaultImmutabilityDays=1` and keep both values. The module shortens the policy with its own update, which
+    the module's `CanNotDelete` resource lock allows, and sends the account and container settings as they
+    already are. By hand instead: `az storage container immutability-policy create … --period 1 --if-match <etag>`. New
     versions are then expected to follow their tiers after a day (to be verified, #79). Removing the policy
     instead is a delete, which that lock refuses: someone with *Owner* or *User Access Administrator* lifts the
     lock `olympos-backups-cannot-delete` first and puts it back afterwards.
