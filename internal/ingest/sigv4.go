@@ -48,6 +48,10 @@ const (
 	service     = "s3"
 	scopeEnd    = "aws4_request"
 	hexUpper    = "0123456789ABCDEF"
+	// UnsignedPayload is the x-amz-content-sha256 of a request whose body
+	// the signature does not cover. ClickHouse (the AWS SDK's
+	// PayloadSigningPolicy::Never) sends it on every request over HTTPS.
+	UnsignedPayload = "UNSIGNED-PAYLOAD"
 )
 
 // Verify checks the header-based SigV4 signature of r against the secret that
@@ -89,8 +93,11 @@ func Verify(r *http.Request, lookup func(accessKey string) (secret string, ok bo
 		return "", "", ErrClockSkew
 	}
 
+	// Over TLS the body may be unsigned: TLS protects it in transit, and
+	// the handler hashes every object while it streams. Over plain HTTP
+	// (devMode only) the signature must cover it.
 	payloadHash = r.Header.Get("X-Amz-Content-Sha256")
-	if !isLowerHexSHA256(payloadHash) {
+	if !isLowerHexSHA256(payloadHash) && (payloadHash != UnsignedPayload || r.TLS == nil) {
 		return "", "", ErrUnsignedPayload
 	}
 	for _, h := range []string{"host", "x-amz-date", "x-amz-content-sha256"} {

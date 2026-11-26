@@ -662,9 +662,10 @@ func (q *request) copyBody(dst io.Writer, charge bool) (bodyDigest, error) {
 	}
 }
 
-// checkDigest compares the body with x-amz-content-sha256 and Content-MD5.
+// checkDigest compares the body with x-amz-content-sha256 (unless it is
+// UNSIGNED-PAYLOAD, over TLS) and Content-MD5.
 func (q *request) checkDigest(d bodyDigest, wantMD5 []byte) *s3Error {
-	if hex.EncodeToString(d.sha.Sum(nil)) != q.payloadHash {
+	if q.payloadHash != UnsignedPayload && hex.EncodeToString(d.sha.Sum(nil)) != q.payloadHash {
 		return errSHA256
 	}
 	if wantMD5 != nil && !bytes.Equal(d.md5.Sum(nil), wantMD5) {
@@ -688,7 +689,7 @@ func (q *request) contentMD5() ([]byte, *s3Error) {
 
 // noBody refuses a body on a request that takes none.
 func (q *request) noBody() *s3Error {
-	if q.payloadHash != emptySHA256 {
+	if q.payloadHash != emptySHA256 && q.payloadHash != UnsignedPayload {
 		return denied("This request takes no body.")
 	}
 	if n, _ := io.Copy(io.Discard, io.LimitReader(q.r.Body, 1)); n > 0 {

@@ -203,7 +203,9 @@ through the same endpoint. This adds four things to the model (SPEC §0 principl
 multipart upload calls, get, and the delete of a run's `.lock`, which lives in the run's memory and never
 reaches storage. Everything else (head, other deletes, copies, bucket operations) is refused `403`. Every request is
 signed (SigV4) with the credential of one run; the signature is checked before a body is read, and the body's
-SHA-256 (and `Content-MD5` when sent) while it streams. Unsigned payloads and `aws-chunked` are refused. The
+SHA-256 (and `Content-MD5` when sent) while it streams. Over HTTPS the signature need not cover the body
+(`UNSIGNED-PAYLOAD`): ClickHouse signs no body over TLS, TLS protects it in transit, and the endpoint hashes every
+object it stores; over plain HTTP the body must be signed. `aws-chunked` is refused. The
 port serves HTTPS (TLS 1.2 or later, HTTP/1.1 only), plain HTTP only in a dev build with `devMode`. Limits per
 run bound what a misbehaving client can do: bytes written ([configuration](configuration.md#ingest)), 200
 requests a second (30 seconds over it stops the run), the run's duration, and `ingest.maxRuns` runs at once.

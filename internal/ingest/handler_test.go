@@ -48,6 +48,17 @@ type env struct {
 
 func newEnv(t *testing.T, opts ...ingest.HandlerOption) *env {
 	t.Helper()
+	return newEnvServer(t, httptest.NewServer, opts...)
+}
+
+// newTLSEnv is newEnv served over TLS, as the endpoint is outside devMode.
+func newTLSEnv(t *testing.T, opts ...ingest.HandlerOption) *env {
+	t.Helper()
+	return newEnvServer(t, httptest.NewTLSServer, opts...)
+}
+
+func newEnvServer(t *testing.T, serve func(http.Handler) *httptest.Server, opts ...ingest.HandlerOption) *env {
+	t.Helper()
 	db := testutil.DB(t)
 	fp, err := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
@@ -60,7 +71,7 @@ func newEnv(t *testing.T, opts ...ingest.HandlerOption) *env {
 	log := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	dir := t.TempDir()
 	h := ingest.NewHandler(reg, log, m, append([]ingest.HandlerOption{ingest.WithSpillDir(dir)}, opts...)...)
-	srv := httptest.NewServer(h)
+	srv := serve(h)
 	t.Cleanup(srv.Close)
 	return &env{reg: reg, clock: c, metrics: m, handler: h, srv: srv, logs: logs, spillDir: dir}
 }
