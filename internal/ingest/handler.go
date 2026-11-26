@@ -351,7 +351,9 @@ func (q *request) finish() {
 		case q.s == nil:
 			// Refused before any session was found: anyone can send these,
 			// so they are counted but not logged above Debug.
-		case q.failed.status == http.StatusNotFound:
+		case q.failed.status == http.StatusNotFound, q.failed.code == errSlowDown.code:
+			// A 503 SlowDown (the rate, the spill budget) is back-pressure
+			// the client retries, not a refusal.
 			level = slog.LevelInfo
 		default:
 			level = slog.LevelWarn

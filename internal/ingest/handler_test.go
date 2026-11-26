@@ -896,6 +896,13 @@ func TestHandlerRate(t *testing.T) {
 	if p := a.sink.all(); len(p) != 0 {
 		t.Errorf("a refused PUT reached the sink: %d puts", len(p))
 	}
+	// A 503 SlowDown is back-pressure the client retries, not a refusal:
+	// logged at Info, not Warn.
+	for _, line := range strings.Split(strings.TrimSpace(e.logs.String()), "\n") {
+		if strings.Contains(line, `"error":"SlowDown"`) && !strings.Contains(line, `"level":"INFO"`) {
+			t.Fatalf("a 503 SlowDown is not logged at Info: %s", line)
+		}
+	}
 	// The limit is per session.
 	wantStatus(t, e.do(t, b.cred, http.MethodGet, "/olympos/?prefix="+b.prefix, ""), http.StatusOK)
 	// Under the rate again, the run goes on.
