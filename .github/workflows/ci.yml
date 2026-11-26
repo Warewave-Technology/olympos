@@ -30,7 +30,7 @@ jobs:
         with: {fetch-depth: 0}
       - uses: actions/setup-go@v6
         with: {go-version-file: go.mod}
-      - uses: azure/setup-helm@v4
+      - uses: azure/setup-helm@v5
       - name: pg_dump 16/17 (PGDG)
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-common
