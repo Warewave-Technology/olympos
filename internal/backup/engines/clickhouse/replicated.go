@@ -80,6 +80,21 @@ func replicatedErr(format string, a ...any) error {
 // fill the table from another; the allowlist refuses it too), and a request
 // id requestIDRe does not take.
 func rewriteReplicatedEngine(create string, requestID, db, table string) (string, error) {
+	return rewriteReplicated(create, requestID, db, table, false)
+}
+
+// replicatedCreate is the CREATE TABLE a native restore runs for an allowed
+// Replicated table before its RESTORE: rewriteReplicatedEngine's, without
+// the backup's UUID '…', so the table gets a UUID of its own on the target.
+// The backup's UUID seeds what the table shares through Keeper beyond its
+// path (table_shared_id, the zero-copy lock namespace), so on a Keeper
+// shared with the source the restored table would share it; RESTORE fills
+// a table it finds whatever its UUID (allow_different_table_def, Task 17).
+func replicatedCreate(create string, requestID, db, table string) (string, error) {
+	return rewriteReplicated(create, requestID, db, table, true)
+}
+
+func rewriteReplicated(create string, requestID, db, table string, stripUUID bool) (string, error) {
 	if !requestIDRe.MatchString(requestID) {
 		return "", replicatedErr("the request id %q cannot be in a Keeper path", requestID)
 	}
@@ -108,10 +123,12 @@ func rewriteReplicatedEngine(create string, requestID, db, table string) (string
 		return "", replicatedErr("its definition creates %s, not %s", got, want)
 	}
 	i := 5
+	uuidStart, uuidEnd := -1, -1
 	if at(i).is("UUID") {
 		if at(i+1).kind != tokString || !isRunID(at(i+1).val) {
 			return "", replicatedErr("a UUID Olympos does not read")
 		}
+		uuidStart, uuidEnd = toks[i].start, toks[i+1].end
 		i += 2
 	}
 	if at(i).is("ON") && at(i+1).is("CLUSTER") {
@@ -185,7 +202,13 @@ func rewriteReplicatedEngine(create string, requestID, db, table string) (string
 	p, r := path[0], replica[0]
 	var b strings.Builder
 	b.Grow(len(create) + len(keeperPath(requestID, db, table)))
-	b.WriteString(create[:p.start])
+	if stripUUID && uuidStart >= 0 {
+		// "CREATE TABLE db.t UUID '…' (" becomes "CREATE TABLE db.t (".
+		b.WriteString(strings.TrimRight(create[:uuidStart], " \t\r\n"))
+		b.WriteString(create[uuidEnd:p.start])
+	} else {
+		b.WriteString(create[:p.start])
+	}
 	b.WriteString(quoteString(keeperPath(requestID, db, table)))
 	b.WriteString(create[p.end:r.start])
 	b.WriteString(quoteString(replicaName))

@@ -268,3 +268,32 @@ func TestRewriteReplicatedRequestAndNames(t *testing.T) {
 		}
 	}
 }
+
+// TestReplicatedCreateStripsUUID (task 17, M-3): the CREATE the native
+// restore runs is the rewrite without the backup's UUID, every other byte
+// kept; a statement without a UUID is the rewrite itself, and what the
+// rewrite refuses is refused.
+func TestReplicatedCreateStripsUUID(t *testing.T) {
+	in := "CREATE TABLE db1.t1 UUID '" + rrUUID + "' (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/s1/db1/t1', 'r1') ORDER BY id"
+	out, err := replicatedCreate(in, rrRequest, "db1", "t1")
+	if want := "CREATE TABLE db1.t1 (`id` UInt64) ENGINE = ReplicatedMergeTree(" + rrPath + ", '{replica}') ORDER BY id"; err != nil || out != want {
+		t.Fatalf("replicatedCreate:\n got %q, %v\nwant %q", out, err, want)
+	}
+	if strings.Contains(out, rrUUID) {
+		t.Fatal("the backup's UUID is kept")
+	}
+	noUUID := "CREATE TABLE db1.t1 (`id` UInt64) ENGINE = ReplicatedMergeTree('/p', 'r1') ORDER BY id"
+	a, err1 := replicatedCreate(noUUID, rrRequest, "db1", "t1")
+	b, err2 := rewriteReplicatedEngine(noUUID, rrRequest, "db1", "t1")
+	if err1 != nil || err2 != nil || a != b {
+		t.Fatalf("without a UUID: %q %v, %q %v", a, err1, b, err2)
+	}
+	// The rewrite keeps the UUID; only the restore's CREATE drops it.
+	if kept, err := rewriteReplicatedEngine(in, rrRequest, "db1", "t1"); err != nil || !strings.Contains(kept, rrUUID) {
+		t.Fatalf("rewriteReplicatedEngine: %q %v", kept, err)
+	}
+	if _, err := replicatedCreate("CREATE TABLE db1.t1 UUID 'x' (`id` UInt64) ENGINE = ReplicatedMergeTree('/p', 'r') ORDER BY id",
+		rrRequest, "db1", "t1"); !errors.Is(err, errReplicatedEngine) {
+		t.Fatalf("a UUID Olympos does not read: %v", err)
+	}
+}

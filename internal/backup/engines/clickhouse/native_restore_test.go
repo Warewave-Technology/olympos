@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
+	"net"
 	"reflect"
 	"slices"
 	"strings"
@@ -214,6 +216,16 @@ func TestCheckNativeRestoreReplicatedRewrite(t *testing.T) {
 	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
 		t.Fatalf("\n got %q\nwant %q", d, want)
 	}
+	// Task 17: the restore gets the definition of the allowed Replicated
+	// table, which it creates itself, and the row count of every allowed
+	// table; nothing of what is left out.
+	key := restoreKey("shop", "good")
+	if len(got.DDL) != 1 || !strings.Contains(string(got.DDL[key]), "/clickhouse/tables/shop/good") {
+		t.Fatalf("DDL: %q", got.DDL)
+	}
+	if !reflect.DeepEqual(got.Rows, map[string]uint64{key: 0}) {
+		t.Fatalf("rows: %v", got.Rows)
+	}
 }
 
 // TestCheckNativeRestoreChain: an incremental's chain verifies, and the DDL
@@ -306,5 +318,98 @@ func TestCheckNativeRestoreIngestURL(t *testing.T) {
 	}
 	if got != nil && slices.ContainsFunc(got.Objects, func(d backup.NativeDecision) bool { return d.Allowed }) {
 		t.Fatalf("an object is allowed on a refused chain: %+v", got.Objects)
+	}
+}
+
+// TestNativeRestoreStatement (task 17): the RESTORE names the selected
+// databases, each with EXCEPT TABLES of its objects left out, reads with the
+// request's credential, and sets R26 and the request id; what is logged of
+// it hides the secret.
+func TestNativeRestoreStatement(t *testing.T) {
+	const req = "4b1d6c2e-7f3a-4e5b-8c9d-0a1b2c3d4e5f"
+	repl := "CREATE TABLE shop.r UUID '6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/s1/r', 'r1') ORDER BY id"
+	nr := NativeRestore{URL: nrURL + "/olympos/" + nrFull + "/", RunID: nrFull, AccessKey: "OLYKEY", Secret: "s3cr3t-canary",
+		Decisions: []Decision{
+			{Database: "shop", Name: "orders", Kind: KindTable, Allowed: true},
+			{Database: "shop", Name: "r", Kind: KindTable, Allowed: true},
+			{Database: "shop", Name: "ext", Kind: KindTable, Reason: "the URL engine is not on the restore allowlist"},
+			{Database: "shop", Name: "odd`name", Kind: KindOther, Reason: "the backup lists it as an object Olympos does not classify"},
+			{Database: "stats", Name: "v", Kind: KindView, Allowed: true},
+		},
+		DDL:  map[string][]byte{restoreKey("shop", "r"): []byte(repl)},
+		Rows: map[string]uint64{restoreKey("shop", "orders"): 3, restoreKey("shop", "r"): 2},
+	}
+	p, err := planNativeRestore(req, []string{"shop", "stats"}, nr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stmt := restoreStatement(p, nr, req)
+	want := "RESTORE DATABASE `shop` EXCEPT TABLES `shop`.`ext`, `shop`.`odd\\`name`, DATABASE `stats` FROM S3('" + nr.URL +
+		"', 'OLYKEY', 's3cr3t-canary') SETTINGS async = 1, allow_different_table_def = 1, use_same_s3_credentials_for_base_backup = 1, id = '" + req + "'"
+	if stmt != want {
+		t.Fatalf("statement\n got %s\nwant %s", stmt, want)
+	}
+	if r := redactStatement(stmt); strings.Contains(r, nr.Secret) || !strings.Contains(r, "'OLYKEY', '[HIDDEN]'") {
+		t.Fatalf("redacted: %s", r)
+	}
+	// The Replicated table is created with its path rewritten and no UUID.
+	if got := p.creates[restoreKey("shop", "r")]; got != "CREATE TABLE shop.r (`id` UInt64) ENGINE = ReplicatedMergeTree('/olympos-restore/"+req+"/shop/r', '{replica}') ORDER BY id" {
+		t.Fatalf("create: %s", got)
+	}
+	if !reflect.DeepEqual(nr.String(), "clickhouse.NativeRestore{run "+nrFull+", key OLYKEY, secret redacted}") ||
+		strings.Contains(fmt.Sprintf("%v %+v %#v", nr, nr, nr), nr.Secret) {
+		t.Fatal("a print of the restore holds the secret")
+	}
+
+	// What the plan refuses, before anything reaches the target.
+	bad := func(name string, mut func(*NativeRestore), dbs ...string) {
+		t.Helper()
+		c := nr
+		c.Decisions = slices.Clone(nr.Decisions)
+		c.DDL, c.Rows = maps.Clone(nr.DDL), maps.Clone(nr.Rows)
+		if mut != nil {
+			mut(&c)
+		}
+		if len(dbs) == 0 {
+			dbs = []string{"shop", "stats"}
+		}
+		if _, err := planNativeRestore(req, dbs, c); err == nil {
+			t.Errorf("%s: planned", name)
+		}
+	}
+	bad("an unselected database's decision", nil, "shop")
+	bad("no database", nil, "")
+	bad("a system database", nil, "system")
+	bad("a decision twice", func(c *NativeRestore) { c.Decisions = append(c.Decisions, c.Decisions[0]) })
+	bad("DDL of a table left out", func(c *NativeRestore) { c.DDL[restoreKey("shop", "ext")] = []byte(repl) })
+	bad("DDL the rewrite refuses", func(c *NativeRestore) {
+		c.DDL[restoreKey("shop", "r")] = []byte("CREATE TABLE shop.r (`id` UInt64) ENGINE = ReplicatedMergeTree ORDER BY id")
+	})
+	bad("no row count", func(c *NativeRestore) { delete(c.Rows, restoreKey("shop", "orders")) })
+}
+
+// TestRestoreNativeRefusesInput: RestoreNative checks its input before it
+// dials the target.
+func TestRestoreNativeRefusesInput(t *testing.T) {
+	const req = "4b1d6c2e-7f3a-4e5b-8c9d-0a1b2c3d4e5f"
+	good := NativeRestore{URL: nrURL + "/olympos/" + nrFull + "/", RunID: nrFull, AccessKey: "OLYKEY", Secret: "s3cr3t-canary"}
+	dialed := false
+	rc := backup.RestoreContext{RequestID: req, Databases: []string{"shop"}, EngineContext: backup.EngineContext{
+		Dial: func(context.Context) (net.Conn, error) { dialed = true; return nil, errors.New("no") }}}
+	for name, mut := range map[string]func(*NativeRestore, *backup.RestoreContext){
+		"request id":  func(_ *NativeRestore, rc *backup.RestoreContext) { rc.RequestID = "x" },
+		"run id":      func(nr *NativeRestore, _ *backup.RestoreContext) { nr.RunID = "x" },
+		"credential":  func(nr *NativeRestore, _ *backup.RestoreContext) { nr.Secret = "" },
+		"another url": func(nr *NativeRestore, _ *backup.RestoreContext) { nr.URL = nrURL + "/olympos/" + nrInc + "/" },
+		"no database": func(_ *NativeRestore, rc *backup.RestoreContext) { rc.Databases = nil },
+	} {
+		nr, c := good, rc
+		mut(&nr, &c)
+		if _, err := (Engine{}).RestoreNative(context.Background(), c, nr); err == nil || strings.Contains(err.Error(), nr.Secret+"x") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if dialed {
+		t.Fatal("the target was dialed for a refused restore")
 	}
 }

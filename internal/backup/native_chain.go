@@ -466,6 +466,8 @@ type checkedObject struct {
 	h         hash.Hash
 	log       *slog.Logger
 	failed    error
+	// onFail, when set, is told the key of an object that did not match.
+	onFail func(key string)
 }
 
 func (c *checkedObject) Read(p []byte) (int, error) {
@@ -500,7 +502,10 @@ func (c *checkedObject) Read(p []byte) (int, error) {
 
 func (c *checkedObject) fail() error {
 	c.failed = fmt.Errorf("%s: %w", c.key, errChainObject)
-	c.log.Error("native backup: an object of the base chain does not match its signed manifest", "key", c.key)
+	c.log.Error("native: an object of the chain does not match its signed manifest", "key", c.key)
+	if c.onFail != nil {
+		c.onFail(c.key)
+	}
 	return c.failed
 }
 

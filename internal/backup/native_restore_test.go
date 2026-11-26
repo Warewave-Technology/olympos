@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"reflect"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/backup/engines/clickhouse"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
@@ -303,5 +305,92 @@ func TestNativeRestoreContextEnded(t *testing.T) {
 	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, context.Canceled) ||
 		errors.Is(err, backup.ErrNativeNotVerified) {
 		t.Fatalf("a cancelled request: %v", err)
+	}
+}
+
+// TestNativeRestoreServes (task 17): the restore's source is built while
+// the slot is held and serves after it is given back: only the objects of
+// the chain's verified manifests (another key is ingest.ErrNotServed),
+// each checked while it streams; an object that does not match fails its
+// last read, and the source names it.
+func TestNativeRestoreServes(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedIncremental(t, db)
+	full := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(ctx, db, inc, &e.DestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rs *backup.NativeRestoreSource
+	err = backup.WithNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
+		var err error
+		rs, err = n.RestoreSource()
+		return err
+	})
+	if err != nil || rs == nil {
+		t.Fatalf("restore source: %v", err)
+	}
+	// The slot is free: another check runs while the source serves.
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); err != nil {
+		t.Fatalf("a check after the source was built: %v", err)
+	}
+	var _ ingest.WholeSource = rs
+
+	key := full.String() + "/metadata/shop/orders.sql"
+	read := func() ([]byte, error) {
+		rc, _, err := rs.Open(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+		return io.ReadAll(rc)
+	}
+	body, err := read()
+	if err != nil || len(body) == 0 {
+		t.Fatalf("the full's metadata: %q, %v", body, err)
+	}
+	listed, _ := rs.List(ctx, inc.String()+"/")
+	if len(listed) == 0 {
+		t.Fatal("the incremental lists nothing")
+	}
+	for _, k := range []string{full.String() + "/metadata/shop/other.sql", inc.String() + "/data/x.bin", uuid.NewString() + "/.backup"} {
+		if _, _, err := rs.Open(ctx, k); !errors.Is(err, ingest.ErrNotServed) {
+			t.Fatalf("%s: %v, want ErrNotServed", k, err)
+		}
+	}
+	if rs.Failed() != "" {
+		t.Fatalf("failed before any mismatch: %s", rs.Failed())
+	}
+
+	// One byte changed in storage: the reader never gets the whole object.
+	path := runDir(t, db, "a", full) + "/metadata/shop/orders.sql"
+	changed := bytes.Clone(e.B1.blobs[path])
+	changed[len(changed)-1] ^= 1
+	e.B1.blobs[path] = changed
+	got, err := read()
+	if err == nil || len(got) >= len(body) {
+		t.Fatalf("a changed object: %d of %d bytes, %v", len(got), len(body), err)
+	}
+	if rs.Failed() != key {
+		t.Fatalf("failed: %q, want %s", rs.Failed(), key)
+	}
+}
+
+// TestNativeRestoreSourceKeys: a manifest key the endpoint would not serve
+// refuses the restore's source.
+func TestNativeRestoreSourceKeys(t *testing.T) {
+	for _, bad := range []string{`a\b.bin`, "a/../b.bin", "a//b.bin", "a/\x01.bin"} {
+		run := uuid.NewString()
+		if _, err := backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{
+			{Key: run + "/" + bad, Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, nil); err == nil {
+			t.Fatalf("%q: a restore source", bad)
+		}
+	}
+	run := uuid.NewString()
+	if _, err := backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{
+		{Key: run + "/data/%2e%2e/x.bin", Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, nil); err != nil {
+		t.Fatalf("a %% sequence is a plain name: %v", err)
 	}
 }
