@@ -66,7 +66,7 @@ nothing was deleted, was rejected.
   |---|---|
   | `ListObjects` v1 (bucket level, `prefix`, `max-keys`, `marker`) | `prefix` lies inside a prefix the credential may read or write |
   | `PutObject`, `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload` | write credential, key inside its own run prefix |
-  | `GetObject` (no `Range` seen, spike §1; the base chain's source refuses one, as it checks each object's SHA-256 when the object ends) | read: a credential that may read that prefix; a backup also reads back its own `.lock` and `.backup` |
+  | `GetObject` (no `Range` seen, spike §1 and Task 17; the base chain's and the restore's sources refuse one, as they check each object's SHA-256 when the object ends) | read: a credential that may read that prefix, of an object a verified manifest lists (the restore's source answers `403` for another key); a backup also reads back its own `.lock` and `.backup` |
   | `DeleteObject <run-id>/.lock` | write credential of that run (memory only, see below) |
 
   Never allowed: other deletes, `DeleteObjects`, `CopyObject`, `UploadPartCopy`, `HeadBucket` and other bucket
@@ -289,6 +289,40 @@ The existing flow, with these changes for a native source:
   - A native run's restore guide (`GET /backup/runs/{id}`) lists its succeeded copies and no commands; the run
     page offers **Restore…** and shows the tier the run was written with, and "kept at least as long as
     weekly" once an incremental based on it succeeded (R45).
+- **Decided while building Milestone E (Task 17, the restore).**
+  - The request records, when it is opened, the databases it restores and every object of them it leaves
+    out, with the reason (`options.native`, R50); the request page shows that list to the checker. At start
+    the executor checks the chain again and refuses to start, before the target is contacted or a credential
+    minted, with "the backup changed since the request was approved: …" when the check now leaves out
+    anything else.
+  - The check's one-at-a-time slot is held only to verify the chain and bind it. What the restore keeps for
+    the hours its `RESTORE` runs is the restore's source: one entry per object of the verified manifests
+    (key, size, SHA-256, run), about the size of their object lists, none of the parsed manifests. A manifest
+    key the endpoint would not serve refuses the source; a key is only ever looked up, and mapped to a path
+    only below its run's directory on the copy's destination. The check reads definitions 8 at a time.
+  - The credential is a read-only ingest session (`kind = 'restore'`, `run_id` the request) over the chain's
+    prefixes, the full first, with the same lifetime as a backup's; it counts against `ingest.maxRuns`, and it
+    is revoked when the engine returns. A key in its scope that the manifests do not list is `403` and the
+    restore goes on; an object that does not match is never served whole: its last read fails, the endpoint
+    aborts the connection, the session stops, the `RESTORE` is killed and the request fails naming the object.
+    Every chunk written to a client has a 2-minute deadline.
+  - The order is: the selected databases (`CREATE DATABASE … ENGINE = Atomic`, or an existing empty one), the
+    allowed Replicated tables from the backup's own text with the Keeper path rewritten and the backup's
+    `UUID '…'` removed, then
+    `RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…) SETTINGS async = 1, allow_different_table_def = 1, use_same_s3_credentials_for_base_backup = 1, id = '<request id>'`
+    with query id `olympos-restore-<request id>` and the read throttle of R29. `RESTORE` fills a table it
+    finds and creates the others (24.8 and 25.8): a pre-created table is not named in `EXCEPT TABLES`, and
+    without `allow_different_table_def` it is refused as "a different definition". A pre-created table needs
+    no UUID of the backup: it gets its own, so on a shared Keeper nothing of the source's table (its
+    `table_shared_id`) is shared.
+  - The `RESTORE` is polled every 5 s in `system.backups` (id = the request id) and ended with `KILL QUERY …
+    SYNC` on a stop of the session, a cancelled restore (the request ended elsewhere, the lease, a shutdown)
+    and every way out that did not see it end, on a new connection when its own is lost; when even that does
+    not end it, the error names the `KILL QUERY` to run. After `RESTORED`, every allowed table's row count must
+    be the manifest's; a table that differs fails the request, named.
+  - Seen on 24.8 and 25.8 through the endpoint: `RESTORE` sends `GetObject` without `Range` (the source
+    refuses one) and two `ListObjects`; a dictionary whose ClickHouse source names a `TABLE` and no `DB` reads
+    that table in its own database; `EXCEPT TABLES` leaves out an object listed as `other` by its name.
 
 ### 7. Incrementals
 

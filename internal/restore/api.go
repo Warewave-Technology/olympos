@@ -326,6 +326,10 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 			fields["databases"] = msg
 		}
 		ev.databases = dbs
+		// R50: a native request records what it leaves out, as checked.
+		if ev.run.native && ev.nativeCheck != nil && msg == "" {
+			ev.opts.Native = nativeOptions(dbs, ev.nativeCheck.Objects)
+		}
 	}
 	if open {
 		if msg := approvals.ValidateJustification(in.Justification); msg != "" {
@@ -428,9 +432,6 @@ func loadTargetInfo(ctx context.Context, q store.Querier, targetID string) (targ
 const (
 	errNativeIngestOff = "a native backup is restored through the ingest endpoint, which is off on this server (ingest.url)"
 	errNativeEngine    = "native backups of this engine are not restored"
-	// errNativeExecute ends a native request at its start until the native
-	// restore runs (task 17 replaces it).
-	errNativeExecute = "this server does not run native restores yet; nothing was read or written"
 )
 
 // sourceRules: the run is succeeded or partial and not a test run, and the

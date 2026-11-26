@@ -89,6 +89,31 @@ type Options struct {
 	Notes []string `json:"notes,omitempty"`
 	// ServerVersion of the target when the request was opened.
 	ServerVersion string `json:"server_version,omitempty"`
+	// Native: what a native restore was opened with (R50); nil for other
+	// copies.
+	Native *NativeOptions `json:"native,omitempty"`
+}
+
+// NativeOptions are what the check of a native copy decided when the
+// request was opened (R50): the databases restored and every object of
+// them the restore leaves out, with the reason, in the check's order. The
+// checker approves this list (the request page shows it), and the
+// executor refuses to start when the check it runs again at start decides
+// otherwise.
+type NativeOptions struct {
+	Databases []string                `json:"databases"`
+	Excluded  []backup.NativeDecision `json:"excluded"`
+}
+
+// nativeOptions is the R50 record of a check's decisions for databases.
+func nativeOptions(databases []string, objects []backup.NativeDecision) *NativeOptions {
+	o := &NativeOptions{Databases: append([]string{}, databases...), Excluded: []backup.NativeDecision{}}
+	for _, d := range objects {
+		if !d.Allowed {
+			o.Excluded = append(o.Excluded, d)
+		}
+	}
+	return o
 }
 
 // EngineOptions are the engine options of the target's EngineContext for a

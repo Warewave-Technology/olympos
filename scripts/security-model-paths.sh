@@ -29,6 +29,7 @@ paths=(
   internal/backup/native_restore.go
   internal/backup/restore_guide.go
   internal/restore/api.go
+  internal/restore/native_execute.go
   internal/app/ingest.go
   internal/blob/fs.go
   deploy/helm/olympos-agent/templates/clusterrole.yaml

@@ -8,9 +8,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/backup/engines/clickhouse"
 	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/restore"
+	"github.com/Warewave-Technology/olympos/internal/secrets"
 )
 
 // Native ClickHouse runs as a restore source (task 16): the check verifies
@@ -207,30 +211,277 @@ func TestNativeCheckIngestOff(t *testing.T) {
 	}
 }
 
-// TestNativeExecuteNotYet: an approved native request ends at its start,
-// failed, before anything is read from the copy or sent to the target, its
-// secrets wiped: the native RESTORE is task 17's.
-func TestNativeExecuteNotYet(t *testing.T) {
+// nativeRunner is the native restorer of the executor tests, in place of
+// ClickHouse's (its RESTORE is the engine's Docker test's): it records the
+// run and what its ingest session serves, and reads what read names
+// through the session's source, as the target's RESTORE would.
+type nativeRunner struct {
+	reg   *ingest.Registry
+	read  []string
+	block bool // hold until the restore's context ends
+	err   error
+
+	mu       sync.Mutex
+	calls    []backup.NativeRestoreRun
+	rc       backup.RestoreContext
+	sess     *ingest.Session
+	readErrs []error
+	stopped  bool
+}
+
+func (*nativeRunner) Restore(context.Context, backup.RestoreContext) (*backup.RestoreResult, error) {
+	return nil, errors.New("a native copy is not restored as one blob")
+}
+
+func (f *nativeRunner) RestoreNativeBackup(ctx context.Context, rc backup.RestoreContext, run backup.NativeRestoreRun) (*backup.RestoreResult, error) {
+	s, secret, ok := f.reg.Lookup(run.AccessKey)
+	f.mu.Lock()
+	f.calls, f.rc, f.sess = append(f.calls, run), rc, s
+	f.mu.Unlock()
+	if !ok || secret != run.Secret {
+		return nil, errors.New("the credential is not a live session")
+	}
+	for _, key := range f.read {
+		rc, _, err := s.Source().Open(ctx, key)
+		if err == nil {
+			_, err = io.ReadAll(rc)
+			rc.Close()
+		}
+		f.mu.Lock()
+		f.readErrs = append(f.readErrs, err)
+		f.mu.Unlock()
+		if err != nil {
+			return &backup.RestoreResult{Created: []string{"shop"}}, errors.New("clickhouse: native restore RESTORE_FAILED: S3 error")
+		}
+	}
+	if f.block {
+		<-ctx.Done()
+		f.mu.Lock()
+		f.stopped = true
+		f.mu.Unlock()
+		return &backup.RestoreResult{Created: []string{"shop"}}, errors.New("clickhouse: native restore ended (" + ctx.Err().Error() + "): KILL QUERY made it RESTORE_CANCELLED")
+	}
+	if f.err != nil {
+		return nil, f.err
+	}
+	res := &backup.RestoreResult{Created: []string{"shop"}, Notes: []string{}}
+	for _, db := range rc.Databases {
+		res.Items = append(res.Items, backup.RestoreItem{Name: db, Status: "succeeded", Tables: 1, Rows: 3})
+	}
+	return res, nil
+}
+
+func (f *nativeRunner) last() (backup.NativeRestoreRun, backup.RestoreContext, *ingest.Session, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) == 0 {
+		return backup.NativeRestoreRun{}, backup.RestoreContext{}, nil, 0
+	}
+	return f.calls[len(f.calls)-1], f.rc, f.sess, len(f.calls)
+}
+
+// nativeExec is an executor test of a native request: the runner in place
+// of ClickHouse's restorer, and an ingest registry for the credentials.
+func nativeExec(t *testing.T) (*xenv, *nativeRunner) {
 	x := newXEnv(t)
+	fp, err := secrets.NewFingerprinter(bytes.Repeat([]byte{7}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := ingest.NewRegistry(x.DB, fp, 8, nil)
+	x.ex.Native = &backup.NativeRestoreConfig{KV: x.KV, ManifestKeyName: nativeKeyName, URL: nativeIngestURL, Registry: reg}
+	f := &nativeRunner{reg: reg}
+	backup.RegisterRestorer("clickhouse", f)
+	t.Cleanup(func() { backup.RegisterRestorer("clickhouse", clickhouse.Engine{}) })
+	return x, f
+}
+
+// approvedNative opens a native request of objs for databases and has it
+// approved; it returns the request and the run.
+func (x *xenv) approvedNative(objs []nativeObj, databases ...string) (uuid.UUID, uuid.UUID) {
+	x.T.Helper()
 	src := x.target(x.prod, "events-ch", "clickhouse", "")
 	tgt := x.target(x.stage, "events-ch-new", "clickhouse", "")
-	run, _ := x.nativeRun(src, nativeSchema[:1])
-	rq := x.open(x.maker, map[string]any{"run_id": run, "target_id": tgt, "justification": "INC-1: restore the shop database",
-		"credential": map[string]any{"source": "stored", "username": "default", "password": canaryPassword}})
-	if code := x.do(x.checker, "POST", "/api/v1/restores/"+rq.ID.String()+"/approve", map[string]string{"comment": "go"}, nil); code != 200 {
-		t.Fatalf("approve: %d", code)
+	run, _ := x.nativeRun(src, objs)
+	in := map[string]any{"run_id": run, "target_id": tgt, "justification": "INC-1: restore the shop database",
+		"credential": map[string]any{"source": "stored", "username": "default", "password": canaryPassword}}
+	if len(databases) > 0 {
+		in["databases"] = databases
 	}
-	x.claim(rq.ID)
+	rq := x.open(x.maker, in)
+	if code := x.do(x.checker, "POST", "/api/v1/restores/"+rq.ID.String()+"/approve", map[string]string{"comment": "go"}, nil); code != 200 {
+		x.T.Fatalf("approve: %d", code)
+	}
+	return rq.ID, run
+}
+
+// R50: a native request records, when it is opened, the databases and
+// every object the restore leaves out with its reason; the request shows
+// them to the checker.
+func TestNativeOpenRecordsDecisions(t *testing.T) {
+	x := newXEnv(t)
+	id, _ := x.approvedNative(nativeSchema, "shop")
+	var rq restore.Request
+	if code := x.do(x.checker, "GET", "/api/v1/restores/"+id.String(), nil, &rq); code != http.StatusOK {
+		t.Fatalf("get: %d", code)
+	}
+	want := &restore.NativeOptions{Databases: []string{"shop"}, Excluded: []backup.NativeDecision{
+		{Database: "shop", Name: "ext", Kind: "table", Reason: "the URL engine is not on the restore allowlist"},
+		{Database: "shop", Name: "report", Kind: "view", Reason: "it reads stats.daily, which is not restored"},
+	}}
+	if !reflect.DeepEqual(rq.Options.Native, want) {
+		t.Fatalf("options.native:\n got %+v\nwant %+v", rq.Options.Native, want)
+	}
+	// Every database selected (none given): the record names them all.
+	y := newXEnv(t)
+	id2, _ := y.approvedNative(nativeSchema)
+	var rq2 restore.Request
+	y.do(y.checker, "GET", "/api/v1/restores/"+id2.String(), nil, &rq2)
+	if rq2.Options.Native == nil || !reflect.DeepEqual(rq2.Options.Native.Databases, []string{"shop", "stats"}) ||
+		len(rq2.Options.Native.Excluded) != 1 {
+		t.Fatalf("every database: %+v", rq2.Options.Native)
+	}
+	x.noCanary()
+}
+
+// TestNativeExecute: an approved native request is checked again, its
+// target too, and restored by the engine with a read-only credential over
+// the chain, minted at start and revoked at the end, whose session serves
+// only the chain's signed objects.
+func TestNativeExecute(t *testing.T) {
+	x, f := nativeExec(t)
+	id, run := x.approvedNative(nativeSchema, "shop")
+	key := run.String() + "/metadata/shop/orders.sql"
+	f.read = []string{key}
+	x.claim(id)
 	calls := chInspector.calls
-	x.ex.Execute(context.Background(), rq.ID)
-	if s := x.stored(rq.ID); s.Status != restore.StatusFailed || s.Error != "this server does not run native restores yet; nothing was read or written" {
+	x.ex.Execute(context.Background(), id)
+	s := x.stored(id)
+	if s.Status != restore.StatusSucceeded || s.Error != "" || len(s.Result.Items) != 1 || strings.Join(s.Result.Created, ",") != "shop" {
 		t.Fatalf("native request: %+v", s)
 	}
-	if chInspector.calls != calls || x.dialer.dialCount() != 0 {
-		t.Fatal("the target was contacted")
+	if chInspector.calls != calls+1 {
+		t.Fatal("the target was not checked again at start")
 	}
-	x.wiped(rq.ID)
+	nr, rc, sess, n := f.last()
+	if n != 1 || nr.RunID != run.String() || nr.URL != nativeIngestURL+"/olympos/"+run.String()+"/" || rc.RequestID != id.String() ||
+		!reflect.DeepEqual(rc.Databases, []string{"shop"}) || len(nr.Decisions) != 3 || nr.Rows == nil {
+		t.Fatalf("the engine got %v, %+v", nr, rc)
+	}
+	if sess.Kind() != ingest.KindRestore || !reflect.DeepEqual(sess.Scope(), ingest.Scope{Read: []string{run.String() + "/"}}) {
+		t.Fatalf("the session: %v %+v", sess.Kind(), sess.Scope())
+	}
+	if f.readErrs[0] != nil {
+		t.Fatalf("a signed object: %v", f.readErrs[0])
+	}
+	// A key the manifest does not list is refused, and the run goes on.
+	if _, _, err := sess.Source().Open(context.Background(), run.String()+"/data/shop/x.bin"); !errors.Is(err, ingest.ErrNotServed) {
+		t.Fatalf("a key the manifest does not list: %v", err)
+	}
+	// The credential is revoked at the end.
+	if _, _, ok := f.reg.Lookup(nr.AccessKey); ok {
+		t.Fatal("the credential lives on after the restore")
+	}
+	var revoked bool
+	x.scan(&revoked, `SELECT revoked_at IS NOT NULL FROM ingest_credentials WHERE run_id = $1 AND kind = 'restore'`, id)
+	if !revoked {
+		t.Fatal("the credential's row is not revoked")
+	}
+	x.wiped(id)
 	x.noCanary()
+}
+
+// TestNativeExecuteChanged (R50): when the check at start does not decide
+// what the request was approved with, the request fails before the target
+// is contacted or a credential minted; a request with no record is refused
+// too.
+func TestNativeExecuteChanged(t *testing.T) {
+	for name, set := range map[string]string{
+		"changed":    `jsonb_set(options, '{native,excluded}', '[]')`,
+		"unrecorded": `options - 'native'`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			x, f := nativeExec(t)
+			id, _ := x.approvedNative(nativeSchema, "shop")
+			x.exec(`UPDATE restore_requests SET options = `+set+` WHERE id = $1`, id)
+			x.claim(id)
+			calls := chInspector.calls
+			x.ex.Execute(context.Background(), id)
+			want := "the backup changed since the request was approved: the objects the restore would leave out are not the ones approved; " +
+				"nothing was written to the target; open a new request"
+			if name == "unrecorded" {
+				want = "the request does not record the objects the restore leaves out, so they were not approved; nothing was written to the target; " +
+					"open a new request"
+			}
+			if s := x.stored(id); s.Status != restore.StatusFailed || s.Error != want {
+				t.Fatalf("request: %+v", s)
+			}
+			if _, _, _, n := f.last(); n != 0 || chInspector.calls != calls {
+				t.Fatal("the target was contacted")
+			}
+			var minted int
+			x.scan(&minted, `SELECT count(*) FROM ingest_credentials WHERE run_id = $1`, id)
+			if minted != 0 {
+				t.Fatal("a credential was minted")
+			}
+			x.wiped(id)
+		})
+	}
+}
+
+// TestNativeExecuteObjectChanged: an object changed in storage after the
+// approval is never served whole: its read fails, and the request fails
+// naming it.
+func TestNativeExecuteObjectChanged(t *testing.T) {
+	x, f := nativeExec(t)
+	id, run := x.approvedNative(nativeSchema, "shop")
+	key := run.String() + "/.backup"
+	f.read = []string{key}
+	x.blobs.put("p/c/shop/"+run.String()+"/.backup", []byte("<config/!"))
+	x.claim(id)
+	x.ex.Execute(context.Background(), id)
+	s := x.stored(id)
+	want := "the restore failed: the backup's object " + key + " does not match its signed manifest; its read was aborted " +
+		"(clickhouse: native restore RESTORE_FAILED: S3 error); databases created and left in place: shop"
+	if s.Status != restore.StatusFailed || s.Error != want {
+		t.Fatalf("request: %+v", s)
+	}
+	x.noCanary()
+}
+
+// TestNativeExecuteStopped: a native restore whose request ended elsewhere
+// is stopped (its context ends, which KILLs the RESTORE on the target), and
+// its credential is revoked.
+func TestNativeExecuteStopped(t *testing.T) {
+	x, f := nativeExec(t)
+	f.block = true
+	id, _ := x.approvedNative(nativeSchema, "shop")
+	x.claim(id)
+	done := make(chan struct{})
+	go func() { x.ex.Execute(context.Background(), id); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, _, _, n := f.last(); n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the restore did not start")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	x.exec(`UPDATE restore_requests SET status = 'failed', error = 'reaped elsewhere', finished_at = now() WHERE id = $1`, id)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the restore kept running after its request ended elsewhere")
+	}
+	f.mu.Lock()
+	stopped := f.stopped
+	f.mu.Unlock()
+	nr, _, _, _ := f.last()
+	if _, _, ok := f.reg.Lookup(nr.AccessKey); !stopped || ok {
+		t.Fatalf("stopped %v, credential live %v", stopped, ok)
+	}
 }
 
 // TestNativeCheckClientGone: a request that goes away while its chain is

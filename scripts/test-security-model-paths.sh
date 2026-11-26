@@ -197,6 +197,18 @@ if printf 'internal/backup/restore_guide_test.go\ninternal/restore/api_test.go\n
   echo "FAIL: --files matched a file next to the restore source or the open-time rules" >&2
   fail=1
 fi
+# The execution of a native restore: the decisions approved (R50), the
+# read-only credential over the chain and the source it is served from.
+if ! out=$(printf 'internal/restore/executor.go\ninternal/restore/native_execute.go\n' | "$script" --files) ||
+  [ "$out" != internal/restore/native_execute.go ]; then
+  echo "FAIL: --files with the native restore's execution: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/restore/native_test.go\ninternal/restore/native_execute_test.go\ninternal/restore/native_execute.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the native restore's execution" >&2
+  fail=1
+fi
 # The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,
 # whose SetTags rewrites the tags of stored backups.
 if ! out=$(printf 'internal/app/app.go\ninternal/app/ingest.go\n' | "$script" --files) || [ "$out" != internal/app/ingest.go ]; then
