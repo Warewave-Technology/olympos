@@ -420,7 +420,7 @@ function CredentialsCard({ canAdmin }: { canAdmin: boolean }) {
   const [editing, setEditing] = useState<SyntheticCredential | null | undefined>(undefined);
   // A link with ?credential= brings its row into view, once the list is there.
   const card = useRef<HTMLElement>(null);
-  const scrolled = useRef<string>();
+  const scrolled = useRef<string>(undefined);
   useEffect(() => {
     if (!selected || !q.data || scrolled.current === selected) return;
     const row = card.current?.querySelector('tr[aria-current="true"]');
