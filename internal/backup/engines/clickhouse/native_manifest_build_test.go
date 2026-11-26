@@ -62,9 +62,11 @@ func (d nativeRunData) body(key string) ([]byte, bool) {
 	return b, ok
 }
 
+// build builds the run's manifest on base; an incremental's base URL is the
+// one its .backup names (the capture's).
 func (d nativeRunData) build(runID string, base []*NativeManifest) (*NativeManifest, error) {
 	return BuildNativeManifest(NativeBuild{RunID: runID, ServerVersion: "25.8.33.6", Settings: map[string]string{"id": runID},
-		Objects: d.objects, Body: d.body, Base: base})
+		Objects: d.objects, Body: d.body, Base: base, BaseURL: d.meta.BaseBackup})
 }
 
 // wantPartRows is what a .backup's count.txt files hold: a written one its
@@ -482,7 +484,7 @@ func partFull(t *testing.T) (nativeRunData, *NativeManifest) {
 func TestBuildNativeManifestPartlyInBase(t *testing.T) {
 	full, base := partFull(t)
 	baseXML := `<base_backup>S3('http://h/olympos/` + testBaseRunID + `/')</base_backup>` +
-		`<base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`
+		`<base_backup_uuid>62c08f3c-f80a-4c02-aabb-255897f0c3fc</base_backup_uuid>`
 	inMeta := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
 		fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum><use_base>true</use_base>") +
 		fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>")
@@ -541,7 +543,7 @@ func TestSignNativeManifestIncremental(t *testing.T) {
 	signedFull := signedJSON(t, kv, testManifestKey, fullM)
 	incr := nativeRunOf(t, "25.8", "incremental", captureIncrRun)
 	var read []string
-	baseURL := "https://ingest.example:9443/olympos/" + captureFullRun + "/"
+	baseURL := incr.meta.BaseBackup // the URL the BACKUP named its base by
 	in := backup.NativeManifestInput{KV: kv, KeyName: testManifestKey, RunID: captureIncrRun, ServerVersion: "25.8.33.6",
 		Objects: incr.objects, Captured: incr.body,
 		Base: &backup.NativeManifestBase{RunID: captureFullRun, URL: baseURL, Signed: [][]byte{signedFull},
@@ -610,5 +612,45 @@ func TestVerifyNativeChain(t *testing.T) {
 	}
 	if _, err := (Engine{}).VerifyNativeChain(ctx, kv, testManifestKey, testOtherRunID, raws); !IsNotVerified(err) {
 		t.Fatalf("another run expected: %v", err)
+	}
+}
+
+// TestBuildNativeManifestBoundToBase (task 13, fix round 1): an incremental
+// is built only on the base it names: its .backup's base_backup is the URL
+// the run gave ClickHouse, its base_backup_uuid the verified base .backup's
+// <uuid>, and every file it takes from the base is a file of the base's
+// .backup of that size and checksum.
+func TestBuildNativeManifestBoundToBase(t *testing.T) {
+	full, base := partFull(t)
+	baseURL := "http://h/olympos/" + testBaseRunID + "/"
+	baseXML := func(url, id string) string {
+		return `<base_backup>S3('` + url + `')</base_backup><base_backup_uuid>` + id + `</base_backup_uuid>`
+	}
+	const fullUUID = "62c08f3c-f80a-4c02-aabb-255897f0c3fc"
+	meta := func(tSum string) string {
+		return fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
+			fileXML("metadata/db/t.sql", len(partT), "<checksum>"+tSum+"</checksum><use_base>true</use_base>") +
+			fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>") +
+			fileXML("data/db/t/count.txt", 1, "<checksum>"+sumC+"</checksum><use_base>true</use_base>")
+	}
+	build := func(extra, files, url string) error {
+		d := partRun(t, testRunID, extra, files, nil)
+		maps.Copy(d.bodies, full.bodies)
+		_, err := BuildNativeManifest(NativeBuild{RunID: testRunID, ServerVersion: "25.8.33.6", Settings: map[string]string{"id": testRunID},
+			Objects: d.objects, Body: d.body, Base: []*NativeManifest{base}, BaseURL: url})
+		return err
+	}
+	if err := build(baseXML(baseURL, fullUUID), meta(sumA), baseURL); err != nil {
+		t.Fatalf("bound to its base: %v", err)
+	}
+	for name, err := range map[string]error{
+		"another base URL":       build(baseXML("http://h/olympos/"+testOtherRunID+"/", fullUUID), meta(sumA), baseURL),
+		"another URL expected":   build(baseXML(baseURL, fullUUID), meta(sumA), "http://other/olympos/"+testBaseRunID+"/"),
+		"another base .backup":   build(baseXML(baseURL, "5d1492d5-3a5e-46db-a6ae-3e8afa751a45"), meta(sumA), baseURL),
+		"a file not in the base": build(baseXML(baseURL, fullUUID), meta(sumD), baseURL),
+	} {
+		if !errors.Is(err, ErrNativeMeta) || !strings.Contains(err.Error(), "base") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

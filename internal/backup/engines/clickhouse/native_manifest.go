@@ -529,9 +529,11 @@ type NativeBuild struct {
 	// the metadata/*.sql it did not write again and its base's .backup. Those
 	// are read from storage, so checked against the chain's manifests.
 	Body func(key string) ([]byte, bool)
-	// Base is an incremental's base chain, verified, base first
-	// (VerifyChain); nil for a full backup.
-	Base []*NativeManifest
+	// Base is an incremental's base chain, verified, the full first and the
+	// base last (VerifyChain); nil for a full backup. BaseURL is the base's
+	// URL as the BACKUP named it (NativeBase.URL).
+	Base    []*NativeManifest
+	BaseURL string
 	// StructureOnly is a test run's BACKUP with structure_only = 1 (R40):
 	// its .backup lists no data file, so the manifest has no part rows.
 	StructureOnly bool
@@ -615,6 +617,12 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 		}
 		return bb, nil
 	}
+	var baseMeta *BackupMeta
+	if len(b.Base) > 0 {
+		if baseMeta, err = boundToBase(b, meta, body); err != nil {
+			return nil, err
+		}
+	}
 
 	metadata := map[string][]byte{}
 	for _, f := range meta.Files {
@@ -636,7 +644,7 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 		return nil, err
 	}
 
-	inBase := baseCounts(b.Base, body)
+	inBase := baseCounts(b.Base, baseMeta)
 	for _, f := range meta.Files {
 		if !strings.HasPrefix(f.Name, "data/") || path.Base(f.Name) != "count.txt" {
 			continue
@@ -676,38 +684,64 @@ func baseObject(base []*NativeManifest, f MetaFile) (string, error) {
 	return "", metaErr("%s is in the base, and no run of the base chain stored it", clip(f.Name))
 }
 
+// boundToBase reads the base's .backup (the last of b.Base) and checks that
+// the run is an incremental on it: its .backup's base_backup is b.BaseURL,
+// its base_backup_uuid the base .backup's <uuid>, and every file it takes
+// from the base, whole or its first BaseSize bytes, is a file of the base's
+// .backup of that size and checksum, as ClickHouse reads it back. It returns
+// the base's .backup.
+func boundToBase(b NativeBuild, meta *BackupMeta, body func(string) ([]byte, error)) (*BackupMeta, error) {
+	last := b.Base[len(b.Base)-1]
+	raw, err := body(last.RunID + "/.backup")
+	if err != nil {
+		return nil, err
+	}
+	bm, err := ParseBackupMeta(raw)
+	if err != nil {
+		return nil, fmt.Errorf("the base's .backup: %w", err)
+	}
+	switch {
+	case meta.BaseBackup != b.BaseURL:
+		return nil, metaErr(".backup is based on %s, not on the base %s", clip(meta.BaseBackup), clip(b.BaseURL))
+	case bm.UUID == "" || meta.BaseBackupUUID != bm.UUID:
+		return nil, metaErr(".backup is based on the backup %s, not on the base's %s", clip(meta.BaseBackupUUID), clip(bm.UUID))
+	}
+	inBase := map[[2]string]bool{}
+	for _, f := range bm.Files {
+		inBase[[2]string{strconv.FormatUint(f.Size, 10), f.Checksum}] = true
+	}
+	for _, f := range meta.Files {
+		if !f.UseBase {
+			continue
+		}
+		size, sum := f.Size, f.Checksum
+		if f.BaseSize < f.Size {
+			size, sum = f.BaseSize, f.BaseChecksum
+		}
+		if !inBase[[2]string{strconv.FormatUint(size, 10), sum}] {
+			return nil, metaErr("%s: the base's .backup has no file of %d bytes with checksum %s", clip(f.Name), size, clip(sum))
+		}
+	}
+	return bm, nil
+}
+
 // baseCounts returns the rows of a count.txt of the base by its size and
-// checksum, read from the base's .backup and its manifest's part rows; it
-// reads the .backup on its first call. name, the file of the run that
-// takes those bytes from the base, is for errors. Without a base it finds
-// nothing.
-func baseCounts(base []*NativeManifest, body func(string) ([]byte, error)) func(name string, size uint64, checksum string) (uint64, error) {
-	var byContent map[[2]string]uint64
-	var readErr error
+// checksum, from the base's .backup (baseMeta) and its manifest's part
+// rows. name, the file of the run that takes those bytes from the base, is
+// for errors. Without a base it finds nothing.
+func baseCounts(base []*NativeManifest, baseMeta *BackupMeta) func(name string, size uint64, checksum string) (uint64, error) {
+	byContent := map[[2]string]uint64{}
+	if len(base) > 0 && baseMeta != nil {
+		last := base[len(base)-1]
+		for _, bf := range baseMeta.Files {
+			if n, ok := last.PartRows[bf.Name]; ok && path.Base(bf.Name) == "count.txt" {
+				byContent[[2]string{strconv.FormatUint(bf.Size, 10), bf.Checksum}] = n
+			}
+		}
+	}
 	return func(name string, size uint64, checksum string) (uint64, error) {
 		if len(base) == 0 {
 			return 0, metaErr("%s is in the base, and the run has none", clip(name))
-		}
-		last := base[len(base)-1]
-		if byContent == nil && readErr == nil {
-			byContent = map[[2]string]uint64{}
-			raw, err := body(last.RunID + "/.backup")
-			var bm *BackupMeta
-			if err == nil {
-				bm, err = ParseBackupMeta(raw)
-			}
-			if err != nil {
-				readErr = fmt.Errorf("the base's .backup: %w", err)
-				return 0, readErr
-			}
-			for _, bf := range bm.Files {
-				if n, ok := last.PartRows[bf.Name]; ok && path.Base(bf.Name) == "count.txt" {
-					byContent[[2]string{strconv.FormatUint(bf.Size, 10), bf.Checksum}] = n
-				}
-			}
-		}
-		if readErr != nil {
-			return 0, readErr
 		}
 		n, ok := byContent[[2]string{strconv.FormatUint(size, 10), checksum}]
 		if !ok {
@@ -793,7 +827,7 @@ func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestIn
 		if err != nil {
 			return nil, fmt.Errorf("the base chain: %w", err)
 		}
-		b.Base, b.Settings = chain, statementSettings(in.RunID, in.StructureOnly, in.Base.URL)
+		b.Base, b.BaseURL, b.Settings = chain, in.Base.URL, statementSettings(in.RunID, in.StructureOnly, in.Base.URL)
 		inChain := map[string]bool{}
 		for _, m := range chain {
 			inChain[m.RunID] = true

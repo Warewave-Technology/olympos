@@ -266,7 +266,7 @@ INSERT INTO spike.applog_copy SELECT 100 + number, 'grown' FROM numbers(18);`)
 				baseURL = base.URL
 			}
 			m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, false, baseURL),
-				Objects: r.s.Objects(), Body: body(r.s), Base: chain})
+				Objects: r.s.Objects(), Body: body(r.s), Base: chain, BaseURL: baseURL})
 			if err != nil {
 				t.Fatalf("manifest of %s: %v", r.id, err)
 			}
