@@ -151,6 +151,11 @@ type NativeManifestResult struct {
 	// signature covers and what an incremental names as its base: the run's
 	// and its copies' sha256.
 	SHA256 string
+	// Objects are the objects the manifest holds, which the run tags
+	// complete. Unlisted are the keys of the objects the session stored
+	// that the backup does not declare (R43): not signed, left incomplete.
+	Objects  []ingest.ObjectRecord
+	Unlisted []string
 }
 
 // ErrNativeOrphan says a native backup may still run on the target after its
@@ -526,6 +531,17 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		}
 		return finish(total, errors.New(msg)), rr
 	}
+	if len(res.Unlisted) > 0 {
+		// Stored, not declared by the backup: not signed, so not tagged
+		// complete; the lifecycle rule removes them.
+		w.Log.Warn("native backup: objects the backup does not declare are left out of the manifest and stay incomplete",
+			"run_id", r.id, "count", len(res.Unlisted), "keys", res.Unlisted[:min(len(res.Unlisted), 100)])
+	}
+	objects, total = res.Objects, 0
+	for _, o := range objects {
+		total += o.Size
+	}
+	stored = len(objects)
 	var wg sync.WaitGroup
 	for _, d := range live {
 		wg.Add(1)

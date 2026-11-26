@@ -199,7 +199,9 @@ know. The error of a run that may have left one, and the restart error, name the
 ### 5. The signed manifest
 
 - **Format.** `olympos.clickhouse.native/v1`, inside the existing sidecar's `Details`:
-  - every object: key, size, SHA-256;
+  - every object `.backup` declares, and `.backup` itself: key, size, SHA-256. An object the client stored
+    besides is not signed: it stays `incomplete`, so the lifecycle rule removes it, and the run logs its key
+    (R43);
   - ClickHouse version, backup settings, base run ID and its manifest's SHA-256;
   - the databases, tables, dictionaries and views, from the `metadata/*.sql` objects;
   - rows per table: the endpoint keeps the body of every part's `count.txt` (a few bytes) while it streams, and

@@ -150,6 +150,8 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		// whose native backups run on the target (run.Before).
 		TargetBytes int64    `json:"native_target_bytes"`
 		Running     []string `json:"native_running"`
+		// Extra stores an object the .backup does not list.
+		Extra bool `json:"native_extra"`
 	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
@@ -170,6 +172,9 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		nativeCalls.mu.Unlock()
 	}
 	steps := []nativeObject{{".lock", []byte("lock")}}
+	if o.Extra {
+		steps = append(steps, nativeObject{"data/shop/orders/extra.bin", []byte("not in .backup")})
+	}
 	steps = append(steps, nativeBackupOf(run.StructureOnly)...)
 	for _, obj := range steps {
 		select {
@@ -859,5 +864,42 @@ func TestNativeRunEndsOrphans(t *testing.T) {
 	}
 	if got := loadRun(t, db, r); got.Status != "succeeded" {
 		t.Fatalf("run: %+v", got)
+	}
+}
+
+// R43: an object the client stored that .backup does not list is left out
+// of the signed manifest and stays incomplete on every destination, so the
+// lifecycle rule removes it; the run still succeeds.
+func TestNativeRunUnlistedObject(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	setOptions(t, db, e.Job, `{"method":"native","native_extra":true}`)
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	r := loadRun(t, db, run)
+	cs := loadCopies(t, db, run)
+	if r.Status != "succeeded" || len(cs) != 2 {
+		t.Fatalf("run: %+v copies %+v", r, cs)
+	}
+	var total int64
+	for _, o := range nativeBackup() {
+		total += int64(len(o.body))
+	}
+	for i, b := range []*fakeBlobs{e.B1, e.B2} {
+		dir := runDir(t, db, []string{"a", "b"}[i], run)
+		_, m := readSidecar(t, b, e.kv, dir, run)
+		if len(m.Objects) != len(nativeBackup()) || cs[i].Bytes != total {
+			t.Fatalf("copy %d: %d objects in the manifest, %d bytes", i, len(m.Objects), cs[i].Bytes)
+		}
+		extra := dir + "/data/shop/orders/extra.bin"
+		if _, ok := b.blobs[extra]; !ok {
+			t.Fatalf("copy %d: the extra object was not stored", i)
+		}
+		if tg := b.tags[extra]; tg[backup.StateTag] != backup.StateIncomplete {
+			t.Fatalf("copy %d: the unlisted object is tagged %v", i, tg)
+		}
+	}
+	if _, objects := runMethod(t, db, run); objects != fmt.Sprint(len(nativeBackup())) {
+		t.Fatalf("objects %s", objects)
 	}
 }

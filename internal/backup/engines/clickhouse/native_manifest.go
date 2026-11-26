@@ -541,7 +541,8 @@ type NativeBuild struct {
 // BuildNativeManifest builds the manifest of a native run from its .backup
 // (ParseBackupMeta), its metadata (ObjectsFromMetadata) and its count.txt
 // files (ParseCount). It checks that every file the .backup lists as written
-// by the run was stored whole. Every part's rows go into PartRows (R27): a
+// by the run was stored whole; its Objects are those files and .backup, and
+// an object stored besides is left out (R43). Every part's rows go into PartRows (R27): a
 // written count.txt is read, a deduplicated one (data_file) counts as the
 // file it names, one in the base counts as the base's count.txt of the same
 // content: ClickHouse takes a file from its base by size and checksum, not by
@@ -564,7 +565,7 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 		return nil, err
 	}
 	m := &NativeManifest{Format: NativeManifestFormat, RunID: b.RunID, ServerVersion: b.ServerVersion,
-		Settings: maps.Clone(b.Settings), Objects: slices.Clone(b.Objects), PartRows: map[string]uint64{}}
+		Settings: maps.Clone(b.Settings), PartRows: map[string]uint64{}}
 	switch {
 	case meta.BaseBackup != "" && len(b.Base) == 0:
 		return nil, metaErr(".backup is an incremental's, and the run has no base")
@@ -576,6 +577,7 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 	}
 
 	stored := map[string]int64{}
+	declared := map[string]bool{run + ".backup": true}
 	for _, o := range b.Objects {
 		stored[o.Key] = o.Size
 	}
@@ -591,12 +593,20 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 		if !f.Written() {
 			continue
 		}
+		declared[run+f.Name] = true
 		size, ok := stored[run+f.Name]
 		switch {
 		case !ok:
 			return nil, metaErr("%s is in .backup but was not stored", clip(f.Name))
 		case size < 0 || uint64(size) != f.Size-f.BaseSize:
 			return nil, metaErr("%s: stored %d bytes, .backup says %d", clip(f.Name), size, f.Size-f.BaseSize)
+		}
+	}
+	// The manifest holds what .backup declares, and .backup: an object the
+	// client stored besides is not signed (R43).
+	for _, o := range b.Objects {
+		if declared[o.Key] {
+			m.Objects = append(m.Objects, o)
 		}
 	}
 	body := func(key string) ([]byte, error) {
@@ -772,7 +782,17 @@ func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestIn
 	if err != nil {
 		return nil, fmt.Errorf("the signed manifest does not verify: %w", err)
 	}
-	return &backup.NativeManifestResult{Signed: raw, SHA256: v.SHA256()}, nil
+	res := &backup.NativeManifestResult{Signed: raw, SHA256: v.SHA256(), Objects: slices.Clone(v.Objects)}
+	signed := map[string]bool{}
+	for _, o := range v.Objects {
+		signed[o.Key] = true
+	}
+	for _, o := range in.Objects {
+		if !signed[o.Key] {
+			res.Unlisted = append(res.Unlisted, o.Key)
+		}
+	}
+	return res, nil
 }
 
 // manifestJSON is the manifest as it is parsed. Objects has its own type as

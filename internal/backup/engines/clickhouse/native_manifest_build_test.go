@@ -7,6 +7,7 @@ import (
 	"hash/crc32"
 	"maps"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -388,5 +389,41 @@ func TestBuildNativeManifestStructureOnly(t *testing.T) {
 		RunID: captureFullRun, ServerVersion: "25.8.33.6", Objects: so.objects, Captured: so.body, StructureOnly: true})
 	if err != nil || !strings.Contains(string(res.Signed), `"structure_only":"1"`) {
 		t.Fatalf("signed: %v %.300s", err, res.Signed)
+	}
+}
+
+// R43: an object the client stored that .backup does not list (other than
+// .backup itself) is left out of the signed manifest: it signs only what
+// ClickHouse declared. The run is not failed; the worker leaves the object
+// tagged incomplete and logs it (Unlisted).
+func TestBuildNativeManifestUnlisted(t *testing.T) {
+	full := nativeRunOf(t, "25.8", "full", captureFullRun)
+	declared := len(full.objects)
+	extra := []ingest.ObjectRecord{
+		{Key: captureFullRun + "/data/spike/events/extra.bin", Size: 3, SHA256: sum("extra")},
+		{Key: captureFullRun + "/notes.txt", Size: 5, SHA256: sum("notes")},
+	}
+	objects := append(append([]ingest.ObjectRecord{}, extra[0]), full.objects...)
+	objects = append(objects, extra[1])
+	m, err := BuildNativeManifest(NativeBuild{RunID: captureFullRun, ServerVersion: "25.8.33.6", Settings: map[string]string{"id": captureFullRun},
+		Objects: objects, Body: full.body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m.Objects) != declared {
+		t.Fatalf("%d objects in the manifest, want the %d .backup declares", len(m.Objects), declared)
+	}
+	for _, o := range m.Objects {
+		if o.Key == extra[0].Key || o.Key == extra[1].Key {
+			t.Fatalf("the unlisted %s is in the manifest", o.Key)
+		}
+	}
+	res, err := Engine{}.SignNativeManifest(context.Background(), backup.NativeManifestInput{KV: newFakeVault(), KeyName: testManifestKey,
+		RunID: captureFullRun, ServerVersion: "25.8.33.6", Objects: objects, Captured: full.body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Objects) != declared || !slices.Equal(res.Unlisted, []string{extra[0].Key, extra[1].Key}) {
+		t.Fatalf("signed %d objects, unlisted %v", len(res.Objects), res.Unlisted)
 	}
 }
