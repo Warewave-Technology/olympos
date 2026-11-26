@@ -39,6 +39,10 @@ Key Vault, so tests, lab and e2e images are built with `-tags dev` (`--build-arg
 image). Release builds have neither and refuse `devMode: true` at startup. `make test-release` runs the
 untagged tests and `scripts/check-release-binary.sh` (symbol and string check).
 
+Tests that need Docker skip without it, or fail with `OLYMPOS_REQUIRE_DOCKER=1`. `OLYMPOS_SKIP_DOCKER=1` skips them
+even then: CI's release-build job sets it, since the dev-build job runs the same Docker tests and what differs
+between the builds is not in them.
+
 `internal/testutil.DB(t)` creates a fresh migrated database per test. `internal/apitest` starts the full HTTP
 API with dev login: `e := apitest.New(t, apitest.Options{Modules: ...}); c := e.Login(e.Principal("ada", "Member", "operator@env=prod"))`.
 `e.LogBuf` holds redacted logs for canary-secret checks.

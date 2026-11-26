@@ -74,6 +74,9 @@ func startAzurite() (string, error) {
 
 func azurite(t *testing.T) string {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	azOnce.Do(func() { azEndpoint, azErr = startAzurite() })
 	if azErr != nil {
 		if os.Getenv("OLYMPOS_REQUIRE_DOCKER") == "1" {

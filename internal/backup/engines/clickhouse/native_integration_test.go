@@ -56,6 +56,9 @@ func TestRunNativeAgainstIngest(t *testing.T) {
 
 func requireDocker(t *testing.T) {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	require := os.Getenv("OLYMPOS_REQUIRE_DOCKER") == "1"
 	if _, err := exec.LookPath("docker"); err != nil {
 		if require {

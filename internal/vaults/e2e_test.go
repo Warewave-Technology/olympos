@@ -43,6 +43,7 @@ import (
 	_ "github.com/Warewave-Technology/olympos/internal/backup/engines/vault" // registers engine "vault"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
 	"github.com/Warewave-Technology/olympos/internal/server"
+	"github.com/Warewave-Technology/olympos/internal/testutil"
 	"github.com/Warewave-Technology/olympos/internal/vaults"
 	"github.com/Warewave-Technology/olympos/internal/vaults/vclient"
 )
@@ -62,6 +63,9 @@ var providers = []provider{
 
 func requireDocker(t *testing.T) {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := exec.CommandContext(ctx, "docker", "info").Run(); err != nil {

@@ -27,6 +27,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/backup/engines/postgres"
+	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
 const (
@@ -47,6 +48,9 @@ var (
 
 func TestMain(m *testing.M) {
 	code := func() int {
+		if testutil.DockerSkipped() {
+			return m.Run()
+		}
 		if err := setup(); err != nil {
 			skipMsg = err.Error()
 			fmt.Fprintln(os.Stderr, "postgres engine tests skipped:", skipMsg)
@@ -59,6 +63,9 @@ func TestMain(m *testing.M) {
 
 func need(t *testing.T) {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	if skipMsg != "" {
 		if os.Getenv("OLYMPOS_REQUIRE_DOCKER") == "1" {
 			t.Fatal(skipMsg)
