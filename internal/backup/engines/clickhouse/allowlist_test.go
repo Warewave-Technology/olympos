@@ -365,6 +365,16 @@ func TestClassifyInForms(t *testing.T) {
 		{name: "in () after AND", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id > 0 AND in (id, other.ids)")},
 		{name: "in() in brackets", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (in(id, other.ids))")},
 		{name: "in() in the select list", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT in(id, other.ids) AS f FROM db.events")},
+		// After SELECT's modifiers (TOP n [WITH TIES], DISTINCT ON (…)) the
+		// select list starts: in( there is the function (fix round 1, A).
+		{name: "in() after TOP n", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP 10 in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after TOP n WITH TIES", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP 10 WITH TIES in(id, other.ids) AS m FROM db.events ORDER BY id")},
+		{name: "in() after TOP (n)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP (10) in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after DISTINCT ON (…)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after DISTINCT ON (a, b) in a subquery", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT m FROM (SELECT DISTINCT ON (id, arr) in(id, other.ids) AS m FROM db.events)")},
+		{name: "in() as an index's expression", reason: "it reads other.ids, which is not in the backup", objs: tbl("CREATE TABLE db.x (`id` UInt64, INDEX i in(id, other.ids) TYPE minmax GRANULARITY 1) ENGINE = MergeTree ORDER BY id")},
+		{name: "the operator after TOP n and DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT TOP 10 id IN (1, toUInt64(2)) AS m FROM db.events")},
+		{name: "the operator after DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) id IN (1, toUInt64(2)) AS m FROM db.events")},
 		{name: "in() with three arguments", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT notIn(id, 1, 2) AS f FROM db.events")},
 		{name: "in() in a column default", reason: "it reads other.ids, which is not in the backup",
 			objs: tbl("CREATE TABLE db.x (`id` UInt64, `f` UInt8 DEFAULT in(id, other.ids)) ENGINE = Log")},

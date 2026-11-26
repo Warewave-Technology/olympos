@@ -316,6 +316,7 @@ func (d definition) deps() []objRef {
 type reader struct {
 	toks     []token
 	match    []int  // the index of the bracket closing each opening one
+	opening  []int  // the index of the bracket opening each closing one
 	db       string // the object's database (a dictionary source's DB when it names none)
 	embedded bool   // a dictionary source's query: every table must be qualified
 	def      *definition
@@ -339,10 +340,10 @@ func newReader(text, db string, def *definition) (*reader, bool) {
 	if err != nil {
 		return nil, false
 	}
-	match := make([]int, len(toks))
+	match, opening := make([]int, len(toks)), make([]int, len(toks))
 	var open []int
 	for i, t := range toks {
-		match[i] = -1
+		match[i], opening[i] = -1, -1
 		switch {
 		case t.punct(";"):
 			return nil, false
@@ -360,13 +361,13 @@ func newReader(text, db string, def *definition) (*reader, bool) {
 			if (toks[o].val == "(") != (t.val == ")") {
 				return nil, false
 			}
-			match[o] = i
+			match[o], opening[i] = i, o
 		}
 	}
 	if len(open) != 0 {
 		return nil, false
 	}
-	return &reader{toks: toks, match: match, db: db, def: def}, true
+	return &reader{toks: toks, match: match, opening: opening, db: db, def: def}, true
 }
 
 // readDefinition reads the statement of db.name.
@@ -1162,18 +1163,47 @@ var inFunctions = func() map[string]bool {
 // inFunctionAt reports whether "in(" at toks[i] is the function in, not
 // the operator IN: as ClickHouse parses it, the operator follows an operand
 // (a name, a literal, a bracket; NOT and GLOBAL are part of it), and the
-// function starts one: after the start of a bracket, punctuation, or a
-// keyword that an expression follows.
+// function starts one: after the start of a bracket, punctuation, a keyword
+// that an expression follows, or a clause that ends like an operand and is
+// followed by an expression (exprStartAfter).
 func (r *reader) inFunctionAt(i int) bool {
 	j := i - 1
 	for r.at(j).is("NOT") || r.at(j).is("GLOBAL") {
 		j--
+	}
+	if r.exprStartAfter(j) {
+		return true
 	}
 	switch p := r.at(j); p.kind {
 	case tokPunct:
 		return p.val != ")" && p.val != "]"
 	case tokWord:
 		return exprKeywords[strings.ToUpper(p.val)]
+	}
+	return false
+}
+
+// exprStartAfter reports whether an expression starts after toks[j] although
+// toks[j] ends like an operand (fix round 1 of the security review v0.4, A):
+// the clauses that end in a number, a bracket or a name and are followed by
+// an expression, not by an operator. They are SELECT's modifiers before its
+// list (TOP n, TOP (n), WITH TIES, DISTINCT ON (…)) and an index's name
+// (INDEX name expression TYPE …).
+func (r *reader) exprStartAfter(j int) bool {
+	p := r.at(j)
+	switch {
+	case p.kind == tokNumber:
+		return r.at(j - 1).is("TOP")
+	case p.punct(")"):
+		o := -1
+		if j >= 0 && j < len(r.opening) {
+			o = r.opening[j]
+		}
+		return o >= 0 && (r.at(o-1).is("TOP") || r.at(o-1).is("ON") && r.at(o-2).is("DISTINCT"))
+	case p.is("TIES"):
+		return r.at(j - 1).is("WITH")
+	case p.ident():
+		return r.at(j - 1).is("INDEX")
 	}
 	return false
 }
