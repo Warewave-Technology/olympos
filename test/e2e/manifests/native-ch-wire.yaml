@@ -1,0 +1,32 @@
+# native-ch-wire (TestM10ClickHouseNative only, applied and deleted by the
+# test): a second ClickHouse target that is native-ch seen through a byte
+# recorder. The lab ClickHouse has no TLS, so the cluster's transfer mode is
+# compressed and a native run's BACKUP statement, with the run's credential in
+# it, reaches ClickHouse in the clear (docs/security-model.md). The recorder
+# keeps what the agent sends (/tmp/c2s), so the test learns the run's secret
+# and can check that it appears nowhere else and is refused after the run.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: native-ch-wire, namespace: lab}
+spec:
+  selector: {matchLabels: {app: native-ch-wire}}
+  template:
+    metadata: {labels: {app: native-ch-wire}}
+    spec:
+      containers:
+      - name: wire
+        image: busybox:1.36
+        command: [nc, -lk, -p, "9000", -e, sh, -c, "tee -a /tmp/c2s | nc native-ch.lab.svc 9000"]
+        ports: [{containerPort: 9000, name: native}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: native-ch-wire
+  namespace: lab
+  annotations:
+    olympos.io/backup: clickhouse
+    olympos.io/port: native
+spec:
+  selector: {app: native-ch-wire}
+  ports: [{name: native, port: 9000}]
