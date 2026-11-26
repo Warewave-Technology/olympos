@@ -125,6 +125,17 @@ if printf 'internal/backup/native_test.go\ninternal/backup/native_internal_test.
   echo "FAIL: --files matched a file next to the worker's native run" >&2
   fail=1
 fi
+# The base chain of an incremental: which runs its credential reads, and
+# which stored objects the endpoint serves it.
+if ! out=$(printf 'internal/backup/copies.go\ninternal/backup/native_chain.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/native_chain.go ]; then
+  echo "FAIL: --files with the base chain: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/native_chain_test.go\ninternal/backup/native_chain.go.orig\n' | "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the base chain" >&2
+  fail=1
+fi
 # The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,
 # whose SetTags rewrites the tags of stored backups.
 if ! out=$(printf 'internal/app/app.go\ninternal/app/ingest.go\n' | "$script" --files) || [ "$out" != internal/app/ingest.go ]; then

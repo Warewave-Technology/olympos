@@ -5,8 +5,12 @@ package backup
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
+	"io/fs"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +19,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Warewave-Technology/olympos/internal/blob"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
@@ -241,10 +246,11 @@ func TestNativeLastFull(t *testing.T) {
 	want(1 << 20)
 }
 
-// nativeQuota (R39): the largest of twice the last full native run, 1.5
-// times the databases' size on disk and 1 GiB; ingest.maxRunBytes, when
-// set, instead. A database with no full yet, or one that grew, is not
-// stopped by an earlier, smaller run.
+// nativeQuota (R39, R44): the largest of twice the last full native run
+// (at most twice the databases' size), 1.5 times the databases' size and
+// 1 GiB; ingest.maxRunBytes, when set, instead. A database with no full yet,
+// or one that grew, is not stopped by an earlier, smaller run; a full that
+// wrote far more than the databases hold does not raise the next limit.
 func TestNativeQuota(t *testing.T) {
 	for _, tc := range []struct {
 		last, size, override, want int64
@@ -252,7 +258,11 @@ func TestNativeQuota(t *testing.T) {
 		{0, 0, 0, 1 << 30},                       // an empty database, no full yet
 		{0, 200 << 30, 0, 300 << 30},             // a large database, no full yet
 		{100 << 20, 5 << 30, 0, 15 << 29},        // a tiny first full, then 5 GiB loaded
-		{3 << 30, 1 << 30, 0, 6 << 30},           // twice the last full
+		{3 << 30, 2 << 30, 0, 4 << 30},           // twice the last full, at most twice the size
+		{5 << 30, 4 << 30, 0, 8 << 30},           // a full larger than the size on disk
+		{7 << 30, 4 << 30, 0, 8 << 30},           // bounded by twice the size
+		{100 << 30, 2 << 30, 0, 4 << 30},         // R44: no ratchet from a full of junk
+		{3 << 30, 0, 0, 1 << 30},                 // no size read: the floor
 		{1 << 20, 1 << 20, 0, 1 << 30},           // the floor
 		{3 << 30, 100 << 30, 10 << 30, 10 << 30}, // ingest.maxRunBytes
 		{0, 0, 1 << 20, 1 << 20},                 // under the floor too
@@ -289,4 +299,123 @@ func TestNativeSinkOutlivesWorkerContext(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
+}
+
+// memReader is a blob.Reader over memWriter's objects.
+type memReader struct{ *memWriter }
+
+func (m memReader) Open(_ context.Context, path string) (blob.Object, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b, ok := m.objs[path]
+	if !ok {
+		return nil, fs.ErrNotExist
+	}
+	return memObj{bytes.NewReader(b)}, nil
+}
+
+type memObj struct{ *bytes.Reader }
+
+func (memObj) Close() error { return nil }
+
+// chainSource serves only the objects of the chain's verified manifests,
+// from the run's directory on its first destination, and checks each while
+// it streams: a changed object never reaches the reader whole.
+func TestChainSource(t *testing.T) {
+	const base, other = "7c2e9d14-3b6a-4e8f-a1d5-9f0b4c7e2a61", "d41e7a90-5c2b-4b8e-9e3f-61a0c8b7d2f4"
+	m := newMemWriter()
+	body := bytes.Repeat([]byte("signed bytes "), 1000)
+	sum := func(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
+	m.objs["p/base/.backup"] = body
+	m.objs["p/base/data/x.bin"] = append(bytes.Clone(body[:len(body)-1]), '!') // changed in storage
+	m.objs["p/base/data/short.bin"] = body[:10]
+	m.objs["p/base/data/stray.bin"] = body // stored, not signed
+	id := uuid.MustParse(base)
+	d := &nativeDest{ref: destRef{ID: uuid.New(), Name: "a"}, w: memReader{m}}
+	c := &nativeChain{Runs: []uuid.UUID{id}, copies: []map[uuid.UUID]chainCopy{{d.ref.ID: {dir: "p/base"}}}, dests: []*nativeDest{d},
+		manifests: []NativeChainManifest{{RunID: base, Objects: []ingest.ObjectRecord{
+			{Key: base + "/.backup", Size: int64(len(body)), SHA256: sum(body)},
+			{Key: base + "/data/x.bin", Size: int64(len(body)), SHA256: sum(body)},
+			{Key: base + "/data/short.bin", Size: int64(len(body)), SHA256: sum(body)},
+		}}}}
+	s, err := newChainSource(c, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if b, err := s.read(ctx, base+"/.backup", 1<<20); err != nil || !bytes.Equal(b, body) {
+		t.Fatalf(".backup: %v", err)
+	}
+	if _, err := s.read(ctx, base+"/.backup", 10); err == nil {
+		t.Fatal("over the limit")
+	}
+	for _, key := range []string{base + "/data/stray.bin", other + "/.backup", base + "/"} {
+		if _, _, err := s.Open(ctx, key); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("%s: %v", key, err)
+		}
+	}
+	if _, _, err := s.Open(ctx, base+"/data/short.bin"); !errors.Is(err, errChainObject) {
+		t.Fatalf("a shorter object: %v", err)
+	}
+	// The changed object: everything but its last bytes, then the error.
+	rc, rec, err := s.Open(ctx, base+"/data/x.bin")
+	if err != nil || rec.SHA256 != sum(body) {
+		t.Fatal(err)
+	}
+	got, err := io.ReadAll(rc)
+	if !errors.Is(err, errChainObject) || len(got) >= len(body) {
+		t.Fatalf("read %d of %d bytes: %v", len(got), len(body), err)
+	}
+	recs, err := s.List(ctx, base+"/data/")
+	if err != nil || len(recs) != 2 || recs[0].Key != base+"/data/short.bin" || recs[1].Key != base+"/data/x.bin" {
+		t.Fatalf("list: %+v %v", recs, err)
+	}
+	if recs, _ := s.List(ctx, other+"/"); len(recs) != 0 {
+		t.Fatalf("list of another run: %+v", recs)
+	}
+}
+
+// retagChain re-tags only the runs whose copies are of a shorter tier, on
+// each of the chain's destinations, objects and manifest.
+func TestRetagChain(t *testing.T) {
+	const full, inc = "7c2e9d14-3b6a-4e8f-a1d5-9f0b4c7e2a61", "d41e7a90-5c2b-4b8e-9e3f-61a0c8b7d2f4"
+	m := newMemWriter()
+	for _, p := range []string{"p/" + full + "/.backup", "p/" + full + ".manifest.json", "p/" + inc + "/.backup", "p/" + inc + ".manifest.json"} {
+		m.objs[p] = []byte("x")
+	}
+	d := &nativeDest{ref: destRef{ID: uuid.New(), Name: "a"}, w: tagMem{m}}
+	c := &nativeChain{Runs: []uuid.UUID{uuid.MustParse(full), uuid.MustParse(inc)}, dests: []*nativeDest{d},
+		copies: []map[uuid.UUID]chainCopy{{d.ref.ID: {dir: "p/" + full, tier: "weekly"}}, {d.ref.ID: {dir: "p/" + inc, tier: "monthly"}}},
+		manifests: []NativeChainManifest{{RunID: full, Objects: []ingest.ObjectRecord{{Key: full + "/.backup"}}},
+			{RunID: inc, Objects: []ingest.ObjectRecord{{Key: inc + "/.backup"}}}}}
+	if err := retagChain(context.Background(), c, "daily"); err != nil || len(m.tags["p/"+full+"/.backup"]) != 0 {
+		t.Fatalf("a daily incremental re-tagged: %v %v", err, m.tags)
+	}
+	if err := retagChain(context.Background(), c, "monthly"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{TierTag: "monthly", StateTag: StateComplete}
+	for _, p := range []string{"p/" + full + "/.backup", "p/" + full + ".manifest.json"} {
+		if got := m.tags[p]; got[TierTag] != want[TierTag] || got[StateTag] != want[StateTag] {
+			t.Errorf("%s: %v", p, got)
+		}
+	}
+	for _, p := range []string{"p/" + inc + "/.backup", "p/" + inc + ".manifest.json"} {
+		if got := m.tags[p]; len(got) != 0 {
+			t.Errorf("%s re-tagged: %v", p, got)
+		}
+	}
+}
+
+// tagMem is memWriter with SetTags.
+type tagMem struct{ *memWriter }
+
+func (m tagMem) SetTags(_ context.Context, path string, tags map[string]string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.objs[path]; !ok {
+		return fs.ErrNotExist
+	}
+	m.tags[path] = tags
+	return nil
 }
