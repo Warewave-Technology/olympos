@@ -138,12 +138,13 @@ so the check covers `olympos-manifest` as well.
 ## 4. Backup storage (Azure Blob)
 
 `deploy/bicep/backup-storage.bicep` creates a storage account hardened for backups: a private endpoint,
-versioning, soft delete, version-level immutability support, lifecycle rules that delete each tier (by the
-`olympos-tier` index tag) after its retention, a resource lock, optional diagnostics, and a **custom
-data-plane role that can read, write and tag blobs but not delete them**, assigned to the server's identity.
-A container default immutability policy is optional (`defaultImmutabilityDays`, 0 by default): it keeps a
-compromised server from having backups deleted by re-tagging or overwriting them, and keeps every backup at
-least that long, whatever its tier
+versioning, soft delete, lifecycle rules that delete each tier (by the `olympos-tier` index tag) after its
+retention, a resource lock, optional diagnostics, and a **custom data-plane role that can read, write and tag
+blobs but not delete them**, assigned to the server's identity. A container default immutability policy is
+optional (`defaultImmutabilityDays`, 0 by default, which also leaves version-level immutability support off).
+Within its period it keeps a compromised server from having backups deleted by re-tagging or overwriting
+them, and it keeps every backup at least that long, whatever its tier. Decide before the first deployment:
+an account can get version-level support only when it is created
 ([install › Immutability (optional)](install.md#immutability-optional)):
 
 ```bash

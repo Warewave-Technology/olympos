@@ -124,14 +124,24 @@ that gap. It is the storage owner's choice, off in the Bicep module by default
   nor an overwrite destroys a backup within it. A default applies to every object, whatever its tier: it holds
   every backup, dry run and probe for at least that long, and the lifecycle rules wait for it. Only a default
   of at least the longest tier protects every backup for its whole retention; a shorter one protects each
-  backup for its first days. An unlocked Azure policy can be removed or shortened by its owner, and the
-  version policies under it by a holder of `blobs/immutableStorage/runAsSuperUser/action`; a locked one, or
-  S3 compliance mode, by no one. The server has neither permission.
+  backup for its first days. Who can weaken it:
+  - Azure: an unlocked container policy can be shortened by its owner and removed once the module's
+    `CanNotDelete` resource lock is lifted; the version policies under it can be shortened or removed by a
+    holder of `blobs/immutableStorage/runAsSuperUser/action`; a locked policy by no one.
+  - S3: the compliance retention of each object version can be shortened or removed by no one, not even root.
+    The bucket's default retention, though, is a bucket setting that a principal allowed
+    `s3:PutBucketObjectLockConfiguration` can lower or remove for new versions; the documented bucket policy
+    leaves that to the break-glass role.
+
+  The server has none of these permissions.
 - **With it off**, the server still cannot delete, but a re-tag or an overwrite leads to a deletion through
-  the lifecycle rules: a re-tag to `test` within the shortest tier (2 days in the Bicep module), an
-  overwritten version when the version rules reach it (on S3, 1 day after the overwrite in the documented
-  rules). On Azure the deleted version stays soft-deleted for the soft-delete period (30 days in the module) and can
-  be restored in that time; S3 has no soft delete.
+  the lifecycle rules: a backup re-tagged `test` at the rules' next runs, usually within a day or two (the
+  rules count from when the backup was written); an overwritten version when the version rules reach it, or
+  sooner if the old version is re-tagged too (on S3, 1 day after the overwrite in the documented rules). On
+  Azure the deleted version stays soft-deleted for the soft-delete period (30 days in the module) and can be
+  restored in that time; S3 has no soft delete. A new Azure install without a policy has a plain container;
+  an account deployed with the module before v0.4.0 keeps version-level support, where lifecycle deletes are
+  expected to work once no policy covers a version (to be verified on a real account, #79).
 - **On NFS** the server can delete files itself (`docs/spec-changes.md` #13); protection is storage-side
   snapshots or WORM, and the destination shows a permanent warning.
 

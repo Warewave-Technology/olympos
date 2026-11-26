@@ -345,8 +345,8 @@ Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:
 3. Data-plane RBAC only for the server MI, custom role with `blobs/read`, `blobs/write`,
    `blobs/add/action`, `blobs/tags/read`, `blobs/tags/write` — **no `blobs/delete`**. No human data-plane
    roles; break-glass through a PIM time-bound assignment.
-4. Blob **versioning + soft delete**, and version-level immutability **support** on the account and the
-   container. An immutability policy is your choice and off by default: see
+4. Blob **versioning + soft delete**. An immutability policy, with version-level immutability support on the
+   account and the container, is your choice and off by default: see
    [Immutability (optional)](#immutability-optional).
 5. Resource lock `CanNotDelete` on the account.
 6. Azure Policy: deny public network access and shared-key re-enablement.
@@ -392,15 +392,14 @@ removed by their tier's rule (for example `olympos-daily`), not after 7 days.
 
 ### Immutability (optional)
 
-Whether backup versions are immutable is the storage owner's decision. Olympos works either way; this section
-says what each choice protects and what it costs.
+Whether backup versions are immutable is the storage owner's decision, best made **before the first
+deployment**. Olympos works either way; this section says what each choice protects and what it costs.
 
 **What it protects.** The server's role cannot delete, but it has to write and tag: it writes every backup and
 sets its `olympos-tier`. A compromised server, or anyone holding its credential, can therefore still have a
 backup destroyed without a delete permission:
 
-- by **re-tagging** it to a short tier such as `test`, after which the `olympos-test` rule deletes it within
-  days;
+- by **re-tagging** it to a short tier such as `test`, after which the `olympos-test` rule deletes it;
 - by **overwriting** it, after which the version rules delete the old version.
 
 A time-based immutability policy stops both for as long as it lasts: a version under it cannot be deleted,
@@ -408,39 +407,92 @@ and an overwrite only adds a new version. That is what makes "a compromised serv
 backups" hold.
 
 **What it costs.** A container default policy applies to every new blob version, whatever its tier: backups,
-dry runs (`test`), the probe blobs of *Test destination* and the objects of native runs that did not finish.
-None of them can be deleted before the default period ends, so every lifecycle rule waits for it. A default
-of 400 days with daily backups kept for 7 days stores, and bills, every daily backup for 400 days, about 57
-times what the retention suggests. A default shorter than the longest tier costs less but protects each
-backup only for its first N days: after that, a re-tag or an overwrite can again lead to its deletion. For
-example, 30 days covers the daily and weekly tiers of the module's defaults for their whole retention and
-monthly backups for their first 30 days, and keeps each daily backup for 30 days instead of 7.
+dry runs (`test`), the objects of native runs that did not finish, and the probe blobs of *Test
+destination*. None of them can be deleted before the default period ends, so every lifecycle rule waits for
+it. A default of 400 days with daily backups kept for 7 days stores, and bills, every daily backup for 400
+days, about 57 times what the retention suggests. A default shorter than the longest tier costs less but
+protects each backup only for its first N days: after that, a re-tag or an overwrite can again lead to its
+deletion. For example, 30 days covers the daily and weekly tiers of the module's defaults for their whole
+retention and monthly backups for their first 30 days, and keeps each daily backup for 30 days instead of 7.
+(Probe blobs and audit raw reports have no lifecycle rule in the module: on Azure they stay until someone
+removes them, with or without a policy. For raw reports add the rule from [Audit raw results](#audit-raw-results).)
 
-**Without a policy** (the Bicep module's default, `defaultImmutabilityDays=0`), every tier is deleted on time
-and the server still cannot delete anything itself. A backup that a compromised server re-tags to `test` is
-deleted by the lifecycle rules within 2 days, and an overwritten version when the version rule of its tag
-reaches it. A version a rule deletes is then kept **soft-deleted** for 30 days (the module's soft delete),
-during which an administrator can restore it. The diagnostic logs of step 7 record every tag change and
-write, which is how you would notice one.
+**Without a policy** (the Bicep module's default, `defaultImmutabilityDays=0`), the module also leaves
+version-level immutability support off: the container is a plain versioned container, and the lifecycle
+rules delete each tier on time. The server still cannot delete anything itself. A backup older than 2 days
+that a compromised server re-tags to `test` is deleted at the next lifecycle runs, usually within a day or
+two (the rule counts from when the backup was written, not from the re-tag). An overwritten version is deleted
+when the version rule of its tag reaches it, or sooner if the old version is re-tagged too (Set Blob Tags takes
+a version ID). A version that a rule deletes is then kept **soft-deleted** for 30 days (the module's soft
+delete), and an administrator can restore it in that time: without a policy, this is the real recovery margin.
+The diagnostic logs of step 7 record every tag change and write, which is how you would notice one.
 
-**Turning it on.** Pass `defaultImmutabilityDays=<days>` to the Bicep module, or by hand:
+**Turning it on.** Pass `defaultImmutabilityDays=<days>` (1 or more) to the first deployment of the module. It
+then turns on version-level immutability support on the account and the container and sets the container's
+default policy. Microsoft documents that support cannot be turned off once it is on, and that an account can
+get it only when it is created. So for an account first deployed with `0`, redeploying with a value is expected
+to fail rather than turn immutability on (not verified, [#79](https://github.com/Warewave-Technology/olympos/issues/79)).
+For an existing container, Microsoft's procedure is a container policy followed by a migration of the
+container to version-level support (`az storage container immutability-policy create`, then
+`az storage container-rm migrate-vlw`, see
+[Configure immutability policies for blob versions](https://learn.microsoft.com/en-us/azure/storage/blobs/immutable-policy-configure-version-scope));
+it has not been tried with this module.
 
-```bash
-az storage container immutability-policy create -g $RG --account-name $SA \
-  --container-name olympos-backups --period 30
-```
+The policy is created **unlocked**. An unlocked policy already blocks deletes and overwrites. It can be
+shortened or extended (an update, which the module's `CanNotDelete` resource lock allows) and removed (a
+delete, which that lock blocks until it is lifted). The versions written under it get unlocked policies of
+their own, which a principal with `blobs/immutableStorage/runAsSuperUser/action` (*Storage Blob Data Owner*)
+can shorten or remove one version at a time. The server has none of these permissions. **Locking**
+(`az storage container immutability-policy lock … --if-match <etag>`) cannot be undone: a locked policy can be
+extended, never shortened or removed, and new versions get locked policies. Lock it only once you are sure of
+the period. A changed or removed default applies to new versions only; existing versions keep the policy they
+were written with until it ends.
 
-The policy is created **unlocked**. An unlocked policy already blocks deletes and overwrites, and its owner can
-shorten or remove it; the versions written under it get unlocked policies of their own, which a principal with
-`blobs/immutableStorage/runAsSuperUser/action` (*Storage Blob Data Owner*) can shorten or remove. The server
-has neither permission. **Locking** (`az storage container immutability-policy lock … --if-match <etag>`)
-cannot be undone: a locked policy can be extended, never shortened or removed, and new versions get locked
-policies. Lock it only once you are sure of the period. A changed or removed default applies to new versions
-only; existing versions keep the policy they were written with.
+**Accounts deployed before v0.4.0.** The module used to turn version-level support on and set a 400-day
+default policy (`longestRetentionDays`), unlocked: nothing in the module or in Olympos locks it. Support stays
+on, since it cannot be turned off; the new module with `0` simply no longer sends that setting (that such a
+redeploy goes through cleanly is still to be verified). The policy stays until you change it: deploying the
+new module does not remove it, because a deployment in incremental mode (the default) leaves resources that
+the template no longer has. Lifecycle deletes on such a container are expected to work once no policy covers a version,
+because support alone makes nothing immutable; this is still to be verified on a real account
+([#79](https://github.com/Warewave-Technology/olympos/issues/79)). To stop new backups from being held for 400
+days:
+
+1. Look at the policy:
+
+   ```bash
+   az storage container immutability-policy show -g $RG --account-name $SA --container-name olympos-backups \
+     --query "{state:state, days:immutabilityPeriodSinceCreationInDays}"
+   ```
+
+2. If it is `Unlocked`, **shorten** it to 1 day, the minimum. This is an update, which the resource lock
+   allows:
+
+   ```bash
+   etag=$(az storage container immutability-policy show -g $RG --account-name $SA \
+     --container-name olympos-backups --query etag -o tsv)
+   az storage container immutability-policy create -g $RG --account-name $SA \
+     --container-name olympos-backups --period 1 --if-match "$etag"
+   ```
+
+   New versions are then held for 1 day and follow their tiers after that. Keep deploying the module with
+   `defaultImmutabilityDays=0`; it leaves the policy as it is.
+3. Removing the policy instead (`az storage container immutability-policy delete … --if-match "$etag"`) is a
+   delete, which the module's lock `olympos-backups-cannot-delete` refuses. Someone with *Owner* or *User
+   Access Administrator* (`Microsoft.Authorization/locks/*`) must lift the lock first
+   (`az lock delete --name olympos-backups-cannot-delete -g $RG --resource $SA --resource-type Microsoft.Storage/storageAccounts`),
+   and put it back afterwards by redeploying the module. Shortening to 1 day gives almost the same result
+   without lifting the lock.
+4. If it is `Locked` (someone locked it by hand), it can only be extended: new backups stay held for 400 days.
+
+Either way, **versions already written keep their own 400-day policy until it ends**. Shortening them one
+version at a time needs *Storage Blob Data Owner*, which step 3 of the hardening keeps from people outside a
+break-glass assignment, and is impractical for a backup container. Expect existing backups to stay until 400
+days after they were written, and new ones to follow their tiers.
 
 **Planned for v0.5** ([#79](https://github.com/Warewave-Technology/olympos/issues/79)): the server locks each
 object for its own tier when it writes it, so every backup is protected for its whole retention and kept no
-longer. Version-level immutability support, which the module turns on, is what this needs on Azure.
+longer.
 
 ### SAS token option
 
@@ -517,12 +569,23 @@ least the default. Only a default of at least the longest tier protects every ba
 retention, at that cost; a shorter one protects each backup for its first days. To use it, create the bucket
 with Object Lock enabled (this turns versioning on) and set a default, for example 30 days:
 `aws s3api put-object-lock-configuration --bucket olympos-backups --object-lock-configuration '{"ObjectLockEnabled":"Enabled","Rule":{"DefaultRetention":{"Mode":"COMPLIANCE","Days":30}}}'`
-(MinIO: `mc retention set --default compliance 30d <alias>/olympos-backups`). Compliance mode cannot be
-shortened or removed, not even by the root user. Without Object Lock, still turn **versioning** on
+(MinIO: `mc retention set --default compliance 30d <alias>/olympos-backups`).
+
+Compliance mode fixes the retention of each **object version**: nobody can shorten or remove it, not even
+the root user. The bucket's **default** retention is only the rule for new versions: a principal allowed
+`s3:PutBucketObjectLockConfiguration` can lower or remove it (Object Lock itself cannot be turned off), and
+the bucket policy above leaves that to the break-glass role. A bucket set up with the 400-day default of
+earlier versions of this guide keeps holding every new object for 400 days. To stop that, remove the default
+as the break-glass role (or set a shorter `Days`):
+`aws s3api put-object-lock-configuration --bucket olympos-backups --object-lock-configuration '{"ObjectLockEnabled":"Enabled"}'`
+(MinIO: `mc retention clear --default <alias>/olympos-backups`). Versions already written keep their
+compliance lock until it ends.
+
+Without Object Lock, still turn **versioning** on
 (`aws s3api put-bucket-versioning --bucket olympos-backups --versioning-configuration Status=Enabled`): an
-overwrite then keeps the old version until the `NoncurrentVersionExpiration` below, where without versioning it
-replaces the backup at once. S3 has no soft delete: a version a rule expires is gone. Per-object locks for each
-object's own tier, set by the server at upload, are planned for v0.5
+overwrite then keeps the old version for 1 day (the `NoncurrentVersionExpiration` below), where without
+versioning it replaces the backup at once. S3 has no soft delete: a version a rule expires is gone.
+Per-object locks for each object's own tier, set by the server at upload, are planned for v0.5
 ([#79](https://github.com/Warewave-Technology/olympos/issues/79)).
 
 **Retention = lifecycle rules filtered by the `olympos-tier` tag** (Olympos never deletes):
@@ -535,7 +598,8 @@ object's own tier, set by the server at upload, are planned for v0.5
   {"ID": "test",    "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "test"}},    "Expiration": {"Days": 7},   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
   {"ID": "audit",   "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-tier", "Value": "audit"}},   "Expiration": {"Days": 400}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
   {"ID": "incomplete", "Status": "Enabled", "Filter": {"Tag": {"Key": "olympos-state", "Value": "incomplete"}}, "Expiration": {"Days": 7}, "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
-  {"ID": "probe",   "Status": "Enabled", "Filter": {"Prefix": "olympos/.olympos-probe/"},                 "Expiration": {"Days": 1}},
+  {"ID": "probe",   "Status": "Enabled", "Filter": {"Prefix": "olympos/.olympos-probe/"},                 "Expiration": {"Days": 1},   "NoncurrentVersionExpiration": {"NoncurrentDays": 1}},
+  {"ID": "markers", "Status": "Enabled", "Filter": {}, "Expiration": {"ExpiredObjectDeleteMarker": true}},
   {"ID": "mpu",     "Status": "Enabled", "Filter": {}, "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2}}
 ]}
 ```
@@ -544,8 +608,9 @@ Apply with `aws s3api put-bucket-lifecycle-configuration --bucket olympos-backup
 (MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …), with the weekly
 `Days` at least the daily ones plus 8 for native incrementals of a daily job (7 days and the retry window, see
 above), and adjust the probe prefix to your destination
-prefix. With Object Lock, an expiration only adds a delete marker
-until the lock period of the version has ended.
+prefix. With versioning on, an expiration only adds a delete marker and makes the version noncurrent, which
+`NoncurrentVersionExpiration` then removes; with Object Lock, not before the lock period of the version has
+ended. The `markers` rule removes delete markers that no longer hide any version.
 
 The `incomplete` rule removes what a native ClickHouse backup left behind when its run died: the run writes
 every object with `olympos-state=incomplete` and replaces the tag with `olympos-state=complete` after the

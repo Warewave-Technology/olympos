@@ -512,7 +512,8 @@ func warnings(kind string, rep Report, now time.Time) []string {
 		switch kind {
 		case blob.KindS3:
 			out = append(out, "The credential can delete objects. Olympos never deletes backups (retention is bucket lifecycle rules); "+
-				"remove s3:DeleteObject and s3:DeleteObjectVersion from its policy (and use Object Lock) so a compromised server cannot delete either.")
+				"remove s3:DeleteObject and s3:DeleteObjectVersion from its policy so a compromised server cannot delete either. "+
+				"Object Lock is optional (docs/install.md, S3 and S3-compatible storage).")
 		case blob.KindNFS:
 			out = append(out, "Olympos can delete files on this export: a filesystem cannot refuse deletes to the server's own user. "+
 				"Olympos never deletes backups; protect them with storage snapshots / WORM (e.g. SnapLock) and do retention on the storage.")

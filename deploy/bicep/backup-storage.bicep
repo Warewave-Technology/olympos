@@ -12,7 +12,7 @@ param serverIdentityPrincipalId string
 param privateEndpointSubnetId string
 @minValue(0)
 @maxValue(146000)
-@description('Days the container default immutability policy keeps every new blob version from delete and overwrite. 0 (the default) sets no policy. A policy holds every version that long, whatever its tier, so lifecycle rules cannot delete it earlier. The policy is created unlocked (docs/install.md, Backup storage hardening).')
+@description('Days the container default immutability policy keeps every new blob version from delete and overwrite (1 or more). 0 (the default) sets no policy and leaves version-level immutability support off. A policy holds every version that long, whatever its tier, so lifecycle rules cannot delete it earlier. The policy is created unlocked. Decide before the first deployment: docs/install.md#immutability-optional.')
 param defaultImmutabilityDays int = 0
 @description('Lifecycle: delete by tier after N days.')
 param dailyDays int = 7
@@ -23,21 +23,25 @@ param monthlyDays int = 372
 param incompleteDays int = 7
 param logAnalyticsWorkspaceId string = ''
 
+// 4. Version-level immutability support only with a policy. Support cannot be turned off once it is on, and
+// on an account it can only be turned on at creation; with 0 the account and the container are plain.
+var immutable = defaultImmutabilityDays > 0
+var versionLevelSupport = immutable ? { immutableStorageWithVersioning: { enabled: true } } : {}
+
 resource sa 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   name: accountName
   location: location
   kind: 'StorageV2'
   sku: { name: 'Standard_ZRS' }
-  properties: {
+  properties: union({
     publicNetworkAccess: 'Disabled'          // 1. private endpoint only
     allowSharedKeyAccess: false              // 2. MI option: no shared key
     allowBlobPublicAccess: false
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
     defaultToOAuthAuthentication: true
-    immutableStorageWithVersioning: { enabled: true }   // 4. version-level immutability support (no policy by itself)
     networkAcls: { defaultAction: 'Deny', bypass: 'None' }
-  }
+  }, versionLevelSupport)                    // 4. version-level immutability support, with a policy only
 }
 
 resource blobSvc 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
@@ -53,22 +57,18 @@ resource blobSvc 'Microsoft.Storage/storageAccounts/blobServices@2023-05-01' = {
 resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
   parent: blobSvc
   name: containerName
-  properties: {
-    publicAccess: 'None'
-    immutableStorageWithVersioning: { enabled: true }
-  }
+  properties: union({ publicAccess: 'None' }, versionLevelSupport)
 }
 
 // 4. Optional container default immutability policy (time-based), the storage owner's choice.
-// Version-level immutability support above makes nothing immutable by itself; it lets a default policy,
-// or a policy on one version, be set later without changing the account. A default policy applies to
-// every new blob version of every tier, probe blobs and dry runs included, and a version under it cannot
-// be deleted before its period ends: it keeps every backup at least defaultImmutabilityDays.
+// A default policy applies to every new blob version, dry runs and probe blobs included, and a version
+// under it cannot be deleted before its period ends: it keeps every object at least defaultImmutabilityDays.
 // Without it, the server still cannot delete, but it can re-tag or overwrite a backup, and the lifecycle
-// rules below then delete it. ARM creates the policy unlocked: its owner can shorten or remove it.
-// Locking it (az storage container immutability-policy lock) cannot be undone.
+// rules below then delete it. ARM creates the policy unlocked: it can be shortened (an update, allowed under
+// the resource lock below) or, with that lock lifted, removed. Locking it
+// (az storage container immutability-policy lock) cannot be undone.
 // Per-tier locks set by the server at write time are planned (https://github.com/Warewave-Technology/olympos/issues/79).
-resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies@2023-05-01' = if (defaultImmutabilityDays > 0) {
+resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies@2023-05-01' = if (immutable) {
   parent: container
   name: 'default'
   properties: {

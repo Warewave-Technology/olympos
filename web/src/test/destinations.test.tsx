@@ -109,6 +109,9 @@ describe('destination dialog', () => {
     const user = userEvent.setup();
     const { qc, onClose } = renderDialog();
     await user.click(screen.getByRole('radio', { name: /S3 \/ S3-compatible/ }));
+    // Retention is lifecycle rules; Object Lock is optional, not a form of retention (#79).
+    expect(screen.getByText(/Retention is enforced by bucket lifecycle rules, not by Olympos; Object Lock is optional/)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'install' })).toHaveAttribute('href', expect.stringContaining('docs/install.md#s3-and-s3-compatible-storage'));
     await user.type(screen.getByLabelText('Name'), 'minio');
     const pathStyle = screen.getByRole('checkbox', { name: /Path-style addressing/ });
     expect(pathStyle).not.toBeChecked();
