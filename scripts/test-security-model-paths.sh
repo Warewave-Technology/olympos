@@ -125,6 +125,19 @@ if printf 'internal/backup/engines/clickhouse/sqllex_test.go\ninternal/backup/en
   echo "FAIL: --files matched a file next to the SQL lexer" >&2
   fail=1
 fi
+# The native restore's Replicated DDL rewrite decides which Keeper path a
+# restored table joins; the logical restore's table generator is not on the
+# list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/table.go\ninternal/backup/engines/clickhouse/replicated.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/replicated.go ]; then
+  echo "FAIL: --files with the Replicated DDL rewrite: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/replicated_test.go\ninternal/backup/engines/clickhouse/replicated.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the Replicated DDL rewrite" >&2
+  fail=1
+fi
 # The native run puts the run's credential into the BACKUP statement and
 # keeps it out of the logs.
 if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
