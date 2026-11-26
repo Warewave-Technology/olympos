@@ -919,6 +919,7 @@ func (q *request) serveSource() *s3Error {
 		return errNoSuchKey
 	}
 	if err != nil {
+		q.abortIfGone(err)
 		q.h.log.Warn("ingest: could not read an object", "run", s.RunID().String(), "key", q.key, "err", err)
 		q.stop(ReasonSource)
 		return denied("The object could not be read.")
@@ -959,12 +960,28 @@ func (q *request) serveSource() *s3Error {
 			left -= int64(n)
 		}
 		if rerr != nil && left > 0 {
-			q.h.log.Warn("ingest: could not read an object", "run", s.RunID().String(), "key", q.key, "err", errSourceShort)
+			q.abortIfGone(rerr)
+		}
+		if rerr != nil && left > 0 {
+			q.h.log.Warn("ingest: could not read an object", "run", s.RunID().String(), "key", q.key, "err", errors.Join(errSourceShort, rerr))
 			q.stop(ReasonSource)
 			q.abort()
 		}
 	}
 	return nil
+}
+
+// abortIfGone cuts the connection when err is the request's own context
+// ending: the client went away, or closed its side, or its connection was
+// cut when the session ended. The source did not fail, so the run is not
+// stopped for it; and the reply is cut, never sent short or empty, which
+// a client that still reads would take for the object.
+func (q *request) abortIfGone(err error) {
+	if q.r.Context().Err() == nil || !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return
+	}
+	q.h.log.Info("ingest: the client went away while an object was read", "run", q.s.RunID().String(), "key", q.key)
+	q.abort()
 }
 
 // abort cuts a reply whose headers are sent.
