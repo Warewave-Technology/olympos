@@ -111,7 +111,7 @@ describe('Backup wizard · ClickHouse method', () => {
     expect(screen.getByRole('radio', { name: /^Off/ })).toBeChecked();
     const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });
     expect(weekly).toBeEnabled();
-    expect(weekly).toHaveAccessibleDescription(/^The first run of each week, in the job's timezone, is a full backup\./);
+    expect(weekly).toHaveAccessibleDescription(/^The first run of each week and of each month, in the job's timezone, is a full backup, and so is every run that gets a weekly or monthly copy\./);
     await user.click(weekly);
 
     await toReview(user);

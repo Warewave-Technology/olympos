@@ -1850,7 +1850,7 @@ components:
         destination_group_id: {type: string, description: "Write to every destination of a group (docs/design/destination-groups.md)."}
         engine_options:
           type: object
-          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..] (logical only), method: native|logical (default logical), incremental: weekly_full_daily (native only: a full on the first run of the week in the job's timezone, an incremental on the others)}; vault: {}"
+          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..] (logical only), method: native|logical (default logical), incremental: weekly_full_daily (native only: a full on the first run of the week and of the month in the job's timezone and on every run that gets a weekly or monthly copy, an incremental on the others)}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}

@@ -752,7 +752,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     <span className="t1">Weekly full, daily incrementals</span>
                     <span className="t2" id="w-inc-weekly-t2">
                       {method === 'native'
-                        ? "The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination."
+                        ? "The first run of each week and of each month, in the job's timezone, is a full backup, and so is every run that gets a weekly or monthly copy. The others store only what changed since the last run that succeeded on every destination."
                         : 'Incrementals need the native method.'}
                     </span>
                   </span>
