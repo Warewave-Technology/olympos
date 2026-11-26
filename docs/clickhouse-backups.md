@@ -16,7 +16,7 @@ page compares them and explains what a native backup needs, keeps and does.
 | Consistency | ClickHouse's snapshot, consistent per table | One query per partition: a table that changes during the run is not read at one point in time |
 | What is backed up | Whole databases | Databases, or a list of tables |
 | Incrementals | Optional: a full each week, daily incrementals | No: every run is a full backup |
-| Network | ClickHouse connects to the endpoint directly over HTTPS; the cluster needs egress to it. The cluster's transfer mode does not apply | Through the agent tunnel, in the cluster's transfer mode |
+| Network | The backup data does not use the tunnel: ClickHouse connects to the endpoint directly over HTTPS, and the cluster needs egress to it. The `BACKUP` statement does, in the cluster's transfer mode (in `compressed` mode the run's credential crosses the agent in the clear; see the [security model](security-model.md#native-clickhouse-backups-the-ingest-endpoint)) | Through the agent tunnel, in the cluster's transfer mode |
 | A partial run (a destination failed) | Not repaired: the next run is a full backup | Repaired: the missing copies are written again |
 | Restore | From the UI only: a native run has no commands to restore by hand | From the UI, or by hand with the run's commands ([Restore by hand](restore.md#clickhouse)) |
 
@@ -96,8 +96,8 @@ incrementals of earlier weeks name the old one.
 
 ## Limits
 
-- **Bytes per run.** A run may write the largest of twice the job's last full, 1.5 times what its databases
-  hold, and 1 GiB, or `ingest.maxRunBytes` when set ([configuration › `ingest`](configuration.md#ingest)).
+- **Bytes per run.** A run may write the largest of twice the job's last full (at most twice what its databases
+  hold), 1.5 times what its databases hold, and 1 GiB, or `ingest.maxRunBytes` when set ([configuration › `ingest`](configuration.md#ingest)).
 - **Files per run.** A backup of more than about 250,000 files fails: its `.backup` file, which lists every
   file, would be over the 64 MiB the endpoint keeps of it, and the run is stopped (`capture limit`). A wide
   part of a MergeTree table has two files per column and a few more, so the limit is about parts and columns,
@@ -111,7 +111,8 @@ incrementals of earlier weeks name the old one.
 - **Duration.** A run's credential lasts `ingest.maxRunDuration` (6 hours by default); a run still going then
   is ended.
 - **Runs at once.** At most `ingest.maxRuns` (4) native backups and restores hold an ingest session at the same
-  time; a run that finds none free fails and is retried by its schedule.
+  time; a backup run that finds none free fails (the next scheduled run tries again); a restore fails and can be
+  opened again.
 
 ## When a native run fails
 
@@ -124,7 +125,7 @@ The run's error names the cause; the most common ones:
 | `clickhouse: size of the databases: …` | Grant `SELECT` on `system.parts` and `system.tables` ([above](#what-a-native-backup-needs)), or set `ingest.maxRunBytes`, which skips this query. |
 | `native byte limit: the run wrote more than …` | Set `ingest.maxRunBytes` above the largest backup you expect ([configuration](configuration.md#ingest)). |
 | a TLS or connection error from ClickHouse in `BACKUP` | ClickHouse cannot reach the endpoint or does not trust its certificate: check the egress and `openSSL.client` ([install](install.md#5-native-clickhouse-backups-optional)). |
-| `the backup's manifest does not verify` (a restore), or a full where an incremental was due (the server log: *the base chain cannot be used*) | Key Vault did not answer, or the server's identity cannot read the manifest key: the server verifies fail-closed. Check Key Vault and `keys/get` on the key, then check again. |
+| `the backup's manifest does not verify` (a restore), or a full where an incremental was due (the server log: *the base chain cannot be used*) | The cause is in the server log. Key Vault did not answer, or the server's identity cannot read the manifest key (the server verifies fail-closed): check Key Vault and `keys/get` on the key, then check again. The key version that signed the manifest is disabled or deleted, or the manifest or a link of its chain was changed: the backup cannot be restored. The destination could not be read: check it, then check again. |
 
 A run that dies while its `BACKUP` still runs on the target leaves it there; the next native run on that server
 ends it, and the error names the `KILL QUERY` to run by hand ([configuration › Backups left

@@ -42,7 +42,7 @@ property. The SPEC (§0, §18) is normative; this is the rationale and the map t
    `tls.missing` finding. `compressed` mode trades that for egress cost; enabling it always opens
    the `transfer.compressed_mode` finding. Second exception: synthetic monitoring sends the credentials
    a scenario uses to the cluster's probe for each run
-   ([below](#synthetic-monitoring-credentials-in-the-cluster)). Third exception: a native ClickHouse backup
+   ([below](#synthetic-monitoring-credentials-in-the-cluster)). Third exception (SPEC §0's second): a native ClickHouse backup
    or restore gives ClickHouse a credential of its own, for that run's prefix of the ingest endpoint only,
    short-lived and never a storage credential ([below](#native-clickhouse-backups-the-ingest-endpoint)).
    The agent still never receives one.
@@ -201,14 +201,15 @@ through the same endpoint. This adds four things to the model (SPEC §0 principl
 
 **A listening port.** `listen.ingest` (`:9444`) speaks a small part of S3 on one bucket: list, put, the
 multipart upload calls, get, and the delete of a run's `.lock`, which lives in the run's memory and never
-reaches storage. Everything else (other deletes, copies, bucket operations) is refused `403`. Every request is
+reaches storage. Everything else (head, other deletes, copies, bucket operations) is refused `403`. Every request is
 signed (SigV4) with the credential of one run; the signature is checked before a body is read, and the body's
 SHA-256 (and `Content-MD5` when sent) while it streams. Unsigned payloads and `aws-chunked` are refused. The
 port serves HTTPS (TLS 1.2 or later, HTTP/1.1 only), plain HTTP only in a dev build with `devMode`. Limits per
 run bound what a misbehaving client can do: bytes written ([configuration](configuration.md#ingest)), 200
 requests a second (30 seconds over it stops the run), the run's duration, and `ingest.maxRuns` runs at once.
 
-**A credential that enters the cluster** (the third exception to [Cluster ↛ credentials](#trust-boundaries)).
+**A credential that enters the cluster** (the third exception to [Cluster ↛ credentials](#trust-boundaries),
+SPEC §0's second).
 Each backup or restore run mints an access key and secret just before it sends its statement, and sends them
 inside the `BACKUP` or `RESTORE` statement over the run's connection to the target (through the agent tunnel,
 TLS end to end in `e2e-tls`). Its scope is the run:

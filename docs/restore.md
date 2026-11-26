@@ -277,6 +277,26 @@ cannot end a `RESTORE` it started, the error names the `KILL QUERY` to run.
 **Limits.** A chain of at most 32 runs, with at most 8 Mi objects and 1 GiB of object names between them: the
 server keeps one entry per object for as long as the `RESTORE` runs. A larger chain is refused at the check.
 
+**After a disaster, Olympos first.** A native restore needs a running Olympos server with `ingest.url` set and
+the manifest key in Key Vault: ClickHouse reads the backup through the server's endpoint, and the server verifies
+the manifests with that key. There are no commands to restore a native backup by hand. When Olympos itself is
+gone, bring it back first, from its own backup (`olympos-self`, [restore-olympos.md](restore-olympos.md)), and then
+restore ClickHouse.
+
+**When the server stops during a restore.**
+
+- A server that shuts down cleanly sends `KILL QUERY` for the `RESTORE` (through the agent tunnel, while it is
+  still up) and records the request as failed (*interrupted: server stopped during the restore …*).
+- A server that crashes or is killed sends no `KILL`. The restore's credential lived only in its memory, so the
+  target's reads are refused (`403`) from then on, and its `RESTORE` fails, or retries until it does; to end it
+  at once, run `KILL QUERY WHERE query_id = 'olympos-restore-<request id>' SYNC` on the target. The request stays
+  *running* until a server finds it without progress for 5 minutes and marks it failed (*interrupted: the server
+  running the restore stopped …*); the databases it created are listed and stay on the target.
+- Either way, the databases created are left in place. To clean up, drop them (`DROP DATABASE <db> SYNC`, which
+  also removes their Replicated tables' Keeper data), then remove what is left under the request's Keeper path
+  with `clickhouse-keeper-client` on the target: `rmr '/olympos-restore/<request id>'`. Do not remove the path
+  of a restore whose tables you keep.
+
 
 ### What a Vault or OpenBao restore does
 
