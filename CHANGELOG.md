@@ -60,6 +60,20 @@ security-model change. Release candidate: v0.4.0-rc.1.
   release is tested in the lab with a focused test plan and passes an independent security review. CI labels
   the pull requests `security-model`. See `docs/development.md` › Releases.
 
+### Security
+- Findings of the independent review fixed before the release candidate:
+  [docs/security-review-v0.4.md](docs/security-review-v0.4.md).
+  - A native restore takes each definition from where ClickHouse's `RESTORE` reads it, by size and checksum: a
+    backup in which another file holds a definition's size and checksum is refused, and after the `RESTORE` an
+    object that is not the approved definition is dropped and the restore fails, naming it.
+  - The restore allowlist reads a table joined after `SAMPLE … OFFSET` or an alias, the `in` function family and
+    `IN (db.t)`, and refuses a table named without its database. The `RESTORE` runs in the first restored
+    database.
+  - A native restore's credential reads only what its `RESTORE` reads: not a database left unselected, not an
+    object left out.
+  - Native checks: the executor's check at the start of a restore has a slot of its own, a user runs one check
+    at a time, and a check ends after 5 minutes.
+
 ### Upgrade notes
 - From v0.3.1 nothing needs action: native backups stay off until `ingest.url` is set, and existing ClickHouse jobs keep
   the logical method. Migrations `00026` (ingest credentials, without their secrets) and `00027` (the object

@@ -224,7 +224,11 @@ inside the `BACKUP` or `RESTORE` statement over the run's connection to the targ
 TLS end to end in `e2e-tls`). Its scope is the run:
 
 - a backup writes and lists its own run prefix, and reads its base chain (an incremental);
-- a restore reads only the chain of the copy it restores.
+- a restore reads only what its `RESTORE` reads of the copy's chain: the `.backup` file of every run, the
+  definitions of the selected databases and the data of the objects it creates, each resolved as ClickHouse
+  resolves it (by size and checksum). Every other object of the chain, of a database left unselected or an
+  object left out, is refused `403`. The target holds the credential while the restore runs, so the request's
+  approval bounds what the target can read of the backup, not only what it creates.
 
 It can never delete (except its own `.lock`) or overwrite: a stored object is written once, a repeat with the
 same body is answered with the stored one, and another body stops the run. It ends when the run ends, or after
@@ -234,7 +238,7 @@ logged, stored or returned by the API (Olympos logs the statement with the secre
 and 25.8 mask it themselves (`[HIDDEN]`) in `query_log`, `system.backups`, the process list and their log, and
 the server checks that a target runs 24.8 or later before it sends the statement, so an older one never
 receives a secret. A stolen credential can
-write into its own run, up to that run's limits, or read the chain it was given, until its run ends; it reaches
+write into its own run, up to that run's limits, or read what its restore reads, until its run ends; it reaches
 no other run and no storage credential.
 
 **A signing key.** The server signs every native run's manifest (the objects ClickHouse declared, with sizes
@@ -257,10 +261,20 @@ object be created only when a rule matches it:
   `default` disk and storage policy (another disk or policy, or a disk defined inline, can be outside the
   server: an S3 disk, for example). GraphiteMergeTree and encryption codecs, which need the target's
   configuration, are left out;
-- what views, materialized views and dictionaries read: every `FROM` and `JOIN` source, `IN <table>`, and the
-  object of a `dictGet*` or `joinGet` must be an object that is restored; a source followed by `(` is a table
-  function and is refused, whatever its name; a dictionary's source must be the local ClickHouse (no `HOST` or
-  `PORT`), with a layout from a list.
+- what views, materialized views and dictionaries read: every `FROM` and `JOIN` source (a `SAMPLE … OFFSET` or
+  an alias does not end the clause), `IN <table>` (bare or in brackets, and the second argument of the `in`
+  function family: `in`, `notIn`, `globalIn`, `globalNotIn`, `nullIn`, `notNullIn`, their `global` and
+  `IgnoreSet` forms), and the object of a `dictGet*` or `joinGet` must be an object that is restored, named with
+  its database (ClickHouse would resolve a name without one against the restore's session); a source followed by
+  `(` is a table function and is refused, whatever its name; a dictionary's source must be the local ClickHouse
+  (no `HOST` or `PORT`), with a layout from a list.
+
+**The definition read is the one `RESTORE` runs.** ClickHouse reads a file of a backup by its size and
+checksum, from the first file its `.backup` lists with them (and from the base by the same pair), and never
+checks the checksum against the bytes. So a backup is refused when a definition is not the first file of its
+size and checksum, when two files it wrote share a size and checksum but not their bytes, or when an unchanged
+definition is held in the base under another name; an unchanged definition is taken from the base by size and
+checksum, as ClickHouse takes it.
 
 Everything else is left out with `EXCEPT TABLES` and listed with the reason. The request records that list
 when it is opened and shows it to the checker; when the restore starts, the chain is checked again and the
@@ -268,9 +282,19 @@ restore refuses to start when it would leave out anything else. Replicated table
 the backup's own text with only the Keeper path and replica rewritten (`/olympos-restore/<request id>/…`) and
 the backup's UUID removed, so a restored table never joins the source's replicas; a materialized view whose
 inner table is Replicated is left out, because `RESTORE` would create that table with the source's path. Only
-`Atomic` databases are restored. The `RESTORE` reads only the objects of the verified manifests, each checked
-against its SHA-256 while it streams (and served whole: a ranged read is refused), and ClickHouse's server-side
-S3 copy is off (`allow_s3_native_copy = 0`), so nothing reaches the target past that check. ClickHouse's error
+`Atomic` databases are restored. The `RESTORE` reads only the objects of the verified manifests it needs, each
+checked against its SHA-256 while it streams (and served whole: a ranged read is refused), and ClickHouse's
+server-side S3 copy is off (`allow_s3_native_copy = 0`), so nothing reaches the target past that check. It runs
+with the first restored database as its session's database, which held nothing before the restore, so a name
+without its database could only reach what the restore creates. After the `RESTORE` (also one that failed or was
+ended), each allowed object's engine and `create_table_query` must be its approved definition (without its
+UUIDs, a dictionary's password shown as `[HIDDEN]`), which the allowlist must allow again; an object other than
+approved, or one that was left out, is dropped and the restore fails naming it. An object the restore was not
+to create at all is named, never dropped.
+
+**Checks are bounded.** Checking a native copy holds its chain in memory. The API's checks share 2 slots and a
+user runs one at a time (a second is refused at once); the check at the start of an approved restore has a
+slot of its own, so checks sent in a loop cannot hold up an approved restore; a check ends after 5 minutes. ClickHouse's error
 messages, which can quote the DDL, are kept only as code, name and the start of their first line.
 
 What the allowlist does **not** check, by design or because it cannot:

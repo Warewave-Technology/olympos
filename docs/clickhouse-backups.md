@@ -157,4 +157,7 @@ running](configuration.md#ingest)).
 ## Restoring a native backup
 
 A native backup is restored from the UI into a new ClickHouse 24.8 or later that also reaches the endpoint and
-trusts its certificate: [Restoring backups › A native backup](restore.md#a-native-backup).
+trusts its certificate: [Restoring backups › A native backup](restore.md#a-native-backup). While the restore
+runs, the target reads through the endpoint only what it restores: the backup's file lists, the definitions of
+the selected databases and the data of the objects it creates. After the `RESTORE`, an object that is not the
+definition the checker approved is dropped and the restore fails, naming it.
