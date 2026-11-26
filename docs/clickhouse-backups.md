@@ -160,4 +160,7 @@ A native backup is restored from the UI into a new ClickHouse 24.8 or later that
 trusts its certificate: [Restoring backups › A native backup](restore.md#a-native-backup). While the restore
 runs, the target reads through the endpoint only what it restores: the backup's file lists and the definitions
 and data of the selected databases and the objects it creates, never the definition of an object left out. After the `RESTORE`, an object that is not the
-definition the checker approved is dropped and the restore fails, naming it.
+definition the checker approved is dropped and the restore fails, naming it. An object that calls `encrypt`,
+`decrypt`, `tryDecrypt`, `aes_encrypt_mysql` or `aes_decrypt_mysql` with anything but literals and column names
+from the second argument on is left out, with the reason: ClickHouse hides those arguments on the target, so the
+check after the restore cannot compare them ([what is left out](restore.md#a-native-backup)).

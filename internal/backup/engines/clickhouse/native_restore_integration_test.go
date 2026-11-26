@@ -72,8 +72,8 @@ func TestRestoreNativeAgainstIngest(t *testing.T) {
 // which the manifest lists as "other"), two views on the database other,
 // which is not backed up (findings 2 and 3 of the security review v0.4),
 // spike.users, named like a table of system, and a table and a view that
-// call encrypt and decrypt, whose secret arguments ClickHouse hides in
-// system.tables (fix round 1, C).
+// call encrypt and decrypt with a column and a literal key, whose secret
+// arguments ClickHouse hides in system.tables (fix rounds 1 and 2).
 const restoreSchema = `
 CREATE TABLE spike.rep (id UInt64, v String) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{shard}/spike_rep', '{replica}') ORDER BY id;
 INSERT INTO spike.rep SELECT number, toString(number) FROM numbers(1000);
@@ -93,8 +93,8 @@ CREATE VIEW spike.sampled AS SELECT s.id FROM spike.sampletab AS s SAMPLE 1/2 OF
 CREATE VIEW spike.inview AS SELECT id FROM spike.countries WHERE in(id, other.ids);
 CREATE TABLE spike.users (name String) ENGINE = Log;
 INSERT INTO spike.users VALUES ('harmless');
-CREATE TABLE spike.enc (id UInt64, c String DEFAULT encrypt('aes-256-ofb', toString(id), '12345678901234567890123456789012')) ENGINE = Log;
-INSERT INTO spike.enc (id) VALUES (1);
+CREATE TABLE spike.enc (id UInt64, s String, c String DEFAULT encrypt('aes-256-ofb', s, '12345678901234567890123456789012')) ENGINE = Log;
+INSERT INTO spike.enc (id, s) VALUES (1, 'plain');
 CREATE VIEW spike.decv AS SELECT id, decrypt('aes-256-ofb', c, '12345678901234567890123456789012') AS p FROM spike.enc;
 `
 
@@ -307,7 +307,7 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 				t.Errorf("%s is left out: %s", name, left[name])
 			}
 		}
-		if got := dst.query(t, "SELECT p FROM spike.decv WHERE id = 1"); got != "1" {
+		if got := dst.query(t, "SELECT p FROM spike.decv WHERE id = 1"); got != "plain" {
 			t.Errorf("spike.decv on the target: %q", got)
 		}
 		for _, name := range []string{"ext", "nums", "sampled", "inview"} {

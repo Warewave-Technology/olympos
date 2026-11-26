@@ -335,8 +335,10 @@ UUIDs, a dictionary's password shown as `[HIDDEN]`), which the allowlist must al
 approved, or one that was left out, is dropped and the restore fails naming it. An object the restore was not
 to create at all is named, never dropped. ClickHouse shows the arguments of `encrypt`, `decrypt`, `tryDecrypt`,
 `aes_encrypt_mysql` and `aes_decrypt_mysql` from the second on as one `'[HIDDEN]'`, and that form is accepted:
-what those arguments hold on the target is the one part of a definition this comparison cannot see, so there
-it rests on the checks of the backup's files above.
+what those arguments hold on the target is the one part of a definition this comparison cannot see. So the
+allowlist takes only a literal or a column name there, which cannot read anything (an object with a call, a
+subquery, an expression or a table name there is left out, *it calls decrypt with an argument that is not a
+literal or a column …*), and the checks of the backup's files above bind the text.
 
 **Checks are bounded.** Checking a native copy holds its chain in memory. The API's checks share 2 slots and a
 user runs one at a time (a second is refused at once); the check at the start of an approved restore has a

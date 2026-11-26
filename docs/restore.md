@@ -256,6 +256,11 @@ Everything else is **left out**, listed in the check with its reason, and not cr
   `file`, `remote`, `mysql`, `executable`, …), and a column default or TTL that holds a query;
 - an object that reads one that is left out, or one in a database you did not select;
 - an object that names a table without its database (*it reads events without naming its database*);
+- an object that calls `encrypt`, `decrypt`, `tryDecrypt`, `aes_encrypt_mysql` or `aes_decrypt_mysql` with
+  anything but a literal or a column name from the second argument on (a function call, a subquery, an
+  expression, a table name): ClickHouse hides those arguments on the target, so Olympos cannot check them after
+  the restore (*it calls decrypt with an argument that is not a literal or a column …*). Pass the key, the IV and
+  the value as literals or columns;
 - anything Olympos cannot read with certainty.
 
 A mistake in these rules can only leave something out, never let something in. That is also why `x IN f(…)` is
@@ -318,7 +323,8 @@ request was approved: …*): open a new request.
    is someone else's: it is named, never dropped. A drop that fails is named with the statement to run. Do not
    create objects in a database that is being restored: one created there under the name of an object of the
    backup while the restore runs is taken for the restore's own, and may be dropped. An honest object that calls
-   `encrypt` or `decrypt` is restored as approved, although ClickHouse hides its key arguments (`'[HIDDEN]'`).
+   `encrypt` or `decrypt` with literals and columns is restored as approved, although ClickHouse hides its key
+   arguments (`'[HIDDEN]'`).
 
 **Errors.** ClickHouse's error message can quote the backup's DDL, which can hold a password (a dictionary's
 source, for example), so the result keeps only its code, its name and the start of its first line. The whole
