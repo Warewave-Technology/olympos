@@ -903,3 +903,42 @@ func TestNativeRunUnlistedObject(t *testing.T) {
 		t.Fatalf("objects %s", objects)
 	}
 }
+
+// A native job's run that fails before the native path starts (the agent
+// gone, at claim or when it runs) is still a native run: method native, 0
+// objects, as the API documents.
+func TestNativeRunEarlyFailures(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedNative(t, db)
+	cluster := func(status string) {
+		t.Helper()
+		if _, err := db.Exec(ctx, `UPDATE clusters SET status = $2 WHERE id = (SELECT t.cluster_id FROM backup_jobs j
+			JOIN targets t ON t.id = j.target_id WHERE j.id = $1)`, e.Job, status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Revoked while it was queued: failed at claim.
+	cluster("revoked")
+	atClaim := queue(t, db, e.Job, "manual", nil)
+	if id, err := e.W.Claim(ctx); err != nil || id != uuid.Nil {
+		t.Fatalf("claimed %s %v", id, err)
+	}
+	// Revoked once claimed: failed when it runs.
+	cluster("online")
+	atRun := queue(t, db, e.Job, "manual", nil)
+	id, err := e.W.Claim(ctx)
+	if err != nil || id != atRun {
+		t.Fatalf("claimed %s %v", id, err)
+	}
+	cluster("revoked")
+	e.W.Execute(ctx, atRun)
+	for name, id := range map[string]uuid.UUID{"at claim": atClaim, "at run": atRun} {
+		if r := loadRun(t, db, id); r.Status != "failed" {
+			t.Fatalf("%s: %+v", name, r)
+		}
+		if m, o := runMethod(t, db, id); m != "native" || o != "0" {
+			t.Fatalf("%s: method %q objects %s, want native 0", name, m, o)
+		}
+	}
+}

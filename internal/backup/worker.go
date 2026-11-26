@@ -137,7 +137,10 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			return err
 		}
 		// A repair waits for its not_before (RepairDelays).
-		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until, r.repair_of IS NOT NULL, j.enabled, j.paused_reason FROM backup_runs r
+		// A run of a job whose method is native is a native run, also when it
+		// fails here (as the run API tells a run that has not finished).
+		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until, r.repair_of IS NOT NULL, j.enabled, j.paused_reason,
+			j.engine_options->>'method' IS NOT DISTINCT FROM 'native' FROM backup_runs r
 			JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 			WHERE r.status = 'queued' AND (r.not_before IS NULL OR r.not_before <= $1)
 			ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`, time.Now())
@@ -151,11 +154,12 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			repair      bool
 			enabled     bool
 			paused      string
+			native      bool
 		}
 		var cands []cand
 		for rows.Next() {
 			var c cand
-			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil, &c.repair, &c.enabled, &c.paused); err != nil {
+			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil, &c.repair, &c.enabled, &c.paused, &c.native); err != nil {
 				rows.Close()
 				return err
 			}
@@ -181,7 +185,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 				if c.retryUntil != nil && time.Now().Before(*c.retryUntil) {
 					continue
 				}
-				o, err := disconnectedOutcome(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline}, time.Now())
+				o, err := disconnectedOutcome(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline, native: c.native}, time.Now())
 				if err != nil {
 					return err
 				}
@@ -192,7 +196,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 				failed = append(failed, f)
 				continue
 			case "revoked", "pending":
-				f, err := finishRunTx(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline})
+				f, err := finishRunTx(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline, native: c.native})
 				if err != nil {
 					return err
 				}
@@ -861,7 +865,8 @@ func (c *countingHash) Write(p []byte) (int, error) {
 // perform does the work of a run and returns its outcome. Errors are
 // scrubbed of secrets before they are returned.
 func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *Job) {
-	fail := func(msg string) outcome { return outcome{status: "failed", err: msg} }
+	var native bool // a native job's run fails as a native run (method native, 0 objects)
+	fail := func(msg string) outcome { return outcome{status: "failed", err: msg, native: native} }
 	var job *Job
 	jj, err := scanJob(w.DB.QueryRow(ctx, jobSelectAny+` AND j.id = $1`, r.jobID))
 	if err != nil {
@@ -870,10 +875,17 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	job = jj
 	tr := &secretTracker{}
 	defer tr.zero()
+	eng, ok := EngineFor(job.Target.Engine)
+	var nj NativeJob
+	if ne, isNative := eng.(NativeEngine); ok && isNative {
+		// Options that do not parse fail in the engine's Run, as they always did.
+		if j, err := ne.NativeJob(job.EngineOptions); err == nil && j.Native {
+			nj, native = j, true
+		}
+	}
 	if job.ClusterStatus == "offline" || job.ClusterStatus == "revoked" {
 		return fail(errAgentOffline), nil, job
 	}
-	eng, ok := EngineFor(job.Target.Engine)
 	if !ok {
 		return fail(fmt.Sprintf("no backup engine registered for %q", job.Target.Engine)), nil, job
 	}
@@ -929,16 +941,13 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
 		}
 	}
-	if ne, ok := eng.(NativeEngine); ok {
-		// Options that do not parse fail in the engine's Run, as they always did.
-		if nj, err := ne.NativeJob(job.EngineOptions); err == nil && nj.Native {
-			if r.repairOf != nil {
-				return outcome{status: "failed", err: errNativeRepair, native: true}, nil, job
-			}
-			o, rr := w.runNative(ctx, r, job, nativeJob{eng: ne, opts: nj, ec: ec, dests: dests, tiers: tiers,
-				envelope: envelope, wire: wc.total, scrub: tr.scrub})
-			return o, rr, job
+	if native {
+		if r.repairOf != nil {
+			return fail(errNativeRepair), nil, job
 		}
+		o, rr := w.runNative(ctx, r, job, nativeJob{eng: eng.(NativeEngine), opts: nj, ec: ec, dests: dests, tiers: tiers,
+			envelope: envelope, wire: wc.total, scrub: tr.scrub})
+		return o, rr, job
 	}
 	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, envelope, tr.scrub)
 	return copiesOutcome(ctx, copies, streamed, wc.total(), tiers[dests[0].ID], engErr, tr.scrub), rr, job
