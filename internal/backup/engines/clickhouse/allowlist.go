@@ -544,9 +544,17 @@ func (r *reader) encryptedCodecs(lo, hi int) {
 		if !r.toks[j].is("CODEC") || !r.at(j+1).punct("(") {
 			continue
 		}
+		// A codec named in quotes is read by ClickHouse as the same name:
+		// an encryption codec is found quoted or not, and any other quoted
+		// name inside CODEC(…) is not read with certainty.
 		for k, c := j+2, r.closing(j+1); k < c; k++ {
-			if t := r.toks[k]; t.is("AES_128_GCM_SIV") || t.is("AES_256_GCM_SIV") {
+			t := r.toks[k]
+			switch {
+			case t.ident() && (strings.EqualFold(t.val, "AES_128_GCM_SIV") || strings.EqualFold(t.val, "AES_256_GCM_SIV")):
 				r.fail("its " + strings.ToUpper(t.val) + " codec needs encryption keys on the target server")
+				return
+			case t.kind == tokQIdent:
+				r.uncertain()
 				return
 			}
 		}

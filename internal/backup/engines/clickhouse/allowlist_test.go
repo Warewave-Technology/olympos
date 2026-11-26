@@ -160,6 +160,12 @@ func TestClassifyTables(t *testing.T) {
 			{"db", "x", KindTable, "CREATE TABLE db.x (`id` UInt64, `secret` String CODEC(AES_128_GCM_SIV)) ENGINE = MergeTree ORDER BY id"},
 			{"db", "ev", KindView, "CREATE VIEW db.ev AS SELECT id FROM db.x"},
 		}},
+		{name: "a backquoted encryption codec", reason: "its AES_256_GCM_SIV codec needs encryption keys on the target server",
+			objs: tbl("CREATE TABLE db.x (`id` UInt64, `secret` String CODEC(`AES_256_GCM_SIV`)) ENGINE = MergeTree ORDER BY id")},
+		{name: "a double-quoted encryption codec", reason: "its AES_128_GCM_SIV codec needs encryption keys on the target server",
+			objs: tbl("CREATE TABLE db.x (`id` UInt64, `secret` String CODEC(Delta, \"aes_128_gcm_siv\")) ENGINE = MergeTree ORDER BY id")},
+		{name: "another quoted codec", reason: reasonUncertain,
+			objs: tbl("CREATE TABLE db.x (`id` UInt64, `s` String CODEC(`ZSTD`(1))) ENGINE = MergeTree ORDER BY id")},
 		{name: "a column named like an encryption codec", allowed: true, objs: tbl("CREATE TABLE db.x (`AES_128_GCM_SIV` String CODEC(ZSTD(1)), `s` String DEFAULT 'AES_256_GCM_SIV') ENGINE = MergeTree ORDER BY AES_128_GCM_SIV")},
 		{name: "inline disk", reason: "its settings define a disk inline", objs: tbl(
 			"CREATE TABLE db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = disk(type = s3, endpoint = 'http://example.invalid/b/', access_key_id = 'a', secret_access_key = 'b'), index_granularity = 8192")},
