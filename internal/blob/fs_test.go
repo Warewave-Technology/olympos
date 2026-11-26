@@ -345,3 +345,43 @@ func TestFSSetTagsNativeRun(t *testing.T) {
 		}
 	}
 }
+
+// TestIsNativeRunObject (task 13): an object of a native run is under the
+// run's directory of the native layout, <…>/YYYY/MM/DD/<run-id>/<key>, not
+// under any directory named like a UUID; an existing file outside the
+// layout is not re-tagged either.
+func TestIsNativeRunObject(t *testing.T) {
+	const run = "0f6b2a4e-8d1c-4f3a-9b7e-2c5d8a1f6e30"
+	for p, want := range map[string]bool{
+		"pfx/prod/db/orders/clickhouse/2026/11/26/" + run + "/data/sales/orders/all_1_1_0/data.bin": true,
+		"prod/db/orders/clickhouse/2026/11/26/" + run + "/.backup":                                  true,
+		"2026/01/31/" + run + "/metadata/db.sql":                                                    true,
+		"pfx/prod/db/orders/clickhouse/" + run + "/data.bin":                                        false,
+		"pfx/" + run + "/2026/11/26/x/data.bin":                                                     false,
+		"pfx/prod/db/orders/clickhouse/2026/13/26/" + run + "/data.bin":                             false,
+		"pfx/prod/db/orders/clickhouse/2026/11/32/" + run + "/data.bin":                             false,
+		"pfx/prod/db/orders/clickhouse/26/11/26/" + run + "/data.bin":                               false,
+		"pfx/prod/db/orders/clickhouse/2026/1/26/" + run + "/data.bin":                              false,
+		"pfx/prod/db/orders/clickhouse/2026/11/26/" + run:                                           false,
+		"pfx/prod/db/orders/clickhouse/2026/11/26/" + run + ".zip":                                  false,
+		"pfx/prod/db/orders/clickhouse/2026/11/26/" + strings.ToUpper(run) + "/data.bin":            false,
+	} {
+		if got := blob.IsNativeRunObject(p); got != want {
+			t.Errorf("IsNativeRunObject(%s) = %v, want %v", p, got, want)
+		}
+	}
+
+	root, _ := nfsRoot(t)
+	ctx := context.Background()
+	w, err := blob.OpenFS(blob.FSTarget{Name: "nas", Path: root + "/nas/olympos/backups", Prefix: "pfx"}, blob.StorageOptions{NFSRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outside := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/"+run+"/data.bin")
+	if _, err := w.Upload(ctx, outside, strings.NewReader("x"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.SetTags(ctx, outside, map[string]string{"olympos-tier": "monthly"}); err == nil {
+		t.Fatal("SetTags under a UUID directory outside the native layout")
+	}
+}
