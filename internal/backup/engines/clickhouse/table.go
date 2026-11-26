@@ -282,18 +282,6 @@ type tableDef struct {
 	notRestored []string // what of the source table is not restored
 }
 
-// keeperPath is the Keeper path of a restored Replicated table: under
-// /olympos-restore/<request id>/, then the database and table names
-// escaped as ClickHouse escapes file names ([A-Za-z0-9_] kept, every other
-// byte %XX), so a name can add no path component and no macro.
-func keeperPath(requestID, db, table string) string {
-	return "/olympos-restore/" + requestID + "/" + escapeForFileName(db) + "/" + escapeForFileName(table)
-}
-
-// replicaName is the replica of a restored Replicated table: the target's
-// {replica} macro (without it, the target refuses the CREATE).
-const replicaName = "{replica}"
-
 // buildTable generates the CREATE TABLE of table t of database db, named
 // target on the target. ddl is t's schema entry ("" when the backup has
 // none readable); it is only read for the ENGINE parameters of
