@@ -642,3 +642,21 @@ func (m tagMem) SetTags(_ context.Context, path string, tags map[string]string) 
 	m.tags[path] = tags
 	return nil
 }
+
+// A job time zone that is not known: its weeks and months are taken in UTC,
+// with a warning.
+func TestSelectBaseUnknownTimezone(t *testing.T) {
+	c := newChainDB(t, "UTC")
+	c.job.Timezone = "Mars/Olympus"
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	defer slog.SetDefault(prev)
+	full := c.run(c.job.ID, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC), "succeeded", "schedule")
+	if b := c.base(time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC)); !slices.Equal(b, []uuid.UUID{full}) {
+		t.Fatalf("based on %v", b)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "Mars/Olympus") {
+		t.Fatalf("no warning: %q", logs.String())
+	}
+}

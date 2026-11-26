@@ -116,6 +116,8 @@ func periodStart(now time.Time, loc *time.Location) time.Time {
 func selectBase(ctx context.Context, q store.Querier, job *Job, now time.Time) (*nativeChain, error) {
 	loc, err := time.LoadLocation(job.Timezone)
 	if err != nil {
+		slog.Default().Warn("native backup: the job's time zone is not known; its weeks and months are taken in UTC",
+			"job_id", job.ID, "timezone", job.Timezone, "err", err)
 		loc = time.UTC
 	}
 	start := periodStart(now, loc)
