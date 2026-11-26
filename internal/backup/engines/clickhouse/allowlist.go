@@ -27,8 +27,10 @@ package clickhouse
 // leave something out, never let something in.
 //
 // What a definition reads is collected from every FROM and JOIN source (the
-// subqueries, CTEs and unions in it too), every "IN <table>", and the
-// object a dictGet* or joinGet names. A FROM clause goes on past a table's
+// subqueries, CTEs and unions in it too), every "IN <table>" (the table in
+// brackets too, as ClickHouse writes it, and the second argument of in,
+// notIn, globalIn and the rest of the in family), and the object a dictGet*
+// or joinGet names. A FROM clause goes on past a table's
 // alias, FINAL and SAMPLE k [OFFSET m] to the next source; only a clause
 // word of its own level ends it, never an alias. A source followed by "(" is a table
 // function, and so is "IN f(…)" unless f is tuple or array. An unqualified name is of the object's own database, as
@@ -937,6 +939,10 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 			source = !arrayJoin
 		case t.punct(","):
 			source = from && !arrayJoin
+		case t.is("IN") && r.at(i+1).punct("(") && r.inFunctionAt(i):
+			// in(x, s), the function form of "x IN s" (finding 3); walk
+			// then reads its arguments.
+			r.inCall(i, ctes)
 		case t.is("IN"):
 			i = r.inTable(i, ctes)
 		case t.is("AS") && r.at(i+1).kind == tokWord && !r.at(i+2).punct("("):
@@ -976,6 +982,9 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 				r.function(j, false)
 			}
 		case t.ident() && r.at(i+1).punct("("):
+			if inFunctions[strings.ToLower(t.val)] {
+				r.inCall(i, ctes)
+			}
 			r.function(i, true)
 		}
 	}
@@ -1076,9 +1085,13 @@ func (r *reader) from(i int, ctes map[string]bool) int {
 
 // inTable reads what follows IN at toks[i] and returns the index of its
 // last token read: a table ("IN db.t"), or "IN f(…)", where f is a table
-// function unless it is tuple or array. A bracket (a tuple or a subquery)
-// is left to walk.
+// function unless it is tuple or array. A bracket is read by inOperand
+// (a table in brackets, as ClickHouse writes "IN db.t") and left to walk.
 func (r *reader) inTable(i int, ctes map[string]bool) int {
+	if r.at(i + 1).punct("(") {
+		r.inOperand(i+1, r.closing(i+1)+1, ctes)
+		return i
+	}
 	o, j, ok := r.name(i + 1)
 	switch {
 	case !ok:
@@ -1092,6 +1105,94 @@ func (r *reader) inTable(i int, ctes map[string]bool) int {
 	}
 	r.read(o, j-i == 2, ctes)
 	return j - 1
+}
+
+// inOperand reads toks[lo:hi], the right side of an IN, in brackets or as
+// the second argument of the in family: a (qualified) name, in any number
+// of brackets, is a table, and f(…) a table function unless f is tuple or
+// array (security review v0.4, finding 3). Anything else (a tuple, an
+// array, a subquery) is an expression, which walk reads.
+func (r *reader) inOperand(lo, hi int, ctes map[string]bool) {
+	for lo < hi && r.at(lo).punct("(") && r.closing(lo) == hi-1 {
+		lo, hi = lo+1, hi-1
+	}
+	o, j, ok := r.name(lo)
+	switch {
+	case !ok:
+	case j == hi:
+		r.read(o, j-lo == 1, ctes)
+	case r.at(j).punct("(") && r.closing(j) == hi-1:
+		if f := strings.ToLower(r.at(j - 1).val); j-lo == 1 && (f == "tuple" || f == "array") {
+			return
+		}
+		r.fail("it reads the table function " + shortName(r.at(j-1).val))
+	}
+}
+
+// inFunctions are the function forms of IN (lower-case): f(x, s) is
+// "x IN s", global or not, with or without the set (the IgnoreSet forms
+// ClickHouse uses for its indexes).
+var inFunctions = func() map[string]bool {
+	m := map[string]bool{}
+	for _, g := range []string{"", "global"} {
+		for _, f := range []string{"in", "notin", "nullin", "notnullin"} {
+			m[g+f] = true
+			m[g+f+"ignoreset"] = true
+		}
+	}
+	return m
+}()
+
+// inFunctionAt reports whether "in(" at toks[i] is the function in, not
+// the operator IN: as ClickHouse parses it, the operator follows an operand
+// (a name, a literal, a bracket; NOT and GLOBAL are part of it), and the
+// function starts one: after the start of a bracket, punctuation, or a
+// keyword that an expression follows.
+func (r *reader) inFunctionAt(i int) bool {
+	j := i - 1
+	for r.at(j).is("NOT") || r.at(j).is("GLOBAL") {
+		j--
+	}
+	switch p := r.at(j); p.kind {
+	case tokPunct:
+		return p.val != ")" && p.val != "]"
+	case tokWord:
+		return exprKeywords[strings.ToUpper(p.val)]
+	}
+	return false
+}
+
+// exprKeywords are the words an expression can follow in a definition:
+// "<word> in(…)" is the function in after one of them, and the operator IN
+// after any other word (a column's name).
+var exprKeywords = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(`ALIAS ALL AND ANY ARRAY ASSUME BETWEEN BY CASE CHECK CODEC DEFAULT DISTINCT
+		ELSE EPHEMERAL ESCAPE EXISTS EXPRESSION FILL FROM GRANULARITY HAVING ILIKE IN INTERPOLATE INTERVAL IS JOIN KEY
+		LIKE LIMIT MATERIALIZED OFFSET ON OR PREWHERE QUALIFY RECURSIVE SELECT SETTINGS SOME STALENESS STEP THEN TO TOP
+		TTL USING WHEN WHERE WITH XOR`) {
+		m[w] = true
+	}
+	return m
+}()
+
+// inCall reads the arguments of an in-family function at toks[i]: exactly
+// two, the second of which is IN's right side (inOperand).
+func (r *reader) inCall(i int, ctes map[string]bool) {
+	open := i + 1
+	end := r.closing(open)
+	d := r.toks[open].depth + 1
+	var commas []int
+	for j := open + 1; j < end; j++ {
+		if r.toks[j].punct(",") && r.toks[j].depth == d {
+			commas = append(commas, j)
+		}
+	}
+	if len(commas) != 1 || commas[0] == open+1 || commas[0] == end-1 {
+		r.uncertain()
+		return
+	}
+	r.inOperand(commas[0]+1, end, ctes)
 }
 
 // function checks the function at toks[i], called with its arguments or,

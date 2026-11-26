@@ -334,6 +334,56 @@ func TestClassifyFromClause(t *testing.T) {
 	})
 }
 
+// TestClassifyInForms: the function forms of IN, and a table name in
+// brackets after IN, read a table (security review v0.4, finding 3).
+// ClickHouse itself writes "x IN db.t" and "in(x, db.t)" as
+// "x IN (db.t)".
+func TestClassifyInForms(t *testing.T) {
+	cases := []alCase{
+		{name: "IN (a restored table)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (id IN (db.logs)) AND (id GLOBAL NOT IN (db.v))")},
+		{name: "in() on a restored table", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE in(id, db.logs)")},
+		{name: "in() on a tuple", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE in(id, (1, 2)) AND notIn(id, tuple(3)) AND globalIn(id, [4, 5])")},
+		{name: "in() on a subquery", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE globalNotIn(id, (SELECT id FROM db.logs))")},
+		{name: "IN a CTE in brackets", allowed: true, objs: view("CREATE VIEW db.x AS WITH c AS (SELECT id FROM db.logs) SELECT id FROM db.events WHERE id IN (c)")},
+
+		// The review's reproductions.
+		{name: "in() on a table outside the backup", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE in(id, other.ids)")},
+		{name: "IN (a table outside the backup)", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id IN (other.ids)")},
+		{name: "IN ((a table)) outside the backup", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id NOT IN ((other.ids))")},
+		{name: "IN (a table left out)", reason: "it reads db.ext, which is not restored",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id GLOBAL IN (db.ext)")},
+		{name: "in() on a table function", reason: "it reads the table function url",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE notIn(id, url('http://example.invalid/ids', CSV, 'id UInt64'))")},
+		{name: "in() on a table function in brackets", reason: "it reads the table function numbers",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE in(id, (numbers(10)))")},
+		// The operator follows an operand, the function starts one.
+		{name: "the operator on a tuple with a call", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (id IN (1, toUInt64(2))) AND (toString(id) NOT IN ('a', lower('B')))")},
+		{name: "NOT in()", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE NOT in(id, other.ids)")},
+		{name: "in () after AND", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id > 0 AND in (id, other.ids)")},
+		{name: "in() in brackets", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (in(id, other.ids))")},
+		{name: "in() in the select list", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT in(id, other.ids) AS f FROM db.events")},
+		{name: "in() with three arguments", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT notIn(id, 1, 2) AS f FROM db.events")},
+		{name: "in() in a column default", reason: "it reads other.ids, which is not in the backup",
+			objs: tbl("CREATE TABLE db.x (`id` UInt64, `f` UInt8 DEFAULT in(id, other.ids)) ENGINE = Log")},
+		{name: "IN (a table) in a dictionary's query", reason: "it reads other.ids, which is not in the backup",
+			objs: dictOn("CLICKHOUSE(QUERY 'SELECT id, msg FROM db.logs WHERE id IN (other.ids)')", "FLAT()")},
+	}
+	// Every form of the in family, the global ones too, with a table in
+	// brackets or not.
+	for _, f := range []string{"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn", "globalNullIn", "globalNotNullIn",
+		"inIgnoreSet", "notInIgnoreSet", "globalInIgnoreSet", "globalNotInIgnoreSet", "nullInIgnoreSet", "notNullInIgnoreSet",
+		"globalNullInIgnoreSet", "globalNotNullInIgnoreSet"} {
+		for _, arg := range []string{"other.ids", "(other.ids)"} {
+			cases = append(cases, alCase{name: f + " " + arg, reason: "it reads other.ids, which is not in the backup",
+				objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE " + f + "(id, " + arg + ")")})
+		}
+	}
+	runAlCases(t, cases)
+}
+
 func TestClassifyMaterializedViews(t *testing.T) {
 	runAlCases(t, []alCase{
 		{name: "TO a restored table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID 'f0128b77-346e-4f76-b6ad-18eb944a2104' TO db.logs (`id` UInt64, `msg` String) AS SELECT id, toString(id) AS msg FROM db.events")},
