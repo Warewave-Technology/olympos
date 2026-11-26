@@ -98,7 +98,8 @@ failed* ([troubleshooting](troubleshooting.md#the-person-search-fails)).
 ## 3. Key Vault
 
 `deploy/bicep/keyvault.bicep` creates a vault with soft delete and **purge protection** on (it cannot be
-turned off again), the key encryption key `olympos-kek` (RSA 3072, wrap/unwrap only), the server's role
+turned off again), the key encryption key `olympos-kek` (RSA 3072, wrap/unwrap only), the key `olympos-manifest`
+that signs the manifests of native ClickHouse backups (EC P-256, sign/verify only), the server's role
 assignments, and optionally a private endpoint:
 
 ```bash
@@ -121,14 +122,18 @@ The roles the template gives the server's identity:
 | Role | On | Why |
 |---|---|---|
 | *Key Vault Crypto User* | the key `olympos-kek` | wrap and unwrap the per-record keys; read the key's properties to check purge protection |
+| *Key Vault Crypto User* | the key `olympos-manifest` | sign the manifest of each native ClickHouse backup (`keys/sign`) and read the public key the server verifies it with (`keys/get`) |
 | *Key Vault Secrets Officer* | the vault | read `kv://` secrets, and write Vault AppRole secret IDs when you configure a Vault (`olympos-vault-<id>-secret-id`) |
 
 If you never connect a Vault or OpenBao to Olympos, *Key Vault Secrets User* (read only) is enough instead
 of *Secrets Officer*; change the role in the template before deploying.
 
 Why purge protection matters: Olympos encrypts stored credentials with `olympos-kek`, and its own database
-backup is useless without that key ([Restoring Olympos](restore-olympos.md)). The server checks the key at
-start and shows *Key Vault · purge protection is off* under *Needs attention* otherwise.
+backup is useless without that key ([Restoring Olympos](restore-olympos.md)). A native ClickHouse backup is
+restored only while the version of `olympos-manifest` that signed it can be read
+([install › The manifest key](install.md#the-manifest-key)). The server checks the KEK at start and shows *Key
+Vault · purge protection is off* under *Needs attention* otherwise; purge protection is a setting of the vault,
+so the check covers `olympos-manifest` as well.
 
 ## 4. Backup storage (Azure Blob)
 
