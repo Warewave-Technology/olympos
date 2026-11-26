@@ -1307,6 +1307,28 @@ export const restoreRequests: RestoreRequest[] = [
       created: ['metrics'],
     },
   }),
+  // a native ClickHouse restore waiting for a checker: what it leaves out was recorded when it was opened (R50)
+  restoreReq({
+    engine: 'clickhouse',
+    source: restoreSource(runMetrics.id, destinations[1]?.id ?? blobWeu),
+    target: tRef(tByService('metrics-ch-dr')),
+    maker: people.mert,
+    databases: ['metrics', 'default'],
+    options: {
+      server_version: '25.8.33.6',
+      native: {
+        databases: ['metrics', 'default'],
+        excluded: [
+          { database: 'metrics', name: 'requests_all', kind: 'table', allowed: false, reason: 'the Distributed engine is not on the restore allowlist' },
+          { database: 'metrics', name: 'geo', kind: 'dictionary', allowed: false, reason: 'its ClickHouse source names a host' },
+        ],
+      },
+    },
+    credential: { source: 'stored', username: 'default' },
+    justification: 'Restore last night’s native backup of metrics into the DR cluster (CHG-1190).',
+    created_at: iso(30 * 60_000),
+    expires_at: isoIn(71 * H),
+  }),
   // a break-glass Vault restore: the result carries the unseal note
   restoreReq({
     engine: 'vault',

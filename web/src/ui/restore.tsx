@@ -1,6 +1,6 @@
 // Shared pieces of restore requests (docs/design/ui-restore.md): the status
 // badge, the engine-specific notes, progress and the result.
-import type { RestoreEngine, RestoreItem, RestoreProgress, RestoreRequest, RestoreResult, RestoreStatus } from '../api/types';
+import type { RestoreEngine, RestoreItem, RestoreNativeObject, RestoreNativeOptions, RestoreProgress, RestoreRequest, RestoreResult, RestoreStatus } from '../api/types';
 import { bytes, duration } from '../lib/format';
 import { Badge, ClampedError, type Tone } from './kit';
 
@@ -58,6 +58,64 @@ export function NativeScopeNote() {
       ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that
       Olympos cannot read with certainty, is left out, with the reason in the check. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (
       <span className="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source&apos;s replicas.
+    </div>
+  );
+}
+
+const KIND_NAME: Record<string, string> = { table: 'table', view: 'view', materialized_view: 'materialized view', dictionary: 'dictionary', other: 'other' };
+const sentenceCase = (m: string) => (m ? m[0].toUpperCase() + m.slice(1) : m);
+
+/**
+ * The objects of one database of a native backup and what the restore does with each (docs/design/restore-native.html).
+ * The maker selects databases; a left out object shows its reason and has no control of its own.
+ */
+export function NativeObjects({ db, objects }: { db: string; objects: RestoreNativeObject[] }) {
+  return (
+    <ul className="plain-list native-objs" aria-label={`Objects of ${db}`}>
+      {objects.map((o, i) => (
+        <li key={`${o.kind}/${o.name}/${i}`} className={o.allowed ? undefined : 'out'}>
+          <span className="what">
+            <span className="mono">{o.name}</span> <span className="muted small">{KIND_NAME[o.kind] ?? o.kind}</span>
+          </span>
+          {o.allowed ? <Badge tone="ok">Restored</Badge> : <Badge tone="mute">Left out</Badge>}
+          {!o.allowed && o.reason && <span className="why">{sentenceCase(o.reason)}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** A native check's objects by database, in the order the server listed them. */
+export function nativeByDatabase(objects: RestoreNativeObject[]): [string, RestoreNativeObject[]][] {
+  const m = new Map<string, RestoreNativeObject[]>();
+  for (const o of objects) m.set(o.database, [...(m.get(o.database) ?? []), o]);
+  return [...m];
+}
+
+/**
+ * What a native request leaves out, as it was checked when it was opened (R50): the checker approves this list, and the
+ * restore does not start when the backup's check at start decides otherwise.
+ */
+export function NativeLeftOut({ native }: { native: RestoreNativeOptions }) {
+  const byDb = nativeByDatabase(native.excluded);
+  return (
+    <div className="native-left-out">
+      {byDb.length === 0 ? (
+        <div>Nothing: every table, view, materialized view and dictionary of these databases is restored.</div>
+      ) : (
+        byDb.map(([d, objs]) => (
+          <div key={d} className="native-db">
+            <div className="native-db-head">
+              <span className="mono">{d}</span>{' '}
+              <span className="muted small">
+                {objs.length} left out
+              </span>
+            </div>
+            <NativeObjects db={d} objects={objs} />
+          </div>
+        ))
+      )}
+      <div className="muted small">Recorded when the request was opened. If the backup&apos;s check at start leaves out anything else, the restore does not start.</div>
     </div>
   );
 }

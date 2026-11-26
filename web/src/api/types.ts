@@ -677,6 +677,13 @@ export interface RestoreOptions {
   /** Open-time findings: existing empty databases restored into, no superuser. */
   notes?: string[];
   server_version?: string;
+  /** A native ClickHouse request (R50): what the check decided when it was opened; the checker approves this list, and the restore does not start when the check at start decides otherwise. */
+  native?: RestoreNativeOptions;
+}
+/** The databases a native restore restores and every object of them it leaves out, with the reason. */
+export interface RestoreNativeOptions {
+  databases: string[];
+  excluded: RestoreNativeObject[];
 }
 export interface RestoreTargetReport {
   /** Selected databases that exist on the target: true when they hold user objects. */

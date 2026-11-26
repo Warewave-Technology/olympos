@@ -29,7 +29,7 @@ import { CheckIcon } from './icons';
 import { Badge, Field, FormError, Modal, aria, fieldError, useAction } from './kit';
 import { KindBadge } from './destinations';
 import { Select } from './Select';
-import { ClickHouseScopeNote, NativeScopeNote, VaultTokenNeeds, VaultUnsealNote, restoreEngineName } from './restore';
+import { ClickHouseScopeNote, NativeObjects, NativeScopeNote, VaultTokenNeeds, VaultUnsealNote, nativeByDatabase, restoreEngineName } from './restore';
 
 /** Justification bounds (the server's approvals.ValidateJustification). */
 const MIN_WHY = 10;
@@ -100,37 +100,8 @@ function learn(prev: Known, checkedDbs: string[] | null, r: RestoreTargetReport 
   return next;
 }
 
-const KIND_NAME: Record<string, string> = { table: 'table', view: 'view', materialized_view: 'materialized view', dictionary: 'dictionary', other: 'other' };
-
 /** "4 of 6 objects restored" */
 const restoredOf = (objs: RestoreNativeObject[]) => `${objs.filter((o) => o.allowed).length} of ${objs.length} ${objs.length === 1 ? 'object' : 'objects'} restored`;
-
-/**
- * The objects of one database of a native backup and what the restore does with each (docs/design/restore-native.html).
- * The maker selects databases; a left out object shows its reason and has no control of its own.
- */
-function NativeObjects({ db, objects }: { db: string; objects: RestoreNativeObject[] }) {
-  return (
-    <ul className="plain-list native-objs" aria-label={`Objects of ${db}`}>
-      {objects.map((o, i) => (
-        <li key={`${o.kind}/${o.name}/${i}`} className={o.allowed ? undefined : 'out'}>
-          <span className="what">
-            <span className="mono">{o.name}</span> <span className="muted small">{KIND_NAME[o.kind] ?? o.kind}</span>
-          </span>
-          {o.allowed ? <Badge tone="ok">Restored</Badge> : <Badge tone="mute">Left out</Badge>}
-          {!o.allowed && o.reason && <span className="why">{sentenceCase(o.reason)}</span>}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-/** A native check's objects by database, in the order the server listed them. */
-function byDatabase(objects: RestoreNativeObject[]): [string, RestoreNativeObject[]][] {
-  const m = new Map<string, RestoreNativeObject[]>();
-  for (const o of objects) m.set(o.database, [...(m.get(o.database) ?? []), o]);
-  return [...m];
-}
 
 /** The Vault checks in the order the server applies them; after the first failure the rest were not reached. */
 function VaultChecks({ r }: { r: RestoreTargetReport }) {
@@ -674,7 +645,7 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
             {/* a backup that does not verify: what its own signed manifest lists, every object left out, nothing to select */}
             {res.native && !res.databases_in_backup?.length && res.native.objects.length > 0 && (
               <div>
-                {byDatabase(res.native.objects).map(([d, objs]) => (
+                {nativeByDatabase(res.native.objects).map(([d, objs]) => (
                   <div className="native-db" key={d}>
                     <div className="native-db-head small">
                       <span className="mono">{d}</span> <span className="muted small">{restoredOf(objs)}</span>
