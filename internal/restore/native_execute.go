@@ -113,7 +113,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 			changed = true
 			return nil
 		}
-		s, err := n.RestoreSource(ctx)
+		s, err := n.RestoreSource()
 		if err != nil {
 			return err // ErrNativeChain or ErrNativeNotVerified: why the chain is not served
 		}
@@ -127,7 +127,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 	switch {
 	case ctx.Err() != nil:
 		return fail("the restore was interrupted before it started; nothing was written to the target")
-	case errors.Is(err, backup.ErrNativeChain):
+	case errors.Is(err, backup.ErrNativeChain), errors.Is(err, backup.ErrNativeCheckLimit):
 		return fail("the restore cannot start: " + err.Error() + "; nothing was written to the target")
 	case errors.Is(err, backup.ErrNativeNotVerified):
 		x.Log.Warn("restore: the native backup does not verify", "restore_id", j.id, "copy_run_id", src.CopyRunID,

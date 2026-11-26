@@ -81,7 +81,7 @@ func TestNativeRestoreCheck(t *testing.T) {
 		want := []backup.NativeDecision{{Database: "shop", Name: "orders", Kind: "table", Allowed: true}}
 		// The check keeps the databases and the decisions only: nothing of
 		// the parsed chain outlives its slot.
-		got, err := backup.CheckNativeRestore(ctx, db, b, fakeEngine{}, restoreCfg(e), src, nil, quietLog())
+		got, err := backup.CheckNativeRestore(ctx, db, b, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog())
 		if err != nil || !reflect.DeepEqual(got.Databases, []string{"shop"}) || !reflect.DeepEqual(got.Objects, want) || got.Manifests != nil {
 			t.Fatalf("copy %d: %+v, %v", i, got, err)
 		}
@@ -113,7 +113,7 @@ func TestNativeRestoreCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, []string{"other"}, quietLog())
+	got, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, []string{"other"}, "test", quietLog())
 	if err != nil || len(got.Objects) != 0 || !reflect.DeepEqual(got.Databases, []string{"shop"}) {
 		t.Fatalf("another selection: %+v, %v", got, err)
 	}
@@ -121,7 +121,7 @@ func TestNativeRestoreCheck(t *testing.T) {
 	// Through another ingest.url, the chain is refused with the reason.
 	cfg := restoreCfg(e)
 	cfg.URL = "https://ingest.elsewhere.test:9444"
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, cfg, src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, cfg, src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
 		!strings.Contains(err.Error(), e.srv.URL+"/olympos/"+full.String()+"/") {
 		t.Fatalf("another ingest.url: %v", err)
 	}
@@ -144,7 +144,7 @@ func TestNativeRestoreBaseDoesNotVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog())
+	got, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog())
 	if !errors.Is(err, backup.ErrNativeNotVerified) || err.Error() == backup.ErrNativeNotVerified.Error() || got == nil {
 		t.Fatalf("a base that does not verify: %+v, %v", got, err)
 	}
@@ -162,12 +162,12 @@ func TestNativeRestoreBaseDoesNotVerify(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src2, nil, quietLog()); err != nil {
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src2, nil, "test", quietLog()); err != nil {
 		t.Fatalf("the intact copy: %v", err)
 	}
 	// A sidecar that is gone does not verify either.
 	delete(e.B2.blobs, backup.ManifestPath(runDir(t, db, "b", full), full))
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src2, nil, quietLog()); !errors.Is(err, backup.ErrNativeNotVerified) {
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src2, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeNotVerified) {
 		t.Fatalf("a missing sidecar: %v", err)
 	}
 }
@@ -191,7 +191,7 @@ func TestNativeRestoreChainCopies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
 		!strings.Contains(err.Error(), "run "+other.String()+" of its chain has no succeeded copy on dest-b") {
 		t.Fatalf("a chain member without a copy here: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestNativeRestoreChainCopies(t *testing.T) {
 	if _, err := db.Exec(ctx, `UPDATE ingest_credentials SET scope = jsonb_set(scope, '{read}', '["../x/"]') WHERE run_id = $1 AND kind = 'backup'`, inc); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) {
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) {
 		t.Fatalf("a read scope that is not a chain: %v", err)
 	}
 	// Longer than a restore reads (32 runs, the cap of Task 13).
@@ -210,7 +210,7 @@ func TestNativeRestoreChainCopies(t *testing.T) {
 	if _, err := db.Exec(ctx, `UPDATE ingest_credentials SET scope = jsonb_set(scope, '{read}', to_jsonb($2::text[])) WHERE run_id = $1 AND kind = 'backup'`, inc, long); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B2, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
 		!strings.Contains(err.Error(), "33 runs, more than the 32") {
 		t.Fatalf("a chain over the cap: %v", err)
 	}
@@ -289,11 +289,11 @@ func TestNativeRestoreCredentialRecords(t *testing.T) {
 		}
 	}
 	add("OLYSAMESCOPE00000001", `{"read": ["`+full.String()+`/"], "write": "`+inc.String()+`/"}`)
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); err != nil {
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); err != nil {
 		t.Fatalf("two records that agree: %v", err)
 	}
 	add("OLYOTHERSCOPE0000001", `{"write": "`+inc.String()+`/"}`)
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
 		!strings.Contains(err.Error(), "more than one chain") {
 		t.Fatalf("records that differ: %v", err)
 	}
@@ -310,27 +310,30 @@ func TestNativeRestoreContextEnded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Another check holds the slot until this request ends.
-	held, release := make(chan struct{}), make(chan struct{})
-	go func() {
-		_ = backup.WithNativeRestore(context.Background(), db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(*backup.NativeRestore) error {
-			close(held)
-			<-release
-			return nil
-		})
-	}()
-	<-held
+	// Other checks hold the API's slots until this request ends.
+	entered, release := make(chan struct{}, 2), make(chan struct{})
+	held := make(chan struct{}, 2)
+	for _, user := range []string{"ada", "bob"} {
+		go func() {
+			_, _ = backup.CheckNativeRestore(context.Background(), db, e.B1, blockingEngine{entered: entered, release: release}, restoreCfg(e), src, nil,
+				user, quietLog())
+			held <- struct{}{}
+		}()
+		<-entered
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
-	_, err = backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog())
+	_, err = backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog())
 	close(release)
-	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, backup.ErrNativeNotVerified) {
+	<-held
+	<-held
+	if !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, backup.ErrNativeNotVerified) || errors.Is(err, backup.ErrNativeCheckLimit) {
 		t.Fatalf("waiting for the slot: %v", err)
 	}
 	// Ended while it reads: the same.
 	ctx, cancel = context.WithCancel(context.Background())
 	cancel()
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, context.Canceled) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, context.Canceled) ||
 		errors.Is(err, backup.ErrNativeNotVerified) {
 		t.Fatalf("a cancelled request: %v", err)
 	}
@@ -354,14 +357,14 @@ func TestNativeRestoreServes(t *testing.T) {
 	var rs *backup.NativeRestoreSource
 	err = backup.WithNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
 		var err error
-		rs, err = n.RestoreSource(ctx)
+		rs, err = n.RestoreSource()
 		return err
 	})
 	if err != nil || rs == nil {
 		t.Fatalf("restore source: %v", err)
 	}
 	// The slot is free: another check runs while the source serves.
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); err != nil {
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); err != nil {
 		t.Fatalf("a check after the source was built: %v", err)
 	}
 	var _ ingest.WholeSource = rs
@@ -439,7 +442,7 @@ func TestNativeRestoreServesWhatTheRestoreReads(t *testing.T) {
 		err := backup.WithNativeRestore(ctx, db, e.B1, eng, restoreCfg(e), src, []string{"shop"}, quietLog(), func(n *backup.NativeRestore) error {
 			var err error
 			ms = n.Manifests
-			rs, err = n.RestoreSource(ctx)
+			rs, err = n.RestoreSource()
 			return err
 		})
 		return rs, ms, err
@@ -548,8 +551,100 @@ func TestNativeRestoreCheckBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	backup.SetServedBoundForTest(t, 2, 1<<20)
-	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "test", quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
 		!strings.Contains(err.Error(), "more than the 2 objects") {
 		t.Fatalf("a chain past the bound: %v", err)
 	}
+}
+
+// blockingEngine is fakeEngine whose check waits for release (or its
+// context) after it says it entered.
+type blockingEngine struct {
+	fakeEngine
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (e blockingEngine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInput) (*backup.NativeRestoreCheck, error) {
+	e.entered <- struct{}{}
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return e.fakeEngine.CheckNativeRestore(ctx, in)
+}
+
+// TestNativeCheckSlots (security review v0.4, finding 6): the API's checks
+// cannot hold up the executor's check at the start of an approved restore
+// (it has a slot of its own), a user runs one check at a time, and a check
+// that takes longer than its limit ends.
+func TestNativeCheckSlots(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedIncremental(t, db)
+	scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(ctx, db, inc, &e.DestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}, 8), make(chan struct{})
+	blocking := blockingEngine{entered: entered, release: release}
+	// Every API slot held, by two users: the review's reproduction held the
+	// one slot there was.
+	done := make(chan error, 2)
+	for _, user := range []string{"ada", "bob"} {
+		go func() {
+			_, err := backup.CheckNativeRestore(ctx, db, e.B1, blocking, restoreCfg(e), src, nil, user, quietLog())
+			done <- err
+		}()
+		<-entered
+	}
+	// A third user waits for an API slot.
+	short, cancel := context.WithTimeout(ctx, 300*time.Millisecond)
+	defer cancel()
+	if _, err := backup.CheckNativeRestore(short, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "cyd", quietLog()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a check while the API's slots are held: %v", err)
+	}
+	// The executor's check is not held up.
+	exec, cancel2 := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel2()
+	var verified bool
+	if err := backup.WithNativeRestore(exec, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog(), func(n *backup.NativeRestore) error {
+		verified = n.Source() != nil
+		return nil
+	}); err != nil || !verified {
+		t.Fatalf("the executor's check while the API's slots are held: %v (verified %v)", err, verified)
+	}
+	// A user with a check running gets no second one, at once.
+	start := time.Now()
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "ada", quietLog()); !errors.Is(err, backup.ErrNativeCheckLimit) ||
+		!strings.Contains(err.Error(), "a check of yours runs") || time.Since(start) > 5*time.Second {
+		t.Fatalf("a second check of one user: %v", err)
+	}
+	close(release)
+	for range 2 {
+		if err := <-done; err != nil {
+			t.Fatalf("a held check: %v", err)
+		}
+	}
+	// The slots and the users' checks are free again.
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, "ada", quietLog()); err != nil {
+		t.Fatalf("a check after the others ended: %v", err)
+	}
+
+	// A check that takes longer than its limit ends, the API's and the
+	// executor's alike, and says so.
+	backup.SetNativeCheckTimeoutForTest(t, 200*time.Millisecond)
+	stuck := blockingEngine{entered: entered, release: make(chan struct{})}
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, stuck, restoreCfg(e), src, nil, "ada", quietLog()); !errors.Is(err, backup.ErrNativeCheckLimit) ||
+		!strings.Contains(err.Error(), "took longer than 200ms") {
+		t.Fatalf("an API check past its limit: %v", err)
+	}
+	<-entered
+	if err := backup.WithNativeRestore(ctx, db, e.B1, stuck, restoreCfg(e), src, nil, quietLog(), func(*backup.NativeRestore) error { return nil }); !errors.Is(err, backup.ErrNativeCheckLimit) {
+		t.Fatalf("the executor's check past its limit: %v", err)
+	}
+	<-entered
 }

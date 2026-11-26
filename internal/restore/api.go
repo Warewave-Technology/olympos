@@ -178,6 +178,9 @@ type evaluation struct {
 	// when its chain did not verify). Nothing of the parsed chain is kept:
 	// it lives only inside backup.CheckNativeRestore's slot.
 	nativeCheck *NativeCheck
+	// user is the caller's principal: a user runs one native check at a
+	// time.
+	user string
 }
 
 // evalError is a failed check: code 422 with fields, or 403/404/500.
@@ -218,7 +221,7 @@ func internalErr(err error) *evalError {
 // justification is checked too (before the target is contacted). tr tracks
 // the secrets handed to the inspector (the caller zeroes them).
 func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open bool, tr *backup.SecretScrubber) (*evaluation, *evalError) {
-	ev := &evaluation{}
+	ev := &evaluation{user: sub.Principal.ID.String()}
 	unknownRun := invalid("invalid restore request", map[string]string{"run_id": "unknown run"})
 	var err error
 	ev.run, err = loadSourceRun(ctx, a.DB, in.RunID)
@@ -663,12 +666,12 @@ func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields
 		notVerified(err)
 		return nil
 	}
-	nr, err := backup.CheckNativeRestore(ctx, a.DB, rd, ne, *a.Native, ev.src, in.Databases, a.Log)
+	nr, err := backup.CheckNativeRestore(ctx, a.DB, rd, ne, *a.Native, ev.src, in.Databases, ev.user, a.Log)
 	if nr != nil {
 		ev.nativeCheck = &NativeCheck{Objects: nr.Objects}
 	}
 	switch {
-	case errors.Is(err, backup.ErrNativeChain):
+	case errors.Is(err, backup.ErrNativeChain), errors.Is(err, backup.ErrNativeCheckLimit):
 		fields["copy_destination_id"] = err.Error()
 	case errors.Is(err, backup.ErrNativeNotVerified):
 		notVerified(err)
