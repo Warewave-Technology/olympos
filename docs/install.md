@@ -690,7 +690,8 @@ spec:
 ```
 
 A pod's first `Egress` policy denies all its other egress (DNS, Keeper, the other replicas), so add this only
-next to the egress rules the namespace already has. If the server's namespace restricts ingress, allow the
+next to the egress rules the namespace already has; where it has none, allow DNS too (the `kube-dns` pods in
+`kube-system`, UDP and TCP 53), or ClickHouse cannot resolve the host of `ingest.url`. If the server's namespace restricts ingress, allow the
 ClickHouse pods to the server pods on `9444` there too. Firewalls between the clusters need the same port.
 
 ### The manifest key

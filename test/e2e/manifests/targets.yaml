@@ -261,7 +261,6 @@ data:
             <query>GRANT BACKUP ON m10.*</query>
             <query>GRANT BACKUP ON m10wire.*</query>
             <query>GRANT BACKUP ON shop.*</query>
-            <query>GRANT SELECT ON system.tables</query>
             <query>GRANT SELECT ON system.clusters</query>
             <query>GRANT SELECT ON system.parts</query>
             <query>GRANT SELECT ON system.processes</query>

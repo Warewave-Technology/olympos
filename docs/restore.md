@@ -241,6 +241,15 @@ left out as a table function for any `f` other than `tuple` and `array`, `range(
 was left out from your schema after the restore. You select databases, not objects: a left-out object cannot be
 selected.
 
+![The restore dialog of a native backup: the check verified the manifests, and the URL table is left out](images/clickhouse-native-03-restore.png)
+
+**Definers.** A view or materialized view defined with `DEFINER = <user> SQL SECURITY DEFINER` is restored as it
+was, and `RESTORE` does not need that user on the target. Until a user of that name exists there, reading the view
+fails with `UNKNOWN_USER`, and so does every `INSERT` into the table a materialized view of that kind reads from.
+Create the user on the target (with `SELECT` on what the view reads and, for a materialized view, `INSERT` on its
+`TO` table), or re-create the view with `SQL SECURITY INVOKER` or another definer. A view without `DEFINER`
+needs nothing.
+
 **Atomic databases only.** The restore creates its databases as `Atomic`. A selected database that is another
 engine in the backup (`Replicated`, `Lazy`, …) is refused at the check, with the reason: leave it out of the
 selection.
@@ -250,6 +259,8 @@ reason, and the request page shows the list to the checker. When the restore sta
 again; if it would now leave out anything else, or give another reason (an upgrade of Olympos may reword one),
 the request fails before the target is touched (*the backup or Olympos's restore rules changed since the
 request was approved: …*): open a new request.
+
+![The request page shows the checker what the restore leaves out](images/clickhouse-native-04-approval.png)
 
 **What the server does**, after the steps every restore takes ([above](#what-the-server-does)):
 
@@ -287,9 +298,10 @@ restore ClickHouse.
 
 - A server that shuts down cleanly sends `KILL QUERY` for the `RESTORE` (through the agent tunnel, while it is
   still up) and records the request as failed (*interrupted: server stopped during the restore …*).
-- A server that crashes or is killed sends no `KILL`. The restore's credential lived only in its memory, so the
-  target's reads are refused (`403`) from then on, and its `RESTORE` fails, or retries until it does; to end it
-  at once, run `KILL QUERY WHERE query_id = 'olympos-restore-<request id>' SYNC` on the target. The request stays
+- A server that crashes or is killed sends no `KILL`. The restore's credential lived only in its memory. While
+  no server runs, the target's reads fail to connect and its `RESTORE` retries them; once a server runs again
+  they are refused (`403`) and the `RESTORE` fails. To end it at once, run
+  `KILL QUERY WHERE query_id = 'olympos-restore-<request id>' SYNC` on the target. The request stays
   *running* until a server finds it without progress for 5 minutes and marks it failed (*interrupted: the server
   running the restore stopped …*); the databases it created are listed and stay on the target.
 - Either way, the databases created are left in place. To clean up, drop them (`DROP DATABASE <db> SYNC`, which

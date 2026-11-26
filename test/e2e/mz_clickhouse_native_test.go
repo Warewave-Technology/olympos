@@ -52,7 +52,6 @@ var nativeGrants = []string{
 	"GRANT SELECT ON system.clusters TO backup",
 	"GRANT SELECT ON system.parts TO backup",
 	"GRANT SELECT ON system.processes TO backup",
-	"GRANT SELECT ON system.tables TO backup",
 }
 
 // nativeSchema is the source: every kind of object #62 names (codecs, a TTL,
@@ -470,7 +469,9 @@ spec:
 		t.Fatalf("source replicas before the restores: %q", r)
 	}
 
-	dstQ := func(t *testing.T, sql string) string { return chQuery(t, nativeRestoreCH, "restore", nativeRestorePW, sql) }
+	dstQ := func(t *testing.T, sql string) string {
+		return chQuery(t, nativeRestoreCH, "restore", nativeRestorePW, sql)
+	}
 	dropTarget := func(t *testing.T) { dstQ(t, "DROP DATABASE IF EXISTS m10 SYNC") }
 	target := restoreTargetID(t, admin, nativeRestoreCH)
 	restoreIn := func(r backup.Run, destID string) map[string]any {
@@ -540,7 +541,7 @@ spec:
 				if o == "events_definer" && !decided[o].Allowed {
 					continue
 				}
-				if got := dstQ(t, "SHOW CREATE m10." + o + " FORMAT TSVRaw"); got != want {
+				if got := dstQ(t, "SHOW CREATE m10."+o+" FORMAT TSVRaw"); got != want {
 					t.Errorf("m10.%s on the target:\n%s\nsource:\n%s", o, got, want)
 				}
 			}
