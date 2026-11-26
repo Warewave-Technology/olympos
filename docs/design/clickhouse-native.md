@@ -66,7 +66,7 @@ nothing was deleted, was rejected.
   |---|---|
   | `ListObjects` v1 (bucket level, `prefix`, `max-keys`, `marker`) | `prefix` lies inside a prefix the credential may read or write |
   | `PutObject`, `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload` | write credential, key inside its own run prefix |
-  | `GetObject` (`Range` supported, though not seen) | read: a credential that may read that prefix; a backup also reads back its own `.lock` and `.backup` |
+  | `GetObject` (no `Range` seen, spike §1; the base chain's source refuses one, as it checks each object's SHA-256 when the object ends) | read: a credential that may read that prefix; a backup also reads back its own `.lock` and `.backup` |
   | `DeleteObject <run-id>/.lock` | write credential of that run (memory only, see below) |
 
   Never allowed: other deletes, `DeleteObjects`, `CopyObject`, `UploadPartCopy`, `HeadBucket` and other bucket

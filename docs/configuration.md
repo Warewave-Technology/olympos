@@ -215,7 +215,9 @@ the runs of its chain that are tagged `daily` to `weekly`, objects and manifests
 week's incrementals are kept as long as the weekly tier, and the newest one, still daily, is never kept longer
 than its chain. This holds when the weekly retention is at least the daily retention plus 7 days (the Bicep
 module's defaults, 7 and 28 days, do; see [install.md](install.md) for the lifecycle rules). A copy whose
-chain cannot be re-tagged fails, and so does one whose chain holds a tier the server does not know.
+chain cannot be re-tagged fails, and so does one whose chain holds a tier the server does not know. The
+run's manifest and the run page show the tier the run was written with, not the tier its objects are
+re-tagged to.
 
 **Dry runs.** The dry run of a native job (*Review & test run* in the backup wizard) is a `BACKUP` with
 `structure_only = 1`: ClickHouse writes the databases' definitions and no data, through the endpoint to the

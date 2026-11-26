@@ -506,7 +506,10 @@ rename) → `.partial` removed; directories are 0750. Tags are stored next to ea
 *can* (the server user owns the files), so *Test destination* reports **can delete** with a warning.
 Protect backups on the storage side with read-only **snapshots** on their own schedule or **WORM**
 (NetApp SnapLock, PowerScale SmartLock, ZFS snapshots with holds), and expire files by tier with a
-storage-side job that reads the `.tags.json` sidecars or the manifests.
+storage-side job that reads the `.tags.json` sidecars. For native ClickHouse runs only the sidecars decide
+retention, not the `Tier` in the run's manifest: an incremental re-tags the runs of its chain (a daily run to
+weekly) in their sidecars, while the manifest keeps the tier the run was written with, so a job that follows
+the manifests would delete a chain's runs before the incrementals that need them.
 
 **Cleaning up incomplete runs.** A native ClickHouse backup writes each file, then its sidecar
 `<file>.tags.json` with `{"olympos-state":"incomplete","olympos-tier":"daily"}`, and rewrites the sidecars
