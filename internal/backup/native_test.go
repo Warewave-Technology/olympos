@@ -75,8 +75,10 @@ func nativeBackupOf(structureOnly bool) []nativeObject {
 type nativeCall struct {
 	run    backup.NativeRun
 	killed string // the stop reason it was KILLed for
-	// quota is the session's byte limit after run.Before (R39).
+	// quota is the session's byte limit after run.Before (R39), kill what
+	// run.Before said to end of the native backups running (R41).
 	quota int64
+	kill  []string
 }
 
 // nativeRegistry is the ingest registry of the test's endpoint, in which
@@ -144,17 +146,23 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		fakeOpts
 		// Repeat sends the first object again: "same" body or "other".
 		Repeat string `json:"native_repeat"`
-		// TargetBytes is what the databases hold on disk (run.Before).
-		TargetBytes int64 `json:"native_target_bytes"`
+		// TargetBytes is what the databases hold on disk, Running the runs
+		// whose native backups run on the target (run.Before).
+		TargetBytes int64    `json:"native_target_bytes"`
+		Running     []string `json:"native_running"`
 	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
 		return "", errors.New("clickhouse: BACKUP: S3 secret " + run.Secret + " refused")
 	}
 	if run.Before != nil {
-		if err := run.Before(ctx, backup.NativeTarget{Bytes: o.TargetBytes}); err != nil {
+		kill, err := run.Before(ctx, backup.NativeTarget{Bytes: o.TargetBytes, Running: o.Running})
+		if err != nil {
 			return "", err
 		}
+		nativeCalls.mu.Lock()
+		call.kill = kill
+		nativeCalls.mu.Unlock()
 	}
 	if s, _, ok := nativeRegistry.Lookup(run.AccessKey); ok {
 		nativeCalls.mu.Lock()
@@ -533,7 +541,8 @@ func TestNativeRunServerRestart(t *testing.T) {
 	if err := e.W.ReapStale(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if r := loadRun(t, db, before); r.Status != "failed" || !strings.HasPrefix(r.Error, "interrupted: the server restarted during the native backup") {
+	if r := loadRun(t, db, before); r.Status != "failed" || !strings.HasPrefix(r.Error, "interrupted: the server restarted during the native backup") ||
+		!strings.Contains(r.Error, "KILL QUERY WHERE query_id = 'olympos-backup-"+before.String()+"' SYNC") {
 		t.Fatalf("run before the restart: %+v", r)
 	}
 	if r := loadRun(t, db, after); r.Status != "running" {
@@ -812,5 +821,43 @@ func TestNativeRunDryRun(t *testing.T) {
 	claimAndRun(t, e.W, full)
 	if call := nativeCallOf(t, full); call.run.StructureOnly || call.quota != 1<<30 {
 		t.Fatalf("after a dry run: structure only %v, quota %d", call.run.StructureOnly, call.quota)
+	}
+}
+
+// R41: before its BACKUP a native run ends the native backups on the target
+// whose runs are over (a server that crashed, an agent lost mid-run): only
+// those. The BACKUP of a run still running, another job's on the same
+// target, is never ended, nor one of a run this server does not know.
+func TestNativeRunEndsOrphans(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedNative(t, db)
+	// Another job on the same target, whose runs these are.
+	var other uuid.UUID
+	if err := db.QueryRow(ctx, `INSERT INTO backup_jobs (target_id, destination_id, destination_group_id, cron, timezone, engine_options)
+		SELECT target_id, destination_id, destination_group_id, cron, timezone, engine_options FROM backup_jobs WHERE id = $1 RETURNING id`,
+		e.Job).Scan(&other); err != nil {
+		t.Fatal(err)
+	}
+	run := func(status string) uuid.UUID {
+		var id uuid.UUID
+		if err := db.QueryRow(ctx, `INSERT INTO backup_runs (job_id, trigger, status, started_at) VALUES ($1, 'manual', $2, now()) RETURNING id`,
+			other, status).Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	live, failed, done := run("running"), run("failed"), run("succeeded")
+	e.W.PerCluster = 2 // the live run holds one of the cluster's slots
+	unknown := uuid.New()
+	setOptions(t, db, e.Job, fmt.Sprintf(`{"method":"native","native_running":["%s","%s","%s","%s"]}`, live, failed, done, unknown))
+	r := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, r)
+	call := nativeCallOf(t, r)
+	if strings.Join(call.kill, ",") != failed.String()+","+done.String() {
+		t.Fatalf("ended %v; want only the finished runs %s and %s", call.kill, failed, done)
+	}
+	if got := loadRun(t, db, r); got.Status != "succeeded" {
+		t.Fatalf("run: %+v", got)
 	}
 }

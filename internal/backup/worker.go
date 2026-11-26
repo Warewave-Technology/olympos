@@ -260,9 +260,12 @@ func skippedRepair(repair, enabled bool, paused string) (o outcome, ok bool) {
 
 // errNativeRestart fails a native run whose ingest credential start-up
 // recovery revoked: its server restarted, and the credential's secret,
-// which ClickHouse writes with, was lost with the process.
-const errNativeRestart = "interrupted: the server restarted during the native backup; its ingest credential is revoked, " +
-	"and the objects it wrote stay incomplete"
+// which ClickHouse writes with, was lost with the process. Its BACKUP may
+// still run on the target (R41).
+func errNativeRestart(runID uuid.UUID) string {
+	return "interrupted: the server restarted during the native backup; its ingest credential is revoked, " +
+		"and the objects it wrote stay incomplete; " + nativeOrphanHint(runID)
+}
 
 // ReapStale fails running runs whose worker stopped heartbeating, and at
 // once a native run whose ingest credential start-up recovery revoked
@@ -303,8 +306,11 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 		rows.Close()
 		for _, r := range ids {
 			o := outcome{status: "failed", err: "interrupted: the worker running this backup stopped", native: r.native}
-			if r.restart {
-				o = outcome{status: "failed", err: errNativeRestart, native: true}
+			switch {
+			case r.restart:
+				o = outcome{status: "failed", err: errNativeRestart(r.id), native: true}
+			case r.native:
+				o.err += "; " + nativeOrphanHint(r.id)
 			}
 			f, err := finishRunTx(ctx, tx, r.id, o)
 			if err != nil {

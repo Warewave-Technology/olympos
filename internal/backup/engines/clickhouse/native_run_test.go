@@ -341,8 +341,13 @@ func TestOrphanResult(t *testing.T) {
 		{statusCreating, nil, true, `it is "CREATING_BACKUP"`},
 		{"", nil, true, "not in system.backups"},
 	} {
-		err := orphanResult(why, tc.status, tc.err)
+		err := orphanResult(why, nrRunID, tc.status, tc.err)
 		if errors.Is(err, ErrNativeOrphan) != tc.orphan || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), why) {
+			t.Errorf("status %q, error %v: %v", tc.status, tc.err, err)
+		}
+		// R41: an orphan's error names its query and the KILL that ends it.
+		kill := "KILL QUERY WHERE query_id = 'olympos-backup-" + nrRunID + "' SYNC"
+		if strings.Contains(err.Error(), kill) != tc.orphan {
 			t.Errorf("status %q, error %v: %v", tc.status, tc.err, err)
 		}
 	}
@@ -367,7 +372,7 @@ func TestNativeEngine(t *testing.T) {
 	}
 
 	// The worker recognises a lost backup by backup.ErrNativeOrphan.
-	err := orphanResult("lost", statusCreating, nil)
+	err := orphanResult("lost", nrRunID, statusCreating, nil)
 	if !errors.Is(err, ErrNativeOrphan) || !errors.Is(err, backup.ErrNativeOrphan) ||
 		!strings.HasPrefix(err.Error(), "clickhouse: the native backup may still be running on the target") {
 		t.Fatalf("orphan error: %v", err)
@@ -396,12 +401,15 @@ func TestNativeEngine(t *testing.T) {
 // nativeTargetState reads what the worker needs before the BACKUP: the
 // bytes on disk of the run's databases' active parts (R39).
 func TestNativeTargetState(t *testing.T) {
-	q := &fakeQuerier{answers: map[string][][]string{"system.parts": {{"214748364800"}}}}
-	got, err := nativeTargetState(context.Background(), q, []string{"db1", "web-shop"})
-	if err != nil || got.Bytes != 200<<30 {
+	q := &fakeQuerier{answers: map[string][][]string{"system.parts": {{"214748364800"}},
+		// R41: the native backups that run on the server, by their query id.
+		"system.processes": {{"olympos-backup-" + nrBaseID}, {"olympos-backup-" + nrRunID}, {"olympos-backup-NOT-A-RUN"}}}}
+	got, err := nativeTargetState(context.Background(), q, []string{"db1", "web-shop"}, nrRunID)
+	if err != nil || got.Bytes != 200<<30 || !slices.Equal(got.Running, []string{nrBaseID}) {
 		t.Fatalf("state %+v, %v", got, err)
 	}
-	if len(q.asked) != 1 || !strings.Contains(q.asked[0], "active") || !strings.Contains(q.asked[0], "database IN ('db1', 'web-shop')") {
+	if len(q.asked) != 2 || !strings.Contains(q.asked[0], "active") || !strings.Contains(q.asked[0], "database IN ('db1', 'web-shop')") ||
+		!strings.Contains(q.asked[1], "startsWith(query_id, 'olympos-backup-')") {
 		t.Fatalf("asked %q", q.asked)
 	}
 	for name, q := range map[string]*fakeQuerier{
@@ -409,8 +417,14 @@ func TestNativeTargetState(t *testing.T) {
 		"no row":     {answers: map[string][][]string{}},
 		"refused":    {fail: map[string]error{"system.parts": errors.New("ACCESS_DENIED")}},
 	} {
-		if _, err := nativeTargetState(context.Background(), q, []string{"db1"}); err == nil || !strings.Contains(err.Error(), "size of the databases") {
+		if _, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID); err == nil || !strings.Contains(err.Error(), "size of the databases") {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+	// Ending orphans is a clean-up: a process list that cannot be read does
+	// not hold up the backup.
+	q = &fakeQuerier{answers: map[string][][]string{"system.parts": {{"1"}}}, fail: map[string]error{"system.processes": errors.New("ACCESS_DENIED")}}
+	if got, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID); err != nil || got.Bytes != 1 || len(got.Running) != 0 {
+		t.Errorf("processes refused: %+v %v", got, err)
 	}
 }

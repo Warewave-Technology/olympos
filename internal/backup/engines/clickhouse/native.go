@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -121,8 +122,10 @@ type NativeRun struct {
 	Stop <-chan string
 	// Before, when set, is called once the target is checked and before the
 	// BACKUP is sent, with what nativeTargetState read on the run's
-	// connection; an error ends the run there (backup.NativeRun.Before).
-	Before func(ctx context.Context, t backup.NativeTarget) error
+	// connection. The backups of the runs it returns, among t.Running, are
+	// ended first (endOrphans); an error ends the run there
+	// (backup.NativeRun.Before).
+	Before func(ctx context.Context, t backup.NativeTarget) (end []string, err error)
 }
 
 // NativeBase is the backup an incremental is taken on.
@@ -455,13 +458,15 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 		return version, err
 	}
 	if nr.Before != nil {
-		t, err := nativeTargetState(ctx, s, dbs)
+		t, err := nativeTargetState(ctx, s, dbs, nr.RunID)
 		if err != nil {
 			return version, err
 		}
-		if err := nr.Before(ctx, t); err != nil {
+		end, err := nr.Before(ctx, t)
+		if err != nil {
 			return version, err
 		}
+		s.endOrphans(nr.RunID, t.Running, end)
 	}
 	again := func(ctx context.Context) (*session, error) { return connect(ctx, ec, opts) }
 	return version, s.runBackup(ctx, nr, again)
@@ -469,8 +474,12 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 
 // nativeTargetState reads what the worker decides on before the BACKUP
 // (backup.NativeTarget): the bytes on disk of the active parts of the run's
-// databases, which a BACKUP writes about as they are.
-func nativeTargetState(ctx context.Context, c querier, databases []string) (backup.NativeTarget, error) {
+// databases, which a BACKUP writes about as they are, and the native
+// backups of other runs that run on this server (system.processes, where
+// an async BACKUP stays under its query id until it ends: seen on 24.8 and
+// 25.8). A process list that cannot be read is logged and taken as empty:
+// ending orphans is a clean-up and does not hold up the backup.
+func nativeTargetState(ctx context.Context, c querier, databases []string, self string) (backup.NativeTarget, error) {
 	quoted := make([]string, len(databases))
 	for i, db := range databases {
 		quoted[i] = quoteString(db)
@@ -487,7 +496,45 @@ func nativeTargetState(ctx context.Context, c querier, databases []string) (back
 	if err != nil || n < 0 {
 		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %q is not a size", clip(rows[0][0]))
 	}
-	return backup.NativeTarget{Bytes: n}, nil
+	t := backup.NativeTarget{Bytes: n}
+	rows, err = c.queryStrings(ctx, "SELECT query_id FROM system.processes WHERE startsWith(query_id, "+
+		quoteString(nativeQueryID(""))+") ORDER BY query_id")
+	if err != nil {
+		slog.Default().Warn("clickhouse: cannot list the native backups that run on the server; none is ended",
+			"run", self, "err", err)
+		return t, nil
+	}
+	for _, r := range rows {
+		if id := strings.TrimPrefix(r[0], nativeQueryID("")); isRunID(id) && id != self && !slices.Contains(t.Running, id) {
+			t.Running = append(t.Running, id)
+		}
+	}
+	return t, nil
+}
+
+// endOrphans ends, with KILL QUERY … SYNC on the run's connection, the
+// native backups of the runs in end that nativeTargetState found running
+// (running): backups of runs that are over, which nothing else would end
+// (R41). Each is logged; one that does not end leaves the run to go on.
+func (s *session) endOrphans(self string, running, end []string) {
+	for _, id := range end {
+		if id == self || !slices.Contains(running, id) {
+			continue
+		}
+		log := slog.Default().With("run", self, "orphan_run", id)
+		ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
+		status, err := s.killOn(ctx, id, nativeQueryID(id))
+		cancel()
+		switch {
+		case err != nil:
+			log.Error("clickhouse: KILL QUERY of a left-over native backup failed", "kill", backup.NativeKillQuery(id),
+				"err", err)
+		case status == statusCreating:
+			log.Error("clickhouse: a left-over native backup still runs after KILL QUERY", "kill", backup.NativeKillQuery(id))
+		default:
+			log.Warn("clickhouse: ended a left-over native backup", "status", statusText(status))
+		}
+	}
 }
 
 // nativeDatabases is the run's databases, sorted: the ones named, each of
@@ -531,7 +578,7 @@ func compactStrings(sorted []string) []string {
 }
 
 // nativeQueryID is the query id of a run's BACKUP, which KILL names.
-func nativeQueryID(runID string) string { return "olympos-backup-" + runID }
+func nativeQueryID(runID string) string { return backup.NativeQueryID(runID) }
 
 // redial opens a new connection to the target, for the KILL of a backup
 // whose own connection was lost.
@@ -609,7 +656,7 @@ func (s *session) killBackup(log *slog.Logger, again redial, nr NativeRun, query
 	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
 	defer cancel()
 	log.Warn("clickhouse: ending the native backup with KILL QUERY", "query_id", queryID, "reason", why)
-	status, err := s.killOn(ctx, nr, queryID)
+	status, err := s.killOn(ctx, nr.RunID, queryID)
 	switch {
 	case status == statusFailed || status == statusCancelled:
 		log.Warn("clickhouse: native backup ended by KILL QUERY", "status", status)
@@ -635,14 +682,14 @@ func orphanKill(log *slog.Logger, again redial, nr NativeRun, queryID, why strin
 	log.Warn("clickhouse: lost the native backup; KILL QUERY on a new connection", "query_id", queryID, "reason", why)
 	s, err := again(ctx)
 	if err != nil {
-		err = orphanResult(why, "", fmt.Errorf("a new connection: %s", maskSecret(err.Error(), nr.Secret)))
+		err = orphanResult(why, nr.RunID, "", fmt.Errorf("a new connection: %s", maskSecret(err.Error(), nr.Secret)))
 	} else {
 		defer s.close()
-		status, kerr := s.killOn(ctx, nr, queryID)
+		status, kerr := s.killOn(ctx, nr.RunID, queryID)
 		if kerr != nil {
 			kerr = errors.New(maskSecret(kerr.Error(), nr.Secret))
 		}
-		err = orphanResult(why, status, kerr)
+		err = orphanResult(why, nr.RunID, status, kerr)
 	}
 	if errors.Is(err, ErrNativeOrphan) {
 		log.Error("clickhouse: the native backup may still run on the server", "query_id", queryID, "err", err)
@@ -652,16 +699,18 @@ func orphanKill(log *slog.Logger, again redial, nr NativeRun, queryID, why strin
 
 // orphanResult is orphanKill's error from what the KILL on the new
 // connection left: the last status it read ("" when none) and its error.
-func orphanResult(why, status string, killErr error) error {
+// An orphan's error names the statement that ends it (R41).
+func orphanResult(why, runID, status string, killErr error) error {
+	end := "; the next native run on this target ends it, or run " + backup.NativeKillQuery(runID) + " there"
 	switch {
 	case status == statusFailed || status == statusCancelled:
 		return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY on a new connection made it %s", why, status)
 	case status == statusCreated:
 		return fmt.Errorf("clickhouse: native backup ended (%s), although it was created", why)
 	case killErr != nil:
-		return fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v", ErrNativeOrphan, why, killErr)
+		return fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v%s", ErrNativeOrphan, why, killErr, end)
 	default:
-		return fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s", ErrNativeOrphan, why, statusText(status))
+		return fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s%s", ErrNativeOrphan, why, statusText(status), end)
 	}
 }
 
@@ -677,12 +726,12 @@ func statusText(status string) string {
 // BACKUP_CREATED, ctx ends, or the row is missing (the server does not know
 // the backup). It returns the last status read and the error that stopped
 // it, if any.
-func (s *session) killOn(ctx context.Context, nr NativeRun, queryID string) (string, error) {
+func (s *session) killOn(ctx context.Context, runID, queryID string) (string, error) {
 	if err := s.nativeExec(ctx, "KILL QUERY WHERE query_id = "+quoteString(queryID)+" SYNC", ""); err != nil {
 		return "", err
 	}
 	for {
-		status, _, err := s.backupStatus(ctx, nr.RunID)
+		status, _, err := s.backupStatus(ctx, runID)
 		if err != nil {
 			return "", err
 		}

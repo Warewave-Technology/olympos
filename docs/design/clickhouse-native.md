@@ -189,6 +189,13 @@ the certificate, the credential, the signed manifest and the tags in seconds, wh
 manifest records the setting and has no part rows. It is not the last full of the byte limit (§9), and not a
 base (§7).
 
+**Left-over backups (R41).** A server crash or a lost agent can leave a run's `BACKUP` running on the target,
+retrying refused uploads, with nothing to end it. Before its `BACKUP` every run reads the native backups running
+on the server it reached (`system.processes`, query ids `olympos-backup-<run-id>`), and the worker ends with
+`KILL QUERY … SYNC`, on the run's connection, those whose runs are not `running` in the database. The backup of
+a run still running (another job on the same target) is never ended, nor one of a run the database does not
+know. The error of a run that may have left one, and the restart error, name the `KILL QUERY` to run by hand.
+
 ### 5. The signed manifest
 
 - **Format.** `olympos.clickhouse.native/v1`, inside the existing sidecar's `Details`:

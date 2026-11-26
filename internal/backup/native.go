@@ -85,9 +85,10 @@ type NativeRun struct {
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
 	// Before, when set, is called once the target is checked and before the
-	// BACKUP is sent, with what the engine read on the target. An error ends
-	// the run there, with no backup started.
-	Before func(ctx context.Context, t NativeTarget) error
+	// BACKUP is sent, with what the engine read on the target. It returns
+	// the runs among t.Running whose backups the engine ends first (R41). An
+	// error ends the run there, with no backup started.
+	Before func(ctx context.Context, t NativeTarget) (end []string, err error)
 }
 
 // NativeTarget is what the engine reads on the target before its BACKUP.
@@ -95,6 +96,26 @@ type NativeTarget struct {
 	// Bytes is what the run's databases hold on disk: the bytes of their
 	// active parts (R39).
 	Bytes int64
+	// Running are the runs, other than this one, whose native backups run
+	// on the target (by their query id, NativeQueryID).
+	Running []string
+}
+
+// NativeQueryID is the query id of a native run's BACKUP on the target
+// (ClickHouse, the engine that takes native backups).
+func NativeQueryID(runID string) string { return "olympos-backup-" + runID }
+
+// NativeKillQuery is the statement that ends a native run's BACKUP on the
+// target, for an operator to run when Olympos could not.
+func NativeKillQuery(runID string) string {
+	return "KILL QUERY WHERE query_id = '" + NativeQueryID(runID) + "' SYNC"
+}
+
+// nativeOrphanHint is how a native run's BACKUP that may still run on the
+// target ends.
+func nativeOrphanHint(runID uuid.UUID) string {
+	return "if its BACKUP still runs on the target, the next native run on that target ends it, or run " +
+		NativeKillQuery(runID.String()) + " there"
 }
 
 // String and LogValue keep the secret out of every print and log of a run.
@@ -440,12 +461,12 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	scrub := func(s string) string { return n.scrub(strings.ReplaceAll(s, secret, "[HIDDEN]")) }
 	stopped := &stopForward{}
 	done := stopped.run(ctx, sess)
-	before := func(ctx context.Context, t NativeTarget) error {
+	before := func(ctx context.Context, t NativeTarget) ([]string, error) {
 		quota = nativeQuota(lastFull, t.Bytes, cfg.MaxRunBytes)
 		sess.SetMaxBytes(quota)
 		w.Log.Info("native backup: byte limit", "run_id", r.id, "max_bytes", quota, "databases_bytes", t.Bytes,
 			"last_full_bytes", lastFull, "configured", cfg.MaxRunBytes > 0)
-		return nil
+		return w.nativeOrphans(ctx, r.id, t.Running), nil
 	}
 	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: nativeURL(cfg.URL, runID), AccessKey: cred.AccessKey,
 		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Stop: stopped.ch, Before: before})
@@ -468,7 +489,8 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		}
 		if errors.Is(runErr, ErrNativeOrphan) {
 			w.Log.Error("native backup: the BACKUP may still be running on the target, and its revoked credential does not end "+
-				"an upload in flight; end it with KILL QUERY", "run_id", r.id, "job_id", job.ID, "err", msg)
+				"an upload in flight; the next native run on that target ends it", "run_id", r.id, "job_id", job.ID,
+				"kill", NativeKillQuery(runID), "err", msg)
 		}
 		if reason == ingest.ReasonDestination {
 			// No destination took an object: each copy failed on its own.
@@ -526,6 +548,59 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	}
 	wg.Wait()
 	return finish(total, nil), rr
+}
+
+// nativeOrphans is which of the native backups running on the target
+// (NativeTarget.Running) run self ends before its own (R41): those whose
+// runs are over in this server's database, left behind by a server that
+// crashed or an agent lost mid-run. The backup of a run that is running,
+// another job's on the same target, is never ended, nor one of a run this
+// server does not know (another installation's). When the runs cannot be
+// read, none is ended.
+func (w *Worker) nativeOrphans(ctx context.Context, self uuid.UUID, running []string) []string {
+	var ids []uuid.UUID
+	for _, s := range running {
+		if id, err := uuid.Parse(s); err == nil && id.String() == s && id != self {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	status := map[uuid.UUID]string{}
+	rows, err := w.DB.Query(ctx, `SELECT id, status FROM backup_runs WHERE id = ANY($1)`, ids)
+	if err == nil {
+		for rows.Next() {
+			var id uuid.UUID
+			var st string
+			if err = rows.Scan(&id, &st); err != nil {
+				break
+			}
+			status[id] = st
+		}
+		rows.Close()
+		if err == nil {
+			err = rows.Err()
+		}
+	}
+	if err != nil {
+		w.Log.Warn("native backup: cannot tell which native backups on the target are left over; none is ended", "run_id", self, "err", err)
+		return nil
+	}
+	var end []string
+	for _, id := range ids {
+		switch st, ok := status[id]; {
+		case !ok:
+			w.Log.Warn("native backup: a native backup of a run this server does not know runs on the target; left alone",
+				"run_id", self, "other_run_id", id, "kill", NativeKillQuery(id.String()))
+		case st == "running":
+		default:
+			w.Log.Warn("native backup: ending the native backup of a run that is over", "run_id", self, "orphan_run_id", id,
+				"orphan_status", st)
+			end = append(end, id.String())
+		}
+	}
+	return end
 }
 
 // scrubbedError is err with its message scrubbed.

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -115,7 +116,7 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		r := in.open(t, st, nil)
 		fullID = r.id
 		var target backup.NativeTarget
-		r.before = func(_ context.Context, nt backup.NativeTarget) error { target = nt; return nil }
+		r.before = func(_ context.Context, nt backup.NativeTarget) ([]string, error) { target = nt; return nil, nil }
 		v, err := runNative(t, chc, r, nil, "spike", "big")
 		if err != nil {
 			t.Fatalf("RunNative: %v", err)
@@ -333,6 +334,60 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		in.checkNoSecret(t, r, engineLogs)
 	})
 
+	// R41: before its BACKUP a run ends the native backups of runs that are
+	// over, and only those: the one Before names is KILLed on the run's
+	// connection, the other, a run still running, goes on.
+	t.Run("orphans", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		s, err := connect(ctx, chc.ec(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		in := newIngest(t, db)
+		start := func() *nativeTestRun {
+			slow := newDirStore(t, 2<<20)
+			o := in.open(t, slow, nil)
+			nr := NativeRun{URL: o.url, AccessKey: o.cred.AccessKey, Secret: o.cred.Secret, RunID: o.id, Databases: []string{"big"}}
+			t.Cleanup(func() {
+				_, _ = dockerT(t, time.Minute, "exec", chc.name, "clickhouse-client", "-u", nativeCHUser, "--password", nativeCHPassword,
+					"-q", backup.NativeKillQuery(o.id))
+			})
+			if err := s.nativeExec(ctx, backupStatement(nr), nativeQueryID(o.id), nativeBackupSettings...); err != nil {
+				t.Fatalf("BACKUP: %s", maskSecret(err.Error(), nr.Secret))
+			}
+			select {
+			case <-slow.first:
+			case <-time.After(2 * time.Minute):
+				t.Fatal("the backup wrote nothing")
+			}
+			return o
+		}
+		over, live := start(), start()
+		r := in.open(t, newDirStore(t, 0), nil)
+		var seen []string
+		r.before = func(_ context.Context, nt backup.NativeTarget) ([]string, error) {
+			seen = nt.Running
+			return []string{over.id}, nil
+		}
+		if _, err := runNative(t, chc, r, nil, "spike"); err != nil {
+			t.Fatalf("RunNative: %v", err)
+		}
+		chc.wantStatus(t, r.id, statusCreated)
+		if !slices.Contains(seen, over.id) || !slices.Contains(seen, live.id) || slices.Contains(seen, r.id) {
+			t.Fatalf("running native backups %v; want %s and %s", seen, over.id, live.id)
+		}
+		if st := chc.status(t, over.id); st != statusFailed && st != statusCancelled {
+			t.Fatalf("the left-over backup is %s", st)
+		}
+		if st := chc.status(t, live.id); st != statusCreating {
+			t.Fatalf("the running run's backup is %s", st)
+		}
+		t.Logf("seen running %v; ended %s (%s); left %s (%s)", seen, over.id, chc.status(t, over.id), live.id, chc.status(t, live.id))
+		r.s.Revoke("run ended")
+	})
+
 	// OLYMPOS_NATIVE_ORPHAN_PROBE=1: does a backup whose credential is
 	// revoked, with no KILL, end on its own (task 9 round 3)? Watched for
 	// 3 min, then KILLed.
@@ -395,7 +450,7 @@ CREATE TABLE dist.all AS dist.local ENGINE = Distributed(default, dist, local);`
 			t.Fatalf("a missing database: %v", err)
 		}
 		// An error from Before ends the run before its BACKUP.
-		r.before = func(context.Context, backup.NativeTarget) error { return errors.New("no, thanks") }
+		r.before = func(context.Context, backup.NativeTarget) ([]string, error) { return nil, errors.New("no, thanks") }
 		if _, err := runNative(t, chc, r, nil, "spike"); err == nil || err.Error() != "no, thanks" {
 			t.Fatalf("Before refused: %v", err)
 		}
@@ -605,7 +660,7 @@ type nativeTestRun struct {
 	s       *ingest.Session
 	cred    ingest.Credential
 	// before is the run's NativeRun.Before, structureOnly its StructureOnly.
-	before        func(context.Context, backup.NativeTarget) error
+	before        func(context.Context, backup.NativeTarget) ([]string, error)
 	structureOnly bool
 }
 

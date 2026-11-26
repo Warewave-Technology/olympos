@@ -196,6 +196,15 @@ every native job), or back to `0` for the automatic limit.
 destinations. It checks egress, the endpoint's certificate, the run's credential, the signed manifest and the
 tags in seconds, however large the databases are; it does not show how long the data takes to upload.
 
+**Backups left running.** When the server stops in the middle of a native run, or loses the agent, the
+`BACKUP` can go on running on the ClickHouse server, retrying uploads the endpoint refuses. Before its own
+`BACKUP`, every native run lists the native backups running on that ClickHouse server (`system.processes`,
+query ids `olympos-backup-<run-id>`) and ends with `KILL QUERY` those whose runs are over; it never ends the
+backup of a run that is still running, such as another job's on the same target, nor one of a run this server
+does not know. The failed run's error names the statement to run by hand when you do not want to wait:
+`KILL QUERY WHERE query_id = 'olympos-backup-<run-id>' SYNC`. A Service with several ClickHouse pods sends a
+run to one of them, so a backup left on another pod waits for a run that lands there.
+
 ### `targetTLS`
 
 How the server verifies the TLS certificates of backup and Vault targets, end to end through the tunnel.
