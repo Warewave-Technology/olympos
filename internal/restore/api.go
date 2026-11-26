@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -675,8 +676,29 @@ func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields
 		return err
 	default:
 		ev.inBackup = nonNil(nr.Databases)
+		if msg := refusedDatabases(nr.RefusedDatabases); msg != "" {
+			fields["databases"] = msg
+		}
 	}
 	return nil
+}
+
+// refusedDatabases is the field error for the selected databases a native
+// restore cannot create ("" when there are none), in name order.
+func refusedDatabases(refused map[string]string) string {
+	if len(refused) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(refused))
+	for n := range refused {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	parts := make([]string, len(names))
+	for i, n := range names {
+		parts[i] = n + ": " + refused[n]
+	}
+	return "a native restore cannot create these databases (leave them out): " + strings.Join(parts, "; ")
 }
 
 func nonNil(s []string) []string {

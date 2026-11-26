@@ -186,7 +186,10 @@ type env struct {
 	api    *restore.API
 	dialer *fakeDialer
 	blobs  *fakeBlobs
-	now    time.Time
+	// dbEngines are the database engines a native fixture run writes
+	// (nativeRun; Atomic when not set).
+	dbEngines map[string]string
+	now       time.Time
 
 	prod, stage uuid.UUID // clusters: the backup's, the new target's
 	dest        uuid.UUID

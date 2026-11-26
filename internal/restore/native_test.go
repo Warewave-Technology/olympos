@@ -68,6 +68,13 @@ func (e *env) nativeRun(target string, objs []nativeObj) (uuid.UUID, string) {
 	put(".backup", []byte("<config/>"))
 	at := map[string]int{}
 	for _, o := range objs {
+		if _, ok := at[o.db]; !ok {
+			engine := e.dbEngines[o.db]
+			if engine == "" {
+				engine = "Atomic"
+			}
+			put("metadata/"+o.db+".sql", []byte("CREATE DATABASE "+o.db+" ENGINE = "+engine))
+		}
 		key := put("metadata/"+o.db+"/"+o.name+".sql", []byte(o.ddl))
 		i, ok := at[o.db]
 		if !ok {
@@ -191,6 +198,29 @@ func TestNativeCheckDoesNotVerify(t *testing.T) {
 		t.Fatalf("open: %d %+v", code, eb)
 	}
 	e.noCanary()
+}
+
+// TestNativeCheckDatabaseEngine (R52): a selected database whose engine in
+// the backup is not Atomic is refused at the check, with the reason; left
+// unselected, the others restore.
+func TestNativeCheckDatabaseEngine(t *testing.T) {
+	e := newEnv(t)
+	e.dbEngines = map[string]string{"stats": "Lazy(60)"}
+	src := e.target(e.prod, "events-ch", "clickhouse", "")
+	tgt := e.target(e.stage, "events-ch-new", "clickhouse", "")
+	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
+	run, _ := e.nativeRun(src, nativeSchema)
+	in := map[string]any{"run_id": run, "target_id": tgt, "credential": map[string]any{"source": "stored", "username": "default", "password": canaryPassword}}
+	var res restore.CheckResult
+	want := "a native restore cannot create these databases (leave them out): stats: it has the Lazy database engine; a native restore " +
+		"creates Atomic databases only, and RESTORE refuses a database of another engine (restore it with the logical method)"
+	if code := e.do(maker, "POST", "/api/v1/restores/check", in, &res); code != http.StatusOK || res.OK || res.Fields["databases"] != want {
+		t.Fatalf("check: %d %+v", code, res)
+	}
+	in["databases"] = []string{"shop"}
+	if code := e.do(maker, "POST", "/api/v1/restores/check", in, &res); code != http.StatusOK || !res.OK {
+		t.Fatalf("check shop: %d %+v", code, res)
+	}
 }
 
 // TestNativeCheckIngestOff: without the ingest endpoint a native copy cannot
@@ -441,8 +471,8 @@ func TestNativeExecuteObjectChanged(t *testing.T) {
 	x.claim(id)
 	x.ex.Execute(context.Background(), id)
 	s := x.stored(id)
-	want := "the restore failed: the backup's object " + key + " does not match its signed manifest; its read was aborted " +
-		"(clickhouse: native restore RESTORE_FAILED: S3 error); databases created and left in place: shop"
+	want := "the restore failed: the backup's object " + key + " does not match its signed manifest; its read was aborted; " +
+		"databases created and left in place: shop"
 	if s.Status != restore.StatusFailed || s.Error != want {
 		t.Fatalf("request: %+v", s)
 	}

@@ -2155,7 +2155,7 @@ components:
         server_version: {type: string}
         native:
           description: >-
-            A native ClickHouse request: what the check decided when the request was opened (R50), shown to the
+            A native ClickHouse request: what the check decided when the request was opened, shown to the
             checker. When the restore starts, the backup is checked again; if it then leaves out anything else, the
             request fails with "the backup changed since the request was approved: …" before the target is written
             to. Absent for other copies.

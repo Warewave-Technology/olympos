@@ -77,10 +77,14 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 	var run backup.NativeRestoreRun
 	var source *backup.NativeRestoreSource
 	var prefixes []string
-	changed := false
+	changed, refused := false, ""
 	err = backup.WithNativeRestore(ctx, x.DB, rd, checker, *cfg, src, j.databases, x.Log, func(n *backup.NativeRestore) error {
 		if n.Source() == nil {
 			return nil // not verified: WithNativeRestore returns why
+		}
+		if msg := refusedDatabases(n.RefusedDatabases); msg != "" {
+			refused = msg
+			return nil
 		}
 		if !sameNative(nativeOptions(j.databases, n.Objects), j.opts.Native) {
 			changed = true
@@ -88,7 +92,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 		}
 		s, err := n.RestoreSource()
 		if err != nil {
-			return fmt.Errorf("%w: %v", backup.ErrNativeNotVerified, err)
+			return err // ErrNativeChain: why the chain is not served
 		}
 		source = s
 		run.Decisions, run.DDL, run.Rows = n.Objects, n.DDL, n.Rows
@@ -108,6 +112,8 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 		return fail("the restore cannot start: " + backup.ErrNativeNotVerified.Error() + "; nothing was written to the target")
 	case err != nil:
 		return internal("check the native backup", err)
+	case refused != "":
+		return fail("the restore cannot start: " + refused + "; nothing was written to the target")
 	case changed:
 		x.Log.Warn("restore: a native request does not decide what it was approved with", "restore_id", j.id)
 		return fail(errNativeChanged)
@@ -158,10 +164,9 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 	if key := source.Failed(); key != "" {
 		// The endpoint aborted the GET of an object that is not the one
 		// signed: that, not what the target made of it, is why.
+		// The target's own error is not added: what it says is about the
+		// aborted read, and it may quote the backup's DDL (R52).
 		failed = fmt.Sprintf("the restore failed: the backup's object %s does not match its signed manifest; its read was aborted", key)
-		if err != nil {
-			failed += " (" + err.Error() + ")"
-		}
 	}
 	return x.restored(res, out, err, tr, failed)
 }
