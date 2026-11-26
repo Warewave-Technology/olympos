@@ -271,11 +271,11 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 			t.Fatal(err)
 		}
 		defer sess.close()
-		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan); err != nil {
+		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan, false); err != nil {
 			t.Fatalf("the restored objects: %v", err)
 		}
 		dst.query(t, "CREATE TABLE spike.surprise (x UInt8) ENGINE = Log")
-		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan); err == nil || !strings.Contains(err.Error(), "spike.surprise is not an object the restore was to create") {
+		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan, false); err == nil || !strings.Contains(err.Error(), "spike.surprise is not an object the restore was to create") {
 			t.Fatalf("an object no one decided: %v", err)
 		}
 		dst.query(t, "DROP TABLE spike.surprise SYNC")

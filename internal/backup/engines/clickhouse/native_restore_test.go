@@ -522,7 +522,7 @@ func TestRestoredObjects(t *testing.T) {
 	}
 	check := func(name string, found []restoredObject, wantDrop []string, want ...string) {
 		t.Helper()
-		problems, drop := p.restoredObjects(found)
+		problems, drop := p.restoredObjects(found, false)
 		var dropped []string
 		for _, o := range drop {
 			dropped = append(dropped, o.name)
@@ -588,6 +588,13 @@ func TestRestoredObjects(t *testing.T) {
 		"CREATE TABLE shop.`" + inner.name + "` (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = 's3'"}),
 		[]string{"mv"}, "shop..inner_id."+mvUUID+", the inner table of shop.mv, is not what was approved (the allowlist refuses its definition on the target: "+
 			"its settings put it on the disk s3); shop.mv was dropped")
+	// After a RESTORE that failed: what it did not get to, or what someone
+	// else made, is not named; what it made other than approved is dropped.
+	problems, drop := p.restoredObjects([]restoredObject{good[3], {"shop", "surprise", "", "Log", ""},
+		{"shop", "v", "", "View", "CREATE VIEW shop.v (`name` String) AS SELECT name FROM system.users"}}, true)
+	if len(problems) != 1 || !strings.Contains(problems[0], "shop.v is not what was approved") || len(drop) != 1 || drop[0].name != "v" {
+		t.Errorf("after a failed RESTORE: %q, drop %v", problems, drop)
+	}
 	check("an inner table on another engine", with(restoredObject{"shop", inner.name, inner.uuid, "Log", "CREATE TABLE shop.`" + inner.name + "` (`id` UInt64) ENGINE = Log"}),
 		[]string{"mv"}, "it has the Log engine, not its view's MergeTree")
 }

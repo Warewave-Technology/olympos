@@ -579,12 +579,21 @@ func (Engine) RestoreNative(ctx context.Context, rc backup.RestoreContext, nr Na
 	}
 	again := func(ctx context.Context) (*session, error) { return connect(ctx, rc.EngineContext, opts) }
 	if err := s.runRestore(ctx, log, plan, nr, rc.RequestID, again); err != nil {
+		// A RESTORE that failed or was ended leaves what it created (R52):
+		// what of that is not what was approved, or was to be left out, is
+		// dropped all the same (security review v0.4, finding 1). Not while
+		// it may still run.
+		if !errors.Is(err, ErrNativeOrphan) {
+			if perr := s.checkAfterRestore(context.WithoutCancel(ctx), log, plan, again); perr != nil {
+				err = fmt.Errorf("%w; besides, %v", err, strings.TrimPrefix(perr.Error(), "clickhouse: "))
+			}
+		}
 		return res, err
 	}
 
 	// 4. What the target holds now: exactly what was allowed, as it was
 	// approved.
-	if err := s.checkRestoredObjects(ctx, log, plan); err != nil {
+	if err := s.checkRestoredObjects(ctx, log, plan, false); err != nil {
 		return res, err
 	}
 
@@ -856,7 +865,10 @@ var (
 // nothing before this restore, so the object is this restore's, and it may
 // reach outside the target. An object the restore was not to create at all
 // is someone else's: it is named, never dropped.
-func (s *session) checkRestoredObjects(ctx context.Context, log *slog.Logger, p *nativeRestorePlan) error {
+//
+// After a RESTORE that failed (failed), what it did not get to is not a
+// problem: only what it created other than approved, or left out, is.
+func (s *session) checkRestoredObjects(ctx context.Context, log *slog.Logger, p *nativeRestorePlan, failed bool) error {
 	quoted := make([]string, len(p.databases))
 	for i, db := range p.databases {
 		quoted[i] = quoteString(db)
@@ -870,7 +882,7 @@ func (s *session) checkRestoredObjects(ctx context.Context, log *slog.Logger, p 
 	for i, r := range rows {
 		found[i] = restoredObject{db: r[0], name: r[1], uuid: r[2], engine: r[3], query: r[4]}
 	}
-	problems, drop := p.restoredObjects(found)
+	problems, drop := p.restoredObjects(found, failed)
 	for _, o := range drop {
 		stmt := dropStatement(o)
 		if err := s.client.Do(ctx, ch.Query{Body: stmt, Settings: append(slices.Clone(ddlSettings), dropSettings...)}); err != nil {
@@ -892,6 +904,25 @@ func (s *session) checkRestoredObjects(ctx context.Context, log *slog.Logger, p 
 	return fmt.Errorf("clickhouse: the restored databases do not hold what was decided: %s", strings.Join(problems, "; "))
 }
 
+// checkAfterRestore is checkRestoredObjects after a RESTORE that did not end
+// RESTORED, within nativeKillWait, on s or, when s fails, on a new
+// connection.
+func (s *session) checkAfterRestore(ctx context.Context, log *slog.Logger, p *nativeRestorePlan, again redial) error {
+	ctx, cancel := context.WithTimeout(ctx, nativeKillWait)
+	defer cancel()
+	err := s.checkRestoredObjects(ctx, log, p, true)
+	if _, refused := ch.AsException(err); err == nil || refused || !strings.Contains(err.Error(), "list the restored objects") {
+		return err
+	}
+	ns, cerr := again(ctx)
+	if cerr != nil {
+		log.Error("clickhouse: could not check what a failed restore created", "err", cerr.Error())
+		return err
+	}
+	defer ns.close()
+	return ns.checkRestoredObjects(ctx, log, p, true)
+}
+
 // dropSettings let a drop go ahead when other objects depend on the one
 // dropped (a dictionary on a table, a view on a view): what is dropped is
 // not what was approved, whatever depends on it.
@@ -903,7 +934,7 @@ type restoredObject struct{ db, name, uuid, engine, query string }
 // restoredObjects is checkRestoredObjects on the rows found: the problems,
 // and the objects to drop (each once: an inner table's view for the inner
 // table).
-func (p *nativeRestorePlan) restoredObjects(found []restoredObject) (problems []string, drop []restoredObject) {
+func (p *nativeRestorePlan) restoredObjects(found []restoredObject, failed bool) (problems []string, drop []restoredObject) {
 	views := map[string]string{} // "<db>\x00.inner_id.<uuid>" or ".inner.<name>" → the view
 	byRef := map[objRef]restoredObject{}
 	for _, o := range found {
@@ -946,12 +977,12 @@ func (p *nativeRestorePlan) restoredObjects(found []restoredObject) (problems []
 		case excluded[r]:
 			problems = append(problems, r.String()+" was to be left out, and the target holds it; it was dropped")
 			dropIt(o)
-		default:
+		case !failed:
 			problems = append(problems, r.String()+" is not an object the restore was to create")
 		}
 	}
 	for r := range p.allowed {
-		if !seen[r] {
+		if !seen[r] && !failed {
 			problems = append(problems, r.String()+" was to be restored, and the target does not hold it")
 		}
 	}
