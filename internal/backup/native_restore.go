@@ -188,15 +188,22 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 // holds a slot (nativeRestoreSlots); the result must not be kept after use
 // returns. use is called with the chain verified and its source bound, or,
 // with ErrNativeNotVerified, with the decisions eng could list (every
-// object left out, no source); not at all on other errors, and use's error
-// is returned as it is. Errors are ErrNativeChain or ErrNativeNotVerified,
-// with the cause, an internal error of q, or the context's error when ctx
-// ended (the caller is gone: nothing to show or log).
+// object left out, no source). It is not called at all on other errors:
+// an ErrNativeChain, a chain that eng verified but did not bind
+// (ErrNativeNotVerified, "the engine did not bind the chain"), a chain past
+// the serving path's bound (ErrNativeChain), an internal error, or ctx
+// ending; use's error is returned as it is. Errors are ErrNativeChain or
+// ErrNativeNotVerified, with the cause, an internal error of q, or the
+// context's error when ctx ended (the caller is gone: nothing to show; a
+// verification error it cut is logged at Debug).
 func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
 	src *RestoreSource, databases []string, log *slog.Logger, use func(*NativeRestore) error) error {
+	if log == nil {
+		log = slog.Default()
+	}
 	runs, copies, err := restoreChain(ctx, q, src)
 	if err != nil {
-		return ended(ctx, err)
+		return ended(ctx, log, src, err)
 	}
 	select {
 	case nativeRestoreSlots <- struct{}{}:
@@ -208,7 +215,7 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 	for i, run := range runs {
 		raw, err := readSidecarManifest(ctx, r, ManifestPath(copies[i].dir, run))
 		if err != nil {
-			return ended(ctx, fmt.Errorf("%w: the manifest of run %s: %v", ErrNativeNotVerified, run, err))
+			return ended(ctx, log, src, fmt.Errorf("%w: the manifest of run %s: %v", ErrNativeNotVerified, run, err))
 		}
 		signed[i] = raw
 	}
@@ -239,6 +246,8 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		out = &NativeRestore{NativeRestoreCheck: *check, Runs: runs, r: r, log: log}
 	}
 	switch {
+	case ctx.Err() != nil && err != nil:
+		return ended(ctx, log, src, err)
 	case ctx.Err() != nil:
 		return ctx.Err()
 	case errors.Is(err, ErrNativeChain):
@@ -269,9 +278,10 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 }
 
 // ended is ctx's error when ctx ended (what failed then is the request
-// going away), else err.
-func ended(ctx context.Context, err error) error {
+// going away; err, its cause, is logged at Debug), else err.
+func ended(ctx context.Context, log *slog.Logger, src *RestoreSource, err error) error {
 	if ctx.Err() != nil {
+		log.Debug("native restore: the check ended with its request", "copy_run_id", src.CopyRunID, "err", err.Error())
 		return ctx.Err()
 	}
 	return err

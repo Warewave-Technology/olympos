@@ -561,12 +561,23 @@ func TestNativeCheckClientGone(t *testing.T) {
 		t.Fatal("the request was answered")
 	}
 	<-done
-	// The handler ends right after the read; give its log lines time to land.
-	time.Sleep(300 * time.Millisecond)
-	for _, s := range []string{"does not verify", "request failed"} {
+	// The server logs each request once its handler has returned: wait for
+	// that line, so the handler's own log lines are in.
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(e.LogBuf.String(), "/api/v1/restores/check") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the check's handler did not return:\n%s", e.LogBuf.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for _, s := range []string{`"msg":"restore: the native backup does not verify"`, "request failed"} {
 		if strings.Contains(e.LogBuf.String(), s) {
 			t.Fatalf("a request that went away logged %q: %s", s, e.LogBuf.String())
 		}
+	}
+	// What it cut is at Debug, for whoever looks.
+	if !strings.Contains(e.LogBuf.String(), "the check ended with its request") {
+		t.Fatalf("the cut cause is not logged at Debug: %s", e.LogBuf.String())
 	}
 	if chInspector.calls != calls {
 		t.Fatal("the target was contacted")
