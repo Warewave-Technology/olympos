@@ -269,6 +269,25 @@ The existing flow, with these changes for a native source:
   - It reads them from the copy's destination and checks each object's SHA-256 while streaming. On a mismatch
     it aborts the connection, so the `GET` fails and the restore with it, and it reports the object.
 - **Afterwards.** The existing post-restore checks run: row counts per table against the manifest.
+- **Decided while building Milestone E (Task 16, the check).**
+  - The chain of the selected copy is its run's backup credential's read scope (the base chain the run was
+    taken on, the full first) and the run, at most 32 runs. Every run of it needs a succeeded copy on the
+    copy's destination; the sidecars are read from there, each at most 65 MiB, and verified with
+    `VerifyChain`, one check at a time per server. Each verified manifest must be the one its copy row
+    records. Any failure to read or verify refuses the check with "the backup's manifest does not verify" on
+    the copy (the cause is logged, never shown); the objects the copy's own manifest lists, when it verifies
+    by itself, are shown, every one left out with that reason, and nothing is read on its strength.
+  - Each object's definition is read through the chain's checked source (only objects of the verified
+    manifests, size and SHA-256 checked) and the allowlist decides for the selected databases only: an object
+    that reads a database left unselected is not restored. The Replicated rewrite runs for every allowed
+    Replicated table at check time, so a table whose Keeper path cannot be rewritten is left out with its
+    reason in the check, and so is what depends on it.
+  - Each incremental's `.backup` names its base by its URL under the endpoint it was taken through, and the
+    restore's `RESTORE` follows it. A chain whose base URL is not `ingest.url` as it is now is refused, with
+    the old URL in the reason; a full backup restores whatever URL it was taken through.
+  - A native run's restore guide (`GET /backup/runs/{id}`) lists its succeeded copies and no commands; the run
+    page offers **Restore…** and shows the tier the run was written with, and "kept at least as long as
+    weekly" once an incremental based on it succeeded (R45).
 
 ### 7. Incrementals
 
@@ -356,8 +375,7 @@ The existing flow, with these changes for a native source:
 
 - **Job setting.** `engine_options.method`: `native` or `logical` (the default for existing jobs, which keep
   their behaviour). New ClickHouse jobs default to `native` when the endpoint is configured and the target is
-  24.8 or later. Until native restore lands (Milestone E, Task 16) they default to `logical`, and Native is
-  offered without "Recommended" and with the note that native backups cannot be restored yet (R42).
+  24.8 or later, with Native "Recommended" (R42 held this back until native restore, Milestone E, Task 16).
   Incrementals are taken since Task 13: the API takes `incremental` with the native method, and the wizard
   offers it for native jobs.
 - **UI.** The backup wizard gets a ClickHouse step:

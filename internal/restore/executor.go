@@ -338,6 +338,14 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 	if len(fields) > 0 {
 		return fail("the restore cannot start: " + describeFields(fields))
 	}
+	// A native copy is a run directory, restored by the target's own
+	// RESTORE through the ingest endpoint (design §6 Execute), not by the
+	// engine's Restorer, which would read it as one blob. Until that is
+	// built (task 17) the request ends here, before anything is read or
+	// written.
+	if run.native {
+		return fail(errNativeExecute)
+	}
 	restorer, ok := backup.RestorerFor(j.engine)
 	if !ok {
 		return fail(noInspectorMessage(j.engine))

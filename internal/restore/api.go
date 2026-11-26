@@ -45,6 +45,10 @@ type API struct {
 	Now func() time.Time
 	// InspectTimeout bounds the open-time check of the target (default 60 s).
 	InspectTimeout time.Duration
+	// Native checks native ClickHouse backups as a source (design
+	// docs/design/clickhouse-native.md §6); nil while the ingest endpoint
+	// is off, which a native restore reads its backup through.
+	Native *backup.NativeRestoreConfig
 }
 
 // Routes mounts the module under /api/v1.
@@ -169,6 +173,11 @@ type evaluation struct {
 	databases []string
 	opts      Options
 	report    *TargetReport
+	// native: a native source's chain, verified, and its decisions; nil
+	// otherwise or when the chain was not verified. nativeCheck is what the
+	// check shows of it (the decisions also when it did not verify).
+	native      *backup.NativeRestore
+	nativeCheck *NativeCheck
 }
 
 // evalError is a failed check: code 422 with fields, or 403/404/500.
@@ -293,8 +302,13 @@ func (a *API) evaluate(ctx context.Context, sub *authz.Subject, in *Input, open 
 	}
 	ev.opts = Options{TLSCAPEM: in.TLSCAPEM}
 
-	// The databases the backup holds (read from the copy).
-	if ev.src != nil && hasDatabases(engine) {
+	// The databases the backup holds (read from the copy). A native copy's
+	// are its verified chain's, with what the restore does with each object.
+	if ev.src != nil && ev.run.native {
+		if err := a.checkNative(ctx, in, ev, fields); err != nil {
+			return ev, internalErr(err)
+		}
+	} else if ev.src != nil && hasDatabases(engine) {
 		dbs, details, err := a.backupDatabases(ctx, engine, ev.src)
 		if err != nil {
 			a.Log.Warn("restore: backup manifest not readable", "run_id", in.RunID, "destination_id", ev.src.DestinationID, "err", err.Error())
@@ -407,18 +421,22 @@ func loadTargetInfo(ctx context.Context, q store.Querier, targetID string) (targ
 	return t, err
 }
 
-// errNativeSource refuses a native ClickHouse run as a source until native
-// restore is built (R38): its copy is a directory, not one blob.
-const errNativeSource = "native restore is not available yet; the backup is kept"
+// Refusals of a native source.
+const (
+	errNativeIngestOff = "a native backup is restored through the ingest endpoint, which is off on this server (ingest.url)"
+	errNativeEngine    = "native backups of this engine are not restored"
+	// errNativeExecute ends a native request at its start until the native
+	// restore runs (task 17 replaces it).
+	errNativeExecute = "this server does not run native restores yet; nothing was read or written"
+)
 
-// sourceRules: the run is succeeded or partial, not a test run and not a
-// native run, and the chosen copy is a succeeded copy of it or of one of its
-// repairs (as the restore guide offers). Broken rules are added to fields;
-// the copy is returned when it was found. err is an internal error only.
+// sourceRules: the run is succeeded or partial and not a test run, and the
+// chosen copy is a succeeded copy of it or of one of its repairs (as the
+// restore guide offers; a native run has no repairs). Broken rules are
+// added to fields; the copy is returned when it was found. err is an
+// internal error only.
 func sourceRules(ctx context.Context, q store.Querier, run sourceRun, runID uuid.UUID, destID *uuid.UUID, fields map[string]string) (*backup.RestoreSource, error) {
 	switch {
-	case run.native:
-		fields["run_id"] = errNativeSource
 	case run.trigger == "test":
 		fields["run_id"] = "a dry run holds no data to restore"
 	case run.status != "succeeded" && run.status != "partial":
@@ -609,6 +627,50 @@ func (a *API) backupDatabases(ctx context.Context, engine string, src *backup.Re
 	return []string{}, nil, nil
 }
 
+// checkNative checks a native copy (design §6): its chain is resolved,
+// read from the copy's destination and verified, and the objects of the
+// selected databases are decided. A chain that does not verify is refused
+// on the copy with exactly backup.ErrNativeNotVerified's message (the cause
+// is logged, never shown), with the decisions the engine could list; one
+// that cannot be restored here says why. err is an internal error only.
+func (a *API) checkNative(ctx context.Context, in *Input, ev *evaluation, fields map[string]string) error {
+	if a.Native == nil {
+		fields["run_id"] = errNativeIngestOff
+		return nil
+	}
+	eng, _ := backup.EngineFor(ev.run.engine)
+	ne, ok := eng.(backup.NativeRestoreEngine)
+	if !ok {
+		fields["run_id"] = errNativeEngine
+		return nil
+	}
+	notVerified := func(err error) {
+		a.Log.Warn("restore: the native backup does not verify", "run_id", in.RunID, "copy_run_id", ev.src.CopyRunID,
+			"destination_id", ev.src.DestinationID, "err", err.Error())
+		fields["copy_destination_id"] = backup.ErrNativeNotVerified.Error()
+	}
+	rd, err := a.Blobs.ReaderFor(ctx, ev.src.DestinationID)
+	if err != nil {
+		notVerified(err)
+		return nil
+	}
+	nr, err := backup.CheckNativeRestore(ctx, a.DB, rd, ne, *a.Native, ev.src, in.Databases, a.Log)
+	if nr != nil {
+		ev.nativeCheck = &NativeCheck{Objects: nr.Objects}
+	}
+	switch {
+	case errors.Is(err, backup.ErrNativeChain):
+		fields["copy_destination_id"] = err.Error()
+	case errors.Is(err, backup.ErrNativeNotVerified):
+		notVerified(err)
+	case err != nil:
+		return err
+	default:
+		ev.native, ev.inBackup = nr, nonNil(nr.Databases)
+	}
+	return nil
+}
+
 func nonNil(s []string) []string {
 	if s == nil {
 		return []string{}
@@ -634,6 +696,17 @@ type CheckResult struct {
 	Databases         []string      `json:"databases"`
 	Options           Options       `json:"options"`
 	Report            *TargetReport `json:"report"`
+	// Native: a native copy's objects and what the restore does with each;
+	// null for other copies.
+	Native *NativeCheck `json:"native"`
+}
+
+// NativeCheck is what the check found in a native copy: every object of the
+// selected databases with the allowlist's decision. When the copy's chain
+// does not verify, the objects its own signed manifest lists, every one
+// left out (or none).
+type NativeCheck struct {
+	Objects []backup.NativeDecision `json:"objects"`
 }
 
 func (a *API) decodeInput(w http.ResponseWriter, r *http.Request) (*Input, bool) {
@@ -664,7 +737,7 @@ func (a *API) check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	res := CheckResult{OK: eerr == nil, Engine: ev.run.engine, DatabasesInBackup: ev.inBackup, Databases: ev.databases,
-		Options: ev.opts, Report: ev.report}
+		Options: ev.opts, Report: ev.report, Native: ev.nativeCheck}
 	if eerr != nil {
 		res.Error, res.Fields = eerr.msg, eerr.fields
 	}

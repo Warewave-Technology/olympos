@@ -61,6 +61,10 @@ func init() {
 		rlog := d.Log.With("component", "restore")
 		restores := &restore.API{DB: d.DB, Log: rlog, Envelope: d.Envelope, Creds: creds,
 			Dialer: d.Gateway, Blobs: readers, TTL: d.Cfg.ChangeRequests.TTL}
+		// Native ClickHouse backups are restored through the ingest endpoint.
+		if d.Ingest != nil {
+			restores.Native = &backup.NativeRestoreConfig{KV: d.KV, ManifestKeyName: d.Cfg.KeyVault.ManifestKeyName, URL: d.Cfg.Ingest.URL}
+		}
 		// Approved restores run next to the backup worker: the same tunnels
 		// and the same per-cluster limit (backup runs and restores together).
 		executor := &restore.Executor{DB: d.DB, Log: rlog.With("loop", "executor"), Dialer: d.Gateway, Blobs: readers,
