@@ -76,12 +76,26 @@ func (s *dnsServer) answer(q dnsmessage.Message, udp bool) []byte {
 
 func newDNSServer(t *testing.T) *dnsServer {
 	t.Helper()
-	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// The UDP and the TCP server share one address, as a resolver asks both
+	// there. A TCP port in use elsewhere makes it take another UDP port.
+	var pc net.PacketConn
+	var ln net.Listener
+	for i := 0; ; i++ {
+		var err error
+		if pc, err = net.ListenPacket("udp", "127.0.0.1:0"); err != nil {
+			t.Fatal(err)
+		}
+		if ln, err = net.Listen("tcp", pc.LocalAddr().String()); err == nil {
+			break
+		}
+		pc.Close()
+		if i == 20 {
+			t.Fatalf("no port free for both UDP and TCP: %v", err)
+		}
 	}
 	s := &dnsServer{addr: pc.LocalAddr().String()}
 	t.Cleanup(func() { pc.Close() })
+	t.Cleanup(func() { ln.Close() })
 	go func() {
 		buf := make([]byte, 65535)
 		for {
@@ -107,36 +121,32 @@ func newDNSServer(t *testing.T) *dnsServer {
 			_, _ = pc.WriteTo(s.answer(q, true), from)
 		}
 	}()
-	ln, err := net.Listen("tcp", s.addr)
-	if err == nil {
-		t.Cleanup(func() { ln.Close() })
-		go func() {
-			for {
-				c, err := ln.Accept()
-				if err != nil {
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				var lb [2]byte
+				if _, err := io.ReadFull(c, lb[:]); err != nil {
 					return
 				}
-				go func() {
-					defer c.Close()
-					var lb [2]byte
-					if _, err := io.ReadFull(c, lb[:]); err != nil {
-						return
-					}
-					b := make([]byte, binary.BigEndian.Uint16(lb[:]))
-					if _, err := io.ReadFull(c, b); err != nil {
-						return
-					}
-					var q dnsmessage.Message
-					if q.Unpack(b) != nil || len(q.Questions) != 1 {
-						return
-					}
-					resp := s.answer(q, false)
-					out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
-					_, _ = c.Write(append(out, resp...))
-				}()
-			}
-		}()
-	}
+				b := make([]byte, binary.BigEndian.Uint16(lb[:]))
+				if _, err := io.ReadFull(c, b); err != nil {
+					return
+				}
+				var q dnsmessage.Message
+				if q.Unpack(b) != nil || len(q.Questions) != 1 {
+					return
+				}
+				resp := s.answer(q, false)
+				out := binary.BigEndian.AppendUint16(nil, uint16(len(resp)))
+				_, _ = c.Write(append(out, resp...))
+			}()
+		}
+	}()
 	return s
 }
 
