@@ -560,7 +560,7 @@ func TestServerIngestPort(t *testing.T) {
 		t.Error("no ingest-tls volume without ingestTLSSecret")
 	}
 	cfg := serverConfig(t, docs)
-	if cfg.Listen.Ingest != ":9444" || cfg.Ingest.SpillDir != "/var/lib/olympos/ingest-spill" || cfg.Ingest.MaxRuns != 4 {
+	if cfg.Listen.Ingest != ":9444" || cfg.Ingest.SpillDir != "/var/lib/olympos/ingest-spill" || cfg.Ingest.MaxRuns != 4 || cfg.Ingest.MaxRunBytes != 0 {
 		t.Errorf("config: listen %q, %+v", cfg.Listen.Ingest, cfg.Ingest)
 	}
 	if cfg.Ingest.URL != ingestURL || !cfg.IngestEnabled() {
@@ -571,7 +571,7 @@ func TestServerIngestPort(t *testing.T) {
 	}
 
 	docs, err = renderServer(t, append(login, "--set", "olympos.ingest.maxRuns=8", "--set", "olympos.ingest.url=https://ingest.example:9444",
-		"--set", "ingestTLSSecret=ing")...)
+		"--set", "ingestTLSSecret=ing", "--set", "olympos.ingest.maxRunBytes=536870912000")...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +585,7 @@ func TestServerIngestPort(t *testing.T) {
 		t.Errorf("ingest-tls mount: %q", got)
 	}
 	cfg = serverConfig(t, docs)
-	if cfg.Ingest.MaxRuns != 8 || cfg.Ingest.URL != "https://ingest.example:9444" ||
+	if cfg.Ingest.MaxRuns != 8 || cfg.Ingest.MaxRunBytes != 500<<30 || cfg.Ingest.URL != "https://ingest.example:9444" ||
 		cfg.Ingest.TLSCertFile != "/etc/olympos/ingest-tls/tls.crt" || cfg.Ingest.TLSKeyFile != "/etc/olympos/ingest-tls/tls.key" {
 		t.Errorf("config: %+v", cfg.Ingest)
 	}
