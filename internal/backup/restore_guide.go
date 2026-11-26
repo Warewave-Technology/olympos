@@ -73,7 +73,8 @@ func (s *guideSource) dests() []any {
 	return []any{&s.copy.DestinationID, &s.copy.Name, &d.kind, &d.account, &d.container, &d.endpoint, &d.bucket, &d.region, &d.nfsPath}
 }
 
-// LoadRestoreGuide builds the guide of a succeeded or partial, non-test run;
+// LoadRestoreGuide builds the guide of a succeeded or partial, non-test run
+// (a native run's has its copies only, no steps);
 // nil for other runs. A run with copy rows restores from one of its
 // succeeded copies and that copy's destination. An original run also offers
 // the succeeded copies its repairs wrote (for that destination they are the
@@ -96,6 +97,16 @@ func LoadRestoreGuide(ctx context.Context, q store.Querier, runID uuid.UUID, des
 	}
 	s := gs.sources[pick]
 	in := gs.in
+	if gs.native {
+		// A native copy is the run's directory, restored through the ingest
+		// endpoint: there are no commands to restore it by hand.
+		g := &RestoreGuide{Doc: "docs/restore.md#clickhouse", Steps: []RestoreStep{}}
+		for i, c := range gs.sources {
+			c.copy.Selected = i == pick
+			g.Copies = append(g.Copies, c.copy)
+		}
+		return g, nil
+	}
 	in.kind, in.account, in.container, in.endpoint, in.bucket, in.region, in.nfsPath =
 		s.dest.kind, s.dest.account, s.dest.container, s.dest.endpoint, s.dest.bucket, s.dest.region, s.dest.nfsPath
 	in.blobPath, in.sha256, in.runID = s.blob, s.sum, s.copy.RunID
@@ -153,6 +164,9 @@ func FindRestoreSource(ctx context.Context, q store.Querier, runID uuid.UUID, de
 type guideSources struct {
 	in      guideInput // run and target fields
 	sources []guideSource
+	// native: a ClickHouse native run (as Run.Method), whose copies are run
+	// directories.
+	native bool
 }
 
 func loadGuideSources(ctx context.Context, q store.Querier, runID uuid.UUID) (*guideSources, error) {
@@ -163,11 +177,12 @@ func loadGuideSources(ctx context.Context, q store.Querier, runID uuid.UUID) (*g
 	var repairOf *uuid.UUID
 	var started *time.Time
 	var opts []byte
+	var native bool
 	err := q.QueryRow(ctx, `SELECT r.job_id, r.status, r.trigger, r.blob_path, r.sha256, r.destination_ids, r.repair_of, r.started_at,
 		COALESCE(t.engine, 'postgresql'), COALESCE(t.vault_provider, ''), COALESCE(t.namespace, 'olympos'), COALESCE(t.service, 'olympos-db'),
-		j.engine_options
+		j.engine_options, r.objects IS NOT NULL
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id WHERE r.id = $1`, runID).
-		Scan(&jobID, &status, &trigger, &runBlob, &runSum, &order, &repairOf, &started, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts)
+		Scan(&jobID, &status, &trigger, &runBlob, &runSum, &order, &repairOf, &started, &in.engine, &in.vaultProvider, &in.ns, &in.svc, &opts, &native)
 	if err != nil {
 		return nil, store.NotFound(err)
 	}
@@ -202,7 +217,9 @@ func loadGuideSources(ctx context.Context, q store.Querier, runID uuid.UUID) (*g
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if !hasCopies && status == "succeeded" && runBlob != "" {
+	// A native run always has copy rows: the fallback is for logical runs
+	// only, and so are repairs (a native run is not repaired).
+	if !hasCopies && !native && status == "succeeded" && runBlob != "" {
 		// From before destination groups: the job's destination.
 		s := guideSource{blob: runBlob, sum: runSum, copy: RestoreCopy{RunID: runID, TakenAt: started}}
 		err := q.QueryRow(ctx, `SELECT `+guideDestCols+` FROM backup_jobs j JOIN destinations d ON d.id = j.destination_id WHERE j.id = $1`, jobID).
@@ -219,7 +236,7 @@ func loadGuideSources(ctx context.Context, q store.Querier, runID uuid.UUID) (*g
 		sources = nil
 	}
 	_ = json.Unmarshal(opts, &in.options)
-	return &guideSources{in: in, sources: sources}, nil
+	return &guideSources{in: in, sources: sources, native: native}, nil
 }
 
 // pick returns the index of the copy used for destID (-1: none and destID

@@ -436,7 +436,7 @@ paths:
       parameters:
         - {name: copy, in: query, schema: {type: string, format: uuid}, description: "Destination id of the copy to build the restore guide from: the run's own copy there, else the newest copy a repair completed there. Default: the first succeeded copy of the run in member order."}
       responses:
-        "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}, next_repair_at: {type: [string, "null"], format: date-time, description: "Partial run with a repair queued: when the repair starts (its not_before), else null"}}}]}}}}
+        "200": {description: "Run; restore = ready-to-copy restore commands for a succeeded or partial run (F19), else null. The commands are built from a succeeded copy of the run and that copy's destination. A native ClickHouse run's restore lists its succeeded copies with no steps: its copies are run directories, restored with POST /restores only.", content: {application/json: {schema: {allOf: [{$ref: "#/components/schemas/BackupRun"}, {type: object, properties: {restore: {$ref: "#/components/schemas/RestoreGuide"}, next_repair_at: {type: [string, "null"], format: date-time, description: "Partial run with a repair queued: when the repair starts (its not_before), else null"}, kept_as: {type: string, description: "A native run written with a tier shorter than weekly that an incremental is based on, and that incremental succeeded: weekly, the tier its copies are kept as since then (R45). Absent otherwise."}}}]}}}}
         "422": {description: "copy is not a destination id, or the run has no successful copy in that destination"}
   /backup/test-connection:
     post:
@@ -739,7 +739,11 @@ paths:
         "422":
           description: >-
             A check failed (fields name it): unknown run or target (also outside scope), run not succeeded/partial,
-            dry run, a native ClickHouse run (run_id: "native restore is not available yet; the backup is kept"), no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
+            dry run, no succeeded copy in copy_destination_id, a native copy whose chain does not verify
+            (copy_destination_id: "the backup's manifest does not verify") or cannot be restored from there (copy_destination_id:
+            "the backup chain cannot be restored: …", for example a run of its chain without a succeeded copy on that
+            destination, a chain longer than 32 runs, or an incremental taken through another ingest endpoint), a native run while
+            the ingest endpoint is off (run_id), the backup's own target, another engine, target gone,
             a Vault configured in Olympos, databases not in the backup, a selected database exists on the target
             with data in it, Vault not initialized/sealed/token without snapshot-force, credential or vault_token
             missing, justification 10–2000 chars, agent_offline, the target check failed, or "restores of <engine>
@@ -753,7 +757,11 @@ paths:
         target, the databases in the backup, and (when the input is complete) the target inspected over its
         tunnel with the given credential, which tests it. Nothing is written to the target. Same permissions as
         opening; justification is not checked. Every inspection of the target (here or when opening) is
-        recorded in the activity log as restore.checked, with the scrubbed reason when it failed.
+        recorded in the activity log as restore.checked, with the scrubbed reason when it failed. For a native
+        ClickHouse copy the check resolves the copy's chain (the run's base chain, the full first), reads every
+        run's signed manifest from the copy's destination and verifies them as a chain, reads each object's
+        definition through the verified manifests, and decides with the restore allowlist what is restored of the
+        selected databases (native.objects); the target is contacted only when the chain verifies.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/RestoreInput"}}}}
       responses:
         "200": {description: "Checks ran: ok, or ok=false with error and fields", content: {application/json: {schema: {$ref: "#/components/schemas/RestoreCheck"}}}}
@@ -2145,6 +2153,27 @@ components:
         tls_ca_pem: {type: string}
         notes: {type: array, items: {type: string}, description: "Open-time findings: existing empty databases restored into, no superuser"}
         server_version: {type: string}
+        native:
+          description: >-
+            A native ClickHouse request: what the check decided when the request was opened, shown to the
+            checker. When the restore starts, the backup is checked again; if it then leaves out anything else, or
+            gives another reason (an upgrade of Olympos may reword one), the request fails with "the backup or
+            Olympos's restore rules changed since the request was approved: …" before the target is written to.
+            Absent for other copies.
+          type: object
+          properties:
+            databases: {type: array, items: {type: string}, description: The databases restored}
+            excluded:
+              type: array
+              description: Every object of them the restore leaves out (RESTORE … EXCEPT TABLES), with the reason, in the check's order
+              items:
+                type: object
+                properties:
+                  database: {type: string}
+                  name: {type: string}
+                  kind: {type: string, enum: [table, view, materialized_view, dictionary, other]}
+                  allowed: {type: boolean, description: Always false}
+                  reason: {type: string}
     RestoreTargetReport:
       type: object
       properties:
@@ -2169,6 +2198,26 @@ components:
         databases: {type: [array, "null"], items: {type: string}, description: What would be restored}
         options: {$ref: "#/components/schemas/RestoreOptions"}
         report: {oneOf: [{$ref: "#/components/schemas/RestoreTargetReport"}, {type: "null"}]}
+        native:
+          description: >-
+            A native ClickHouse copy: every object of the selected databases (all when none are selected) with what
+            the restore does with it; null for other copies. When the copy's chain does not verify, the objects the
+            copy's own signed manifest lists, every one left out with "the backup's manifest does not verify", or
+            none.
+          oneOf:
+            - type: object
+              properties:
+                objects:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      database: {type: string}
+                      name: {type: string}
+                      kind: {type: string, enum: [table, view, materialized_view, dictionary, other]}
+                      allowed: {type: boolean, description: "Created by the restore; the others are left out (RESTORE … EXCEPT TABLES) and cannot be selected"}
+                      reason: {type: string, description: "Why it is left out; absent when allowed"}
+            - type: "null"
     RestoreRequest:
       type: object
       description: Never carries a password or a token.

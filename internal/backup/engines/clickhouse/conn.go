@@ -336,36 +336,4 @@ func (s *session) streamRowBinary(ctx context.Context, from, where string, names
 	return rows, err
 }
 
-// quoteIdent quotes a ClickHouse identifier with backticks.
-func quoteIdent(s string) string { return quoteWith(s, '`') }
-
-// quoteString quotes a ClickHouse string literal.
-func quoteString(s string) string { return quoteWith(s, '\'') }
-
-// quoteWith quotes s strictly: the quote and backslash are escaped, and so
-// is every control byte (\xHH), so the quoted text is one plain line that
-// ClickHouse reads back as exactly s.
-func quoteWith(s string, q byte) string {
-	var b strings.Builder
-	b.Grow(len(s) + 2)
-	b.WriteByte(q)
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case c == '\\' || c == q:
-			b.WriteByte('\\')
-			b.WriteByte(c)
-		case c < 0x20 || c == 0x7f:
-			const hexDigits = "0123456789abcdef"
-			b.WriteString(`\x`)
-			b.WriteByte(hexDigits[c>>4])
-			b.WriteByte(hexDigits[c&0xf])
-		default:
-			b.WriteByte(c)
-		}
-	}
-	b.WriteByte(q)
-	return b.String()
-}
-
 func qualified(db, table string) string { return quoteIdent(db) + "." + quoteIdent(table) }

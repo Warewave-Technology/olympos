@@ -23,6 +23,7 @@ import type {
   NetpolNamespace,
   Principal,
   Registry,
+  RestoreNativeObject,
   RestoreRequest,
   Role,
   Routes,
@@ -1156,6 +1157,24 @@ export const restoreTargetState: Record<string, Record<string, boolean>> = {
 export const restoreBackupDatabases: Record<string, string[]> = {
   'billing-pg': ['billing', 'billing_audit', 'postgres'],
   'metrics-ch': ['default', 'metrics'],
+  'events-ch': ['analytics', 'dicts', 'scratch'],
+};
+/**
+ * What a native restore of each source's backups does with every object (POST /restores/check native.objects, for all
+ * the databases selected): reads names the objects of other databases a view needs, so leaving one out leaves it out.
+ */
+export const restoreNativeObjects: Record<string, (RestoreNativeObject & { reads?: string[] })[]> = {
+  'events-ch': [
+    { database: 'analytics', name: 'daily_totals', kind: 'table', allowed: true },
+    { database: 'analytics', name: 'events', kind: 'table', allowed: true },
+    { database: 'analytics', name: 'events_all', kind: 'table', allowed: false, reason: 'the Distributed engine is not on the restore allowlist' },
+    { database: 'analytics', name: 'events_by_day', kind: 'materialized_view', allowed: true },
+    { database: 'analytics', name: 'live_events', kind: 'other', allowed: false, reason: 'a live view is not restored' },
+    { database: 'analytics', name: 'top_countries', kind: 'view', allowed: true, reads: ['dicts.countries'] },
+    { database: 'dicts', name: 'countries', kind: 'table', allowed: true },
+    { database: 'dicts', name: 'geo', kind: 'dictionary', allowed: false, reason: 'its ClickHouse source names a host' },
+    { database: 'scratch', name: 'tmp', kind: 'table', allowed: true },
+  ],
 };
 
 const tRef = (t: Target) => ({ id: t.id, cluster_id: t.cluster_id, cluster_name: t.cluster_name, namespace: t.namespace, service: t.service, port: t.port, vault_provider: t.vault_provider || undefined });
@@ -1287,6 +1306,28 @@ export const restoreRequests: RestoreRequest[] = [
       ],
       created: ['metrics'],
     },
+  }),
+  // a native ClickHouse restore waiting for a checker: what it leaves out was recorded when it was opened, for the checker
+  restoreReq({
+    engine: 'clickhouse',
+    source: restoreSource(runMetrics.id, destinations[1]?.id ?? blobWeu),
+    target: tRef(tByService('metrics-ch-dr')),
+    maker: people.mert,
+    databases: ['metrics', 'default'],
+    options: {
+      server_version: '25.8.33.6',
+      native: {
+        databases: ['metrics', 'default'],
+        excluded: [
+          { database: 'metrics', name: 'requests_all', kind: 'table', allowed: false, reason: 'the Distributed engine is not on the restore allowlist' },
+          { database: 'metrics', name: 'geo', kind: 'dictionary', allowed: false, reason: 'its ClickHouse source names a host' },
+        ],
+      },
+    },
+    credential: { source: 'stored', username: 'default' },
+    justification: 'Restore last night’s native backup of metrics into the DR cluster (CHG-1190).',
+    created_at: iso(30 * 60_000),
+    expires_at: isoIn(71 * H),
   }),
   // a break-glass Vault restore: the result carries the unseal note
   restoreReq({

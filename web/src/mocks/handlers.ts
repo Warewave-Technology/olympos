@@ -355,7 +355,27 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
     if (n < 10) fields.justification = 'at least 10 characters';
     else if (n > 2000) fields.justification = 'at most 2000 characters';
   }
-  const base: RestoreCheck = { ok: false, engine, copy_destination_id: copyDest, copy_run_id: copyDest ? copyRun : null, databases_in_backup: engine === 'vault' ? [] : inBackup, databases: dbs, options: b.tls_ca_pem ? { tls_ca_pem: b.tls_ca_pem } : {}, report: null };
+  const base: RestoreCheck = { ok: false, engine, copy_destination_id: copyDest, copy_run_id: copyDest ? copyRun : null, databases_in_backup: engine === 'vault' ? [] : inBackup, databases: dbs, options: b.tls_ca_pem ? { tls_ca_pem: b.tls_ca_pem } : {}, report: null, native: null };
+  // A native copy: every object of the selected databases with the allowlist's decision; what reads a database left
+  // unselected is not restored. A native run whose sha256 is 'unverified' stands for a copy whose manifest does not verify.
+  if (run.method === 'native') {
+    if (run.sha256 === 'unverified') {
+      const objects = (db.restoreNativeObjects[run.target_service] ?? []).filter((o) => !selected.length || selected.includes(o.database)).map(({ reads: _, ...o }) => ({ ...o, allowed: false, reason: "the backup's manifest does not verify" }));
+      fields.copy_destination_id = "the backup's manifest does not verify";
+      return { res: { ...base, databases_in_backup: null, databases: null, native: { objects }, error: 'invalid restore request', fields } };
+    }
+    const chosen = new Set(dbs);
+    base.native = {
+      objects: (db.restoreNativeObjects[run.target_service] ?? [])
+        .filter((o) => chosen.has(o.database))
+        .map(({ reads, ...o }) => {
+          const gone = (reads ?? []).find((r) => !chosen.has(r.split('.')[0]));
+          return gone && o.allowed ? { ...o, allowed: false, reason: `it reads ${gone}, which is not restored` } : o;
+        }),
+    };
+    // The request records what it leaves out, as checked: the checker approves that list.
+    base.options = { ...base.options, native: { databases: dbs, excluded: base.native.objects.filter((o) => !o.allowed) } };
+  }
   if (Object.keys(fields).length) return { res: { ...base, error: 'invalid restore request', fields } };
 
   // the target check (reads only, with the given credential)
@@ -1133,6 +1153,8 @@ const routes: [string, string, Handler][] = [
       const restorable = (x.status === 'succeeded' || x.status === 'partial') && x.trigger !== 'test';
       const restore = restorable ? runRestore(x, 'docs/restore.md#postgresql', r.query.get('copy')) : null;
       if (restore && 'status' in restore) return restore;
+      // a native copy is the run's directory: no commands to restore it by hand
+      if (restore && x.method === 'native') restore.steps = [];
       // a partial run with a repair queued: when it starts
       const waiting = x.status === 'partial' ? db.runs.filter((y) => y.repair_of === x.id && y.status === 'queued' && y.not_before).map((y) => y.not_before!) : [];
       return ok({ ...x, restore, next_repair_at: waiting.sort()[0] ?? null });

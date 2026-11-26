@@ -89,6 +89,9 @@ type Options struct {
 	Notes []string `json:"notes,omitempty"`
 	// ServerVersion of the target when the request was opened.
 	ServerVersion string `json:"server_version,omitempty"`
+	// Native: what a native restore was opened with (R50); nil for other
+	// copies.
+	Native *NativeOptions `json:"native,omitempty"`
 }
 
 // EngineOptions are the engine options of the target's EngineContext for a

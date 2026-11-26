@@ -101,6 +101,43 @@ if printf 'internal/backup/engines/clickhouse/backupmeta_test.go\ninternal/backu
   echo "FAIL: --files matched a test next to the native metadata parsers" >&2
   fail=1
 fi
+# The restore allowlist decides which objects of a backup a native RESTORE
+# creates on the target.
+if ! out=$(printf 'internal/backup/engines/clickhouse/restore.go\ninternal/backup/engines/clickhouse/allowlist.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/allowlist.go ]; then
+  echo "FAIL: --files with the restore allowlist: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/allowlist_test.go\ninternal/backup/engines/clickhouse/allowlist.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore allowlist" >&2
+  fail=1
+fi
+# The strict lexer the allowlist and the metadata parsers read statements
+# with; the logical restore's engine parser next to it is not on the list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/ddl.go\ninternal/backup/engines/clickhouse/sqllex.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/sqllex.go ]; then
+  echo "FAIL: --files with the SQL lexer: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/sqllex_test.go\ninternal/backup/engines/clickhouse/sqllex.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the SQL lexer" >&2
+  fail=1
+fi
+# The native restore's Replicated DDL rewrite decides which Keeper path a
+# restored table joins; the logical restore's table generator is not on the
+# list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/table.go\ninternal/backup/engines/clickhouse/replicated.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/replicated.go ]; then
+  echo "FAIL: --files with the Replicated DDL rewrite: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/replicated_test.go\ninternal/backup/engines/clickhouse/replicated.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the Replicated DDL rewrite" >&2
+  fail=1
+fi
 # The native run puts the run's credential into the BACKUP statement and
 # keeps it out of the logs.
 if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
@@ -134,6 +171,55 @@ if ! out=$(printf 'internal/backup/copies.go\ninternal/backup/native_chain.go\n'
 fi
 if printf 'internal/backup/native_chain_test.go\ninternal/backup/native_chain.go.orig\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files matched a file next to the base chain" >&2
+  fail=1
+fi
+# The restore check of a native copy: which chain a restore reads, from
+# where, whether it verifies, and what of it the restore creates.
+if ! out=$(printf 'internal/backup/copies.go\ninternal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go\n' |
+  "$script" --files) || [ "$out" != $'internal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go' ]; then
+  echo "FAIL: --files with the native restore check: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/native_restore_test.go\ninternal/backup/engines/clickhouse/native_restore_test.go\ninternal/backup/native_restore.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the native restore check" >&2
+  fail=1
+fi
+# Which copy a restore reads (FindRestoreSource), and the open-time rules
+# that keep a native run whose chain does not verify from being restored.
+if ! out=$(printf 'internal/backup/restore_guide.go\ninternal/restore/executor.go\ninternal/restore/api.go\n' | "$script" --files) ||
+  [ "$out" != $'internal/backup/restore_guide.go\ninternal/restore/api.go' ]; then
+  echo "FAIL: --files with the restore source and open-time rules: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/restore_guide_test.go\ninternal/restore/api_test.go\ninternal/restore/rules.go\ninternal/restore/api.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore source or the open-time rules" >&2
+  fail=1
+fi
+# The helpers that decide what a restore creates (quoting, the databases it
+# creates or refuses, the schema bound); the files they were moved out of
+# are not on the list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/restore_shared.go\ninternal/backup/engines/clickhouse/conn.go\ninternal/backup/engines/clickhouse/restore.go\ninternal/backup/engines/clickhouse/table.go\ninternal/backup/engines/clickhouse/options.go\ninternal/restore/request.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/restore_shared.go ]; then
+  echo "FAIL: --files with the restore's shared helpers: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/restore_shared_test.go\ninternal/backup/engines/clickhouse/restore_shared.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore's shared helpers" >&2
+  fail=1
+fi
+# The execution of a native restore: the decisions approved (R50), the
+# read-only credential over the chain and the source it is served from.
+if ! out=$(printf 'internal/restore/executor.go\ninternal/restore/native_execute.go\n' | "$script" --files) ||
+  [ "$out" != internal/restore/native_execute.go ]; then
+  echo "FAIL: --files with the native restore's execution: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/restore/native_test.go\ninternal/restore/native_execute_test.go\ninternal/restore/native_execute.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the native restore's execution" >&2
   fail=1
 fi
 # The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,

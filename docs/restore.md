@@ -8,8 +8,8 @@ A backup is restored into a **new server**, never over the one it came from. The
   person agrees (or an admin uses the recorded break-glass path).
 - **By hand** ([Restore by hand](#restore-by-hand)): the details of every successful run show the download,
   checksum and restore commands, filled in for that run. Use them to restore somewhere Olympos does not
-  reach, into the original server, or to restore what the UI does not (single tables, ClickHouse views and
-  dictionaries).
+  reach, into the original server, or to restore what the UI does not (single tables, and the views and
+  dictionaries of a logical ClickHouse backup). Native ClickHouse backups are restored from the UI only.
 
 ## Restore from the UI
 
@@ -80,11 +80,15 @@ approve in time, and route `restore.break_glass` to a channel someone watches
 
 1. **Verifies the backup before writing anything:** one full pass over the copy computes its SHA-256 and
    compares it with the run's copy and its manifest. A mismatch fails the request before the target is
-   touched. While restoring, every zip entry's CRC-32 is checked as well.
+   touched. While restoring, every zip entry's CRC-32 is checked as well. A native ClickHouse backup is
+   verified by its signed manifests instead, and each of its objects while it is read
+   ([A native backup](#a-native-backup)).
 2. **Checks the target again**, because time passes between approval and start: the same checks as when the
    request was opened, with the same credential.
 3. **Restores** through the target's agent tunnel, reading the copy straight from its destination: no
-   temporary files, nothing sent to the cluster but the target's own protocol. The request shows progress
+   temporary files, nothing sent to the cluster but the target's own protocol. A native ClickHouse restore is
+   the exception: the target reads the backup itself, from the server's ingest endpoint, with a read-only
+   credential that ends with the restore. The request shows progress
    (the database or table, bytes read) and then a result per database, or for the snapshot: status, size,
    duration, tables (and rows for ClickHouse), errors, and what was **not** restored, with the reason.
 4. **Never overwrites.** A database that already exists on the target **with user objects in it** stops the
@@ -137,7 +141,12 @@ target and drop them before you open a new request.
 
 ### What a ClickHouse restore does
 
-> **ClickHouse restores are deliberately conservative.** Olympos restores **databases and tables with their
+A ClickHouse job takes **logical** or **native** backups ([ClickHouse backups](clickhouse-backups.md)), and
+the two are restored differently. The run's details say which one a run is.
+
+#### A logical backup
+
+> **Logical restores are deliberately conservative.** Olympos restores **databases and tables with their
 > data**, and it **generates** every `CREATE DATABASE` and `CREATE TABLE` itself from the backup's manifest:
 > **no SQL text from the backup runs on the target.** Everything else is reported, never dropped silently,
 > so you can recreate or re-apply it from your schema (migrations, Terraform, the backup's `schema/*.sql`
@@ -180,6 +189,114 @@ target and drop them before you open a new request.
   reads every format the backup uses.
 
 ![A ClickHouse restore with what it did not restore](images/restore-04-clickhouse-result.png)
+
+#### A native backup
+
+A native backup ([ClickHouse backups](clickhouse-backups.md)) is restored by ClickHouse's own `RESTORE`, from
+the backup's own definitions: tables keep their codecs, TTLs, defaults, indexes, projections and settings, and
+views, materialized views and dictionaries come back as they were defined. That runs SQL text from the backup
+on the target, so Olympos first decides, object by object, what may be created, and the checker approves that.
+
+**Before you start.** The target is ClickHouse 24.8 or later, reaches the server's ingest endpoint and trusts
+its certificate, as a server that takes native backups does
+([install](install.md#5-native-clickhouse-backups-optional)); for Replicated tables it needs Keeper and the
+`{replica}` macro. The Olympos server needs `ingest.url`: the restore reads the backup through it. A copy can be
+restored when every run of its chain (the full and the incrementals it is based on) has a succeeded copy on the
+same destination.
+
+**The check verifies the backup.** It reads the manifests of the copy's chain, at most 32 runs, from the copy's
+destination and verifies their signatures and how they link. A chain that does not verify is refused with
+*the backup's manifest does not verify* (the cause is in the server log); when the copy's own manifest verifies
+alone, its objects are listed, every one left out for that reason. A chain with an incremental taken through
+another `ingest.url` is refused, naming that URL: set `ingest.url` back to restore it.
+
+**What is created: the allowlist.** Olympos reads each object's definition from the verified backup, with a
+strict parser, and creates only what it can prove harmless:
+
+- tables of the MergeTree family (`MergeTree`, `ReplacingMergeTree`, `SummingMergeTree`, `AggregatingMergeTree`,
+  `CollapsingMergeTree`, `VersionedCollapsingMergeTree`, `CoalescingMergeTree`), their `Replicated*` variants,
+  `Log`, `TinyLog`, `StripeLog` and `Memory`, with any column or table feature, on the default disk and storage
+  policy;
+- views and materialized views whose query reads only objects that are restored, with no table function; a
+  materialized view's `TO` table must be restored too;
+- dictionaries whose source is a table or query of the local ClickHouse (no `HOST` or `PORT`) on objects that
+  are restored, with a layout that keeps nothing on the server's disk (not `SSD_CACHE`).
+
+Everything else is **left out**, listed in the check with its reason, and not created:
+
+- other table engines (Kafka, S3, URL, MySQL, PostgreSQL, Distributed, Merge, Buffer, Join, Set, KeeperMap, …),
+  and `GraphiteMergeTree`, which needs the `graphite_rollup` configuration on the target;
+- a table on another disk or storage policy, or with a disk defined in its settings: it can store outside the
+  server;
+- a column with an `AES_128_GCM_SIV` or `AES_256_GCM_SIV` codec, which needs the source's encryption keys;
+- a materialized view without `TO` whose inner table is `Replicated*` (it would keep the backup's Keeper path), a
+  refreshable materialized view, live and window views;
+- a definition that reads a table function or calls a function that reads outside the server (`url`, `s3`,
+  `file`, `remote`, `mysql`, `executable`, …), and a column default or TTL that holds a query;
+- an object that reads one that is left out, or one in a database you did not select;
+- anything Olympos cannot read with certainty.
+
+A mistake in these rules can only leave something out, never let something in. That is also why `x IN f(…)` is
+left out as a table function for any `f` other than `tuple` and `array`, `range(10)` included. Re-create what
+was left out from your schema after the restore. You select databases, not objects: a left-out object cannot be
+selected.
+
+**Atomic databases only.** The restore creates its databases as `Atomic`. A selected database that is another
+engine in the backup (`Replicated`, `Lazy`, …) is refused at the check, with the reason: leave it out of the
+selection.
+
+**The checker approves the list.** The request records the databases and every object it leaves out, with the
+reason, and the request page shows the list to the checker. When the restore starts, the server checks the chain
+again; if it would now leave out anything else, or give another reason (an upgrade of Olympos may reword one),
+the request fails before the target is touched (*the backup or Olympos's restore rules changed since the
+request was approved: …*): open a new request.
+
+**What the server does**, after the steps every restore takes ([above](#what-the-server-does)):
+
+1. It opens a read-only ingest session over the chain, with its own short-lived credential (it counts against
+   `ingest.maxRuns` and ends with the restore).
+2. It creates the selected databases (`ENGINE = Atomic`), or uses an existing empty one.
+3. It creates every allowed Replicated table itself, from the backup's own `CREATE TABLE`, with only the
+   engine's Keeper path and replica changed to `/olympos-restore/<request id>/<db>/<table>` and `{replica}` and
+   the backup's `UUID` removed, so the table shares nothing in Keeper with the source. A table whose path and
+   replica cannot be found exactly in its definition is left out at the check.
+4. It runs `RESTORE DATABASE … EXCEPT TABLES <what is left out> FROM S3('<ingest.url>/olympos/<run id>/', …)`.
+   ClickHouse reads the backup through the endpoint, which serves only the objects the verified manifests list,
+   whole, and checks each one's SHA-256 while it streams; an object that does not match is cut off, and the
+   request fails naming it. ClickHouse's server-side copy for S3 disks is off (`allow_s3_native_copy = 0`), so
+   nothing is copied past that check.
+5. When the `RESTORE` is done, the restored databases must hold exactly the allowed objects (and the inner tables
+   of the allowed materialized views), and every allowed table the backup's row count. Anything else fails the
+   request, named.
+
+**Errors.** ClickHouse's error message can quote the backup's DDL, which can hold a password (a dictionary's
+source, for example), so the result keeps only its code, its name and the start of its first line. The whole
+message stays on the target: `SELECT error FROM system.backups WHERE id = '<request id>'`. When the server
+cannot end a `RESTORE` it started, the error names the `KILL QUERY` to run.
+
+**Limits.** A chain of at most 32 runs, with at most 8 Mi objects and 1 GiB of object names between them: the
+server keeps one entry per object for as long as the `RESTORE` runs. A larger chain is refused at the check.
+
+**After a disaster, Olympos first.** A native restore needs a running Olympos server with `ingest.url` set and
+the manifest key in Key Vault: ClickHouse reads the backup through the server's endpoint, and the server verifies
+the manifests with that key. There are no commands to restore a native backup by hand. When Olympos itself is
+gone, bring it back first, from its own backup (`olympos-self`, [restore-olympos.md](restore-olympos.md)), and then
+restore ClickHouse.
+
+**When the server stops during a restore.**
+
+- A server that shuts down cleanly sends `KILL QUERY` for the `RESTORE` (through the agent tunnel, while it is
+  still up) and records the request as failed (*interrupted: server stopped during the restore …*).
+- A server that crashes or is killed sends no `KILL`. The restore's credential lived only in its memory, so the
+  target's reads are refused (`403`) from then on, and its `RESTORE` fails, or retries until it does; to end it
+  at once, run `KILL QUERY WHERE query_id = 'olympos-restore-<request id>' SYNC` on the target. The request stays
+  *running* until a server finds it without progress for 5 minutes and marks it failed (*interrupted: the server
+  running the restore stopped …*); the databases it created are listed and stay on the target.
+- Either way, the databases created are left in place. To clean up, drop them (`DROP DATABASE <db> SYNC`, which
+  also removes their Replicated tables' Keeper data), then remove what is left under the request's Keeper path
+  with `clickhouse-keeper-client` on the target: `rmr '/olympos-restore/<request id>'`. Do not remove the path
+  of a restore whose tables you keep.
+
 
 ### What a Vault or OpenBao restore does
 
@@ -338,10 +455,14 @@ the snapshot (they are now "missing"), which is correct: review and resolve them
 
 ## ClickHouse
 
+This section is about **logical** ClickHouse backups. A **native** backup is a directory in ClickHouse's own
+backup format, `<run_id>/` with `<run_id>.manifest.json` next to it ([ClickHouse backups](clickhouse-backups.md));
+it has no commands to restore by hand and is restored from the UI ([A native backup](#a-native-backup)).
+
 ### What a backup contains
 
-A ClickHouse backup is a zip (`<run_id>.zip`) written front to back by the server over the native protocol.
-Entries:
+A logical ClickHouse backup is a zip (`<run_id>.zip`) written front to back by the server over the native
+protocol. Entries:
 
 | Entry | Content |
 |---|---|
@@ -494,10 +615,10 @@ To restore into **another database name**, create the new database yourself and 
 (`old_db.` → `new_db.`) in the statements, including inside view and materialized view queries, then insert
 into `new_db.<table>`.
 
-### Large datasets (v2)
+### Large datasets
 
-This logical backup (`SELECT ... FORMAT Native` per partition) is slower than ClickHouse's native `BACKUP` for
-very large datasets, and restore re-inserts every row. A later version may add an S3-compatible ingest
-endpoint on the Olympos server so that ClickHouse can run `BACKUP DATABASE ... TO S3('https://olympos/...')`
-against Olympos itself (and `RESTORE ... FROM S3(...)` through it), while the server stays the only writer to
-Blob storage and ClickHouse still never receives a Blob credential.
+This logical backup (`SELECT ... FORMAT Native` per partition) is slower than ClickHouse's own `BACKUP` for
+very large datasets, and a restore re-inserts every row. For ClickHouse 24.8 or later, a job can take
+**native** backups instead: ClickHouse runs `BACKUP` to the Olympos server's ingest endpoint and `RESTORE`
+through it, while the server stays the only writer to backup storage and ClickHouse never receives a storage
+credential ([ClickHouse backups](clickhouse-backups.md)).

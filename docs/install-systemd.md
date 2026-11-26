@@ -105,6 +105,10 @@ curl -fsS http://127.0.0.1:9090/readyz
   `CapabilityBoundingSet=CAP_NET_BIND_SERVICE`; otherwise keep a high port.
 - **Gateway (`:8443`):** by default the internal CA issues the certificate (agents pin that CA) and renews it
   itself. An own certificate: `gateway.tlsCertFile` / `gateway.tlsKeyFile`.
+- **Ingest (`:9444`, optional):** only for native ClickHouse backups, and only when `ingest.url` is set. ClickHouse
+  connects to it directly, so open the port in the firewall for the ClickHouse hosts. The internal CA issues
+  its certificate for the host of `ingest.url`; an own one: `ingest.tlsCertFile` / `ingest.tlsKeyFile`. See
+  [Installing › Native ClickHouse backups](install.md#5-native-clickhouse-backups-optional).
 - Renewed certificate files are picked up with `sudo systemctl reload olympos-server` (SIGHUP; no restart, no
   dropped agent streams). Other configuration changes need a restart.
 

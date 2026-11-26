@@ -263,6 +263,36 @@ describe('restore requests on Approvals', () => {
     expect(screen.getByLabelText('Notes from the restore')).toHaveTextContent('requests_by_minute__restored_data');
   });
 
+  it('shows the checker what a native request leaves out, as recorded when it was opened', async () => {
+    const rq = db.restoreRequests.find((r) => r.options.native && r.status === 'pending')!;
+    await renderApp(`/approvals?view=all&restore=${rq.id}`);
+    const left = await screen.findByLabelText('Left out by the native restore', {}, T);
+    const list = within(left).getByRole('list', { name: 'Objects of metrics' });
+    const items = within(list).getAllByRole('listitem');
+    expect(items.map((li) => li.textContent)).toEqual([
+      'requests_all tableLeft outThe Distributed engine is not on the restore allowlist',
+      'geo dictionaryLeft outIts ClickHouse source names a host',
+    ]);
+    expect(within(left).queryByRole('list', { name: 'Objects of default' })).toBeNull();
+    expect(left).toHaveTextContent("If the backup's check at start leaves out anything else, the restore does not start.");
+    expect(screen.getByText('What a native restore creates')).toBeInTheDocument();
+    expect(screen.queryByText('What a ClickHouse restore creates')).toBeNull();
+    await screen.findByRole('button', { name: 'Approve restore' }, T);
+  });
+
+  it('says when a native request leaves nothing out', async () => {
+    const rq = db.restoreRequests.find((r) => r.options.native && r.status === 'pending')!;
+    const saved = rq.options.native;
+    rq.options.native = { databases: ['metrics'], excluded: [] };
+    try {
+      await renderApp(`/approvals?view=all&restore=${rq.id}`);
+      const left = await screen.findByLabelText('Left out by the native restore', {}, T);
+      expect(left).toHaveTextContent('Nothing: every table, view, materialized view and dictionary of these databases is restored.');
+    } finally {
+      rq.options.native = saved;
+    }
+  });
+
   it('shows the unseal note on a Vault restore result', async () => {
     const v = db.restoreRequests.find((r) => r.engine === 'vault' && r.status === 'succeeded')!;
     await renderApp(`/approvals?view=all&restore=${v.id}`);

@@ -400,6 +400,8 @@ export interface BackupRun {
   method?: 'native' | 'logical';
   /** How many objects a native run stored; null for logical runs and for a native run that has not finished. */
   objects?: number | null;
+  /** GET /backup/runs/{id}: "weekly" when a daily native run is kept as long as weekly, since an incremental based on it succeeded (R45). */
+  kept_as?: string;
 }
 /** GET /backup/settings: what the backup wizard needs to know about the server. */
 export interface BackupSettings {
@@ -675,6 +677,13 @@ export interface RestoreOptions {
   /** Open-time findings: existing empty databases restored into, no superuser. */
   notes?: string[];
   server_version?: string;
+  /** A native ClickHouse request: what the check decided when it was opened; the checker approves this list, and the restore does not start when the check at start decides otherwise. */
+  native?: RestoreNativeOptions;
+}
+/** The databases a native restore restores and every object of them it leaves out, with the reason. */
+export interface RestoreNativeOptions {
+  databases: string[];
+  excluded: RestoreNativeObject[];
 }
 export interface RestoreTargetReport {
   /** Selected databases that exist on the target: true when they hold user objects. */
@@ -705,6 +714,21 @@ export interface RestoreCheck {
   databases: string[] | null;
   options: RestoreOptions;
   report: RestoreTargetReport | null;
+  /** A native ClickHouse copy: every object of the selected databases and what the restore does with it; null for other copies. */
+  native?: RestoreNativeCheck | null;
+}
+/** One object of a native backup: allowed objects are created by the restore; the others are left out, with the reason. */
+export interface RestoreNativeObject {
+  database: string;
+  name: string;
+  /** table | view | materialized_view | dictionary | other */
+  kind: string;
+  allowed: boolean;
+  reason?: string;
+}
+export interface RestoreNativeCheck {
+  /** When the copy's chain does not verify: the objects its own signed manifest lists, every one left out (or none). */
+  objects: RestoreNativeObject[];
 }
 /** restore_requests.progress: the latest progress of a running restore ({} before it starts). */
 export interface RestoreProgress {

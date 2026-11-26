@@ -393,7 +393,14 @@ func Sign(ctx context.Context, kv secrets.KeyVault, keyName string, m *NativeMan
 // vault's error, wrapped. The manifest it returns has its lists in
 // canonical order, whatever order they were stored in.
 //
-// A DDL key under another run is not checked here: use VerifyChain.
+// A manifest vouches only for its own run's objects. A DDL key under
+// another run (an incremental's unchanged metadata, stored by a run of its
+// chain) is checked for its form only: this manifest holds no size or
+// SHA-256 for it, so a verified manifest alone does not vouch for what that
+// key names, and nothing may read a definition by such a key, or create an
+// object from it, on the strength of VerifySigned. VerifyChain checks every
+// DDL key against the objects of the chain's verified manifests; a restore
+// uses VerifyChain.
 func VerifySigned(ctx context.Context, kv secrets.KeyVault, trustedKeyName, expectedRunID string, raw []byte) (*NativeManifest, error) {
 	refuse := func(format string, a ...any) (*NativeManifest, error) {
 		return nil, fmt.Errorf("%w: %s", ErrManifestInvalid, fmt.Sprintf(format, a...))

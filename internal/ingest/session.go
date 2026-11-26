@@ -99,11 +99,17 @@ type Sink interface {
 
 // Source serves the objects a run may read, by bucket-relative key and
 // prefix. Open returns an error that wraps fs.ErrNotExist for a key that does
-// not exist.
+// not exist, or ErrNotServed for one it refuses.
 type Source interface {
 	Open(ctx context.Context, key string) (io.ReadCloser, ObjectRecord, error)
 	List(ctx context.Context, prefix string) ([]ObjectRecord, error)
 }
+
+// ErrNotServed is wrapped by a Source's Open for a key it refuses to serve
+// although the key lies in the run's read scope: the request is refused 403
+// AccessDenied and the run goes on, where a key that does not exist
+// (fs.ErrNotExist) is 404 NoSuchKey.
+var ErrNotServed = errors.New("ingest: the key is not served")
 
 // WholeSource is a Source that serves whole objects only: it checks each
 // object against its signed digest when the object ends, so a range would

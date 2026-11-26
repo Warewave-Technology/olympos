@@ -61,10 +61,19 @@ func init() {
 		rlog := d.Log.With("component", "restore")
 		restores := &restore.API{DB: d.DB, Log: rlog, Envelope: d.Envelope, Creds: creds,
 			Dialer: d.Gateway, Blobs: readers, TTL: d.Cfg.ChangeRequests.TTL}
+		// Native ClickHouse backups are restored through the ingest endpoint:
+		// checked by the API, run by the executor with a credential of its
+		// registry.
+		var native *backup.NativeRestoreConfig
+		if d.Ingest != nil {
+			native = &backup.NativeRestoreConfig{KV: d.KV, ManifestKeyName: d.Cfg.KeyVault.ManifestKeyName, URL: d.Cfg.Ingest.URL,
+				Registry: d.Ingest, MaxRunDuration: d.Cfg.Ingest.MaxRunDuration}
+			restores.Native = native
+		}
 		// Approved restores run next to the backup worker: the same tunnels
 		// and the same per-cluster limit (backup runs and restores together).
 		executor := &restore.Executor{DB: d.DB, Log: rlog.With("loop", "executor"), Dialer: d.Gateway, Blobs: readers,
-			Creds: creds, Envelope: d.Envelope, PerCluster: d.Cfg.Backup.PerClusterConcurrency}
+			Creds: creds, Envelope: d.Envelope, PerCluster: d.Cfg.Backup.PerClusterConcurrency, Native: native}
 		return Wiring{
 			Modules: []server.Module{api, restores},
 			// Restore expiry runs on its own leader lock, next to the module

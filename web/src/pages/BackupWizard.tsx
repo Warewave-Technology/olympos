@@ -210,8 +210,8 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
         ? 'Native backups need the ingest endpoint, which is off on this server. An admin turns it on with ingest.url (docs/configuration.md#ingest).'
         : null;
   const nativeChecking = isClickHouse && settingsQ.isPending;
-  // A new job starts on Logical until native restore lands (R42); Task 16 makes Native the default again when the server takes native backups.
-  const method: Method = f.method || 'logical';
+  // A new job is native when the server can take native backups; while that is unknown, logical.
+  const method: Method = f.method || (settingsQ.data?.ingest_enabled && !nativeReason ? 'native' : 'logical');
   const incremental: Incremental = method === 'native' ? f.incremental : '';
   const cluster = clusterQ.data;
   const dest = f.groupId ? undefined : destQ.data?.items.find((d) => d.id === f.destinationId);
@@ -700,6 +700,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                   <input type="radio" name="method" checked={method === 'native'} onChange={() => set('method', 'native')} disabled={(!!nativeReason || nativeChecking) && method !== 'native'} aria-describedby="w-native-t2" />
                   <span>
                     <span className="t1">Native</span>
+                    {!nativeReason && !nativeChecking && (
+                      <>
+                        {' '}
+                        <Badge tone="ok">Recommended</Badge>
+                      </>
+                    )}
                     <span className="t2" id="w-native-t2">
                       {nativeReason ? (
                         <WithDocLinks text={nativeReason} />
@@ -707,7 +713,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                         'Checking whether this server takes native backups…'
                       ) : (
                         <>
-                          ClickHouse runs <span className="mono">BACKUP</span> and sends it to Olympos, which stores it. Keeps views, dictionaries, defaults, TTLs and codecs, consistent per table. Whole databases, ClickHouse 24.8 or later. Native restore is not available yet; the backups are kept.
+                          ClickHouse runs <span className="mono">BACKUP</span> and sends it to Olympos, which stores it. Keeps views, dictionaries, defaults, TTLs and codecs, consistent per table. Whole databases, ClickHouse 24.8 or later.
                         </>
                       )}
                     </span>

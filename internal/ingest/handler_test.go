@@ -14,6 +14,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -2271,4 +2272,131 @@ func (w *wholeSource) WholeObjects() {}
 func (w *wholeSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
 	w.opened++
 	return w.fakeSource.Open(ctx, key)
+}
+
+// notServedSource refuses every key it does not hold with ErrNotServed, as
+// a native restore's source refuses a key its signed manifests do not list.
+type notServedSource struct{ *fakeSource }
+
+func (n notServedSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
+	if _, ok := n.objects[key]; !ok {
+		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %w", key, ingest.ErrNotServed)
+	}
+	return n.fakeSource.Open(ctx, key)
+}
+
+// TestHandlerNotServed: a key in the read scope that the source refuses is
+// 403 AccessDenied, and the run goes on; a key that does not exist stays
+// 404 NoSuchKey.
+func TestHandlerNotServed(t *testing.T) {
+	e := newEnv(t)
+	base := uuid.NewString() + "/"
+	src := notServedSource{&fakeSource{objects: map[string]string{base + "data/x.bin": "0123456789"}}}
+	ro := e.restore(t, src, base)
+	wantRefused(t, e.do(t, ro.cred, http.MethodGet, "/olympos/"+base+"data/other.bin", ""), http.StatusForbidden, "AccessDenied")
+	notStopped(t, ro.s)
+	if r := e.do(t, ro.cred, http.MethodGet, "/olympos/"+base+"data/x.bin", ""); r.status != http.StatusOK || r.body != "0123456789" {
+		t.Fatalf("a served key after a refused one: %s", r)
+	}
+	plain := e.restore(t, &fakeSource{objects: map[string]string{}}, base)
+	wantRefused(t, e.do(t, plain.cred, http.MethodGet, "/olympos/"+base+"data/other.bin", ""), http.StatusNotFound, "NoSuchKey")
+}
+
+// TestHandlerSlowReader: a client that stops reading in the middle of a GET
+// no longer holds the handler: the write of a chunk has a deadline.
+func TestHandlerSlowReader(t *testing.T) {
+	e := newEnv(t, ingest.WithWriteTimeout(200*time.Millisecond))
+	base := uuid.NewString() + "/"
+	// Far more than the socket buffers hold.
+	src := &fakeSource{objects: map[string]string{base + "data/big.bin": strings.Repeat("b", 64<<20)}}
+	ro := e.restore(t, src, base)
+	req := mustRequest(t, http.MethodGet, e.srv.URL+"/olympos/"+base+"data/big.bin")
+	req.Header.Set("X-Amz-Content-Sha256", hexSHA256(""))
+	resp, err := e.srv.Client().Do(signer.SignV4(*req, ro.cred.AccessKey, ro.cred.Secret, "", testRegion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: %d", resp.StatusCode)
+	}
+	// The body is not read; the handler must end on its own.
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(e.logs.String(), `"status":"aborted"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the handler is still writing to a client that does not read:\n%s", e.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	notStopped(t, ro.s)
+}
+
+// blockingSource holds every Open until the request's context ends, and
+// fails it with the context's error, as a destination read does.
+type blockingSource struct {
+	*fakeSource
+	opened chan struct{}
+}
+
+func (b blockingSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
+	close(b.opened)
+	<-ctx.Done()
+	return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %w", key, ctx.Err())
+}
+
+// TestHandlerClientGone: a client that goes away while its GET is read
+// from the source does not stop the run: the source did not fail.
+func TestHandlerClientGone(t *testing.T) {
+	e := newEnv(t)
+	base := uuid.NewString() + "/"
+	src := blockingSource{fakeSource: &fakeSource{objects: map[string]string{}}, opened: make(chan struct{})}
+	ro := e.restore(t, src, base)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := mustRequest(t, http.MethodGet, e.srv.URL+"/olympos/"+base+"data/x.bin").WithContext(ctx)
+	req.Header.Set("X-Amz-Content-Sha256", hexSHA256(""))
+	done := make(chan error, 1)
+	go func() {
+		resp, err := e.srv.Client().Do(signer.SignV4(*req, ro.cred.AccessKey, ro.cred.Secret, "", testRegion))
+		if err == nil {
+			resp.Body.Close()
+		}
+		done <- err
+	}()
+	<-src.opened
+	cancel()
+	<-done
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(e.logs.String(), "the client went away while an object was read") {
+		if time.Now().After(deadline) {
+			t.Fatalf("the handler did not see the client go:\n%s", e.logs.String())
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	notStopped(t, ro.s)
+	if strings.Contains(e.logs.String(), "stopping the run") {
+		t.Fatal("the run was stopped for a client that went away")
+	}
+
+	// A client that only closes its sending side still reads: it gets no
+	// reply at all, never an empty 200 it would take for the object.
+	src2 := blockingSource{fakeSource: &fakeSource{objects: map[string]string{}}, opened: make(chan struct{})}
+	ro2 := e.restore(t, src2, base)
+	conn, err := net.Dial("tcp", e.srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	req2 := mustRequest(t, http.MethodGet, e.srv.URL+"/olympos/"+base+"data/x.bin")
+	req2.Header.Set("X-Amz-Content-Sha256", hexSHA256(""))
+	if err := signer.SignV4(*req2, ro2.cred.AccessKey, ro2.cred.Secret, "", testRegion).Write(conn); err != nil {
+		t.Fatal(err)
+	}
+	<-src2.opened
+	_ = conn.(*net.TCPConn).CloseWrite()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	got, _ := io.ReadAll(conn)
+	if len(got) > 0 {
+		t.Fatalf("a half-closed client got a reply: %q", got)
+	}
+	notStopped(t, ro2.s)
 }

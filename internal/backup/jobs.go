@@ -157,6 +157,11 @@ type Run struct {
 	Method string `json:"method"`
 	// Objects: how many objects a native run stored; nil for other runs.
 	Objects *int `json:"objects"`
+	// KeptAs: the tier a native run's copies are kept as since an
+	// incremental based on it succeeded, when that is longer than the tier
+	// it was written with (R45: "weekly" for a daily member of a chain); ""
+	// otherwise. Set by LoadRun only.
+	KeptAs string `json:"kept_as,omitempty"`
 
 	clusterID     uuid.UUID
 	clusterLabels map[string]string
@@ -239,6 +244,20 @@ func LoadRun(ctx context.Context, q store.Querier, id uuid.UUID) (*Run, error) {
 	r, err := scanRun(q.QueryRow(ctx, runSelect+` WHERE r.id = $1`, id))
 	if err != nil {
 		return nil, store.NotFound(err)
+	}
+	if r.Method == "native" && tierRank(r.Tier) >= 0 && tierRank(r.Tier) < tierRank("weekly") {
+		// An incremental re-tags its chain's shorter members weekly before
+		// any of its copies succeeds (retagChain), so one that succeeded
+		// says this run is kept weekly. Every incremental is a daily copy,
+		// so weekly is as long as a re-tag goes.
+		var based bool
+		if err := q.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM ingest_credentials c JOIN backup_runs b ON b.id = c.run_id
+			WHERE c.kind = 'backup' AND c.scope -> 'read' ? $1 AND b.status = 'succeeded')`, id.String()+"/").Scan(&based); err != nil {
+			return nil, err
+		}
+		if based {
+			r.KeptAs = "weekly"
+		}
 	}
 	return r, attachCopies(ctx, q, r)
 }

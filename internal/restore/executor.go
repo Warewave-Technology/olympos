@@ -35,6 +35,9 @@ type Executor struct {
 	Blobs    blob.ReaderResolver
 	Creds    *backup.Credentials
 	Envelope *secrets.Envelope
+	// Native restores native ClickHouse copies through the ingest endpoint
+	// (its Registry mints their credentials); nil while the endpoint is off.
+	Native *backup.NativeRestoreConfig
 	// Global is the max restores at once on this replica (default 2);
 	// PerCluster the max running backup runs and restores together per
 	// cluster, across replicas (backup.perClusterConcurrency, default 2).
@@ -338,6 +341,12 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 	if len(fields) > 0 {
 		return fail("the restore cannot start: " + describeFields(fields))
 	}
+	// A native copy is a run directory, restored by the target's own
+	// RESTORE through the ingest endpoint (design §6 Execute), not by the
+	// engine's Restorer, which would read it as one blob.
+	if run.native {
+		return x.performNative(ctx, j, src, pw, res, tr)
+	}
 	restorer, ok := backup.RestorerFor(j.engine)
 	if !ok {
 		return fail(noInspectorMessage(j.engine))
@@ -380,6 +389,38 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 	// 3. The target again, over the tunnel and with the request's
 	// credential (reads only): time passed since the approval.
 	pw.phase("check")
+	ec, opts, superuser, msg, err := x.checkTarget(ctx, j, tr, res)
+	if err != nil {
+		return internal("build the target's connection", err)
+	}
+	if msg != "" {
+		return fail(msg)
+	}
+	raw, err := json.Marshal(opts)
+	if err != nil {
+		return internal("encode the options", err)
+	}
+
+	// 4. The engine.
+	pw.phase("restore")
+	window := newWindowObject(counted, readWindow)
+	rc := backup.RestoreContext{EngineContext: ec, RequestID: j.id.String(), Databases: j.databases, Options: raw, Superuser: superuser, Progress: pw.report}
+	if j.engine == "vault" {
+		rc.Snapshot = io.NewSectionReader(window, 0, window.Size())
+	} else {
+		rc.Archive = window
+	}
+	out, err := restorer.Restore(ctx, rc)
+	return x.restored(res, out, err, tr, "")
+}
+
+// checkTarget checks the request's target again, over the tunnel and with
+// the request's credential (reads only), and returns its connection, the
+// options the restore runs with and whether the PostgreSQL credential is a
+// superuser; msg is why the restore cannot run there ("" when it can), err
+// an internal error. Its notes go into res.
+func (x *Executor) checkTarget(ctx context.Context, j *job, tr *backup.SecretScrubber, res *backup.RestoreResult) (
+	ec backup.EngineContext, opts Options, superuser bool, msg string, err error) {
 	cred := func(ctx context.Context) (backup.Credential, error) {
 		if j.engine == "vault" {
 			if len(j.sealed.Ciphertext) == 0 {
@@ -397,19 +438,18 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 		c, err := x.Creds.Resolve(ctx, x.DB, *j.credID)
 		return tr.Track(c), err
 	}
-	ec, _, err := backup.TargetEngineContext(ctx, x.DB, x.Dialer, j.targetID, EngineOptions(j.engine, j.opts), cred)
+	ec, _, err = backup.TargetEngineContext(ctx, x.DB, x.Dialer, j.targetID, EngineOptions(j.engine, j.opts), cred)
 	if err != nil {
-		return internal("build the target's connection", err)
+		return ec, opts, false, "", err
 	}
 	rep, fields, notes, err := inspectTarget(ctx, j.engine, ec, j.databases, x.InspectTimeout)
 	if err != nil {
-		return fail("the target check failed: " + err.Error())
+		return ec, opts, false, "the target check failed: " + err.Error(), nil
 	}
 	if len(fields) > 0 {
-		return fail("the target cannot take this restore: " + describeFields(fields))
+		return ec, opts, false, "the target cannot take this restore: " + describeFields(fields), nil
 	}
-	opts := j.opts
-	superuser := false
+	opts = j.opts
 	if j.engine == "postgresql" {
 		approved := opts.Superuser != nil && *opts.Superuser
 		superuser = approved && rep.Superuser
@@ -420,21 +460,13 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 		}
 	}
 	res.Notes = append(res.Notes, notes...)
-	raw, err := json.Marshal(opts)
-	if err != nil {
-		return internal("encode the options", err)
-	}
+	return ec, opts, superuser, "", nil
+}
 
-	// 4. The engine.
-	pw.phase("restore")
-	window := newWindowObject(counted, readWindow)
-	rc := backup.RestoreContext{EngineContext: ec, RequestID: j.id.String(), Databases: j.databases, Options: raw, Superuser: superuser, Progress: pw.report}
-	if j.engine == "vault" {
-		rc.Snapshot = io.NewSectionReader(window, 0, window.Size())
-	} else {
-		rc.Archive = window
-	}
-	out, err := restorer.Restore(ctx, rc)
+// restored records what the engine returned in res and returns the
+// request's outcome: its failure ("" when it succeeded), scrubbed of the
+// request's secrets. failed, when set, replaces the engine's error.
+func (x *Executor) restored(res, out *backup.RestoreResult, err error, tr *backup.SecretScrubber, failed string) (*backup.RestoreResult, string) {
 	if out != nil {
 		if out.Items != nil {
 			res.Items = out.Items
@@ -452,17 +484,20 @@ func (x *Executor) perform(ctx context.Context, j *job, pw *progressWriter) (*ba
 	for i, n := range res.Notes {
 		res.Notes[i] = tr.Scrub(n)
 	}
-	if err != nil {
-		return fail("the restore failed: " + err.Error())
+	switch {
+	case failed != "":
+		return res, tr.Scrub(failed)
+	case err != nil:
+		return res, tr.Scrub("the restore failed: " + err.Error())
 	}
-	var failed []string
+	var names []string
 	for _, it := range res.Items {
 		if it.Status == "failed" {
-			failed = append(failed, it.Name)
+			names = append(names, it.Name)
 		}
 	}
-	if len(failed) > 0 {
-		return fail("the restore failed for: " + strings.Join(failed, ", "))
+	if len(names) > 0 {
+		return res, tr.Scrub("the restore failed for: " + strings.Join(names, ", "))
 	}
 	return res, ""
 }

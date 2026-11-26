@@ -11,12 +11,14 @@ build:
 	$(GO) build ./...
 
 # Tests use the dev build (dev login, local key vault); test-release checks
-# the release build has neither (F6).
+# the release build has neither (F6). The ClickHouse package's Docker tests
+# (native backups and restores on two versions) run past go test's default
+# 10-minute package timeout.
 test:
-	$(GO) test -tags dev ./...
+	$(GO) test -tags dev -timeout 25m ./...
 
 test-release:
-	$(GO) test ./...
+	$(GO) test -timeout 25m ./...
 	./scripts/check-release-binary.sh
 
 web:

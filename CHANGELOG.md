@@ -7,6 +7,33 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- **Native ClickHouse backups and restores** ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).
+  A ClickHouse job can take its backups with ClickHouse's own `BACKUP` instead of the logical export, and a
+  native backup is restored with ClickHouse's own `RESTORE`. It keeps what a logical backup loses: views,
+  materialized views, dictionaries, defaults, TTLs, skip indexes, projections and codecs, consistent per
+  table. ClickHouse writes to a new **ingest endpoint** of the Olympos server (a minimal S3, `ingest.url`,
+  port 9444, off until the URL is set), not to storage: the server streams every object to the job's
+  destinations and stays the only writer. See `docs/clickhouse-backups.md`.
+  - The job's method: *Native* or *Logical* in a new *Method* step of the backup wizard
+    (`engine_options.method`). New jobs on ClickHouse 24.8 or later start on *Native* when the endpoint is on;
+    existing jobs stay logical. Native runs back up whole databases and refuse sharded targets.
+  - *Weekly full, daily incrementals* (`engine_options.incremental: weekly_full_daily`): the first run of each
+    week and month, and every run with a weekly or monthly copy, is a full; the runs of a chain are re-tagged
+    so they are kept as long as their incrementals.
+  - Every run has its own short-lived credential, for its own backup only, held in memory and revoked when the
+    run ends. Its manifest lists every object with its SHA-256 and is **signed** with a new Key Vault key,
+    `olympos-manifest` (`keyVault.manifestKeyName`); a run whose manifest does not verify is not restored.
+  - Restore from the run's *Restore…*: the check verifies the signed chain and lists every object of the
+    selected databases with what the restore does with it. Only what an allowlist on the parsed definitions
+    proves harmless is created; the rest is left out with its reason, the checker approves that list, and the
+    restore refuses to start when the backup changed since. Replicated tables get Keeper paths of their own.
+  - The dry run of a native job is a `BACKUP` of the definitions only (`structure_only`), done in seconds.
+  - A byte limit per run, with `ingest.maxRunBytes`; `ingest.maxRuns`, `ingest.maxRunDuration` and
+    `ingest.spillDir`; metrics `olympos_ingest_*`; Helm values `olympos.ingest`, `ingestService` and
+    `ingestTLSSecret`; the lifecycle rule `olympos-incomplete` (Bicep `incompleteDays`) for the objects of runs
+    that did not finish, and the NFS clean-up for them in `docs/install.md`.
+  - SPEC §0 principle 1 (a second documented exception: the per-run credential that ClickHouse receives) and
+    §10.4 (a native rule next to the logical one): `docs/spec-changes.md` #27, `docs/security-model.md`.
 - **Install with Argo CD or Flux** ([#59](https://github.com/Warewave-Technology/olympos/issues/59)). Argo CD
   and other tools that render the charts with `helm template` could not keep two Secrets that the charts keep with `lookup`:
   every sync wrote the spent bootstrap token into the agent's identity Secrets again (the probe then retried
@@ -21,6 +48,16 @@ All notable changes to this project are documented here. The format follows
   whose security-model commits are not all in an RC of the same version, before anything is published. Such a
   release is tested in the lab with a focused test plan and passes an independent security review. CI labels
   the pull requests `security-model`. See `docs/development.md` › Releases.
+
+### Upgrade notes
+- Nothing needs action: native backups stay off until `ingest.url` is set, and existing ClickHouse jobs keep
+  the logical method. Migrations `00026` (ingest credentials, without their secrets) and `00027` (the object
+  count of a run) run at start.
+- To use native backups, follow `docs/install.md` §5: set `ingest.url`, let ClickHouse trust the endpoint's
+  certificate and reach its port, and create the Key Vault key `olympos-manifest` with *Key Vault Crypto User*
+  for the server's identity (`deploy/bicep/keyvault.bicep` now does both). For incrementals, weekly retention
+  must be at least daily retention plus 7 days plus the job's retry window, and the storage needs the rule for
+  `olympos-state=incomplete`.
 
 ## [0.3.1] - 2026-11-25
 

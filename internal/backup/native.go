@@ -438,8 +438,9 @@ type nativeJob struct {
 	scrub    func(string) string
 }
 
-// nativeURL is the run's directory on the ingest endpoint.
-func nativeURL(ingestURL, runID string) string {
+// NativeRunURL is a run's directory on the ingest endpoint: where its
+// BACKUP writes, and the URL an incremental names its base by.
+func NativeRunURL(ingestURL, runID string) string {
 	return strings.TrimRight(ingestURL, "/") + "/olympos/" + runID + "/"
 }
 
@@ -534,7 +535,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	var base *NativeBase
 	if chain != nil {
 		opts.Scope.Read, opts.Source = chain.prefixes(), src
-		base = &NativeBase{URL: nativeURL(cfg.URL, chain.base().String()), RunID: chain.base().String()}
+		base = &NativeBase{URL: NativeRunURL(cfg.URL, chain.base().String()), RunID: chain.base().String()}
 	}
 	sess, cred, err := cfg.Registry.Open(ctx, opts)
 	if err != nil {
@@ -557,7 +558,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 			"last_full_bytes", lastFull, "configured", cfg.MaxRunBytes > 0)
 		return w.nativeOrphans(ctx, r.id, t.Running), nil
 	}
-	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: nativeURL(cfg.URL, runID), AccessKey: cred.AccessKey,
+	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: NativeRunURL(cfg.URL, runID), AccessKey: cred.AccessKey,
 		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Base: base, SkipSize: cfg.MaxRunBytes > 0,
 		Stop: stopped.ch, Before: before})
 	cred = ingest.Credential{}

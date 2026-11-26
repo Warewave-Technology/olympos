@@ -10,7 +10,7 @@ import { isSelf } from '../auth/permissions';
 import { dateTime, personName, relDateTime, shortId } from '../lib/format';
 import { KindBadge } from '../ui/destinations';
 import { Badge, ErrorState, Field, FormError, Loading, aria, fieldError, useToast } from '../ui/kit';
-import { ClickHouseScopeNote, RestoreProgressView, RestoreResultView, RestoreStatusBadge, VaultTokenNeeds, VaultUnsealNote, restoreEngineName, restorePath } from '../ui/restore';
+import { ClickHouseScopeNote, NativeLeftOut, NativeScopeNote, RestoreProgressView, RestoreResultView, RestoreStatusBadge, VaultTokenNeeds, VaultUnsealNote, restoreEngineName, restorePath } from '../ui/restore';
 
 const KNOWN_KINDS = ['azure_blob', 's3', 'nfs'];
 
@@ -156,6 +156,14 @@ export function RestoreDetail({ id }: { id: string }) {
               <span className="mono">{rq.databases.join(', ')}</span>
             )}
           </dd>
+          {rq.options.native && (
+            <>
+              <dt>Left out</dt>
+              <dd aria-label="Left out by the native restore">
+                <NativeLeftOut native={rq.options.native} />
+              </dd>
+            </>
+          )}
           {rq.engine === 'postgresql' && (
             <>
               <dt>Roles</dt>
@@ -232,7 +240,7 @@ export function RestoreDetail({ id }: { id: string }) {
             </ul>
           </div>
         )}
-        {pending && rq.engine === 'clickhouse' && <ClickHouseScopeNote />}
+        {pending && rq.engine === 'clickhouse' && (rq.options.native ? <NativeScopeNote /> : <ClickHouseScopeNote />)}
         {pending && isVault && <VaultUnsealNote />}
 
         {pending && mayDecide && (

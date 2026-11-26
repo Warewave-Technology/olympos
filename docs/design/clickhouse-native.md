@@ -66,7 +66,7 @@ nothing was deleted, was rejected.
   |---|---|
   | `ListObjects` v1 (bucket level, `prefix`, `max-keys`, `marker`) | `prefix` lies inside a prefix the credential may read or write |
   | `PutObject`, `CreateMultipartUpload`, `UploadPart`, `CompleteMultipartUpload`, `AbortMultipartUpload` | write credential, key inside its own run prefix |
-  | `GetObject` (no `Range` seen, spike §1; the base chain's source refuses one, as it checks each object's SHA-256 when the object ends) | read: a credential that may read that prefix; a backup also reads back its own `.lock` and `.backup` |
+  | `GetObject` (no `Range` seen, spike §1 and Task 17; the base chain's and the restore's sources refuse one, as they check each object's SHA-256 when the object ends) | read: a credential that may read that prefix, of an object a verified manifest lists (the restore's source answers `403` for another key); a backup also reads back its own `.lock` and `.backup` |
   | `DeleteObject <run-id>/.lock` | write credential of that run (memory only, see below) |
 
   Never allowed: other deletes, `DeleteObjects`, `CopyObject`, `UploadPartCopy`, `HeadBucket` and other bucket
@@ -259,7 +259,8 @@ The existing flow, with these changes for a native source:
   4. Run:
      ```sql
      RESTORE DATABASE db1 [EXCEPT TABLES …] FROM S3('<url>/olympos/<run-id>/', '<key>', '<secret>')
-     SETTINGS async = 1, allow_different_table_def = 1, id = '<request-id>'
+     SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0,
+       use_same_s3_credentials_for_base_backup = 1, id = '<request-id>'
      ```
      `allow_different_table_def` applies only to tables that already exist, which are the Replicated tables
      Olympos just created from the backup's own DDL.
@@ -269,6 +270,79 @@ The existing flow, with these changes for a native source:
   - It reads them from the copy's destination and checks each object's SHA-256 while streaming. On a mismatch
     it aborts the connection, so the `GET` fails and the restore with it, and it reports the object.
 - **Afterwards.** The existing post-restore checks run: row counts per table against the manifest.
+- **Decided while building Milestone E (Task 16, the check).**
+  - The chain of the selected copy is its run's backup credential's read scope (the base chain the run was
+    taken on, the full first) and the run, at most 32 runs. Every run of it needs a succeeded copy on the
+    copy's destination; the sidecars are read from there, each at most 65 MiB, and verified with
+    `VerifyChain`, one chain held at a time per server: the check keeps only the databases and the
+    decisions once it gives the slot back. Each verified manifest must be the one its copy row records, and a
+    run with records of more than one chain is refused. Any failure to read or verify refuses the check with "the backup's manifest does not verify" on
+    the copy (the cause is logged, never shown); the objects the copy's own manifest lists, when it verifies
+    by itself, are shown, every one left out with that reason, and nothing is read on its strength.
+  - Each object's definition is read through the chain's checked source (only objects of the verified
+    manifests, size and SHA-256 checked) and the allowlist decides for the selected databases only: an object
+    that reads a database left unselected is not restored. The Replicated rewrite runs for every allowed
+    Replicated table at check time, so a table whose Keeper path cannot be rewritten is left out with its
+    reason in the check, and so is what depends on it.
+  - Each incremental's `.backup` names its base by its URL under the endpoint it was taken through, and the
+    restore's `RESTORE` follows it. A chain whose base URL is not `ingest.url` as it is now is refused, with
+    the old URL in the reason; a full backup restores whatever URL it was taken through.
+  - A native run's restore guide (`GET /backup/runs/{id}`) lists its succeeded copies and no commands; the run
+    page offers **Restore…** and shows the tier the run was written with, and "kept at least as long as
+    weekly" once an incremental based on it succeeded (R45).
+- **Decided while building Milestone E (Task 17, the restore).**
+  - The request records, when it is opened, the databases it restores and every object of them it leaves
+    out, with the reason (`options.native`, R50); the request page shows that list to the checker. At start
+    the executor checks the chain again and refuses to start, before the target is contacted or a credential
+    minted, with "the backup or Olympos's restore rules changed since the request was approved: …" when the
+    check now leaves out anything else or gives another reason (the reasons are compared as text, so an upgrade
+    that rewords one refuses requests approved before it).
+  - The check's one-at-a-time slot is held only to verify the chain and bind it. What the restore keeps for
+    the hours its `RESTORE` runs is the restore's source: one entry per object of the verified manifests
+    (key, size, SHA-256, run), none of the parsed manifests, at most 8 Mi objects (32 runs of 256 Ki, twice
+    the ~250k files a run holds) and 1 GiB of keys, about 1.8 GiB at that bound; a chain past it is refused
+    at the check. A manifest key the endpoint would not serve refuses the source; a key is only ever looked
+    up, and mapped to a path only below its run's directory on the copy's destination. The check reads
+    definitions 8 at a time.
+  - A selected database whose own definition in the backup is not `CREATE DATABASE <db> [UUID '…'] ENGINE =
+    Atomic` is refused at the check, with the reason (R52): the restore creates its databases as Atomic, and
+    RESTORE refuses a database whose definition differs.
+  - The credential is a read-only ingest session (`kind = 'restore'`, `run_id` the request) over the chain's
+    prefixes, the full first, with the same lifetime as a backup's; it counts against `ingest.maxRuns`, and it
+    is revoked when the engine returns. A key in its scope that the manifests do not list is `403` and the
+    restore goes on; an object that does not match is never served whole: its last read fails, the endpoint
+    aborts the connection, the session stops, the `RESTORE` is killed and the request fails naming the object.
+    Every chunk written to a client has a 2-minute deadline. A client that goes away while its object is read
+    (its request's context ends) is not a source failure: the session goes on.
+  - The order is: the selected databases (`CREATE DATABASE … ENGINE = Atomic`, or an existing empty one), the
+    allowed Replicated tables from the backup's own text with the Keeper path rewritten and the backup's
+    `UUID '…'` removed, then:
+
+    ```sql
+    RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…)
+    SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0,
+      use_same_s3_credentials_for_base_backup = 1, id = '<request id>'
+    ```
+
+    with query id `olympos-restore-<request id>` and the read throttle of R29; `allow_s3_native_copy = 0`
+    (R51), as on `BACKUP`, so a table on an S3 disk never copies its files server-side past the verified
+    read. `RESTORE` fills a table it finds and creates the others (24.8 and 25.8): a pre-created table is
+    not named in `EXCEPT TABLES`, and without `allow_different_table_def` it is refused as "a different
+    definition". A pre-created table needs no UUID of the backup: it gets its own, so on a shared Keeper
+    nothing of the source's table (its `table_shared_id`) is shared.
+  - The `RESTORE` is polled every 5 s in `system.backups` (id = the request id) and ended with `KILL QUERY …
+    SYNC` on a stop of the session, a cancelled restore (the request ended elsewhere, the lease, a shutdown)
+    and every way out that did not see it end, on a new connection when its own is lost; when even that does
+    not end it, the error names the `KILL QUERY` to run. A failed `RESTORE` records only ClickHouse's error code,
+    its name and the start of the first line, cut before any quoted text or `CREATE` (R52): the whole message
+    can quote the backup's DDL; it stays in `system.backups` on the target, and the error says how to read it.
+    After `RESTORED`, the restored databases must hold exactly the allowed objects (with the inner tables of
+    the allowed materialized views): an object left out that is there, one no one decided, or an allowed one
+    that is missing fails the request, named. Then every allowed table's row count must be the manifest's; a
+    table that differs fails the request, named.
+  - Seen on 24.8 and 25.8 through the endpoint: `RESTORE` sends `GetObject` without `Range` (the source
+    refuses one) and two `ListObjects`; a dictionary whose ClickHouse source names a `TABLE` and no `DB` reads
+    that table in its own database; `EXCEPT TABLES` leaves out an object listed as `other` by its name.
 
 ### 7. Incrementals
 
@@ -356,8 +430,7 @@ The existing flow, with these changes for a native source:
 
 - **Job setting.** `engine_options.method`: `native` or `logical` (the default for existing jobs, which keep
   their behaviour). New ClickHouse jobs default to `native` when the endpoint is configured and the target is
-  24.8 or later. Until native restore lands (Milestone E, Task 16) they default to `logical`, and Native is
-  offered without "Recommended" and with the note that native backups cannot be restored yet (R42).
+  24.8 or later, with Native "Recommended" (R42 held this back until native restore, Milestone E, Task 16).
   Incrementals are taken since Task 13: the API takes `incremental` with the native method, and the wizard
   offers it for native jobs.
 - **UI.** The backup wizard gets a ClickHouse step:
@@ -388,7 +461,8 @@ Options; the owner chose **1** on 2026-11-25:
 1. **Allowlist on the parsed definitions (recommended).** Olympos parses every object in the manifest and
    restores only what it can prove harmless:
    - MergeTree-family, Replicated, Log and Memory tables, with any column and table features (codecs, TTL,
-     defaults, indexes, projections, settings). These cannot reach outside the server;
+     defaults, indexes, projections, settings), on the `default` disk and storage policy only. These cannot
+     reach outside the server; another disk or policy (an S3 disk, one defined inline) can, and is left out;
    - views and materialized views whose query reads only tables in the restored set, with no table functions;
    - dictionaries with a local ClickHouse source in the restored set.
 

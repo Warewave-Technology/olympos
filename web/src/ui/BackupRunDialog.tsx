@@ -281,8 +281,7 @@ const RESTORABLE_ENGINES = ['postgresql', 'clickhouse', 'vault'];
  * database is restored with the server stopped (docs/restore-olympos.md).
  */
 export const uiRestorable = (run: BackupRunDetail) =>
-  // R38: native ClickHouse runs are refused as a source until native restore lands
-  !!run.restore && (run.restore.copies?.length ?? 1) > 0 && RESTORABLE_ENGINES.includes(run.engine) && run.target_service !== 'olympos-self' && run.method !== 'native';
+  !!run.restore && (run.restore.copies?.length ?? 1) > 0 && RESTORABLE_ENGINES.includes(run.engine) && run.target_service !== 'olympos-self';
 
 export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => void }) {
   const [runId, setRunId] = useState(id);
@@ -327,7 +326,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
     >
       <QueryView q={q} what="the run">
         {(run) => {
-          // ClickHouse BACKUP through the ingest endpoint: a run directory per copy, no commands to restore it by hand
+          // ClickHouse BACKUP through the ingest endpoint: a run directory per copy, restored by Restore… only
           const native = run.method === 'native';
           return (
           <div className="stack-sm" style={{ gap: 14 }}>
@@ -355,6 +354,16 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
                     <Badge tone="info">Native</Badge>
                     {run.objects != null && <span className="muted small"> · {run.objects.toLocaleString('en-US')} {run.objects === 1 ? 'object' : 'objects'}</span>}
                   </dd>
+                  {run.tier && (
+                    <>
+                      <dt>Tier</dt>
+                      <dd>
+                        {run.tier}
+                        {/* R45: a daily member of a chain is re-tagged weekly when an incremental is taken on it */}
+                        {run.kept_as && run.kept_as !== run.tier && <span className="muted small"> · kept at least as long as {run.kept_as}: a later incremental is based on it</span>}
+                      </dd>
+                    </>
+                  )}
                 </>
               )}
               {run.destination_name && (
@@ -381,7 +390,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
             {run.restore && mayRestore && uiRestorable(run) && (
               <div className="spread" style={{ alignItems: 'center' }}>
                 <p className="small" style={{ margin: 0 }}>
-                  <b>Restore…</b> loads this backup into a new target after a second person approves it. Or restore by hand with the commands below.
+                  <b>Restore…</b> loads this backup into a new target after a second person approves it.{native ? '' : ' Or restore by hand with the commands below.'}
                 </p>
                 <button ref={restoreBtn} type="button" className="btn pri" onClick={() => setRestoring(true)} disabled={q.isPlaceholderData}>
                   Restore…
@@ -389,7 +398,7 @@ export function BackupRunDialog({ id, onClose }: { id: string; onClose: () => vo
               </div>
             )}
             {native && run.restore ? (
-              <p className="muted small">Native restore is not available yet; the backup is kept. A native backup has no commands to restore by hand.</p>
+              <p className="muted small">A native backup has no commands to restore by hand: ClickHouse reads it back through the ingest endpoint.</p>
             ) : run.restore ? (
               <RestoreWithCopies guide={run.restore} runId={run.id} runCopies={run.copies} onSelect={setCopy} onOpenRepair={open} pending={q.isPlaceholderData} />
             ) : run.status !== 'succeeded' && run.status !== 'partial' ? null : run.trigger === 'test' ? (

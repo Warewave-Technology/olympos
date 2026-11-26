@@ -19,9 +19,18 @@ paths=(
   internal/ingest
   internal/backup/engines/clickhouse/native_manifest.go
   internal/backup/engines/clickhouse/backupmeta.go
+  internal/backup/engines/clickhouse/allowlist.go
+  internal/backup/engines/clickhouse/sqllex.go
+  internal/backup/engines/clickhouse/replicated.go
   internal/backup/engines/clickhouse/native.go
+  internal/backup/engines/clickhouse/native_restore.go
+  internal/backup/engines/clickhouse/restore_shared.go
   internal/backup/native.go
   internal/backup/native_chain.go
+  internal/backup/native_restore.go
+  internal/backup/restore_guide.go
+  internal/restore/api.go
+  internal/restore/native_execute.go
   internal/app/ingest.go
   internal/blob/fs.go
   deploy/helm/olympos-agent/templates/clusterrole.yaml

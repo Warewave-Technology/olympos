@@ -58,15 +58,6 @@ type optionError struct{ field, msg string }
 
 func (e *optionError) Error() string { return "clickhouse engine_options: " + e.field + " " + e.msg }
 
-// systemDatabases are never backed up.
-var systemDatabases = map[string]bool{
-	"system":             true,
-	"INFORMATION_SCHEMA": true,
-	"information_schema": true,
-}
-
-func isSystemDatabase(name string) bool { return systemDatabases[name] }
-
 // ParseOptions decodes and validates engine_options. Unknown fields are
 // rejected so typos do not silently widen or narrow a backup.
 func ParseOptions(raw json.RawMessage) (Options, error) {
