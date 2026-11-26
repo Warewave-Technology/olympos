@@ -135,3 +135,64 @@ func TestHandlerUnsignedPayloadOverHTTP(t *testing.T) {
 		t.Fatalf("sink got %d puts", len(p))
 	}
 }
+
+// Parts that wait on disk (out of order) and parts sent again go through the
+// same Content-MD5 rule with UNSIGNED-PAYLOAD over TLS.
+func TestHandlerUnsignedPayloadSpilledAndRepeatedParts(t *testing.T) {
+	e := newTLSEnv(t)
+	unsigned := withHeader("X-Amz-Content-Sha256", ingest.UnsignedPayload)
+	start := func(t *testing.T) (*run, func(n int, body string, mutate ...func(*http.Request)) reply, string, string) {
+		a := e.backup(t)
+		key := a.prefix + "data/big.bin"
+		rep := e.do(t, a.cred, http.MethodPost, "/olympos/"+key+"?uploads", "", unsigned)
+		var up struct{ UploadId string }
+		if err := xml.Unmarshal([]byte(rep.body), &up); err != nil || up.UploadId == "" {
+			t.Fatalf("initiate: %s", rep)
+		}
+		part := func(n int, body string, mutate ...func(*http.Request)) reply {
+			return e.do(t, a.cred, http.MethodPut, fmt.Sprintf("/olympos/%s?partNumber=%d&uploadId=%s", key, n, up.UploadId), body,
+				append([]func(*http.Request){unsigned}, mutate...)...)
+		}
+		return a, part, key, up.UploadId
+	}
+
+	t.Run("spilled part with a wrong MD5", func(t *testing.T) {
+		a, part, _, _ := start(t)
+		wantRefused(t, part(2, "part-two", md5Header("other")), http.StatusBadRequest, "BadDigest")
+		if n := spillFiles(t, e.spillDir); n != 0 {
+			t.Errorf("%d spill files left", n)
+		}
+		if p := a.sink.all(); len(p) != 0 && p[0].err == nil {
+			t.Errorf("sink: %+v", p)
+		}
+	})
+	t.Run("spilled and repeated parts with signed MD5s", func(t *testing.T) {
+		a, part, key, id := start(t)
+		if r := part(2, "part-two"); r.status != http.StatusForbidden || !strings.Contains(r.body, "needs a Content-MD5") {
+			t.Errorf("spilled part without Content-MD5: %s", r)
+		}
+		p2 := etagOf(t, part(2, "part-two", md5Header("part-two"))) // waits on disk for part 1
+		p1 := etagOf(t, part(1, "part-one", md5Header("part-one")))
+		if r := part(1, "part-one"); r.status != http.StatusForbidden || !strings.Contains(r.body, "needs a Content-MD5") {
+			t.Errorf("repeated part without Content-MD5: %s", r)
+		}
+		if again := etagOf(t, part(1, "part-one", md5Header("part-one"))); again != p1 {
+			t.Errorf("repeated part: ETag %s, first %s", again, p1)
+		}
+		if r := e.do(t, a.cred, http.MethodPost, "/olympos/"+key+"?uploadId="+id, completeXML(p1, p2), unsigned); r.status != http.StatusOK {
+			t.Fatalf("complete: %s", r)
+		}
+		found := false
+		for _, p := range a.sink.all() {
+			found = found || p.key == key && string(p.body) == "part-onepart-two" && p.err == nil
+		}
+		if !found {
+			t.Fatalf("object not stored: %+v", a.sink.all())
+		}
+	})
+	t.Run("repeated part with a wrong MD5", func(t *testing.T) {
+		_, part, _, _ := start(t)
+		etagOf(t, part(1, "part-one", md5Header("part-one")))
+		wantRefused(t, part(1, "part-one", md5Header("other")), http.StatusBadRequest, "BadDigest")
+	})
+}
