@@ -508,6 +508,9 @@ administrator, on the NFS server or on any host that mounts the share with write
 keeps its no-delete permissions). Every check lists first; delete only what the list shows you expect. The
 age is `-mtime +7`, files last changed at least 8 days ago, far longer than a run lasts.
 
+Run all the blocks below in one shell session, in order: they share the directory and the list file `$list`
+that this first block sets.
+
 ```sh
 cd /srv/backup-nas/olympos &&     # the destination path, on the share
 list=$(mktemp)                    # private list files, not a fixed name in /tmp
@@ -550,7 +553,7 @@ list=$(mktemp)                    # private list files, not a fixed name in /tmp
    find . -type d -name '????????-????-????-????-????????????' | while IFS= read -r d; do
      grep -q '"olympos-state":"complete"' "$d.manifest.json.tags.json" 2>/dev/null && continue
      find "$d" -type f ! -name '*.tags.json' ! -name '*.partial' -mtime +7 | while IFS= read -r f; do
-       [ -e "$f.tags.json" ] || echo "$f"
+       [ -e "$f.tags.json" ] || printf '%s\n' "$f"
      done
    done
    ```
