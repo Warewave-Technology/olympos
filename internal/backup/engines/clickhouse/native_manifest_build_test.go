@@ -654,3 +654,145 @@ func TestBuildNativeManifestBoundToBase(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildNativeManifestByContent (security review v0.4, finding 1):
+// ClickHouse reads a file of a backup by its size and checksum, from the
+// first file its .backup lists with them, and from its base by the same
+// pair; it never checks the checksum against the bytes. A definition is
+// taken from where ClickHouse takes it, and a .backup in which that is not
+// the definition's own file is refused.
+func TestBuildNativeManifestByContent(t *testing.T) {
+	baseURL := "http://h/olympos/" + testBaseRunID + "/"
+	const uuid = "62c08f3c-f80a-4c02-aabb-255897f0c3fc"
+	onBase := func(url string) string {
+		return `<base_backup>S3('` + url + `')</base_backup><base_backup_uuid>` + uuid + `</base_backup_uuid>`
+	}
+	// hostile is as long as partT, so it can take partT's size and checksum.
+	hostile := "CREATE VIEW db.t AS SELECT * FROM system.users"[:len(partT)]
+	if len(hostile) != len(partT) {
+		t.Fatal("hostile is not as long as partT")
+	}
+	fullMeta := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum>") +
+		fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum>") +
+		fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum>")
+	fullBodies := map[string]string{"metadata/db.sql": partDB, "metadata/db/t.sql": partT, "metadata/db/u.sql": partU}
+	withBodies := func(extra map[string]string) map[string]string {
+		m := maps.Clone(fullBodies)
+		maps.Copy(m, extra)
+		return m
+	}
+
+	t.Run("a holder listed first", func(t *testing.T) {
+		// The review's attack: zz/holder has metadata/db/t.sql's size and
+		// checksum, so RESTORE creates db.t from the holder's text.
+		// partRun's own parse refuses it already: the run is built by hand.
+		raw := metaXML("", fileXML("zz/holder", len(partT), "<checksum>"+sumA+"</checksum>")+fullMeta)
+		d := nativeRunData{meta: &BackupMeta{}, bodies: map[string][]byte{testBaseRunID + "/.backup": raw}}
+		d.objects = append(d.objects, ingest.ObjectRecord{Key: testBaseRunID + "/.backup", Size: int64(len(raw)), SHA256: sum("backup")})
+		for name, body := range withBodies(map[string]string{"zz/holder": hostile}) {
+			key := testBaseRunID + "/" + name
+			d.bodies[key] = []byte(body)
+			d.objects = append(d.objects, ingest.ObjectRecord{Key: key, Size: int64(len(body)), SHA256: sum(key)})
+		}
+		if _, err := d.build(testBaseRunID, nil); !errors.Is(err, ErrNativeMeta) ||
+			!strings.Contains(err.Error(), `"metadata/db/t.sql": ClickHouse reads its size and checksum from "zz/holder"`) {
+			t.Fatalf("a holder listed first: %v", err)
+		}
+	})
+	t.Run("two written files of one size and checksum", func(t *testing.T) {
+		files := fullMeta + fileXML("data/db/t/data.bin", 2, "<checksum>"+sumC+"</checksum>") +
+			fileXML("data/db/u/data.bin", 2, "<checksum>"+sumC+"</checksum>")
+		d := partRun(t, testBaseRunID, "", files, withBodies(map[string]string{"data/db/t/data.bin": "ab", "data/db/u/data.bin": "cd"}))
+		if _, err := d.build(testBaseRunID, nil); !errors.Is(err, ErrNativeMeta) ||
+			!strings.Contains(err.Error(), `"data/db/u/data.bin" has the size and checksum of "data/db/t/data.bin" and other bytes`) {
+			t.Fatalf("other bytes: %v", err)
+		}
+		// The same bytes twice (deduplicate_files = 0) are what ClickHouse reads
+		// either way.
+		for i := range d.objects {
+			if strings.HasSuffix(d.objects[i].Key, "/data.bin") {
+				d.objects[i].SHA256 = sum("ab")
+			}
+		}
+		if _, err := d.build(testBaseRunID, nil); err != nil {
+			t.Fatalf("the same bytes: %v", err)
+		}
+	})
+	t.Run("a definition partly in the base", func(t *testing.T) {
+		full := partRun(t, testBaseRunID, "", fullMeta, fullBodies)
+		base, err := full.build(testBaseRunID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
+			fileXML("metadata/db/t.sql", len(partT)+9, "<checksum>"+sumD+"</checksum><use_base>true</use_base><base_size>"+
+				strconv.Itoa(len(partT))+"</base_size><base_checksum>"+sumA+"</base_checksum>") +
+			fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>")
+		d := partRun(t, testRunID, onBase(baseURL), files, map[string]string{"metadata/db/t.sql": " COMMENT 'x'"[:9]})
+		maps.Copy(d.bodies, full.bodies)
+		if _, err := d.build(testRunID, []*NativeManifest{base}); !errors.Is(err, ErrNativeMeta) ||
+			!strings.Contains(err.Error(), `"metadata/db/t.sql": a definition partly in the base`) {
+			t.Fatalf("partly in the base: %v", err)
+		}
+	})
+
+	// An incremental's unchanged definition is the base's file of its size
+	// and checksum, through the chain: never a file the base holds under
+	// another name.
+	unchanged := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
+		fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum><use_base>true</use_base>") +
+		fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>")
+	t.Run("the base holds it under another name", func(t *testing.T) {
+		// The base's own metadata/db/t.sql is harmless and has another
+		// checksum; its data file has t.sql's size and checksum in the
+		// incremental, and hostile bytes.
+		files := fileXML("data/db/x/payload.bin", len(partT), "<checksum>"+sumD+"</checksum>") +
+			fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum>") +
+			fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum>") +
+			fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum>")
+		full := partRun(t, testBaseRunID, "", files, withBodies(map[string]string{"data/db/x/payload.bin": hostile}))
+		base, err := full.build(testBaseRunID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		incr := strings.Replace(unchanged, "<checksum>"+sumA+"</checksum>", "<checksum>"+sumD+"</checksum>", 1)
+		d := partRun(t, testRunID, onBase(baseURL), incr, nil)
+		maps.Copy(d.bodies, full.bodies)
+		if _, err := d.build(testRunID, []*NativeManifest{base}); !errors.Is(err, ErrNativeMeta) ||
+			!strings.Contains(err.Error(), `"metadata/db/t.sql": ClickHouse reads it from the base's "data/db/x/payload.bin"`) {
+			t.Fatalf("held under another name: %v", err)
+		}
+	})
+	t.Run("through a chain of three", func(t *testing.T) {
+		full := partRun(t, testBaseRunID, "", fullMeta, fullBodies)
+		m0, err := full.build(testBaseRunID, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The first incremental writes db.u again; db.t stays the full's.
+		inc1Files := strings.Replace(unchanged, fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>"),
+			fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumC+"</checksum>"), 1)
+		inc1 := partRun(t, testRunID, onBase(baseURL), inc1Files, map[string]string{"metadata/db/u.sql": partU})
+		maps.Copy(inc1.bodies, full.bodies)
+		m1, err := inc1.build(testRunID, []*NativeManifest{m0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inc1URL := "http://h/olympos/" + testRunID + "/"
+		inc2Files := strings.Replace(unchanged, "<checksum>"+sumB+"</checksum>", "<checksum>"+sumC+"</checksum>", 1)
+		inc2 := partRun(t, testOtherRunID, onBase(inc1URL), inc2Files, nil)
+		maps.Copy(inc2.bodies, full.bodies)
+		maps.Copy(inc2.bodies, inc1.bodies)
+		m2, err := inc2.build(testOtherRunID, []*NativeManifest{m0, m1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		keys := map[string]string{}
+		for _, o := range m2.Databases[0].Objects {
+			keys[o.Name] = o.DDLKey
+		}
+		if want := map[string]string{"t": testBaseRunID + "/metadata/db/t.sql", "u": testRunID + "/metadata/db/u.sql"}; !maps.Equal(keys, want) {
+			t.Fatalf("DDL keys %v, want %v", keys, want)
+		}
+	})
+}

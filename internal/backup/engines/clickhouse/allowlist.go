@@ -298,6 +298,7 @@ type definition struct {
 	kind   string   // what the statement creates; "" when its prefix is not read
 	reads  []objRef // the objects it reads, in order
 	target *objRef  // a materialized view's TO table
+	engine string   // a table's engine, a materialized view's inner table's
 	reason string   // why its own text leaves it out; "" when it does not
 	// replicated: a table on a Replicated engine (its Keeper path is
 	// rewritten when it is restored).
@@ -505,6 +506,7 @@ func (r *reader) engine(i int) int {
 	case strings.HasPrefix(name, "Replicated"):
 		r.def.replicated = true
 	}
+	r.def.engine = at(i + 2).val
 	i += 3
 	if at(i).punct("(") {
 		i = r.closing(i) + 1

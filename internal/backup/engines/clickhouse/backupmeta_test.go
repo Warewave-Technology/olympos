@@ -374,6 +374,14 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 		"base empty":              metaXML(`<base_backup></base_backup><base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`, ok),
 		"unterminated":            []byte(`<config><version>1</version><contents>`),
 		"deduplicate_files other": []byte(`<config><version>1</version><deduplicate_files>2</deduplicate_files><contents></contents></config>`),
+		// ClickHouse reads a file by its size and checksum, from the first
+		// file listed with them (security review v0.4, finding 1).
+		"metadata not the first holder": metaXML("", fileXML("zz/holder", 2, "<checksum>"+sumA+"</checksum>")+
+			fileXML("metadata/db/v.sql", 2, "<checksum>"+sumA+"</checksum>")),
+		"metadata after its data_file": metaXML("", fileXML("data/db/t/x.bin", 2, "<checksum>"+sumA+"</checksum>")+
+			fileXML("metadata/db/v.sql", 2, "<checksum>"+sumA+"</checksum><data_file>data/db/t/x.bin</data_file>")),
+		"a database's metadata not the first holder": metaXML(baseXML, fileXML("zz/holder", 2, "<checksum>"+sumA+"</checksum><use_base>true</use_base>")+
+			fileXML("metadata/db.sql", 2, "<checksum>"+sumA+"</checksum><use_base>true</use_base>")),
 	}
 	// Each case is refused for its own reason.
 	reasons := map[string]string{
@@ -449,6 +457,9 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 		"base empty":                         "base_backup is not S3(",
 		"unterminated":                       "not XML Olympos reads",
 		"deduplicate_files other":            `deduplicate_files "2"`,
+		"metadata not the first holder":      `file "metadata/db/v.sql": ClickHouse reads its size and checksum from "zz/holder", listed before it`,
+		"metadata after its data_file":       `file "metadata/db/v.sql": ClickHouse reads its size and checksum from "data/db/t/x.bin", listed before it`,
+		"a database's metadata not the first holder": `file "metadata/db.sql": ClickHouse reads its size and checksum from "zz/holder", listed before it`,
 	}
 	for name := range reasons {
 		if _, ok := cases[name]; !ok {

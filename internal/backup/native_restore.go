@@ -96,12 +96,15 @@ type NativeRestoreCheck struct {
 	// Manifests are the chain's verified manifests, the full first; nil
 	// when the chain does not verify.
 	Manifests []NativeChainManifest
-	// DDL and Rows are what the engine's restore of the chain needs, by keys
-	// of the engine's own (NativeRestoreRun): the definitions it creates
-	// itself before RESTORE and the row counts it checks after. nil when
-	// the chain does not verify.
-	DDL  map[string][]byte
-	Rows map[string]uint64
+	// DDL, Rows and Definitions are what the engine's restore of the chain
+	// needs, by keys of the engine's own (NativeRestoreRun): the definitions
+	// it creates itself before RESTORE, the row counts it checks after, and
+	// the definition of every allowed object, which it compares what the
+	// target created with (security review v0.4, finding 1). nil when the
+	// chain does not verify.
+	DDL         map[string][]byte
+	Rows        map[string]uint64
+	Definitions map[string][]byte
 	// RefusedDatabases are the selected databases the restore cannot
 	// create, with the reason (R52: a native restore creates Atomic
 	// databases only): a request with one of them is refused.
@@ -259,7 +262,7 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		// What eng could list of a chain that did not verify: no
 		// manifests, no source.
 		if out != nil {
-			out.Manifests, out.DDL, out.Rows, out.RefusedDatabases = nil, nil, nil, nil
+			out.Manifests, out.DDL, out.Rows, out.Definitions, out.RefusedDatabases = nil, nil, nil, nil, nil
 			if uerr := use(out); uerr != nil {
 				return uerr
 			}
@@ -365,7 +368,8 @@ type NativeRestorer interface {
 	// RestoreNativeBackup creates the selected databases (rc.Databases) and what
 	// the engine creates itself (run.DDL), has the target restore the rest
 	// of the allowed objects, leaving out every other object, and checks
-	// the row counts against run.Rows. When run.Stop delivers, or ctx ends,
+	// the row counts against run.Rows and what it created against
+	// run.Definitions. When run.Stop delivers, or ctx ends,
 	// it ends the restore on the target and returns an error. The result is
 	// filled as far as it got, Created listing the databases it created.
 	// The secret goes to the target and nowhere else.
@@ -383,10 +387,11 @@ type NativeRestoreRun struct {
 	AccessKey, Secret string
 	// Decisions are the check's, for the selected databases.
 	Decisions []NativeDecision
-	// DDL and Rows are the check's (NativeRestoreCheck), by the engine's
-	// keys.
-	DDL  map[string][]byte
-	Rows map[string]uint64
+	// DDL, Rows and Definitions are the check's (NativeRestoreCheck), by
+	// the engine's keys.
+	DDL         map[string][]byte
+	Rows        map[string]uint64
+	Definitions map[string][]byte
 	// Stop delivers why the restore's ingest session stopped (a source that
 	// failed, expiry): the restore is then ended on the target.
 	Stop <-chan string

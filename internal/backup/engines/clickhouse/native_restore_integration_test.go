@@ -174,7 +174,7 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 		r.sess, r.cred = s, cred
 		t.Cleanup(func() { s.Revoke("test ended") })
 		nr := NativeRestore{URL: in.url + "/olympos/" + inc.id + "/", RunID: inc.id, AccessKey: cred.AccessKey, Secret: cred.Secret,
-			DDL: c.DDL, Rows: c.Rows, Stop: s.Stopped()}
+			DDL: c.DDL, Rows: c.Rows, Definitions: c.Definitions, Stop: s.Stopped()}
 		for _, d := range c.Objects {
 			nr.Decisions = append(nr.Decisions, Decision(d))
 		}
@@ -249,7 +249,7 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 		for _, d := range c.Objects {
 			decisions = append(decisions, Decision(d))
 		}
-		plan, err := planNativeRestore(r.id, []string{"spike"}, NativeRestore{Decisions: decisions, DDL: c.DDL, Rows: c.Rows})
+		plan, err := planNativeRestore(r.id, []string{"spike"}, NativeRestore{Decisions: decisions, DDL: c.DDL, Rows: c.Rows, Definitions: c.Definitions})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,11 +260,11 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 			t.Fatal(err)
 		}
 		defer sess.close()
-		if err := sess.checkRestoredObjects(ctx, plan); err != nil {
+		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan); err != nil {
 			t.Fatalf("the restored objects: %v", err)
 		}
 		dst.query(t, "CREATE TABLE spike.surprise (x UInt8) ENGINE = Log")
-		if err := sess.checkRestoredObjects(ctx, plan); err == nil || !strings.Contains(err.Error(), "spike.surprise is not an object the restore was to create") {
+		if err := sess.checkRestoredObjects(ctx, slog.Default(), plan); err == nil || !strings.Contains(err.Error(), "spike.surprise is not an object the restore was to create") {
 			t.Fatalf("an object no one decided: %v", err)
 		}
 		dst.query(t, "DROP TABLE spike.surprise SYNC")

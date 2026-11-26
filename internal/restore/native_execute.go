@@ -118,7 +118,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 			return err // ErrNativeChain: why the chain is not served
 		}
 		source = s
-		run.Decisions, run.DDL, run.Rows = n.Objects, n.DDL, n.Rows
+		run.Decisions, run.DDL, run.Rows, run.Definitions = n.Objects, n.DDL, n.Rows, n.Definitions
 		for _, id := range n.Runs {
 			prefixes = append(prefixes, id.String()+"/")
 		}
