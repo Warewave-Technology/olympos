@@ -22,9 +22,10 @@ import (
 
 const (
 	// errNativeChanged: the check at start does not decide what the
-	// request was approved with (R50).
-	errNativeChanged = "the backup changed since the request was approved: the objects the restore would leave out are not the ones " +
-		"approved; nothing was written to the target; open a new request"
+	// request was approved with (R50). The reasons are compared as text, so
+	// an upgrade of Olympos that rewords one refuses too.
+	errNativeChanged = "the backup or Olympos's restore rules changed since the request was approved: " +
+		"the objects the restore would leave out are not the ones approved; nothing was written to the target; open a new request"
 	// errNativeUnrecorded: the request records no decisions (opened before
 	// they were recorded), so none were approved.
 	errNativeUnrecorded = "the request does not record the objects the restore leaves out, so they were not approved; " +

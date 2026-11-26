@@ -247,8 +247,9 @@ selection.
 
 **The checker approves the list.** The request records the databases and every object it leaves out, with the
 reason, and the request page shows the list to the checker. When the restore starts, the server checks the chain
-again; if it would now leave out anything else, the request fails before the target is touched (*the backup
-changed since the request was approved: …*): open a new request.
+again; if it would now leave out anything else, or give another reason (an upgrade of Olympos may reword one),
+the request fails before the target is touched (*the backup or Olympos's restore rules changed since the
+request was approved: …*): open a new request.
 
 **What the server does**, after the steps every restore takes ([above](#what-the-server-does)):
 

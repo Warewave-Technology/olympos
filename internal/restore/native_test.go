@@ -437,7 +437,7 @@ func TestNativeExecuteChanged(t *testing.T) {
 			x.claim(id)
 			calls := chInspector.calls
 			x.ex.Execute(context.Background(), id)
-			want := "the backup changed since the request was approved: the objects the restore would leave out are not the ones approved; " +
+			want := "the backup or Olympos's restore rules changed since the request was approved: the objects the restore would leave out are not the ones approved; " +
 				"nothing was written to the target; open a new request"
 			if name == "unrecorded" {
 				want = "the request does not record the objects the restore leaves out, so they were not approved; nothing was written to the target; " +

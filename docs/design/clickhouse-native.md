@@ -294,8 +294,9 @@ The existing flow, with these changes for a native source:
   - The request records, when it is opened, the databases it restores and every object of them it leaves
     out, with the reason (`options.native`, R50); the request page shows that list to the checker. At start
     the executor checks the chain again and refuses to start, before the target is contacted or a credential
-    minted, with "the backup changed since the request was approved: …" when the check now leaves out
-    anything else.
+    minted, with "the backup or Olympos's restore rules changed since the request was approved: …" when the
+    check now leaves out anything else or gives another reason (the reasons are compared as text, so an upgrade
+    that rewords one refuses requests approved before it).
   - The check's one-at-a-time slot is held only to verify the chain and bind it. What the restore keeps for
     the hours its `RESTORE` runs is the restore's source: one entry per object of the verified manifests
     (key, size, SHA-256, run), none of the parsed manifests, at most 8 Mi objects (32 runs of 256 Ki, twice

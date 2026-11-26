@@ -2156,9 +2156,10 @@ components:
         native:
           description: >-
             A native ClickHouse request: what the check decided when the request was opened, shown to the
-            checker. When the restore starts, the backup is checked again; if it then leaves out anything else, the
-            request fails with "the backup changed since the request was approved: …" before the target is written
-            to. Absent for other copies.
+            checker. When the restore starts, the backup is checked again; if it then leaves out anything else, or
+            gives another reason (an upgrade of Olympos may reword one), the request fails with "the backup or
+            Olympos's restore rules changed since the request was approved: …" before the target is written to.
+            Absent for other copies.
           type: object
           properties:
             databases: {type: array, items: {type: string}, description: The databases restored}
