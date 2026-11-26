@@ -28,7 +28,9 @@ package clickhouse
 //
 // What a definition reads is collected from every FROM and JOIN source (the
 // subqueries, CTEs and unions in it too), every "IN <table>", and the
-// object a dictGet* or joinGet names. A source followed by "(" is a table
+// object a dictGet* or joinGet names. A FROM clause goes on past a table's
+// alias, FINAL and SAMPLE k [OFFSET m] to the next source; only a clause
+// word of its own level ends it, never an alias. A source followed by "(" is a table
 // function, and so is "IN f(…)" unless f is tuple or array. An unqualified name is of the object's own database, as
 // ClickHouse qualifies a view's names when it creates it; a CTE's name is
 // not a table within the SELECT that defines it. An object is restored only
@@ -937,6 +939,21 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 			source = from && !arrayJoin
 		case t.is("IN"):
 			i = r.inTable(i, ctes)
+		case t.is("AS") && r.at(i+1).kind == tokWord && !r.at(i+2).punct("("):
+			// The word after AS is an alias (or CAST's type), never a
+			// keyword: "FROM db.t AS limit, other.t" goes on with a source
+			// (security review v0.4, finding 2).
+			i++
+		case t.is("AS") && from && r.at(i+1).kind == tokWord:
+			r.uncertain() // an alias followed by "(": not read
+		case from && t.is("SAMPLE"):
+			// SAMPLE k [OFFSET m] is part of the table expression: its
+			// OFFSET does not end the FROM clause (finding 2).
+			i = r.sample(i)
+		case (t.is("UNION") || t.is("EXCEPT") || t.is("INTERSECT") || t.kind == tokWord && fromEnds[strings.ToUpper(t.val)]) && r.at(i+1).punct(","):
+			// A clause word followed by a comma is an alias without AS, or
+			// not SQL: not read.
+			r.uncertain()
 		case t.is("UNION") || t.is("EXCEPT") || t.is("INTERSECT"):
 			from, arrayJoin = false, false
 			k := i + 1
@@ -965,6 +982,27 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 	if source {
 		r.uncertain() // FROM or JOIN with nothing after it
 	}
+}
+
+// sample reads "SAMPLE k [OFFSET m]" at toks[i], k and m each a number or
+// "a / b", and returns the index of its last token. Anything else is not
+// read with certainty.
+func (r *reader) sample(i int) int {
+	ratio := func(j int) int {
+		if r.at(j).kind != tokNumber {
+			r.uncertain()
+			return j
+		}
+		if r.at(j+1).punct("/") && r.at(j+2).kind == tokNumber {
+			return j + 2
+		}
+		return j
+	}
+	j := ratio(i + 1)
+	if !r.failed() && r.at(j+1).is("OFFSET") {
+		j = ratio(j + 2)
+	}
+	return j
 }
 
 // with reads the WITH clause at toks[i] and returns the index of the SELECT

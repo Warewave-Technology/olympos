@@ -301,6 +301,39 @@ func TestClassifyViews(t *testing.T) {
 	})
 }
 
+// TestClassifyFromClause: SAMPLE … OFFSET is part of the table expression,
+// and a word after AS is an alias, so neither ends the FROM clause: the
+// sources after them are read (security review v0.4, finding 2).
+func TestClassifyFromClause(t *testing.T) {
+	runAlCases(t, []alCase{
+		{name: "SAMPLE as ClickHouse writes it", allowed: true, objs: view("CREATE VIEW db.x (`id` UInt64) AS SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2 WHERE id > 0")},
+		{name: "SAMPLE a ratio", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE 0.1")},
+		{name: "SAMPLE rows, then a comma join", allowed: true, objs: view("CREATE VIEW db.x AS SELECT e.id FROM db.events AS e SAMPLE 10000, db.logs AS l")},
+		{name: "FINAL and SAMPLE, then a join", allowed: true, objs: view("CREATE VIEW db.x AS SELECT e.id FROM db.events AS e FINAL SAMPLE 1 / 10 OFFSET 1 / 2 INNER JOIN db.logs AS l ON e.id = l.id LIMIT 10 OFFSET 5")},
+		{name: "LIMIT with an offset", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events ORDER BY id LIMIT 5, 10")},
+
+		// The review's reproductions.
+		{name: "SAMPLE … OFFSET, then a table", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1/2 OFFSET 1/2, other.secret")},
+		{name: "SAMPLE … OFFSET, then a table function", reason: "it reads the table function merge",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1/2 OFFSET 1/2, merge('system', '^users$')")},
+		{name: "SAMPLE 1 OFFSET 0, then a table", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1 OFFSET 0, other.secret")},
+		{name: "a source aliased limit", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events AS limit, other.secret")},
+		{name: "a source aliased offset, then a table function", reason: "it reads the table function remote",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events AS offset, remote('h:9000', system.users)")},
+		{name: "SAMPLE … OFFSET in a subquery", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id FROM db.logs WHERE id IN (SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2, other.secret)")},
+		{name: "SAMPLE … OFFSET in a union branch", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id FROM db.logs UNION ALL SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2, other.secret")},
+		// What Olympos does not read with certainty.
+		{name: "a clause word as an alias without AS", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT * FROM db.events limit, other.secret")},
+		{name: "SAMPLE an expression", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE id")},
+		{name: "SAMPLE OFFSET an expression", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE 1 / 2 OFFSET (1 / 2)")},
+	})
+}
+
 func TestClassifyMaterializedViews(t *testing.T) {
 	runAlCases(t, []alCase{
 		{name: "TO a restored table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID 'f0128b77-346e-4f76-b6ad-18eb944a2104' TO db.logs (`id` UInt64, `msg` String) AS SELECT id, toString(id) AS msg FROM db.events")},
