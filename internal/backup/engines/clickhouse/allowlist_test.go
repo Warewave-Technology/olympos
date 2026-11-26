@@ -372,6 +372,9 @@ func TestClassifyInForms(t *testing.T) {
 		{name: "in() after TOP (n)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP (10) in(id, other.ids) AS m FROM db.events")},
 		{name: "in() after DISTINCT ON (…)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) in(id, other.ids) AS m FROM db.events")},
 		{name: "in() after DISTINCT ON (a, b) in a subquery", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT m FROM (SELECT DISTINCT ON (id, arr) in(id, other.ids) AS m FROM db.events)")},
+		// After AS (INTERPOLATE (m AS …)) an expression starts (fix round 2).
+		{name: "in() in INTERPOLATE", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id, 1 AS m FROM db.events ORDER BY id WITH FILL INTERPOLATE (m AS in(id, other.ids))")},
 		{name: "in() as an index's expression", reason: "it reads other.ids, which is not in the backup", objs: tbl("CREATE TABLE db.x (`id` UInt64, INDEX i in(id, other.ids) TYPE minmax GRANULARITY 1) ENGINE = MergeTree ORDER BY id")},
 		{name: "the operator after TOP n and DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT TOP 10 id IN (1, toUInt64(2)) AS m FROM db.events")},
 		{name: "the operator after DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) id IN (1, toUInt64(2)) AS m FROM db.events")},
@@ -390,6 +393,35 @@ func TestClassifyInForms(t *testing.T) {
 			cases = append(cases, alCase{name: f + " " + arg, reason: "it reads other.ids, which is not in the backup",
 				objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE " + f + "(id, " + arg + ")")})
 		}
+	}
+	runAlCases(t, cases)
+}
+
+// TestClassifyEncryptFunctions (fix round 2): ClickHouse hides the
+// arguments of the encrypt functions from the second on in system.tables, so
+// the comparison after RESTORE cannot see them; the allowlist takes only a
+// literal or a column there.
+func TestClassifyEncryptFunctions(t *testing.T) {
+	const why = " with an argument that is not a literal or a column, which the target hides from the check after the restore"
+	const key = "'12345678901234567890123456789012'"
+	cases := []alCase{
+		{name: "literals and columns", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-256-ofb', msg, " + key + ") AS a, " +
+			"encrypt('aes-256-gcm', msg, " + key + ", 'iviviviviviv', 'aad') AS b, tryDecrypt('aes-256-ofb', `msg`, " + key + ") AS c, " +
+			"aes_encrypt_mysql('aes-128-ecb', msg, 'k') AS d, aes_decrypt_mysql('aes-128-ecb', msg, 16) AS e FROM db.logs")},
+		{name: "a column default", allowed: true, objs: tbl("CREATE TABLE db.x (`s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, " + key + ")) ENGINE = Log")},
+		{name: "a first argument of any form", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt(concat('aes-256', '-ofb'), msg, " + key + ") AS a FROM db.logs")},
+		{name: "no arguments, one argument", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt() AS a, encrypt(msg) AS b FROM db.logs")},
+		{name: "a function named like one in another case", allowed: true, objs: view("CREATE VIEW db.x AS SELECT lower(DECRYPT) AS a FROM (SELECT msg AS DECRYPT FROM db.logs)")},
+
+		{name: "a function call", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-256-ofb', unhex(msg), " + key + ") AS a FROM db.logs")},
+		{name: "a subquery", reason: "it calls encrypt" + why, objs: view("CREATE VIEW db.x AS SELECT encrypt('aes-256-ofb', msg, (SELECT any(msg) FROM db.logs)) AS a FROM db.logs")},
+		{name: "a table's name", reason: "it calls tryDecrypt" + why, objs: view("CREATE VIEW db.x AS SELECT tryDecrypt('aes-256-ofb', msg, db.logs) AS a FROM db.logs")},
+		{name: "an expression", reason: "it calls aes_encrypt_mysql" + why, objs: view("CREATE VIEW db.x AS SELECT aes_encrypt_mysql('aes-128-ecb', msg, 'k' || msg) AS a FROM db.logs")},
+		{name: "a dictGet", reason: "it calls aes_decrypt_mysql" + why, objs: view("CREATE VIEW db.x AS SELECT aes_decrypt_mysql('aes-128-ecb', msg, dictGet('db.dict', 'msg', id)) AS a FROM db.logs")},
+		{name: "a nested call", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-128-ecb', encrypt('aes-128-ecb', msg, '1234567890123456'), '1234567890123456') AS a FROM db.logs")},
+		{name: "a column default with a call", reason: "it calls encrypt" + why, objs: tbl("CREATE TABLE db.x (`id` UInt64, `c` String DEFAULT encrypt('aes-256-ofb', toString(id), " + key + ")) ENGINE = Log")},
+		{name: "a negative number", reason: "it calls encrypt" + why, objs: view("CREATE VIEW db.x AS SELECT encrypt('aes-128-ecb', msg, -1) AS a FROM db.logs")},
+		{name: "a qualified column", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-128-ecb', l.msg, '1234567890123456') AS a FROM db.logs AS l")},
 	}
 	runAlCases(t, cases)
 }

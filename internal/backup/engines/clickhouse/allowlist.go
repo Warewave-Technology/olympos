@@ -1187,8 +1187,8 @@ func (r *reader) inFunctionAt(i int) bool {
 // toks[j] ends like an operand (fix round 1 of the security review v0.4, A):
 // the clauses that end in a number, a bracket or a name and are followed by
 // an expression, not by an operator. They are SELECT's modifiers before its
-// list (TOP n, TOP (n), WITH TIES, DISTINCT ON (…)) and an index's name
-// (INDEX name expression TYPE …).
+// list (TOP n, TOP (n), WITH TIES, DISTINCT ON (…)), an index's name
+// (INDEX name expression TYPE …) and AS (INTERPOLATE (m AS expression)).
 func (r *reader) exprStartAfter(j int) bool {
 	p := r.at(j)
 	switch {
@@ -1202,6 +1202,10 @@ func (r *reader) exprStartAfter(j int) bool {
 		return o >= 0 && (r.at(o-1).is("TOP") || r.at(o-1).is("ON") && r.at(o-2).is("DISTINCT"))
 	case p.is("TIES"):
 		return r.at(j - 1).is("WITH")
+	case p.is("AS"):
+		// An alias or CAST's type follows AS, never an operator: before
+		// "in(" it is INTERPOLATE (m AS in(…)) (fix round 2).
+		return true
 	case p.ident():
 		return r.at(j - 1).is("INDEX")
 	}
@@ -1254,6 +1258,12 @@ func (r *reader) function(i int, called bool) {
 		r.fail(reasonInlineDisk)
 	case outsideCalls[name]:
 		r.fail("it calls " + shortName(r.toks[i].val) + ", which reads outside the restored set")
+	case called && secretArgumentFunctions[r.toks[i].val] && !plainArguments(r.toks, i+1, r.closing(i+1)):
+		// ClickHouse hides these arguments from the second on in
+		// system.tables, so the check after RESTORE cannot compare them: only
+		// what cannot read anything is allowed there (fix round 2).
+		r.fail("it calls " + shortName(r.toks[i].val) + " with an argument that is not a literal or a column, " +
+			"which the target hides from the check after the restore")
 	case strings.HasPrefix(name, "dictget") || strings.HasPrefix(name, "dicthas") || strings.HasPrefix(name, "dictisin") ||
 		name == "joinget" || name == "joingetornull":
 		if !called {
@@ -1262,6 +1272,22 @@ func (r *reader) function(i int, called bool) {
 		}
 		r.namedObject(i)
 	}
+}
+
+// plainArguments reports whether every argument of the call whose brackets
+// are toks[open] and toks[end], from the second on, is one token: a string,
+// a number or an unqualified name (a column).
+func plainArguments(toks []token, open, end int) bool {
+	args := splitArgs(toks, open, end)
+	if len(args) < 2 {
+		return true // nothing hidden: ClickHouse shows a call with one argument whole
+	}
+	for _, a := range args[1:] {
+		if len(a) != 1 || !(a[0].kind == tokString || a[0].kind == tokNumber || a[0].ident()) {
+			return false
+		}
+	}
+	return true
 }
 
 // namedObject reads the object a dictGet* or joinGet at toks[i] names in
