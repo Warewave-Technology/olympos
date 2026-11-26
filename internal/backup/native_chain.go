@@ -356,7 +356,9 @@ func (s *chainSource) Open(ctx context.Context, key string) (io.ReadCloser, inge
 	}
 	o, err := s.r.Open(ctx, obj.path)
 	if err != nil {
-		return nil, ingest.ObjectRecord{}, err
+		// A signed object that cannot be read is the source's failure, not a
+		// key that does not exist: not wrapped.
+		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %v", key, err)
 	}
 	if o.Size() != obj.rec.Size {
 		_ = o.Close()

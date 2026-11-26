@@ -357,6 +357,12 @@ func TestChainSource(t *testing.T) {
 	if _, _, err := s.Open(ctx, base+"/data/short.bin"); !errors.Is(err, errChainObject) {
 		t.Fatalf("a shorter object: %v", err)
 	}
+	// A signed object gone from storage fails the source; it is no missing key.
+	delete(m.objs, "p/base/.backup")
+	if _, _, err := s.Open(ctx, base+"/.backup"); err == nil || errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("a signed object gone: %v", err)
+	}
+	m.objs["p/base/.backup"] = body
 	// The changed object: everything but its last bytes, then the error.
 	rc, rec, err := s.Open(ctx, base+"/data/x.bin")
 	if err != nil || rec.SHA256 != sum(body) {
