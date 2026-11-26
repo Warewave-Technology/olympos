@@ -45,15 +45,21 @@ type nrChain struct {
 	sums   []string          // each run's manifest SHA-256, as its copy row records it
 	bodies map[string][]byte // by bucket-relative key
 	bound  [][]backup.NativeChainManifest
+	// dbDDL are the databases' own definitions the full writes (Atomic
+	// when not set).
+	dbDDL map[string]string
 }
 
 func nrDDLKey(run, db, name string) string {
 	return run + "/metadata/" + escapeForFileName(db) + "/" + escapeForFileName(name) + ".sql"
 }
 
-func newNRChain(t *testing.T, full, inc []nrObj, baseURL string) *nrChain {
+func newNRChain(t *testing.T, full, inc []nrObj, baseURL string, dbDDL ...string) *nrChain {
 	t.Helper()
-	c := &nrChain{kv: newFakeVault(), bodies: map[string][]byte{}}
+	c := &nrChain{kv: newFakeVault(), bodies: map[string][]byte{}, dbDDL: map[string]string{}}
+	for i := 0; i+1 < len(dbDDL); i += 2 {
+		c.dbDDL[dbDDL[i]] = dbDDL[i+1]
+	}
 	m1 := c.manifest(full, nrFull, nil, "")
 	c.sign(t, m1)
 	if inc != nil {
@@ -76,6 +82,21 @@ func (c *nrChain) manifest(objs []nrObj, run string, base *NativeManifest, baseU
 		m.Objects = append(m.Objects, ingest.ObjectRecord{Key: key, Size: int64(len(body)), SHA256: sum(string(body))})
 	}
 	add(run+"/.backup", []byte("<config/>"))
+	// A database's own definition is written by the full; an incremental
+	// keeps it in its base, as ClickHouse does with unchanged metadata.
+	if base == nil {
+		dbs := map[string]bool{}
+		for _, o := range objs {
+			if !dbs[o.db] {
+				dbs[o.db] = true
+				ddl := c.dbDDL[o.db]
+				if ddl == "" {
+					ddl = "CREATE DATABASE " + o.db + " UUID '6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60' ENGINE = Atomic"
+				}
+				add(run+"/metadata/"+escapeForFileName(o.db)+".sql", []byte(ddl))
+			}
+		}
+	}
 	at := map[string]int{}
 	listed := map[string]bool{}
 	put := func(db string, o NativeObject) {
@@ -345,7 +366,7 @@ func TestNativeRestoreStatement(t *testing.T) {
 	}
 	stmt := restoreStatement(p, nr, req)
 	want := "RESTORE DATABASE `shop` EXCEPT TABLES `shop`.`ext`, `shop`.`odd\\`name`, DATABASE `stats` FROM S3('" + nr.URL +
-		"', 'OLYKEY', 's3cr3t-canary') SETTINGS async = 1, allow_different_table_def = 1, use_same_s3_credentials_for_base_backup = 1, id = '" + req + "'"
+		"', 'OLYKEY', 's3cr3t-canary') SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0, use_same_s3_credentials_for_base_backup = 1, id = '" + req + "'"
 	if stmt != want {
 		t.Fatalf("statement\n got %s\nwant %s", stmt, want)
 	}
@@ -411,5 +432,118 @@ func TestRestoreNativeRefusesInput(t *testing.T) {
 	}
 	if dialed {
 		t.Fatal("the target was dialed for a refused restore")
+	}
+}
+
+// TestServerErrorSummary (R52): what is kept of a failed RESTORE's message
+// is its code, its name and the start of its first line, never quoted text
+// or DDL.
+func TestServerErrorSummary(t *testing.T) {
+	for _, tc := range []struct{ msg, want string }{
+		{"Code: 608. DB::Exception: The table has a different definition: CREATE TABLE src.r UUID '887e' (`x` UInt64) ENGINE = MergeTree " +
+			"comparing to its definition in the backup: CREATE DICTIONARY d SOURCE(CLICKHOUSE(PASSWORD 'pw-canary')): While checking table src.r. (CANNOT_RESTORE_TABLE) (version 24.8.14.39 (official build))",
+			"Code 608 CANNOT_RESTORE_TABLE: The table has a different definition"},
+		{"Code: 499. DB::Exception: Message: Access Denied, bucket olympos, key 'r/data/x.bin': (S3_ERROR)\nStack trace: CREATE …",
+			"Code 499 S3_ERROR: Message: Access Denied, bucket olympos, key"},
+		{"Code: 394. DB::Exception: Query was cancelled. (QUERY_WAS_CANCELLED)", "Code 394 QUERY_WAS_CANCELLED: Query was cancelled."},
+		{"something odd with \"quotes\"", "an error: something odd with"},
+		{"", "an error"},
+	} {
+		got := serverErrorSummary(tc.msg, 0, "")
+		if got != tc.want || strings.Contains(got, "pw-canary") || strings.Contains(got, "CREATE") {
+			t.Errorf("serverErrorSummary(%q)\n got %q\nwant %q", tc.msg, got, tc.want)
+		}
+	}
+	if got := serverErrorSummary("Syntax error: failed at position 9 ('SETTINGS')", 62, "SYNTAX_ERROR"); got != "Code 62 SYNTAX_ERROR: Syntax error: failed at position 9" {
+		t.Errorf("an exception's code and name: %q", got)
+	}
+	long := "Code: 1. DB::Exception: " + strings.Repeat("x", 300)
+	if got := serverErrorSummary(long, 0, ""); len([]rune(got)) > 140 {
+		t.Errorf("not clipped: %d runes", len([]rune(got)))
+	}
+}
+
+// TestRestoredObjects (M-2): after RESTORED the restored databases hold
+// exactly the allowed objects, with the inner tables of the allowed
+// materialized views; an object left out that is there, an object no one
+// decided, or an allowed one that is missing fails the restore, named.
+func TestRestoredObjects(t *testing.T) {
+	const req = "4b1d6c2e-7f3a-4e5b-8c9d-0a1b2c3d4e5f"
+	nr := NativeRestore{Decisions: []Decision{
+		{Database: "shop", Name: "orders", Kind: KindTable, Allowed: true},
+		{Database: "shop", Name: "mv", Kind: KindMaterializedView, Allowed: true},
+		{Database: "shop", Name: "d", Kind: KindDictionary, Allowed: true},
+		{Database: "shop", Name: "ext", Kind: KindTable, Reason: "the URL engine is not on the restore allowlist"},
+	}, Rows: map[string]uint64{restoreKey("shop", "orders"): 1}}
+	p, err := planNativeRestore(req, []string{"shop"}, nr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const mvUUID = "6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60"
+	good := []restoredObject{{"shop", ".inner_id." + mvUUID, "11111111-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree"},
+		{"shop", "d", "22222222-0d8e-4b7a-9c1e-1a2b3c4d5e60", "Dictionary"}, {"shop", "mv", mvUUID, "MaterializedView"},
+		{"shop", "orders", "33333333-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree"}}
+	if err := p.restoredObjects(good); err != nil {
+		t.Fatalf("what was decided: %v", err)
+	}
+	if err := p.restoredObjects(append(slices.Clone(good), restoredObject{"shop", "ext", "", "URL"})); err == nil ||
+		!strings.Contains(err.Error(), "shop.ext was to be left out, and the target holds it") {
+		t.Fatalf("a left out object restored: %v", err)
+	}
+	if err := p.restoredObjects(append(slices.Clone(good), restoredObject{"shop", ".inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60", "", "MergeTree"},
+		restoredObject{"shop", "surprise", "", "Log"})); err == nil ||
+		!strings.Contains(err.Error(), "shop.surprise is not an object the restore was to create") ||
+		!strings.Contains(err.Error(), "shop..inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60 is not an object") {
+		t.Fatalf("objects no one decided: %v", err)
+	}
+	// An inner table is never required (the view holds its data).
+	if err := p.restoredObjects(good[1:]); err != nil {
+		t.Fatalf("an allowed view without its inner table: %v", err)
+	}
+	if err := p.restoredObjects(good[:3]); err == nil || !strings.Contains(err.Error(), "shop.orders was to be restored, and the target does not hold it") {
+		t.Fatalf("a missing allowed table: %v", err)
+	}
+}
+
+// TestCheckNativeRestoreDatabaseEngine (R52): a selected database whose own
+// definition is not CREATE DATABASE … ENGINE = Atomic is refused with the
+// reason; an incremental's databases are read from its base.
+func TestCheckNativeRestoreDatabaseEngine(t *testing.T) {
+	objs := []nrObj{
+		{"shop", "orders", KindTable, "CREATE TABLE shop.orders (`id` UInt64) ENGINE = MergeTree ORDER BY id"},
+		{"repl", "t", KindTable, "CREATE TABLE repl.t (`id` UInt64) ENGINE = MergeTree ORDER BY id"},
+	}
+	c := newNRChain(t, objs, []nrObj{objs[0]}, nrURL+"/olympos/"+nrFull+"/",
+		"repl", "CREATE DATABASE repl ENGINE = Replicated('/clickhouse/db/repl', '{shard}', '{replica}')")
+	got, err := Engine{}.CheckNativeRestore(context.Background(), c.input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"repl": "it has the Replicated database engine; a native restore creates Atomic databases only, " +
+		"and RESTORE refuses a database of another engine (restore it with the logical method)"}
+	if !reflect.DeepEqual(got.RefusedDatabases, want) {
+		t.Fatalf("refused: %q", got.RefusedDatabases)
+	}
+	if got, err := (Engine{}).CheckNativeRestore(context.Background(), c.input("shop")); err != nil || len(got.RefusedDatabases) != 0 {
+		t.Fatalf("shop only: %v %v", got.RefusedDatabases, err)
+	}
+
+	for body, want := range map[string]string{
+		"CREATE DATABASE db ENGINE = Atomic":                                             "",
+		"CREATE DATABASE db UUID '6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60' ENGINE = Atomic": "",
+		"CREATE DATABASE db ENGINE = Atomic COMMENT 'x'":                                 "its definition holds more than ENGINE = Atomic, which RESTORE would compare with the database a native restore creates",
+		"CREATE DATABASE db ENGINE = Ordinary":                                           "it has the Ordinary database engine; a native restore creates Atomic databases only, and RESTORE refuses a database of another engine (restore it with the logical method)",
+		"CREATE DATABASE other ENGINE = Atomic":                                          "its definition cannot be read with certainty",
+		"CREATE DATABASE db ENGINE = Atomic -- x":                                        "its definition cannot be read with certainty",
+	} {
+		if got := atomicDatabase(nrFull+"/metadata/db.sql", "db", []byte(body)); got != want {
+			t.Errorf("%s:\n got %q\nwant %q", body, got, want)
+		}
+	}
+	// A database whose definition is not in the backup is refused.
+	c2 := newNRChain(t, objs[:1], nil, "")
+	delete(c2.bodies, nrFull+"/metadata/shop.sql")
+	if got, err := (Engine{}).CheckNativeRestore(context.Background(), c2.input()); err == nil {
+		t.Fatalf("an unreadable database definition: %v", got.RefusedDatabases)
 	}
 }

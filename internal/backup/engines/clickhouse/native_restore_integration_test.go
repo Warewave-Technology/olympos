@@ -238,6 +238,34 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 				t.Errorf("%s: the source has %s, the restore %s", name, a, b)
 			}
 		}
+		// What the target holds is what was decided (RestoreNative checked it;
+		// here against the real system.tables, with the materialized view's
+		// inner table and the dictionary), and an object no one decided is
+		// named.
+		var decisions []Decision
+		for _, d := range c.Objects {
+			decisions = append(decisions, Decision(d))
+		}
+		plan, err := planNativeRestore(r.id, []string{"spike"}, NativeRestore{Decisions: decisions, DDL: c.DDL, Rows: c.Rows})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		sess, err := connect(ctx, dst.ec(), Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sess.close()
+		if err := sess.checkRestoredObjects(ctx, plan); err != nil {
+			t.Fatalf("the restored objects: %v", err)
+		}
+		dst.query(t, "CREATE TABLE spike.surprise (x UInt8) ENGINE = Log")
+		if err := sess.checkRestoredObjects(ctx, plan); err == nil || !strings.Contains(err.Error(), "spike.surprise is not an object the restore was to create") {
+			t.Fatalf("an object no one decided: %v", err)
+		}
+		dst.query(t, "DROP TABLE spike.surprise SYNC")
+
 		// The Replicated table: its own Keeper path and UUID; the source keeps
 		// its one replica.
 		if got := dst.query(t, "SELECT zookeeper_path FROM system.replicas WHERE database = 'spike' AND table = 'rep'"); got != keeperPath(r.id, "spike", "rep") {
@@ -267,8 +295,18 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 	})
 
 	// drop removes what a restore left on dst, so the next one finds it new.
+	// It first waits until no RESTORE of an earlier subtest still runs (a
+	// KILLed one can take a moment to end its threads).
 	drop := func(t *testing.T) {
 		t.Helper()
+		retry(t, time.Minute, "no restore running on the target", func() (string, error) {
+			n := dst.query(t, "SELECT (SELECT count() FROM system.processes WHERE startsWith(query_id, 'olympos-restore-')) + "+
+				"(SELECT count() FROM system.backups WHERE status = 'RESTORING')")
+			if n != "0" {
+				return n, errors.New("a restore still runs")
+			}
+			return "", nil
+		})
 		dst.query(t, "DROP DATABASE IF EXISTS spike SYNC; DROP DATABASE IF EXISTS big SYNC")
 	}
 
@@ -358,10 +396,14 @@ func testRestoreNative(t *testing.T, db *store.DB, image, wantServer string) {
 			if st := dst.query(t, "SELECT status FROM system.backups WHERE id = "+quoteString(r.id)); st != statusRestoreFailed && st != statusRestoreCancelled {
 				t.Fatalf("system.backups: %s", st)
 			}
-			if n := dst.query(t, "SELECT count() FROM system.processes WHERE query_id = "+quoteString(backup.NativeRestoreQueryID(r.id))); n != "0" {
-				t.Fatalf("the RESTORE still runs: %s", n)
-			}
+			retry(t, 15*time.Second, "the KILLed RESTORE gone from system.processes", func() (string, error) {
+				if n := dst.query(t, "SELECT count() FROM system.processes WHERE query_id = "+quoteString(backup.NativeRestoreQueryID(r.id))); n != "0" {
+					return n, errors.New("the RESTORE still runs")
+				}
+				return "", nil
+			})
 			t.Logf("ClickHouse %s, %s: %v", wantServer, how, r.err)
+
 			r.sess.Revoke("restore ended")
 		})
 	}
@@ -377,12 +419,16 @@ func startNativeKeeperCH(t *testing.T, image, wantServer, name, xml, network str
 	if err := os.WriteFile(filepath.Join(dir, "keeper.xml"), []byte(xml), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(dir, "s3-retries.xml"), []byte(testS3Retries), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", "-v", name) })
 	mustDocker(t, 2*time.Minute, "create", "--pull", "never", "--name", name, "--network", network,
 		"--add-host", "host.docker.internal:host-gateway", "--ulimit", "nofile=262144:262144",
 		"-e", "CLICKHOUSE_USER="+nativeCHUser, "-e", "CLICKHOUSE_PASSWORD="+nativeCHPassword,
 		"-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1", "-p", "127.0.0.1::9000", image)
 	mustDocker(t, time.Minute, "cp", filepath.Join(dir, "keeper.xml"), name+":/etc/clickhouse-server/config.d/keeper.xml")
+	mustDocker(t, time.Minute, "cp", filepath.Join(dir, "s3-retries.xml"), name+":/etc/clickhouse-server/users.d/s3-retries.xml")
 	mustDocker(t, time.Minute, "start", name)
 	out := mustDocker(t, 30*time.Second, "port", name, "9000/tcp")
 	c := &nativeCH{name: name, native: strings.Split(out, "\n")[0]}
@@ -396,11 +442,28 @@ func startNativeKeeperCH(t *testing.T, image, wantServer, name, xml, network str
 	return c
 }
 
+// testS3Retries lowers the test servers' S3 retries. A RESTORE retries a
+// failed GET up to backup_restore_s3_retry_attempts (1000 on 24.8 and
+// 25.8) times, with a backoff of up to 5 s on 25.8, and a thread in that
+// loop can keep a KILLed RESTORE from ending within nativeKillWait (30 s)
+// when the errors are retryable (a reset connection, 5xx). The endpoint
+// answers 403 once a session is stopped, which ends the loop at once, so
+// this only keeps a test from waiting on a slow host; production keeps the
+// defaults and the 30 s wait.
+const testS3Retries = `<clickhouse><profiles><default>
+  <backup_restore_s3_retry_attempts>3</backup_restore_s3_retry_attempts>
+  <s3_retry_attempts>3</s3_retry_attempts>
+</default></profiles></clickhouse>`
+
 // dirReader reads a dirStore's objects as a destination's blobs: path is
 // "<run-id>/<key>", as the dirStore stores them.
 type dirReader struct{ root string }
 
-func (d dirReader) Open(_ context.Context, path string) (blob.Object, error) {
+func (d dirReader) Open(ctx context.Context, path string) (blob.Object, error) {
+	// A destination's reader honours the request's context, as this one.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f, err := os.Open(filepath.Join(d.root, filepath.FromSlash(path)))
 	if err != nil {
 		return nil, err

@@ -724,6 +724,7 @@ func readCreate(key, db, name string, body []byte) (kind, engine string, err err
 		if !at(i).is("ENGINE") || !at(i+1).punct("=") || at(i+2).kind != tokWord {
 			return bad("no ENGINE = <name> after the database name")
 		}
+		engine = at(i + 2).val
 	case KindTable:
 		if !at(i).punct("(") {
 			return bad("no column list after the table name")

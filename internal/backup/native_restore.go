@@ -102,6 +102,10 @@ type NativeRestoreCheck struct {
 	// the chain does not verify.
 	DDL  map[string][]byte
 	Rows map[string]uint64
+	// RefusedDatabases are the selected databases the restore cannot
+	// create, with the reason (R52: a native restore creates Atomic
+	// databases only): a request with one of them is refused.
+	RefusedDatabases map[string]string
 }
 
 var (
@@ -171,7 +175,7 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 	var out *NativeRestoreCheck
 	err := WithNativeRestore(ctx, q, r, eng, cfg, src, databases, log, func(n *NativeRestore) error {
 		if n != nil {
-			out = &NativeRestoreCheck{Databases: n.Databases, Objects: n.Objects}
+			out = &NativeRestoreCheck{Databases: n.Databases, Objects: n.Objects, RefusedDatabases: n.RefusedDatabases}
 		}
 		return nil
 	})
@@ -246,7 +250,7 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		// What eng could list of a chain that did not verify: no
 		// manifests, no source.
 		if out != nil {
-			out.Manifests, out.DDL, out.Rows = nil, nil, nil
+			out.Manifests, out.DDL, out.Rows, out.RefusedDatabases = nil, nil, nil, nil
 			if uerr := use(out); uerr != nil {
 				return uerr
 			}
@@ -256,6 +260,11 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		return fmt.Errorf("%w: the engine did not bind the chain", ErrNativeNotVerified)
 	}
 	out.src, out.dirs = cs, bound
+	// What the restore would serve must be within its bound: refused at
+	// the check, not when the restore starts.
+	if _, err := servedBound(out.Manifests); err != nil {
+		return err
+	}
 	return use(out)
 }
 
@@ -400,11 +409,10 @@ func NativeRestoreKillQuery(requestID string) string {
 // the chain was not verified.
 //
 // Its memory bound: it keeps one entry per object of the chain's verified
-// manifests (the key, the size, the SHA-256 as 32 bytes and the run), about
-// the size of the manifests' object lists and never more than the
-// manifests it is built from (each at most 64 MiB, at most nativeMaxChain
-// of them); none of the parsed manifests, definitions or decisions. A
-// server runs at most the executor's Global restores at once.
+// manifests (the key, the size, the SHA-256 as 32 bytes and the run), none
+// of the parsed manifests, definitions or decisions, and refuses a chain
+// past maxServedObjects or maxServedKeyBytes. A server runs at most the
+// executor's Global restores at once.
 //
 // A manifest key that the endpoint would not serve (ingest.ValidKey: a
 // backslash, a control character, an empty, "." or ".." segment), or that
@@ -427,18 +435,22 @@ func NewNativeRestoreSource(r blob.Reader, ms []NativeChainManifest, dirs []stri
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &NativeRestoreSource{r: r, log: log, objects: map[string]servedObject{}}
+	count, err := servedBound(ms)
+	if err != nil {
+		return nil, err
+	}
+	s := &NativeRestoreSource{r: r, log: log, objects: make(map[string]servedObject, count)}
 	for i, m := range ms {
 		s.runs = append(s.runs, m.RunID+"/")
 		s.dirs = append(s.dirs, dirs[i]+"/")
 		for _, o := range m.Objects {
 			rel, ok := strings.CutPrefix(o.Key, m.RunID+"/")
 			if !ok || rel == "" || !ingest.ValidKey(o.Key) {
-				return nil, fmt.Errorf("the manifest of run %s lists %q, which is not served", m.RunID, clipKey(o.Key))
+				return nil, fmt.Errorf("%w: the manifest of run %s lists %q, which the endpoint does not serve", ErrNativeChain, m.RunID, clipKey(o.Key))
 			}
 			sum, err := hex.DecodeString(o.SHA256)
 			if err != nil || len(sum) != sha256.Size || o.Size < 0 {
-				return nil, fmt.Errorf("the manifest of run %s lists %q without a size and SHA-256", m.RunID, clipKey(o.Key))
+				return nil, fmt.Errorf("%w: the manifest of run %s lists %q without a size and SHA-256", ErrNativeChain, m.RunID, clipKey(o.Key))
 			}
 			var so servedObject
 			so.size, so.run = o.Size, uint8(i)
@@ -454,6 +466,36 @@ func clipKey(k string) string {
 		return k[:128] + "…"
 	}
 	return k
+}
+
+// The serving path's memory bound (NewNativeRestoreSource): at most
+// maxServedObjects entries and maxServedKeyBytes of keys in all, so 32 runs
+// of 256 Ki objects each, twice the ~250k files a native run holds at most
+// (its .backup is capped at 64 MiB). An entry is its key and about 100
+// bytes more (the SHA-256, the size, the map), so a source at the cap
+// holds about 1.8 GiB; a full of 250k files with ~100-byte keys about
+// 50 MiB. A chain past the cap is refused, not served in part.
+var (
+	maxServedObjects  = nativeMaxChain << 18 // 8 Mi; a test lowers it
+	maxServedKeyBytes = 1 << 30
+)
+
+// servedBound returns how many objects the chain ms holds, or an
+// ErrNativeChain error when that, or their keys, are past the serving
+// path's bound.
+func servedBound(ms []NativeChainManifest) (int, error) {
+	var count, keyBytes int
+	for _, m := range ms {
+		count += len(m.Objects)
+		for _, o := range m.Objects {
+			keyBytes += len(o.Key)
+		}
+	}
+	if count > maxServedObjects || keyBytes > maxServedKeyBytes {
+		return 0, fmt.Errorf("%w: the chain holds %d objects (%d bytes of keys), more than the %d objects (%d bytes of keys) a restore serves",
+			ErrNativeChain, count, keyBytes, maxServedObjects, maxServedKeyBytes)
+	}
+	return count, nil
 }
 
 // NativeRestoreSource is the ingest.Source of a native restore

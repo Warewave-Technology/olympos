@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"strings"
@@ -392,5 +393,54 @@ func TestNativeRestoreSourceKeys(t *testing.T) {
 	if _, err := backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{
 		{Key: run + "/data/%2e%2e/x.bin", Size: 1, SHA256: strings.Repeat("0", 64)}}}}, []string{"p/" + run}, nil); err != nil {
 		t.Fatalf("a %% sequence is a plain name: %v", err)
+	}
+}
+
+// TestNativeRestoreSourceBound (M-1): a chain past the serving path's
+// bound (8 Mi objects, 1 GiB of keys; lowered here) is refused, with the
+// figures; one at it is served.
+func TestNativeRestoreSourceBound(t *testing.T) {
+	if backup.MaxServedObjects() != 32<<18 {
+		t.Fatalf("the bound is %d objects", backup.MaxServedObjects())
+	}
+	backup.SetServedBoundForTest(t, 100, 1<<20)
+	run := uuid.NewString()
+	sum := strings.Repeat("0", 64)
+	objs := make([]ingest.ObjectRecord, 101)
+	for i := range objs {
+		objs[i] = ingest.ObjectRecord{Key: fmt.Sprintf("%s/data/%d.bin", run, i), Size: 1, SHA256: sum}
+	}
+	src := func(objs []ingest.ObjectRecord) (*backup.NativeRestoreSource, error) {
+		return backup.NewNativeRestoreSource(nil, []backup.NativeChainManifest{{RunID: run, Objects: objs}}, []string{"p/" + run}, nil)
+	}
+	if _, err := src(objs); err == nil || !strings.Contains(err.Error(), "the chain holds 101 objects") || !strings.Contains(err.Error(), "more than the 100 objects") {
+		t.Fatalf("past the object bound: %v", err)
+	}
+	if s, err := src(objs[:100]); err != nil || s.Objects() != 100 {
+		t.Fatalf("at the bound: %v", err)
+	}
+	backup.SetServedBoundForTest(t, 100, 100)
+	if _, err := src(objs[:10]); err == nil || !strings.Contains(err.Error(), "bytes of keys") {
+		t.Fatalf("past the key bound: %v", err)
+	}
+}
+
+// TestNativeRestoreCheckBound: the check refuses a chain past the serving
+// path's bound (ErrNativeChain, with the figures), so the maker sees it
+// before a request exists.
+func TestNativeRestoreCheckBound(t *testing.T) {
+	db := testutil.DB(t)
+	ctx := context.Background()
+	e := seedIncremental(t, db)
+	scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	src, err := backup.FindRestoreSource(ctx, db, inc, &e.DestID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup.SetServedBoundForTest(t, 2, 1<<20)
+	if _, err := backup.CheckNativeRestore(ctx, db, e.B1, fakeEngine{}, restoreCfg(e), src, nil, quietLog()); !errors.Is(err, backup.ErrNativeChain) ||
+		!strings.Contains(err.Error(), "more than the 2 objects") {
+		t.Fatalf("a chain past the bound: %v", err)
 	}
 }

@@ -259,7 +259,8 @@ The existing flow, with these changes for a native source:
   4. Run:
      ```sql
      RESTORE DATABASE db1 [EXCEPT TABLES …] FROM S3('<url>/olympos/<run-id>/', '<key>', '<secret>')
-     SETTINGS async = 1, allow_different_table_def = 1, id = '<request-id>'
+     SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0,
+       use_same_s3_credentials_for_base_backup = 1, id = '<request-id>'
      ```
      `allow_different_table_def` applies only to tables that already exist, which are the Replicated tables
      Olympos just created from the backup's own DDL.
@@ -297,20 +298,27 @@ The existing flow, with these changes for a native source:
     anything else.
   - The check's one-at-a-time slot is held only to verify the chain and bind it. What the restore keeps for
     the hours its `RESTORE` runs is the restore's source: one entry per object of the verified manifests
-    (key, size, SHA-256, run), about the size of their object lists, none of the parsed manifests. A manifest
-    key the endpoint would not serve refuses the source; a key is only ever looked up, and mapped to a path
-    only below its run's directory on the copy's destination. The check reads definitions 8 at a time.
+    (key, size, SHA-256, run), none of the parsed manifests, at most 8 Mi objects (32 runs of 256 Ki, twice
+    the ~250k files a run holds) and 1 GiB of keys, about 1.8 GiB at that bound; a chain past it is refused
+    at the check. A manifest key the endpoint would not serve refuses the source; a key is only ever looked
+    up, and mapped to a path only below its run's directory on the copy's destination. The check reads
+    definitions 8 at a time.
+  - A selected database whose own definition in the backup is not `CREATE DATABASE <db> [UUID '…'] ENGINE =
+    Atomic` is refused at the check, with the reason (R52): the restore creates its databases as Atomic, and
+    RESTORE refuses a database whose definition differs.
   - The credential is a read-only ingest session (`kind = 'restore'`, `run_id` the request) over the chain's
     prefixes, the full first, with the same lifetime as a backup's; it counts against `ingest.maxRuns`, and it
     is revoked when the engine returns. A key in its scope that the manifests do not list is `403` and the
     restore goes on; an object that does not match is never served whole: its last read fails, the endpoint
     aborts the connection, the session stops, the `RESTORE` is killed and the request fails naming the object.
-    Every chunk written to a client has a 2-minute deadline.
+    Every chunk written to a client has a 2-minute deadline. A client that goes away while its object is read
+    (its request's context ends) is not a source failure: the session goes on.
   - The order is: the selected databases (`CREATE DATABASE … ENGINE = Atomic`, or an existing empty one), the
     allowed Replicated tables from the backup's own text with the Keeper path rewritten and the backup's
     `UUID '…'` removed, then
-    `RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…) SETTINGS async = 1, allow_different_table_def = 1, use_same_s3_credentials_for_base_backup = 1, id = '<request id>'`
-    with query id `olympos-restore-<request id>` and the read throttle of R29. `RESTORE` fills a table it
+    `RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…) SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0, use_same_s3_credentials_for_base_backup = 1, id = '<request id>'`
+    with query id `olympos-restore-<request id>` and the read throttle of R29; `allow_s3_native_copy = 0`
+    (R51), as on `BACKUP`, so a table on an S3 disk never copies its files server-side past the verified read. `RESTORE` fills a table it
     finds and creates the others (24.8 and 25.8): a pre-created table is not named in `EXCEPT TABLES`, and
     without `allow_different_table_def` it is refused as "a different definition". A pre-created table needs
     no UUID of the backup: it gets its own, so on a shared Keeper nothing of the source's table (its
@@ -318,8 +326,13 @@ The existing flow, with these changes for a native source:
   - The `RESTORE` is polled every 5 s in `system.backups` (id = the request id) and ended with `KILL QUERY …
     SYNC` on a stop of the session, a cancelled restore (the request ended elsewhere, the lease, a shutdown)
     and every way out that did not see it end, on a new connection when its own is lost; when even that does
-    not end it, the error names the `KILL QUERY` to run. After `RESTORED`, every allowed table's row count must
-    be the manifest's; a table that differs fails the request, named.
+    not end it, the error names the `KILL QUERY` to run. A failed `RESTORE` records only ClickHouse's error code,
+    its name and the start of the first line, cut before any quoted text or `CREATE` (R52): the whole message
+    can quote the backup's DDL; it stays in `system.backups` on the target, and the error says how to read it.
+    After `RESTORED`, the restored databases must hold exactly the allowed objects (with the inner tables of
+    the allowed materialized views): an object left out that is there, one no one decided, or an allowed one
+    that is missing fails the request, named. Then every allowed table's row count must be the manifest's; a
+    table that differs fails the request, named.
   - Seen on 24.8 and 25.8 through the endpoint: `RESTORE` sends `GetObject` without `Range` (the source
     refuses one) and two `ListObjects`; a dictionary whose ClickHouse source names a `TABLE` and no `DB` reads
     that table in its own database; `EXCEPT TABLES` leaves out an object listed as `other` by its name.

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -67,6 +68,9 @@ func (Engine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInp
 	if err != nil {
 		return check, err
 	}
+	if check.RefusedDatabases, err = refusedDatabases(ctx, read, chain, last.Databases, selected); err != nil {
+		return check, err
+	}
 	check.DDL, check.Rows = map[string][]byte{}, map[string]uint64{}
 	objects := map[string]NativeObject{}
 	for _, d := range last.Databases {
@@ -90,6 +94,70 @@ func (Engine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInp
 	}
 	check.Manifests = chain
 	return check, nil
+}
+
+// refusedDatabases reads the own definition (metadata/<db>.sql) of each
+// selected database, from the latest run of the chain that holds it (an
+// incremental keeps an unchanged one in its base), and returns those a
+// native restore cannot create, with the reason (R52): the restore creates
+// each database as Atomic, and RESTORE refuses a database whose definition
+// in the backup is another. Only CREATE DATABASE <db> [UUID '…'] ENGINE =
+// Atomic, with nothing after it, is restored. A definition that cannot be
+// read through the chain's checked reader is ErrNativeNotVerified.
+func refusedDatabases(ctx context.Context, read backup.NativeObjectReader, chain []backup.NativeChainManifest, dbs []NativeDatabase,
+	selected map[string]bool) (map[string]string, error) {
+	// The database definitions the chain holds, by key.
+	listed := map[string]bool{}
+	for _, m := range chain {
+		for _, o := range m.Objects {
+			if rest, ok := strings.CutPrefix(o.Key, m.RunID+"/metadata/"); ok && !strings.Contains(rest, "/") && strings.HasSuffix(rest, ".sql") {
+				listed[o.Key] = true
+			}
+		}
+	}
+	out := map[string]string{}
+	for _, d := range dbs {
+		if selected != nil && !selected[d.Name] {
+			continue
+		}
+		key := ""
+		for i := len(chain) - 1; i >= 0 && key == ""; i-- {
+			if k := chain[i].RunID + "/metadata/" + escapeForFileName(d.Name) + ".sql"; listed[k] {
+				key = k
+			}
+		}
+		if key == "" {
+			out[d.Name] = "its definition is not in the backup"
+			continue
+		}
+		body, err := read(ctx, key, maxSchemaEntry)
+		if err != nil {
+			return nil, fmt.Errorf("%w: the definition of database %s: %v", backup.ErrNativeNotVerified, clip(d.Name), err)
+		}
+		if why := atomicDatabase(key, d.Name, body); why != "" {
+			out[d.Name] = why
+		}
+	}
+	return out, nil
+}
+
+// atomicDatabase says why body, the backup's definition of database db, is
+// not one a native restore creates ("" when it is: CREATE DATABASE db
+// [UUID '…'] ENGINE = Atomic and nothing after it).
+func atomicDatabase(key, db string, body []byte) string {
+	_, engine, err := readCreate(key, db, "", body)
+	switch {
+	case err != nil:
+		return "its definition cannot be read with certainty"
+	case engine != "Atomic":
+		return "it has the " + shortName(engine) + " database engine; a native restore creates Atomic databases only, and RESTORE " +
+			"refuses a database of another engine (restore it with the logical method)"
+	}
+	toks, err := lexSQL(string(body))
+	if n := len(toks); err != nil || n < 3 || !toks[n-3].is("ENGINE") || !toks[n-2].punct("=") || toks[n-1].val != "Atomic" {
+		return "its definition holds more than ENGINE = Atomic, which RESTORE would compare with the database a native restore creates"
+	}
+	return ""
 }
 
 // restoreKey is the key of an object in NativeRestoreCheck.DDL and Rows:
@@ -282,6 +350,8 @@ type nativeRestorePlan struct {
 	// creates the CREATE TABLE of each Replicated one, by restoreKey.
 	tables  map[string][]Decision
 	creates map[string]string
+	// allowed are every allowed object, by database and name.
+	allowed map[objRef]Decision
 	// except are the objects left out, by database.
 	except map[string][]Decision
 }
@@ -292,7 +362,8 @@ type nativeRestorePlan struct {
 // an allowed table; a definition the rewrite refuses fails the restore
 // (the check ran the same rewrite).
 func planNativeRestore(requestID string, databases []string, nr NativeRestore) (*nativeRestorePlan, error) {
-	p := &nativeRestorePlan{tables: map[string][]Decision{}, creates: map[string]string{}, except: map[string][]Decision{}}
+	p := &nativeRestorePlan{tables: map[string][]Decision{}, creates: map[string]string{}, except: map[string][]Decision{},
+		allowed: map[objRef]Decision{}}
 	selected := map[string]bool{}
 	for _, db := range databases {
 		if db == "" || strings.ContainsRune(db, 0) || isSystemDatabase(db) {
@@ -316,6 +387,9 @@ func planNativeRestore(requestID string, databases []string, nr NativeRestore) (
 			return nil, fmt.Errorf("clickhouse: %s.%s is decided twice", clip(d.Database), clip(d.Name))
 		}
 		seen[key] = true
+		if d.Allowed {
+			p.allowed[objRef{d.Database, d.Name}] = d
+		}
 		switch {
 		case !d.Allowed:
 			p.except[d.Database] = append(p.except[d.Database], d)
@@ -345,7 +419,7 @@ func planNativeRestore(requestID string, databases []string, nr NativeRestore) (
 	return p, nil
 }
 
-// restoreStatement is the RESTORE of a native restore (design §6, R26). It
+// restoreStatement is the RESTORE of a native restore (design §6, R26, R51). It
 // holds the secret: never log it, log redactStatement of it.
 func restoreStatement(p *nativeRestorePlan, nr NativeRestore, requestID string) string {
 	var b strings.Builder
@@ -365,8 +439,11 @@ func restoreStatement(p *nativeRestorePlan, nr NativeRestore, requestID string) 
 		}
 	}
 	b.WriteString(" FROM S3(" + quoteString(nr.URL) + ", " + quoteString(nr.AccessKey) + ", " + quoteString(nr.Secret) + ")")
-	b.WriteString(" SETTINGS async = 1, allow_different_table_def = 1, use_same_s3_credentials_for_base_backup = 1, id = " +
-		quoteString(requestID))
+	// allow_s3_native_copy = 0 (R51): a target table on an S3 disk would
+	// otherwise copy its files server-side (CopyObject through the disk's
+	// own S3 client), past the endpoint's verified read.
+	b.WriteString(" SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0, " +
+		"use_same_s3_credentials_for_base_backup = 1, id = " + quoteString(requestID))
 	return b.String()
 }
 
@@ -471,7 +548,12 @@ func (Engine) RestoreNative(ctx context.Context, rc backup.RestoreContext, nr Na
 		return res, err
 	}
 
-	// 4. The row counts.
+	// 4. What the target holds now: exactly what was allowed.
+	if err := s.checkRestoredObjects(ctx, plan); err != nil {
+		return res, err
+	}
+
+	// 5. The row counts.
 	var mismatched []string
 	for _, db := range plan.databases {
 		item := backup.RestoreItem{Name: db, Status: "succeeded"}
@@ -532,12 +614,16 @@ func (s *session) runRestore(ctx context.Context, log *slog.Logger, p *nativeRes
 	stmt := restoreStatement(p, nr, requestID)
 	log.Info("clickhouse: starting a native restore", "query_id", op.queryID, "statement", redactStatement(stmt))
 	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, op.queryID, nativeRestoreSettings...); err != nil {
-		msg := maskSecret(err.Error(), nr.Secret)
-		if _, refused := ch.AsException(err); refused {
-			// The server refused the statement: no restore runs.
-			return fmt.Errorf("clickhouse: RESTORE: %s", msg)
+		if e, refused := ch.AsException(err); refused {
+			// The server refused the statement: no restore runs. Its message
+			// can quote the statement and the backup's DDL: only its summary.
+			name := ""
+			if e.Code.IsAError() {
+				name = e.Code.String()
+			}
+			return fmt.Errorf("clickhouse: RESTORE refused: %s", serverErrorSummary(maskSecret(e.Message, nr.Secret), int(e.Code), name))
 		}
-		return op.orphanKill(log, again, "RESTORE: "+msg)
+		return op.orphanKill(log, again, "RESTORE: "+maskSecret(err.Error(), nr.Secret))
 	}
 	tick := time.NewTicker(nativePollInterval)
 	defer tick.Stop()
@@ -551,7 +637,10 @@ func (s *session) runRestore(ctx context.Context, log *slog.Logger, p *nativeRes
 			log.Info("clickhouse: native restore done")
 			return nil
 		case statusRestoreFailed, statusRestoreCancelled:
-			return fmt.Errorf("clickhouse: native restore %s: %s", status, maskSecret(msg, nr.Secret))
+			// system.backups.error can quote the backup's DDL (R52): only its
+			// summary, and where the whole message is.
+			return fmt.Errorf("clickhouse: native restore %s: %s; the whole message: run SELECT error FROM system.backups WHERE id = %s on the target",
+				status, serverErrorSummary(maskSecret(msg, nr.Secret), 0, ""), quoteString(requestID))
 		case statusRestoring:
 		case "":
 			return op.orphanKill(log, again, "the native restore is no longer in system.backups (did the server restart?)")
@@ -659,4 +748,129 @@ func (op nativeOp) killOn(ctx context.Context, s *session) (string, error) {
 		case <-time.After(time.Second):
 		}
 	}
+}
+
+// serverErrorSummary is what is kept of a ClickHouse error message (R52):
+// the message can quote the statement and the backup's DDL, and a
+// dictionary's or a database's source can carry a password there. What is
+// kept is the error code and name (code and name, or read from msg's
+// "Code: N." and its last "(NAME)") and the start of its first line, cut
+// before the first quote character or CREATE, at most 120 characters.
+func serverErrorSummary(msg string, code int, name string) string {
+	if code == 0 {
+		if m := errorCodeRe.FindStringSubmatch(msg); m != nil {
+			code, _ = strconv.Atoi(m[1])
+		}
+	}
+	if name == "" || name == "UNKNOWN" {
+		if m := errorNameRe.FindAllStringSubmatch(msg, -1); m != nil {
+			name = m[len(m)-1][1]
+		}
+	}
+	line, _, _ := strings.Cut(msg, "\n")
+	line = errorNameRe.ReplaceAllString(errorCodeRe.ReplaceAllString(line, ""), "")
+	for {
+		t := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "DB::Exception:"))
+		if t == strings.TrimSpace(line) {
+			break
+		}
+		line = t
+	}
+	if i := strings.IndexAny(line, "'\"`"); i >= 0 {
+		line = line[:i]
+	}
+	if i := strings.Index(strings.ToUpper(line), "CREATE "); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.TrimRight(strings.TrimSpace(line), ":,;( ")
+	if r := []rune(line); len(r) > 120 {
+		line = string(r[:120]) + "…"
+	}
+	line = printable(line)
+	head := "Code " + strconv.Itoa(code)
+	if code == 0 {
+		head = "an error"
+	}
+	if name != "" && name != "UNKNOWN" {
+		head += " " + name
+	}
+	if line == "" {
+		return head
+	}
+	return head + ": " + line
+}
+
+var (
+	errorCodeRe = regexp.MustCompile(`Code: (\d+)\.\s*`)
+	errorNameRe = regexp.MustCompile(`\(([A-Z][A-Z0-9_]{2,})\)`)
+)
+
+// checkRestoredObjects checks, after RESTORED, that the restored databases
+// hold what was allowed and nothing else: an object left out that is there
+// (an EXCEPT TABLES name RESTORE did not match), or one the restore was not
+// to create, fails the restore, named; so does an allowed one that is
+// missing. A materialized view's inner table belongs to an allowed view of
+// its database: .inner_id.<its UUID> or .inner.<its name>.
+func (s *session) checkRestoredObjects(ctx context.Context, p *nativeRestorePlan) error {
+	quoted := make([]string, len(p.databases))
+	for i, db := range p.databases {
+		quoted[i] = quoteString(db)
+	}
+	rows, err := s.queryStrings(ctx, "SELECT database, name, toString(uuid), engine FROM system.tables WHERE database IN ("+
+		strings.Join(quoted, ", ")+") ORDER BY database, name")
+	if err != nil {
+		return fmt.Errorf("clickhouse: list the restored objects: %w", err)
+	}
+	found := make([]restoredObject, len(rows))
+	for i, r := range rows {
+		found[i] = restoredObject{db: r[0], name: r[1], uuid: r[2], engine: r[3]}
+	}
+	return p.restoredObjects(found)
+}
+
+// restoredObject is a row of system.tables.
+type restoredObject struct{ db, name, uuid, engine string }
+
+// restoredObjects is checkRestoredObjects on the rows found.
+func (p *nativeRestorePlan) restoredObjects(found []restoredObject) error {
+	views := map[string]string{} // "<db>\x00.inner_id.<uuid>" or ".inner.<name>" → the view
+	for _, o := range found {
+		if d, ok := p.allowed[objRef{o.db, o.name}]; ok && d.Kind == KindMaterializedView {
+			views[o.db+"\x00.inner_id."+o.uuid] = o.name
+			views[o.db+"\x00.inner."+o.name] = o.name
+		}
+	}
+	excluded := map[objRef]bool{}
+	for db, ds := range p.except {
+		for _, d := range ds {
+			excluded[objRef{db, d.Name}] = true
+		}
+	}
+	var problems []string
+	seen := map[objRef]bool{}
+	for _, o := range found {
+		r := objRef{o.db, o.name}
+		seen[r] = true
+		switch {
+		case p.allowed[r].Name != "":
+		case isInnerName(o.name) && views[o.db+"\x00"+o.name] != "":
+		case excluded[r]:
+			problems = append(problems, r.String()+" was to be left out, and the target holds it")
+		default:
+			problems = append(problems, r.String()+" is not an object the restore was to create")
+		}
+	}
+	for r := range p.allowed {
+		if !seen[r] {
+			problems = append(problems, r.String()+" was to be restored, and the target does not hold it")
+		}
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	slices.Sort(problems)
+	if len(problems) > 5 {
+		problems = append(problems[:5], fmt.Sprintf("and %d more", len(problems)-5))
+	}
+	return fmt.Errorf("clickhouse: the restored databases do not hold what was decided: %s", strings.Join(problems, "; "))
 }
