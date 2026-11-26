@@ -263,7 +263,7 @@ describe('restore requests on Approvals', () => {
     expect(screen.getByLabelText('Notes from the restore')).toHaveTextContent('requests_by_minute__restored_data');
   });
 
-  it('shows the checker what a native request leaves out, as recorded when it was opened (R50)', async () => {
+  it('shows the checker what a native request leaves out, as recorded when it was opened', async () => {
     const rq = db.restoreRequests.find((r) => r.options.native && r.status === 'pending')!;
     await renderApp(`/approvals?view=all&restore=${rq.id}`);
     const left = await screen.findByLabelText('Left out by the native restore', {}, T);

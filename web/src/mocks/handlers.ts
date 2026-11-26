@@ -373,7 +373,7 @@ function evaluateRestore(b: RestoreInput, opening: boolean): Evaluated {
           return gone && o.allowed ? { ...o, allowed: false, reason: `it reads ${gone}, which is not restored` } : o;
         }),
     };
-    // R50: the request records what it leaves out, as checked.
+    // The request records what it leaves out, as checked: the checker approves that list.
     base.options = { ...base.options, native: { databases: dbs, excluded: base.native.objects.filter((o) => !o.allowed) } };
   }
   if (Object.keys(fields).length) return { res: { ...base, error: 'invalid restore request', fields } };

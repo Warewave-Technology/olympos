@@ -1307,7 +1307,7 @@ export const restoreRequests: RestoreRequest[] = [
       created: ['metrics'],
     },
   }),
-  // a native ClickHouse restore waiting for a checker: what it leaves out was recorded when it was opened (R50)
+  // a native ClickHouse restore waiting for a checker: what it leaves out was recorded when it was opened, for the checker
   restoreReq({
     engine: 'clickhouse',
     source: restoreSource(runMetrics.id, destinations[1]?.id ?? blobWeu),

@@ -88,12 +88,16 @@ export function NativeObjects({ db, objects }: { db: string; objects: RestoreNat
 /** A native check's objects by database, in the order the server listed them. */
 export function nativeByDatabase(objects: RestoreNativeObject[]): [string, RestoreNativeObject[]][] {
   const m = new Map<string, RestoreNativeObject[]>();
-  for (const o of objects) m.set(o.database, [...(m.get(o.database) ?? []), o]);
+  for (const o of objects) {
+    const list = m.get(o.database);
+    if (list) list.push(o);
+    else m.set(o.database, [o]);
+  }
   return [...m];
 }
 
 /**
- * What a native request leaves out, as it was checked when it was opened (R50): the checker approves this list, and the
+ * What a native request leaves out, as it was checked when it was opened: the checker approves this list, and the
  * restore does not start when the backup's check at start decides otherwise.
  */
 export function NativeLeftOut({ native }: { native: RestoreNativeOptions }) {
