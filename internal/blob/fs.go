@@ -351,15 +351,21 @@ func (f *FS) Download(ctx context.Context, path string, max int64) ([]byte, erro
 	return io.ReadAll(io.LimitReader(fh, max))
 }
 
-// SetTags replaces the tags sidecar of a probe file (backups are never
-// rewritten: their tags are written once by Upload).
+// SetTags replaces the tags sidecar of a probe file, or of an object or the
+// manifest of a native run (IsNativeRunObject, isNativeManifest), which are
+// tagged complete once the run's manifest is signed. The file must exist,
+// and only its sidecar changes. Every other backup keeps the tags Upload
+// wrote once.
 func (f *FS) SetTags(ctx context.Context, path string, tags map[string]string) error {
-	if !IsProbePath(path) {
-		return fmt.Errorf("refusing to rewrite tags of %q: only probe files", path)
+	if !IsProbePath(path) && !IsNativeRunObject(path) && !f.isNativeManifest(path) {
+		return fmt.Errorf("refusing to rewrite tags of %q: only probe files and the objects of native runs", path)
 	}
 	p, err := f.file(path, false)
 	if err != nil {
 		return err
+	}
+	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
+		return fmt.Errorf("refusing to tag %q: not a stored file", path)
 	}
 	b, _ := json.Marshal(tags)
 	tmp := p + TagsSuffix + "." + uuid.NewString()[:8] + partialSuffix
@@ -371,6 +377,41 @@ func (f *FS) SetTags(ctx context.Context, path string, tags map[string]string) e
 		return err
 	}
 	return nil
+}
+
+// IsNativeRunObject reports whether path is an object inside a native run's
+// directory: a segment before the last is a run ID, a canonical lower-case
+// UUID (<…>/<run-id>/<key>). A logical backup is a file named after its run
+// (<run-id>.<ext>), not inside a directory of it.
+func IsNativeRunObject(path string) bool {
+	segs := strings.Split(path, "/")
+	for _, s := range segs[:len(segs)-1] {
+		if u, err := uuid.Parse(s); err == nil && u.String() == s {
+			return true
+		}
+	}
+	return false
+}
+
+// isNativeManifest reports whether path is the manifest of a native run:
+// <dir>/<run-id>.manifest.json next to the run's directory <dir>/<run-id>.
+// A logical run's manifest has a file of the run next to it, not a
+// directory.
+func (f *FS) isNativeManifest(path string) bool {
+	dir, base := "", path
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		dir, base = path[:i+1], path[i+1:]
+	}
+	id, ok := strings.CutSuffix(base, ".manifest.json")
+	if u, err := uuid.Parse(id); !ok || err != nil || u.String() != id {
+		return false
+	}
+	p, err := f.file(dir+id, false)
+	if err != nil {
+		return false
+	}
+	st, err := os.Lstat(p)
+	return err == nil && st.IsDir()
 }
 
 // GetTags reads the tags sidecar (empty when there is none).

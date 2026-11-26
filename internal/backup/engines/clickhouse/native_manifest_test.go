@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"reflect"
 	"regexp"
@@ -59,6 +60,8 @@ func testNativeManifest() *NativeManifest {
 			{Key: testRunID + "/metadata/sales.sql", Size: 0, SHA256: sum("")},
 			{Key: testRunID + "/data/sales/orders/all_1_1_0/data.bin", Size: 1 << 20, SHA256: sum("data.bin")},
 		},
+		// One part written by the run, one taken from its base.
+		PartRows: map[string]uint64{"data/sales/orders/all_1_1_0/count.txt": 2, "data/sales/orders/all_0_0_0/count.txt": 40},
 		Databases: []NativeDatabase{
 			{Name: "sales", Objects: []NativeObject{
 				{Name: "orders_mv", Kind: KindMaterializedView, Engine: "MaterializedView", DDLKey: testRunID + "/metadata/sales/orders_mv.sql"},
@@ -144,6 +147,7 @@ func TestCanonicalGolden(t *testing.T) {
 			{Key: "r/b", Size: 2, SHA256: strings.Repeat("b", 64)},
 			{Key: "r/a", Size: 1, SHA256: strings.Repeat("a", 64)},
 		},
+		PartRows: map[string]uint64{"data/db/t/b/count.txt": 4, "data/db/t/a/count.txt": 3},
 		Databases: []NativeDatabase{{Name: "db", Objects: []NativeObject{
 			{Name: "t", Kind: KindTable, Engine: "MergeTree", Rows: 7, DDLKey: "r/metadata/db/t.sql"},
 		}}},
@@ -153,6 +157,7 @@ func TestCanonicalGolden(t *testing.T) {
 		`"format":"olympos.clickhouse.native/v1","objects":[` +
 		`{"key":"r/a","sha256":"` + strings.Repeat("a", 64) + `","size":1},` +
 		`{"key":"r/b","sha256":"` + strings.Repeat("b", 64) + `","size":2}],` +
+		`"part_rows":{"data/db/t/a/count.txt":3,"data/db/t/b/count.txt":4},` +
 		`"run_id":"r","server_version":"24.8","settings":{"a":"1","b":"2"}}`
 	if got := string(m.Canonical()); got != want {
 		t.Fatalf("canonical:\n got %s\nwant %s", got, want)
@@ -160,11 +165,12 @@ func TestCanonicalGolden(t *testing.T) {
 	// Empty and nil collections are the same manifest.
 	empty := &NativeManifest{Format: NativeManifestFormat, RunID: "r"}
 	if got, want := string(empty.Canonical()), `{"base_manifest_sha256":"","base_run_id":"","databases":[],`+
-		`"format":"olympos.clickhouse.native/v1","objects":[],"run_id":"r","server_version":"","settings":{}}`; got != want {
+		`"format":"olympos.clickhouse.native/v1","objects":[],"part_rows":{},"run_id":"r","server_version":"","settings":{}}`; got != want {
 		t.Fatalf("empty canonical:\n got %s\nwant %s", got, want)
 	}
-	empty.Settings, empty.Objects, empty.Databases = map[string]string{}, []ingest.ObjectRecord{}, []NativeDatabase{}
-	if got := string(empty.Canonical()); !strings.Contains(got, `"databases":[]`) || !strings.Contains(got, `"settings":{}`) {
+	empty.Settings, empty.Objects, empty.Databases, empty.PartRows = map[string]string{}, []ingest.ObjectRecord{}, []NativeDatabase{}, map[string]uint64{}
+	if got := string(empty.Canonical()); !strings.Contains(got, `"databases":[]`) || !strings.Contains(got, `"settings":{}`) ||
+		!strings.Contains(got, `"part_rows":{}`) {
 		t.Fatalf("empty, non-nil collections: %s", got)
 	}
 }
@@ -286,6 +292,30 @@ func TestSignVerify(t *testing.T) {
 	}
 }
 
+// An object ObjectsFromMetadata cannot classify is kind "other" (R28): the
+// manifest lists it, so that the restore leaves it out.
+func TestSignVerifyOtherKind(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeVault()
+	m := testNativeManifest()
+	key := testRunID + "/metadata/sales/lv.sql"
+	m.Objects = append(m.Objects, ingest.ObjectRecord{Key: key, Size: 60, SHA256: sum("lv.sql")})
+	m.Databases[0].Objects = append(m.Databases[0].Objects, NativeObject{Name: "lv", Kind: KindOther, Engine: "LiveView", DDLKey: key})
+	raw := signedJSON(t, kv, testManifestKey, m)
+	got, err := VerifySigned(ctx, kv, testManifestKey, testRunID, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := slices.ContainsFunc(got.Databases, func(d NativeDatabase) bool {
+		return d.Name == "sales" && slices.ContainsFunc(d.Objects, func(o NativeObject) bool {
+			return o.Name == "lv" && o.Kind == KindOther && o.Engine == "LiveView"
+		})
+	})
+	if !found {
+		t.Fatalf("no other object in %+v", got.Databases)
+	}
+}
+
 // TestVerifyReordered: VerifySigned checks the manifest, not the bytes it
 // arrived as. The same manifest with its keys in another order, its lists
 // shuffled and whitespace added still verifies.
@@ -335,7 +365,16 @@ func TestVerifyReordered(t *testing.T) {
 		}
 		fmt.Fprintf(&b, `], "name": %q}`, d.Name)
 	}
-	fmt.Fprintf(&b, "],\n    \"server_version\": %q, \"base_run_id\": %q, \"base_manifest_sha256\": %q\n  },\n  \"key_id\": %q\n}\n",
+	b.WriteString("],\n    \"part_rows\": {")
+	paths := slices.Sorted(maps.Keys(m.PartRows))
+	slices.Reverse(paths)
+	for i, p := range paths {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%q: %d", p, m.PartRows[p])
+	}
+	fmt.Fprintf(&b, "},\n    \"server_version\": %q, \"base_run_id\": %q, \"base_manifest_sha256\": %q\n  },\n  \"key_id\": %q\n}\n",
 		m.ServerVersion, m.BaseRunID, m.BaseManifestSHA256, wire.KeyID)
 
 	if bytes.Equal([]byte(b.String()), raw) {
@@ -383,6 +422,8 @@ func TestVerifyRefusesTamper(t *testing.T) {
 		func(m *NativeManifest) { m.Databases[0].Objects[1].Rows = 41 },
 		func(m *NativeManifest) { m.Settings["extra"] = "1" },
 		func(m *NativeManifest) { m.Objects = m.Objects[:len(m.Objects)-1] },
+		func(m *NativeManifest) { m.PartRows["data/sales/orders/all_1_1_0/count.txt"]++ },
+		func(m *NativeManifest) { delete(m.PartRows, "data/sales/orders/all_0_0_0/count.txt") },
 	} {
 		var top map[string]json.RawMessage
 		_ = json.Unmarshal(raw, &top)
@@ -463,6 +504,7 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 		"fractional size":        strings.Replace(raw, `"size":4096`, `"size":4096.0`, 1),
 		"duplicate object key":   strings.Replace(raw, `"key":"`+testRunID+`/.backup"`, `"key":"`+testRunID+`/data/sales/orders/all_1_1_0/data.bin"`, 1),
 		"unknown kind":           strings.Replace(raw, `"kind":"view"`, `"kind":"live_view"`, 1),
+		"inner table kind":       strings.Replace(raw, `"kind":"view"`, `"kind":"`+KindMVInner+`"`, 1),
 		"empty database name":    strings.Replace(raw, `"name":"dicts"`, `"name":""`, 1),
 		"duplicate database":     strings.Replace(raw, `"name":"dicts"`, `"name":"sales"`, 1),
 		"duplicate table":        strings.Replace(raw, `"name":"by_day"`, `"name":"orders"`, 1),
@@ -508,6 +550,22 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 		"short signature":        regexpSig.ReplaceAllString(raw, `"signature":"`+base64.StdEncoding.EncodeToString(make([]byte, 63))+`"`),
 		"long signature":         regexpSig.ReplaceAllString(raw, `"signature":"`+base64.StdEncoding.EncodeToString(make([]byte, 65))+`"`),
 		"signature not base64":   strings.Replace(raw, `"signature":"`, `"signature":"*`, 1),
+		// Part rows (R27): count.txt paths under data/, relative to the run.
+		"no part_rows":              strings.Replace(raw, `"part_rows":{`+partRowsJSON+`},`, ``, 1),
+		"null part_rows":            strings.Replace(raw, `"part_rows":{`+partRowsJSON+`}`, `"part_rows":null`, 1),
+		"null part rows":            strings.Replace(raw, `all_1_1_0/count.txt":2`, `all_1_1_0/count.txt":null`, 1),
+		"negative part rows":        strings.Replace(raw, `all_1_1_0/count.txt":2`, `all_1_1_0/count.txt":-2`, 1),
+		"fractional part rows":      strings.Replace(raw, `all_1_1_0/count.txt":2`, `all_1_1_0/count.txt":2.0`, 1),
+		"part rows as a string":     strings.Replace(raw, `all_1_1_0/count.txt":2`, `all_1_1_0/count.txt":"2"`, 1),
+		"duplicate part rows":       strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"data/sales/orders/all_1_1_0/count.txt":3,"data/sales/orders/all_1_1_0/count.txt":2`, 1),
+		"part rows not a count.txt": strings.Replace(raw, `all_1_1_0/count.txt":2`, `all_1_1_0/data.bin":2`, 1),
+		"part rows outside data":    strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"metadata/sales/count.txt":2`, 1),
+		"part rows under the run":   strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"`+testRunID+`/data/sales/orders/all_1_1_0/count.txt":2`, 1),
+		"part rows climbing out":    strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"data/../`+testBaseRunID+`/data/count.txt":2`, 1),
+		"part rows with a dot":      strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"data/sales/./all_1_1_0/count.txt":2`, 1),
+		"part rows, empty part":     strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"data/sales//all_1_1_0/count.txt":2`, 1),
+		"part rows, a lone count":   strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"data/count.txt":2`, 1),
+		"part rows, leading slash":  strings.Replace(raw, `"data/sales/orders/all_1_1_0/count.txt":2`, `"/data/sales/orders/all_1_1_0/count.txt":2`, 1),
 	}
 	for name, bad := range cases {
 		if bad == raw {
@@ -543,6 +601,9 @@ func TestVerifyRefusesMalformed(t *testing.T) {
 
 var regexpSig = regexp.MustCompile(`"signature":"[^"]*"`)
 
+// partRowsJSON is the part_rows of testNativeManifest, canonical.
+const partRowsJSON = `"data/sales/orders/all_0_0_0/count.txt":40,"data/sales/orders/all_1_1_0/count.txt":2`
+
 func mustB64(t *testing.T, s string) []byte {
 	t.Helper()
 	b, err := base64.StdEncoding.DecodeString(s)
@@ -576,6 +637,8 @@ func TestSignRefusesInvalid(t *testing.T) {
 		"DDL of another run climbing out": func(m *NativeManifest) {
 			m.Databases[0].Objects[0].DDLKey = testBaseRunID + "/../x.sql"
 		},
+		"part rows outside data": func(m *NativeManifest) { m.PartRows["metadata/count.txt"] = 1 },
+		"part rows not UTF-8":    func(m *NativeManifest) { m.PartRows["data/s/\xff/count.txt"] = 1 },
 		"object of another run, the DDL in it": func(m *NativeManifest) {
 			m.Objects[0].Key = testBaseRunID + "/metadata/sales/orders.sql"
 			m.Databases[0].Objects[1].DDLKey = testBaseRunID + "/metadata/sales/orders.sql"
@@ -826,6 +889,7 @@ func TestSignedIsSnapshot(t *testing.T) {
 	m.Objects[0].Size++
 	m.Settings["late"] = "1"
 	m.Databases[0].Objects[0].Rows = 7
+	m.PartRows["data/sales/orders/all_1_1_0/count.txt"] = 9
 	s.Manifest.Objects[1].Size++
 	s.Manifest.Settings["later"] = "2"
 	raw, err := json.Marshal(s)
@@ -835,6 +899,9 @@ func TestSignedIsSnapshot(t *testing.T) {
 	got, err := VerifySigned(ctx, kv, testManifestKey, testRunID, raw)
 	if err != nil {
 		t.Fatalf("stored form after the manifests changed: %v", err)
+	}
+	if s.Manifest.PartRows["data/sales/orders/all_1_1_0/count.txt"] != 2 {
+		t.Fatal("Sign's copy shares the caller's part rows")
 	}
 	if !bytes.Equal(got.Canonical(), want) {
 		t.Fatalf("stored form is not what was signed:\n got %s\nwant %s", got.Canonical(), want)

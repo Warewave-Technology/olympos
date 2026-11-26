@@ -675,11 +675,11 @@ func startKeeperServer(t *testing.T, name, xml, network string) (*chEnv, func(st
 	if network != "" {
 		args = append(args, "--network", network)
 	}
-	_, _ = docker("rm", "-f", name)
+	_, _ = docker("rm", "-f", "-v", name)
 	if out, err := docker(append(args, chImage)...); err != nil {
 		t.Fatalf("docker create: %v %s", err, out)
 	}
-	t.Cleanup(func() { _, _ = docker("rm", "-f", name) })
+	t.Cleanup(func() { _, _ = docker("rm", "-f", "-v", name) })
 	if out, err := docker("cp", filepath.Join(dir, "keeper.xml"), name+":/etc/clickhouse-server/config.d/keeper.xml"); err != nil {
 		t.Fatalf("docker cp: %v %s", err, out)
 	}

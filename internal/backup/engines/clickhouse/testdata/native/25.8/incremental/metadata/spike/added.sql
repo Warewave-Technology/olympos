@@ -1,0 +1,1 @@
+CREATE TABLE spike.added UUID '5183f91a-329b-40f8-b97c-da25267ed277' (`id` UInt64) ENGINE = Log

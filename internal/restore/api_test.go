@@ -1116,3 +1116,42 @@ func TestCheckRecordedAfterDisconnect(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// R38: until native restore lands, a native ClickHouse run is refused as a
+// source, at check and at open, and the backup is kept: a finished one by
+// the objects it recorded, an unfinished one by its job's method.
+func TestNativeSourceRefused(t *testing.T) {
+	e := newEnv(t)
+	src := e.target(e.prod, "events-ch", "clickhouse", "")
+	tgt := e.target(e.stage, "events-ch-new", "clickhouse", "")
+	maker := e.login("ada", "viewer@env=prod", "operator@env=stage")
+	var job uuid.UUID
+	e.scan(&job, `INSERT INTO backup_jobs (target_id, destination_id, cron, timezone, engine_options) VALUES ($1, $2, '0 2 * * *', 'UTC',
+		'{"method":"native","databases":["analytics"]}') RETURNING id`, src, e.dest)
+	finished, running := uuid.New(), uuid.New()
+	dir := "p/c/events/" + finished.String()
+	e.exec(`INSERT INTO backup_runs (id, job_id, trigger, status, blob_path, sha256, started_at, finished_at, destination_ids, objects)
+		VALUES ($1, $2, 'manual', 'succeeded', $3, 'abc', now(), now(), ARRAY[$4::uuid], 12)`, finished, job, dir, e.dest)
+	e.exec(`INSERT INTO backup_run_copies (run_id, destination_id, status, blob_path, sha256) VALUES ($1, $2, 'succeeded', $3, 'abc')`, finished, e.dest, dir)
+	e.exec(`INSERT INTO backup_runs (id, job_id, trigger, status, started_at, destination_ids) VALUES ($1, $2, 'manual', 'running', now(), ARRAY[$3::uuid])`,
+		running, job, e.dest)
+	const msg = "native restore is not available yet; the backup is kept"
+	for name, run := range map[string]uuid.UUID{"finished": finished, "running": running} {
+		in := map[string]any{"run_id": run, "target_id": tgt, "credential": map[string]any{"source": "stored", "username": "default", "password": canaryPassword}}
+		var res restore.CheckResult
+		if code := e.do(maker, "POST", "/api/v1/restores/check", in, &res); code != 200 || res.OK || res.Fields["run_id"] != msg {
+			t.Fatalf("%s: check: %d %+v", name, code, res)
+		}
+		in["justification"] = "INC-1: restore the events database into events-ch-new"
+		var eb errBody
+		if code := e.do(maker, "POST", "/api/v1/restores", in, &eb); code != 422 || eb.Fields["run_id"] != msg {
+			t.Fatalf("%s: open: %d %+v", name, code, eb)
+		}
+	}
+	var n int
+	e.scan(&n, `SELECT count(*) FROM restore_requests`)
+	if n != 0 {
+		t.Fatalf("%d restore requests opened from a native run", n)
+	}
+	e.noCanary()
+}

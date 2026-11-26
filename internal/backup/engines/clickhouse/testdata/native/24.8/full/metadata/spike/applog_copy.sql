@@ -1,0 +1,1 @@
+CREATE TABLE spike.applog_copy UUID 'd5ed2661-5ad1-4243-93b9-149279372a94' (`id` UInt64, `msg` String) ENGINE = Log

@@ -1,0 +1,1 @@
+CREATE DATABASE spike UUID '933b1764-3b94-4cde-8278-0940ec4efabf' ENGINE = Atomic

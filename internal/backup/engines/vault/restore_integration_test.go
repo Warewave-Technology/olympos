@@ -71,7 +71,7 @@ type itServer struct {
 // itStart runs a raft server, initializes it (one key share) and unseals it.
 func itStart(t *testing.T, p itProvider, container string) *itServer {
 	t.Helper()
-	_ = exec.Command("docker", "rm", "-f", container).Run()
+	_ = exec.Command("docker", "rm", "-f", "-v", container).Run()
 	cfg := map[string]any{
 		"storage":       map[string]any{"raft": map[string]any{"path": p.dataDir, "node_id": "n1"}},
 		"listener":      []any{map[string]any{"tcp": map[string]any{"address": "0.0.0.0:8200", "tls_disable": true}}},
@@ -88,7 +88,7 @@ func itStart(t *testing.T, p itProvider, container string) *itServer {
 			out, _ := exec.Command("docker", "logs", "--tail", "40", container).CombinedOutput()
 			t.Logf("%s logs:\n%s", container, out)
 		}
-		_ = exec.Command("docker", "rm", "-f", container).Run()
+		_ = exec.Command("docker", "rm", "-f", "-v", container).Run()
 	})
 	addr := strings.Split(itDocker(t, "port", container, "8200/tcp"), "\n")[0]
 	s := &itServer{addr: addr}

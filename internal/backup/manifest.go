@@ -90,17 +90,25 @@ func pathSegment(s string) string {
 
 // BlobPath is {prefix}/{cluster}/{namespace}/{service}/{engine}/{YYYY}/{MM}/{DD}/{run_id}.{ext}.
 func BlobPath(prefix, cluster, namespace, service, engine string, at time.Time, runID uuid.UUID, ext string) string {
+	return RunDir(prefix, cluster, namespace, service, engine, at, runID) + "." + ext
+}
+
+// RunDir is {prefix}/{cluster}/{namespace}/{service}/{engine}/{YYYY}/{MM}/{DD}/{run_id}:
+// the directory of a native run's objects, and BlobPath without its
+// extension. The run's manifest is next to it (ManifestPath).
+func RunDir(prefix, cluster, namespace, service, engine string, at time.Time, runID uuid.UUID) string {
 	var parts []string
 	if p := strings.Trim(prefix, "/"); p != "" {
 		parts = append(parts, p)
 	}
 	at = at.UTC()
 	parts = append(parts, pathSegment(cluster), pathSegment(namespace), pathSegment(service), pathSegment(engine),
-		at.Format("2006"), at.Format("01"), at.Format("02"), runID.String()+"."+ext)
+		at.Format("2006"), at.Format("01"), at.Format("02"), runID.String())
 	return strings.Join(parts, "/")
 }
 
-// ManifestPath returns the manifest path for a backup blob path.
+// ManifestPath returns the manifest path for a backup blob path, or for a
+// native run's directory.
 func ManifestPath(blobPath string, runID uuid.UUID) string {
 	dir := ""
 	if i := strings.LastIndexByte(blobPath, '/'); i >= 0 {

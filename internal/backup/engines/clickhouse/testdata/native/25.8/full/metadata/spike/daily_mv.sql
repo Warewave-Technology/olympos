@@ -1,0 +1,1 @@
+CREATE MATERIALIZED VIEW spike.daily_mv UUID 'f0128b77-346e-4f76-b6ad-18eb944a2104' TO spike.daily (`day` Date, `users` AggregateFunction(uniq, UInt32), `total` AggregateFunction(sum, Float64)) AS SELECT toDate(ts) AS day, uniqState(user_id) AS users, sumState(amount) AS total FROM spike.events GROUP BY day
