@@ -2272,3 +2272,60 @@ func (w *wholeSource) Open(ctx context.Context, key string) (io.ReadCloser, inge
 	w.opened++
 	return w.fakeSource.Open(ctx, key)
 }
+
+// notServedSource refuses every key it does not hold with ErrNotServed, as
+// a native restore's source refuses a key its signed manifests do not list.
+type notServedSource struct{ *fakeSource }
+
+func (n notServedSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
+	if _, ok := n.objects[key]; !ok {
+		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %w", key, ingest.ErrNotServed)
+	}
+	return n.fakeSource.Open(ctx, key)
+}
+
+// TestHandlerNotServed: a key in the read scope that the source refuses is
+// 403 AccessDenied, and the run goes on; a key that does not exist stays
+// 404 NoSuchKey.
+func TestHandlerNotServed(t *testing.T) {
+	e := newEnv(t)
+	base := uuid.NewString() + "/"
+	src := notServedSource{&fakeSource{objects: map[string]string{base + "data/x.bin": "0123456789"}}}
+	ro := e.restore(t, src, base)
+	wantRefused(t, e.do(t, ro.cred, http.MethodGet, "/olympos/"+base+"data/other.bin", ""), http.StatusForbidden, "AccessDenied")
+	notStopped(t, ro.s)
+	if r := e.do(t, ro.cred, http.MethodGet, "/olympos/"+base+"data/x.bin", ""); r.status != http.StatusOK || r.body != "0123456789" {
+		t.Fatalf("a served key after a refused one: %s", r)
+	}
+	plain := e.restore(t, &fakeSource{objects: map[string]string{}}, base)
+	wantRefused(t, e.do(t, plain.cred, http.MethodGet, "/olympos/"+base+"data/other.bin", ""), http.StatusNotFound, "NoSuchKey")
+}
+
+// TestHandlerSlowReader: a client that stops reading in the middle of a GET
+// no longer holds the handler: the write of a chunk has a deadline.
+func TestHandlerSlowReader(t *testing.T) {
+	e := newEnv(t, ingest.WithWriteTimeout(200*time.Millisecond))
+	base := uuid.NewString() + "/"
+	// Far more than the socket buffers hold.
+	src := &fakeSource{objects: map[string]string{base + "data/big.bin": strings.Repeat("b", 64<<20)}}
+	ro := e.restore(t, src, base)
+	req := mustRequest(t, http.MethodGet, e.srv.URL+"/olympos/"+base+"data/big.bin")
+	req.Header.Set("X-Amz-Content-Sha256", hexSHA256(""))
+	resp, err := e.srv.Client().Do(signer.SignV4(*req, ro.cred.AccessKey, ro.cred.Secret, "", testRegion))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET: %d", resp.StatusCode)
+	}
+	// The body is not read; the handler must end on its own.
+	deadline := time.Now().Add(10 * time.Second)
+	for !strings.Contains(e.logs.String(), `"status":"aborted"`) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the handler is still writing to a client that does not read:\n%s", e.logs.String())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	notStopped(t, ro.s)
+}

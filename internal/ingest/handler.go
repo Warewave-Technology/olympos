@@ -82,6 +82,9 @@ const (
 	// maxUploads is how many multipart uploads a run may have open at once.
 	maxUploads = 256
 	chunkSize  = 32 << 10
+	// defaultWriteTimeout bounds the write of one chunk of a served object
+	// (WithWriteTimeout).
+	defaultWriteTimeout = 2 * time.Minute
 	// emptySHA256 is the SHA-256 of an empty body.
 	emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 )
@@ -224,6 +227,8 @@ type handler struct {
 	// rate is the requests a session may send per second (maxRate; a test
 	// changes it).
 	rate float64
+	// writeTimeout bounds the write of one chunk of a served object.
+	writeTimeout time.Duration
 
 	mu      sync.Mutex
 	uploads map[string]*upload
@@ -240,6 +245,11 @@ func WithSpillDir(dir string) HandlerOption { return func(h *handler) { h.spillD
 // on disk at once. The default is 1 GiB.
 func WithSpillLimit(n int64) HandlerOption { return func(h *handler) { h.spillLimit = n } }
 
+// WithWriteTimeout sets how long the write of one chunk of an object the
+// endpoint serves may take: a client that stops reading in the middle of a
+// GET then no longer holds the handler. The default is 2 minutes.
+func WithWriteTimeout(d time.Duration) HandlerOption { return func(h *handler) { h.writeTimeout = d } }
+
 // NewHandler returns the ingest endpoint for the sessions of reg. A nil log
 // is slog.Default and nil metrics are not exported.
 func NewHandler(reg *Registry, log *slog.Logger, m *Metrics, opts ...HandlerOption) http.Handler {
@@ -250,7 +260,8 @@ func NewHandler(reg *Registry, log *slog.Logger, m *Metrics, opts ...HandlerOpti
 		m = NewMetrics()
 	}
 	m.attach(reg)
-	h := &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, rate: maxRate, uploads: map[string]*upload{}}
+	h := &handler{reg: reg, log: log, m: m, spillLimit: defaultSpillLimit, rate: maxRate, writeTimeout: defaultWriteTimeout,
+		uploads: map[string]*upload{}}
 	for _, o := range opts {
 		o(h)
 	}
@@ -476,6 +487,10 @@ func onlyParams(query url.Values, names ...string) bool {
 	}
 	return true
 }
+
+// ValidKey reports whether k is a key the endpoint serves (validKey): a
+// source can refuse to serve, or to be built from, any other.
+func ValidKey(k string) bool { return validKey(k) }
 
 // validKey: a key of at most 1024 bytes of printable UTF-8, without a
 // backslash, whose "/"-separated segments are never empty, "." or "..". So
@@ -895,7 +910,12 @@ func (q *request) serveSource() *s3Error {
 		return denied("Objects of this run are served whole only.")
 	}
 	rc, rec, err := s.Source().Open(q.r.Context(), q.key)
-	if errors.Is(err, fs.ErrNotExist) {
+	switch {
+	case errors.Is(err, ErrNotServed):
+		// A key the source does not serve, such as one its signed
+		// manifests do not list: refused, and the run goes on.
+		return denied("The key is not an object of the run's backup.")
+	case errors.Is(err, fs.ErrNotExist):
 		return errNoSuchKey
 	}
 	if err != nil {
@@ -915,6 +935,12 @@ func (q *request) serveSource() *s3Error {
 		}
 	}
 	q.objectHeaders(start, end, rec.Size, partial)
+	// Each chunk's write has its own deadline: a client that stops reading
+	// would otherwise hold the handler in Write for as long as it keeps the
+	// connection open. The deadline is cleared for the connection's next
+	// request.
+	wc := http.NewResponseController(q.w)
+	defer func() { _ = wc.SetWriteDeadline(time.Time{}) }()
 	left := end - start + 1
 	buf := make([]byte, chunkSize)
 	for left > 0 {
@@ -923,8 +949,12 @@ func (q *request) serveSource() *s3Error {
 			if !s.live(q.h.reg.now()) {
 				q.abort()
 			}
+			_ = wc.SetWriteDeadline(time.Now().Add(q.h.writeTimeout))
 			if _, err := q.w.Write(buf[:n]); err != nil {
-				return nil // the client went away
+				// The client went away, or stopped reading for longer than
+				// the write timeout.
+				q.aborted = true
+				return nil
 			}
 			left -= int64(n)
 		}
