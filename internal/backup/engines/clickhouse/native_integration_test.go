@@ -379,10 +379,10 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 			t.Fatalf("running native backups %v; want %s and %s", seen, over.id, live.id)
 		}
 		if st := chc.status(t, over.id); st != statusFailed && st != statusCancelled {
-			t.Fatalf("the left-over backup is %s", st)
+			t.Fatalf("the left-over backup is %s: %s", st, chc.backupError(t, over.id))
 		}
 		if st := chc.status(t, live.id); st != statusCreating {
-			t.Fatalf("the running run's backup is %s", st)
+			t.Fatalf("the running run's backup is %s: %s", st, chc.backupError(t, live.id))
 		}
 		t.Logf("seen running %v; ended %s (%s); left %s (%s)", seen, over.id, chc.status(t, over.id), live.id, chc.status(t, live.id))
 		r.s.Revoke("run ended")
@@ -577,6 +577,12 @@ func (c *nativeCH) query(t *testing.T, q string) string {
 func (c *nativeCH) status(t *testing.T, runID string) string {
 	t.Helper()
 	return c.query(t, "SELECT status FROM system.backups WHERE id = "+quoteString(runID))
+}
+
+// backupError is the error system.backups gives for the run's backup.
+func (c *nativeCH) backupError(t *testing.T, runID string) string {
+	t.Helper()
+	return c.query(t, "SELECT error FROM system.backups WHERE id = "+quoteString(runID))
 }
 
 func (c *nativeCH) wantStatus(t *testing.T, runID, want string) {
