@@ -263,9 +263,6 @@ func readManifest(entries map[string]*zip.File) (*Manifest, error) {
 	return &m, nil
 }
 
-// requestIDRe is what a request id may look like in a Keeper path.
-var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
-
 // planDatabase checks one selected database without writing anything: it
 // is in the backup, not on the target with objects, its database engine is
 // restorable, and every table that is created has its data entries. It
@@ -300,21 +297,6 @@ func printable(s string) string {
 // maxFileName is the longest file name the target's filesystem takes; a
 // table's metadata file is its escaped name with ".sql".
 const maxFileName = 255
-
-// escapeForFileName is ClickHouse's: [A-Za-z0-9_] stay, every other byte
-// is %XX.
-func escapeForFileName(s string) string {
-	var b strings.Builder
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if isWordByte(c) {
-			b.WriteByte(c)
-			continue
-		}
-		fmt.Fprintf(&b, "%%%02X", c)
-	}
-	return b.String()
-}
 
 func planDatabase1(md *Database, entries map[string]*zip.File, ts *targetState, requestID string) (*dbPlan, string) {
 	p := &dbPlan{}

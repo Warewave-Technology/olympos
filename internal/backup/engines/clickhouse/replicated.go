@@ -15,6 +15,7 @@ package clickhouse
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 )
@@ -27,6 +28,24 @@ import (
 // (zookeeper_name:path) is never kept.
 func keeperPath(requestID, db, table string) string {
 	return "/olympos-restore/" + requestID + "/" + escapeForFileName(db) + "/" + escapeForFileName(table)
+}
+
+// requestIDRe is what a request id may look like in a Keeper path.
+var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
+
+// escapeForFileName is ClickHouse's: [A-Za-z0-9_] stay, every other byte
+// is %XX. The logical restore names metadata files with it too.
+func escapeForFileName(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if isWordByte(c) {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }
 
 // replicaName is the replica of a restored Replicated table: the target's
