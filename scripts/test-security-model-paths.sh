@@ -113,6 +113,18 @@ if printf 'internal/backup/engines/clickhouse/allowlist_test.go\ninternal/backup
   echo "FAIL: --files matched a file next to the restore allowlist" >&2
   fail=1
 fi
+# The strict lexer the allowlist and the metadata parsers read statements
+# with; the logical restore's engine parser next to it is not on the list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/ddl.go\ninternal/backup/engines/clickhouse/sqllex.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/sqllex.go ]; then
+  echo "FAIL: --files with the SQL lexer: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/sqllex_test.go\ninternal/backup/engines/clickhouse/sqllex.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the SQL lexer" >&2
+  fail=1
+fi
 # The native run puts the run's credential into the BACKUP statement and
 # keeps it out of the logs.
 if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
