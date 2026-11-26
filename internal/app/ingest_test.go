@@ -158,18 +158,24 @@ func TestIngestServerCertFiles(t *testing.T) {
 		t.Fatal("the internal CA must not vouch for a certificate from the files")
 	}
 	// A new certificate in the files is served after the reload, not before.
+	// Each check dials anew: a kept-alive connection would skip the
+	// handshake it checks.
+	dial := c.Transport.(*http.Transport).DialContext
+	trusting := func(roots *x509.CertPool) *http.Client {
+		return &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: roots, ServerName: "olympos-ingest.test"},
+			DialContext: dial, DisableKeepAlives: true}}
+	}
 	second := selfSigned(t, dir, "olympos-ingest.test")
-	tr := c.Transport.(*http.Transport)
-	tr.TLSClientConfig.RootCAs = second
-	tr.CloseIdleConnections()
-	if err := get(c); err == nil {
-		t.Fatal("before the reload the old certificate is still served")
+	if err := get(trusting(second)); err == nil {
+		t.Fatal("the new certificate is served before the reload")
+	}
+	if err := get(trusting(first)); err != nil {
+		t.Fatalf("before the reload the old certificate is still served: %v", err)
 	}
 	if err := cf.reload(); err != nil {
 		t.Fatal(err)
 	}
-	tr.CloseIdleConnections()
-	if err := get(c); err != nil {
+	if err := get(trusting(second)); err != nil {
 		t.Fatalf("after the reload: %v", err)
 	}
 }
