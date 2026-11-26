@@ -2,25 +2,43 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { ApiError, api } from '../api/client';
-import type { BackupJob, BackupJobInput, BackupRun, Channel, Cluster, ConnectionTest, CredentialInput, Destination, DestinationGroup, ItemList, SchedulePreview, Target, Vault } from '../api/types';
+import type { BackupJob, BackupJobInput, BackupRun, BackupSettings, Channel, Cluster, ConnectionTest, CredentialInput, Destination, DestinationGroup, ItemList, SchedulePreview, Target, Vault } from '../api/types';
 import { useCan } from '../auth/me';
 import { CRON_PRESETS, describeCron, formatInZone, nextRuns, presetFor, timeZones, tzOffsetLabel, validateCron } from '../lib/cron';
 import { age, between, bytes, daysUntil, duration, engineLabel, joinPath, money } from '../lib/format';
 import { backupWizardRoute } from '../router';
 import { CheckIcon } from '../ui/icons';
+import { WithDocLinks } from '../ui/DocLinks';
 import { Badge, EmptyState, ErrorState, Field, FormError, Loading, Spinner, aria, fieldError, useAction, useToast } from '../ui/kit';
 import { PageHead, RunBadge } from '../ui/status';
 import { GroupName, KIND_LABEL, KindBadge, authLabel, destLocation } from '../ui/destinations';
 import { Select } from '../ui/Select';
 import { TagInput, validateDatabaseName } from '../ui/TagInput';
 
-type Step = 1 | 2 | 3 | 4;
-const STEPS: { n: Step; name: string; hint: string }[] = [
-  { n: 1, name: 'Target', hint: '' },
-  { n: 2, name: 'Credentials', hint: 'Where the password comes from' },
-  { n: 3, name: 'Destination & schedule', hint: 'Storage, cron, retention' },
-  { n: 4, name: 'Review & test run', hint: 'Dry run before enabling' },
-];
+type Step = 'target' | 'credentials' | 'method' | 'destination' | 'review';
+const STEP_INFO: Record<Step, { name: string; hint: string; next: string }> = {
+  target: { name: 'Target', hint: '', next: 'Next: target' },
+  credentials: { name: 'Credentials', hint: 'Where the password comes from', next: 'Next: credentials' },
+  method: { name: 'Backup method', hint: 'Native or logical, incrementals', next: 'Next: method' },
+  destination: { name: 'Destination & schedule', hint: 'Storage, cron, retention', next: 'Next: destination' },
+  review: { name: 'Review & test run', hint: 'Dry run before enabling', next: 'Next: review' },
+};
+/** ClickHouse jobs get a Backup method step (docs/design/backup-wizard-clickhouse.html). */
+const stepsFor = (engine: string): Step[] => (engine === 'clickhouse' ? ['target', 'credentials', 'method', 'destination', 'review'] : ['target', 'credentials', 'destination', 'review']);
+
+type Method = 'native' | 'logical';
+type Incremental = '' | 'weekly_full_daily';
+
+/** Incremental native backups are not built yet (R42): the option is shown disabled and the API refuses it. Task 13 lifts both. */
+const incrementalsAvailable = false;
+
+/** Native ClickHouse backups need 24.8 or later; an unknown version is checked when the run starts. */
+export function belowNativeVersion(version: string | undefined): boolean {
+  const m = /^(\d+)\.(\d+)/.exec(version ?? '');
+  if (!m) return false;
+  const [major, minor] = [Number(m[1]), Number(m[2])];
+  return major < 24 || (major === 24 && minor < 8);
+}
 
 interface Form {
   source: 'keyvault_ref' | 'stored';
@@ -39,6 +57,9 @@ interface Form {
   monthly: string;
   notifyChannelId: string;
   notifyOnSuccess: boolean;
+  /** ClickHouse: '' until chosen on a new job, which then follows the server (Native when it can). */
+  method: '' | Method;
+  incremental: Incremental;
 }
 
 const browserTz = (() => {
@@ -56,7 +77,7 @@ function parseRef(ref: string): { kv: string; secret: string } {
 
 function initialForm(job?: BackupJob): Form {
   if (!job) {
-    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: [], destinationId: '', groupId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false };
+    return { source: 'keyvault_ref', kvName: '', secretName: '', username: '', databases: [], destinationId: '', groupId: '', cron: '0 2 * * *', custom: false, timezone: browserTz, daily: '14', weekly: '8', monthly: '12', notifyChannelId: '', notifyOnSuccess: false, method: '', incremental: '' };
   }
   const r = parseRef(job.credential.ref);
   const dbs = (job.engine_options?.databases as string[] | undefined) ?? [];
@@ -76,6 +97,9 @@ function initialForm(job?: BackupJob): Form {
     monthly: String(job.retention.monthly),
     notifyChannelId: job.notify_channel_id ?? '',
     notifyOnSuccess: !!job.notify_on_success,
+    // existing jobs without a method are logical
+    method: job.engine_options?.method === 'native' ? 'native' : 'logical',
+    incremental: job.engine_options?.incremental === 'weekly_full_daily' ? 'weekly_full_daily' : '',
   };
 }
 
@@ -146,8 +170,14 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const qc = useQueryClient();
   const navigate = useNavigate();
   const toast = useToast();
-  const [step, setStep] = useState<Step>(1);
-  const [maxStep, setMaxStep] = useState<Step>(job ? 4 : 1);
+  const steps = stepsFor(target.engine);
+  const [step, setStep] = useState<Step>('target');
+  const at = steps.indexOf(step);
+  /** Index of the furthest step reached. */
+  const [maxStep, setMaxStep] = useState(job ? steps.length - 1 : 0);
+  const after = (s: Step) => steps[steps.indexOf(s) + 1];
+  const before = (s: Step) => steps[steps.indexOf(s) - 1];
+  const stepNo = (s: Step) => steps.indexOf(s) + 1;
   const [f, setF] = useState<Form>(() => initialForm(job));
   // Kept outside `f`, cleared right after it was sent. Never cached anywhere.
   const [password, setPassword] = useState('');
@@ -157,6 +187,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const [runId, setRunId] = useState<string | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const isVault = target.engine === 'vault';
+  const isClickHouse = target.engine === 'clickhouse';
   const [dbDraftErr, setDbDraftErr] = useState<string | null>(null);
   const set = <K extends keyof Form>(k: K, v: Form[K]) => setF((p) => ({ ...p, [k]: v }));
   // Vault/OpenBao snapshots use the Olympos AppRole of that vault: it must be configured first.
@@ -168,6 +199,23 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const destQ = useQuery({ queryKey: ['destinations'], queryFn: () => api.get<ItemList<Destination>>('/destinations') });
   const groupsQ = useQuery({ queryKey: ['destination-groups'], queryFn: () => api.get<ItemList<DestinationGroup>>('/destination-groups') });
   const chanQ = useQuery({ queryKey: ['channels'], queryFn: () => api.get<ItemList<Channel>>('/notifications/channels') });
+  // Native ClickHouse backups need the server's ingest endpoint (ingest.url).
+  const settingsQ = useQuery({ queryKey: ['backup-settings'], queryFn: () => api.get<BackupSettings>('/backup/settings'), enabled: isClickHouse, staleTime: 60_000 });
+  // The wizard has no table filter control: a job that has one (set through the API) stays logical.
+  const tables = (job?.engine_options?.tables as string[] | undefined) ?? [];
+  const nativeReason = !isClickHouse
+    ? null
+    : belowNativeVersion(target.detected_version)
+      ? `Native backups need ClickHouse 24.8 or later; this server runs ${target.detected_version}.`
+      : tables.length > 0
+        ? `This job backs up only some tables (${tables.slice(0, 3).join(', ')}${tables.length > 3 ? ` and ${tables.length - 3} more` : ''}); native backups take whole databases. Keep Logical, or remove the table filter through the API.`
+        : settingsQ.data?.ingest_enabled === false
+        ? 'Native backups need the ingest endpoint, which is off on this server. An admin turns it on with ingest.url (docs/configuration.md#ingest).'
+        : null;
+  const nativeChecking = isClickHouse && settingsQ.isPending;
+  // A new job starts on Logical until native restore lands (R42); Task 16 makes Native the default again when the server takes native backups.
+  const method: Method = f.method || 'logical';
+  const incremental: Incremental = method === 'native' && incrementalsAvailable ? f.incremental : '';
   const cluster = clusterQ.data;
   const dest = f.groupId ? undefined : destQ.data?.items.find((d) => d.id === f.destinationId);
   const group = f.groupId ? groupsQ.data?.items.find((g) => g.id === f.groupId) : undefined;
@@ -214,10 +262,11 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
 
   const validate = (s: Step): Record<string, string> => {
     const e: Record<string, string> = {};
-    if (s === 2 && isVault && !vaultReady) {
+    if (s === 'method' && method === 'native' && nativeReason) e.method = nativeReason;
+    if (s === 'credentials' && isVault && !vaultReady) {
       e.vault = vaultsQ.isPending ? 'Checking the vault…' : 'Configure this vault in Olympos first (Vaults › Configure). Backups use its Olympos AppRole.';
     }
-    if (s === 2 && !isVault) {
+    if (s === 'credentials' && !isVault) {
       if (dbDraftErr) e.databases = dbDraftErr;
       if (!f.username.trim()) e.username = 'Enter the database user the backup connects as.';
       if (f.source === 'keyvault_ref') {
@@ -230,7 +279,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
             : 'Enter the password. It is encrypted with a Key Vault key and never shown again.';
       }
     }
-    if (s === 3) {
+    if (s === 'destination') {
       if (!f.destinationId && !f.groupId) e.destination_id = 'Pick a destination or a group. Add one in Settings › Destinations first if the list is empty.';
       if (cronErr) e.cron = cronErr;
       for (const k of ['daily', 'weekly', 'monthly'] as const) {
@@ -242,25 +291,24 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   };
 
   const go = (to: Step) => {
-    if (to > step) {
-      for (let s = step; s < to; s++) {
-        const e = validate(s as Step);
-        if (Object.keys(e).length) {
-          setErrs(e);
-          setStep(s as Step);
-          return;
-        }
+    const ti = steps.indexOf(to);
+    for (let i = at; i < ti; i++) {
+      const e = validate(steps[i]);
+      if (Object.keys(e).length) {
+        setErrs(e);
+        setStep(steps[i]);
+        return;
       }
     }
     setErrs({});
     setStep(to);
-    setMaxStep((m) => (to > m ? to : m));
+    setMaxStep((m) => (ti > m ? ti : m));
   };
 
   // --------------------------------------------------- connection test
   const test = useAction<ConnectionTest>();
   const runTest = async () => {
-    const e = validate(2);
+    const e = validate('credentials');
     setErrs(e);
     if (Object.keys(e).length) return;
     setConn(null);
@@ -276,7 +324,14 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
     target_id: target.id,
     credential: credential(),
     ...(f.groupId ? { destination_group_id: f.groupId } : { destination_id: f.destinationId }),
-    engine_options: isVault ? {} : target.engine === 'postgresql' ? { databases: f.databases, globals: true } : { databases: f.databases },
+    engine_options: isVault
+      ? {}
+      : target.engine === 'postgresql'
+        ? { databases: f.databases, globals: true }
+        : isClickHouse
+          ? // the job's other options (tables, ca_pem) are kept: engine_options replaces the whole object
+            { ...(job?.engine_options ?? {}), databases: f.databases, method, incremental }
+          : { databases: f.databases },
     cron: f.cron.trim(),
     timezone: f.timezone,
     retention: { daily: Number(f.daily), weekly: Number(f.weekly), monthly: Number(f.monthly) },
@@ -329,8 +384,9 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   // where the field is highlighted, instead of an error with nothing marked.
   useEffect(() => {
     const fields = save.error instanceof ApiError ? Object.keys(save.error.fields) : [];
-    const at = (k: string): Step => (/^(credential\.|username$|password$|ref$|databases$|engine_options$)/.test(k) ? 2 : 3);
-    if (fields.length) setStep(Math.min(...fields.map(at)) as Step);
+    const stepOf = (k: string): Step =>
+      /^(method|incremental|tables)$/.test(k) && steps.includes('method') ? 'method' : /^(credential\.|username$|password$|ref$|databases$|engine_options$)/.test(k) ? 'credentials' : 'destination';
+    if (fields.length) setStep(steps[Math.min(...fields.map((k) => steps.indexOf(stepOf(k))))]);
   }, [save.error]);
 
   const saveChanges = async () => {
@@ -344,7 +400,10 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const fe = (name: string) => errs[name] ?? fieldError(save.error, name) ?? fieldError(save.error, `credential.${name}`) ?? fieldError(test.error, name);
   const destErr = fe('destination_id') ?? fe('destination_group_id');
   const tlsHint = target.tls_ok ? 'TLS verified' : target.tls_ok === false ? 'no TLS' : 'TLS not probed';
-  const stepHint = (n: Step) => (n === 1 ? `${target.service} · ${tlsHint}` : n === 2 && isVault ? 'Olympos AppRole, no password' : STEPS[n - 1].hint);
+  const stepHint = (s: Step) => (s === 'target' ? `${target.service} · ${tlsHint}` : s === 'credentials' && isVault ? 'Olympos AppRole, no password' : STEP_INFO[s].hint);
+  const tablesErr = fe('tables');
+  const methodErr = fe('method') ?? (tablesErr ? `Table filter: ${tablesErr}` : undefined);
+  const incrementalErr = fe('incremental');
   const annotation = [
     'metadata:',
     '  annotations:',
@@ -375,25 +434,25 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
       />
       <div className="wizard">
         <ol aria-label="Steps" className="card steps">
-          {STEPS.map((s) => {
-            const done = s.n < step || (s.n <= maxStep && s.n !== step && s.n < maxStep);
-            const cls = s.n === step ? 'on' : done ? 'done' : '';
-            const reachable = s.n <= maxStep && s.n !== step;
+          {steps.map((s, i) => {
+            const done = i < at || (i <= maxStep && i !== at && i < maxStep);
+            const cls = i === at ? 'on' : done ? 'done' : '';
+            const reachable = i <= maxStep && i !== at;
             return (
-              <li key={s.n} className={`step ${cls}`} aria-current={s.n === step ? 'step' : undefined}>
+              <li key={s} className={`step ${cls}`} aria-current={i === at ? 'step' : undefined}>
                 <span className="num" aria-hidden="true">
-                  {done ? '✓' : s.n}
+                  {done ? '✓' : i + 1}
                 </span>
                 <span>
                   {reachable ? (
-                    <button type="button" className="name" onClick={() => go(s.n)}>
-                      {s.name}
+                    <button type="button" className="name" onClick={() => go(s)}>
+                      {STEP_INFO[s].name}
                       {done && <span className="sr-only"> (completed)</span>}
                     </button>
                   ) : (
-                    <span className="name">{s.name}</span>
+                    <span className="name">{STEP_INFO[s].name}</span>
                   )}
-                  <span className="hint">{stepHint(s.n)}</span>
+                  <span className="hint">{stepHint(s)}</span>
                 </span>
               </li>
             );
@@ -403,21 +462,27 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
         <section className="card pad-xl wizard-body" aria-labelledby="step-t">
           <div className="card-title" style={{ display: 'block' }}>
             <div className="eyebrow">
-              Step {step} of {STEPS.length}
+              Step {at + 1} of {steps.length}
             </div>
             <h2 className="section-title" id="step-t" ref={headingRef} tabIndex={-1}>
-              {STEPS[step - 1].name}
+              {STEP_INFO[step].name}
             </h2>
             <p className="section-sub">
-              {step === 1 && 'What the agent found. Check it is the right database before adding credentials.'}
-              {step === 2 && (isVault ? 'Snapshots are taken by the server through the agent tunnel, with the Olympos AppRole of this vault.' : 'The server connects to the database through the agent tunnel. The password is used on the server only.')}
-              {step === 3 && 'Where backups go, how often, and how long they are kept.'}
-              {step === 4 && (target.engine === 'postgresql' ? 'A dry run takes a schema-only dump end to end, so problems show up now and not at night.' : 'A dry run takes a small test backup end to end, so problems show up now and not at night.')}
+              {step === 'target' && 'What the agent found. Check it is the right database before adding credentials.'}
+              {step === 'credentials' && (isVault ? 'Snapshots are taken by the server through the agent tunnel, with the Olympos AppRole of this vault.' : 'The server connects to the database through the agent tunnel. The password is used on the server only.')}
+              {step === 'method' && "How ClickHouse is backed up. Either way the backup goes to the job's destination, with the same tiers and retention."}
+              {step === 'destination' && 'Where backups go, how often, and how long they are kept.'}
+              {step === 'review' &&
+                (target.engine === 'postgresql'
+                  ? 'A dry run takes a schema-only dump end to end, so problems show up now and not at night.'
+                  : isClickHouse && method === 'native'
+                    ? 'A dry run takes a structure-only native backup (the definitions, no data) end to end, so egress, certificate and credential problems show up now and not at night.'
+                    : 'A dry run takes a small test backup end to end, so problems show up now and not at night.')}
             </p>
           </div>
 
-          {/* ------------------------------------------------ step 1 */}
-          {step === 1 && (
+          {/* ------------------------------------------------ target */}
+          {step === 'target' && (
             <>
               <dl className="dl">
                 <dt>Service</dt>
@@ -477,15 +542,15 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                 <Link to="/backups" className="btn">
                   Cancel
                 </Link>
-                <button type="button" className="btn pri" onClick={() => go(2)} disabled={target.status === 'gone'}>
+                <button type="button" className="btn pri" onClick={() => go('credentials')} disabled={target.status === 'gone'}>
                   Next: credentials
                 </button>
               </div>
             </>
           )}
 
-          {/* ------------------------------------------------ step 2 */}
-          {step === 2 && (
+          {/* ------------------------------------------------ credentials */}
+          {step === 'credentials' && (
             <>
               {isVault ? (
                 <VaultCredentialStep vault={vault} target={target} loading={vaultsQ.isPending} error={vaultsQ.isError ? vaultsQ.error : null} onRetry={() => vaultsQ.refetch()} />
@@ -607,7 +672,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
               )}
 
               <div className="foot-actions">
-                <button type="button" className="btn" onClick={() => go(1)}>
+                <button type="button" className="btn" onClick={() => go('target')}>
                   Back
                 </button>
                 <div className="inline">
@@ -621,16 +686,116 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                       Test connection
                     </button>
                   )}
-                  <button type="button" className="btn pri" onClick={() => go(3)} disabled={!vaultReady} aria-describedby={isVault && !vaultReady ? 'w-next-why' : undefined}>
-                    Next: destination
+                  <button type="button" className="btn pri" onClick={() => go(after('credentials'))} disabled={!vaultReady} aria-describedby={isVault && !vaultReady ? 'w-next-why' : undefined}>
+                    {STEP_INFO[after('credentials')].next}
                   </button>
                 </div>
               </div>
             </>
           )}
 
-          {/* ------------------------------------------------ step 3 */}
-          {step === 3 && (
+          {/* ------------------------------------------------ method (ClickHouse) */}
+          {step === 'method' && (
+            <>
+              <fieldset className="opts" aria-describedby={methodErr ? 'w-method-err' : undefined}>
+                <legend className="lbl">Method</legend>
+                <label className="opt">
+                  <input type="radio" name="method" checked={method === 'native'} onChange={() => set('method', 'native')} disabled={(!!nativeReason || nativeChecking) && method !== 'native'} aria-describedby="w-native-t2" />
+                  <span>
+                    <span className="t1">Native</span>
+                    <span className="t2" id="w-native-t2">
+                      {nativeReason ? (
+                        <WithDocLinks text={nativeReason} />
+                      ) : nativeChecking ? (
+                        'Checking whether this server takes native backups…'
+                      ) : (
+                        <>
+                          ClickHouse runs <span className="mono">BACKUP</span> and sends it to Olympos, which stores it. Keeps views, dictionaries, defaults, TTLs and codecs, consistent per table. Whole databases, ClickHouse 24.8 or later. Native restore is not available yet; the backups are kept.
+                        </>
+                      )}
+                    </span>
+                  </span>
+                </label>
+                <label className="opt">
+                  <input type="radio" name="method" checked={method === 'logical'} onChange={() => setF((p) => ({ ...p, method: 'logical', incremental: '' }))} aria-describedby="w-logical-t2" />
+                  <span>
+                    <span className="t1">Logical</span>
+                    <span className="t2" id="w-logical-t2">
+                      Olympos reads every table through the agent tunnel, and a restore regenerates the DDL. Views, materialized views, dictionaries, defaults, TTLs, skip indexes and codecs are not kept.
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+              {methodErr && (
+                <div className="field-error" id="w-method-err" role="alert">
+                  {methodErr}
+                </div>
+              )}
+              <fieldset className="opts" aria-describedby={incrementalErr ? 'w-inc-err' : undefined}>
+                <legend className="lbl">Incrementals</legend>
+                <label className="opt">
+                  <input type="radio" name="incremental" checked={incremental === ''} onChange={() => set('incremental', '')} aria-describedby="w-inc-off-t2" />
+                  <span>
+                    <span className="t1">Off</span>
+                    <span className="t2" id="w-inc-off-t2">
+                      Every run is a full backup.
+                    </span>
+                  </span>
+                </label>
+                <label className="opt">
+                  <input
+                    type="radio"
+                    name="incremental"
+                    checked={incremental === 'weekly_full_daily'}
+                    onChange={() => set('incremental', 'weekly_full_daily')}
+                    disabled={method !== 'native' || !incrementalsAvailable}
+                    aria-describedby="w-inc-weekly-t2"
+                  />
+                  <span>
+                    <span className="t1">Weekly full, daily incrementals</span>
+                    <span className="t2" id="w-inc-weekly-t2">
+                      {!incrementalsAvailable
+                        ? 'Incremental native backups are not available yet.'
+                        : method === 'native'
+                          ? "The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination."
+                          : 'Incrementals need the native method.'}
+                    </span>
+                  </span>
+                </label>
+              </fieldset>
+              {incrementalErr && (
+                <div className="field-error" id="w-inc-err" role="alert">
+                  {incrementalErr}
+                </div>
+              )}
+              {method === 'native' && (
+                <div className="note">
+                  <div className="note-title">Before the first native run</div>
+                  ClickHouse connects to the server&apos;s ingest endpoint (<span className="mono">ingest.url</span>) directly, not through the agent tunnel:
+                  <ul style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                    <li>
+                      allow egress from the ClickHouse pods to that host and port, for example with a NetworkPolicy (<WithDocLinks text="docs/install.md" />);
+                    </li>
+                    <li>
+                      ClickHouse must trust the endpoint&apos;s certificate: one from your PKI or a public CA, or else the Olympos CA in <span className="mono">openSSL.client.caConfig</span>.
+                    </li>
+                  </ul>
+                  <div style={{ marginTop: 6 }}>Each run gets its own credential for its own backup only, revoked when the run ends. The cluster&apos;s transfer mode does not apply: the backup does not pass through the agent.</div>
+                </div>
+              )}
+              <div className="foot-actions">
+                <button type="button" className="btn" onClick={() => go('credentials')}>
+                  Back
+                </button>
+                <button type="button" className="btn pri" onClick={() => go('destination')}>
+                  Next: destination
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* ------------------------------------------------ destination */}
+          {step === 'destination' && (
             <>
               <fieldset className="opts" aria-describedby={destErr ? 'w-dest-err' : undefined}>
                 <legend className="lbl">Destination</legend>
@@ -779,18 +944,18 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
               </div>
 
               <div className="foot-actions">
-                <button type="button" className="btn" onClick={() => go(2)}>
+                <button type="button" className="btn" onClick={() => go(before('destination'))}>
                   Back
                 </button>
-                <button type="button" className="btn pri" onClick={() => go(4)}>
+                <button type="button" className="btn pri" onClick={() => go('review')}>
                   Next: review
                 </button>
               </div>
             </>
           )}
 
-          {/* ------------------------------------------------ step 4 */}
-          {step === 4 && (
+          {/* ------------------------------------------------ review */}
+          {step === 'review' && (
             <>
               <dl className="dl">
                 <dt>Target</dt>
@@ -804,6 +969,12 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                       {f.databases.length ? f.databases.join(', ') : 'all databases'}
                       {target.engine === 'postgresql' ? ' + globals' : ''}
                     </dd>
+                    {isClickHouse && (
+                      <>
+                        <dt>Method</dt>
+                        <dd>{method === 'native' ? `Native · ${incremental === 'weekly_full_daily' ? 'weekly full, daily incrementals' : 'every run a full backup'}` : 'Logical'}</dd>
+                      </>
+                    )}
                     <dt>Credentials</dt>
                     <dd>
                       {f.source === 'keyvault_ref' ? (
@@ -907,8 +1078,16 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     )}
                   </ul>
                 )}
-                {run?.status === 'failed' && <p className="field-error">Fix the problem (credentials in step 2, destination in step 3), then run the dry run again.</p>}
-                {run?.status === 'partial' && <p className="field-error">Not every destination of the group was written. Fix the failed destination (Settings › Destinations) or pick another group in step 3, then run the dry run again.</p>}
+                {run?.status === 'failed' && (
+                  <p className="field-error">
+                    Fix the problem (credentials in step {stepNo('credentials')}, destination in step {stepNo('destination')}), then run the dry run again.
+                  </p>
+                )}
+                {run?.status === 'partial' && (
+                  <p className="field-error">
+                    Not every destination of the group was written. Fix the failed destination (Settings › Destinations) or pick another group in step {stepNo('destination')}, then run the dry run again.
+                  </p>
+                )}
               </div>
 
               <FormError error={save.error ?? dry.error ?? enable.error} />
@@ -925,7 +1104,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
               )}
 
               <div className="foot-actions">
-                <button type="button" className="btn" onClick={() => go(3)}>
+                <button type="button" className="btn" onClick={() => go('destination')}>
                   Back
                 </button>
                 <div className="inline">

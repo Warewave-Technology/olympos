@@ -183,10 +183,25 @@ nothing was deleted, was rejected.
    query_id = …` and checks that `system.backups` reports `BACKUP_FAILED` (spike §3). It then revokes the
    credential, and the run fails. The objects stay `incomplete`.
 
+**Test runs (R40).** A test run (the wizard's dry run) sends the same statement with `structure_only = 1`.
+ClickHouse then writes only `metadata/*.sql` and `.backup` (seen on 24.8 and 25.8), so the run checks egress,
+the certificate, the credential, the signed manifest and the tags in seconds, whatever the databases hold. Its
+manifest records the setting and has no part rows. It is not the last full of the byte limit (§9), and not a
+base (§7).
+
+**Left-over backups (R41).** A server crash or a lost agent can leave a run's `BACKUP` running on the target,
+retrying refused uploads, with nothing to end it. Before its `BACKUP` every run reads the native backups running
+on the server it reached (`system.processes`, query ids `olympos-backup-<run-id>`), and the worker ends with
+`KILL QUERY … SYNC`, on the run's connection, those whose runs are not `running` in the database. The backup of
+a run still running (another job on the same target) is never ended, nor one of a run the database does not
+know. The error of a run that may have left one, and the restart error, name the `KILL QUERY` to run by hand.
+
 ### 5. The signed manifest
 
 - **Format.** `olympos.clickhouse.native/v1`, inside the existing sidecar's `Details`:
-  - every object: key, size, SHA-256;
+  - every object `.backup` declares, and `.backup` itself: key, size, SHA-256. An object the client stored
+    besides is not signed: it stays `incomplete`, so the lifecycle rule removes it, and the run logs its key
+    (R43);
   - ClickHouse version, backup settings, base run ID and its manifest's SHA-256;
   - the databases, tables, dictionaries and views, from the `metadata/*.sql` objects;
   - rows per table: the endpoint keeps the body of every part's `count.txt` (a few bytes) while it streams, and
@@ -261,7 +276,8 @@ The existing flow, with these changes for a native source:
   week, by the job's timezone, an incremental otherwise).
 - **The base (my call).** The latest run of the same job that **succeeded on every destination** and whose
   manifests verify. One `BACKUP` statement writes the same backup to every destination, so its base must exist,
-  identical, on each of them. A `partial` run is never a base, and the next run after one is a full. The base's
+  identical, on each of them. A `partial` run is never a base, and the next run after one is a full. A test run
+  is never a base either: it holds no data (R40). The base's
   reads are served from the first destination of the group that holds it.
 - **Repairs (my call).** They are off for native runs. A repair runs the engine again, so it would be a
   different backup, with a different snapshot, under the same run. The next scheduled run (a full after a
@@ -282,8 +298,10 @@ The existing flow, with these changes for a native source:
 
 ### 9. Limits and metrics
 
-- **Bytes per run.** A run may write twice its job's last full backup, configurable, with 50 GiB when there is
-  no full yet.
+- **Bytes per run (R39).** A run may write the largest of twice its job's last full native run (not a test
+  run), 1.5 times the size on disk of its databases (`bytes_on_disk` of their active parts, read on the target
+  before the `BACKUP`) and 1 GiB. `ingest.maxRunBytes` replaces it when set. Bytes ClickHouse sends again for an
+  object already stored (a repeat, R35) are drained and not counted.
 - **Requests per run.** 200 per second.
 - **Concurrent runs.** At most `ingest.maxRuns` (default 4).
 - **Over a limit.** The request gets `403`, and the run is ended with `KILL QUERY`.
@@ -300,7 +318,9 @@ The existing flow, with these changes for a native source:
 
 - **Job setting.** `engine_options.method`: `native` or `logical` (the default for existing jobs, which keep
   their behaviour). New ClickHouse jobs default to `native` when the endpoint is configured and the target is
-  24.8 or later.
+  24.8 or later. Until native restore lands (Milestone E, Task 16) they default to `logical`, and Native is
+  offered without "Recommended" and with the note that native backups cannot be restored yet (R42). Until
+  incrementals land (Task 13) the API refuses `incremental` (422) and the wizard shows the option disabled.
 - **UI.** The backup wizard gets a ClickHouse step:
   - the method;
   - incrementals (native only);

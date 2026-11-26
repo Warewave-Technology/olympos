@@ -151,6 +151,12 @@ type Run struct {
 	// Copies: one result per destination, in the order the run wrote them;
 	// empty for runs from before destination groups.
 	Copies []RunCopy `json:"copies"`
+	// Method: "native" for a ClickHouse native run (design §10), else
+	// "logical". A finished run is native when it recorded Objects; a queued
+	// or running one has its job's method.
+	Method string `json:"method"`
+	// Objects: how many objects a native run stored; nil for other runs.
+	Objects *int `json:"objects"`
 
 	clusterID     uuid.UUID
 	clusterLabels map[string]string
@@ -172,7 +178,8 @@ type RunCopy struct {
 
 const runSelect = `SELECT r.id, r.job_id, t.service, c.name, t.engine, r.trigger, r.status, r.scheduled_for, r.tier,
 	r.started_at, r.finished_at, r.bytes, r.wire_bytes, r.blob_path, r.sha256, r.error, r.created_at, r.attempt, r.steps, c.id, c.labels,
-	r.repair_of, r.destination_ids, COALESCE(d.name, g.name, ''), r.not_before
+	r.repair_of, r.destination_ids, COALESCE(d.name, g.name, ''), r.not_before, r.objects,
+	CASE WHEN r.objects IS NOT NULL OR r.finished_at IS NULL AND j.engine_options->>'method' = 'native' THEN 'native' ELSE 'logical' END
 	FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 	LEFT JOIN destinations d ON d.id = j.destination_id LEFT JOIN destination_groups g ON g.id = j.destination_group_id`
 
@@ -180,7 +187,7 @@ func scanRun(row pgx.Row) (*Run, error) {
 	var r Run
 	err := row.Scan(&r.ID, &r.JobID, &r.TargetService, &r.ClusterName, &r.Engine, &r.Trigger, &r.Status, &r.ScheduledFor, &r.Tier,
 		&r.StartedAt, &r.FinishedAt, &r.Bytes, &r.WireBytes, &r.BlobPath, &r.SHA256, &r.Error, &r.CreatedAt, &r.Attempt, &r.Steps, &r.clusterID, &r.clusterLabels,
-		&r.RepairOf, &r.destIDs, &r.DestinationName, &r.NotBefore)
+		&r.RepairOf, &r.destIDs, &r.DestinationName, &r.NotBefore, &r.Objects, &r.Method)
 	if err != nil {
 		return nil, err
 	}

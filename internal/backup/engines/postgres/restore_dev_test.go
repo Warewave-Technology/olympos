@@ -184,7 +184,7 @@ func startTarget17(t *testing.T) target17 {
 		t.Fatal(err)
 	}
 	name := "olympos-restore-pg17-" + randSuffix()
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", "-v", name).Run() })
 	script := `set -e
 printf '%s' "$SSL_CERT" > /var/lib/postgresql/server.crt
 printf '%s' "$SSL_KEY" > /var/lib/postgresql/server.key

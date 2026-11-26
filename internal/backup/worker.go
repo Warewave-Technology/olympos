@@ -19,6 +19,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/blob"
 	"github.com/Warewave-Technology/olympos/internal/gateway"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
 	"github.com/Warewave-Technology/olympos/internal/metrics"
 	"github.com/Warewave-Technology/olympos/internal/notify"
 	"github.com/Warewave-Technology/olympos/internal/store"
@@ -47,6 +48,9 @@ type Worker struct {
 	// Heartbeat refreshes running rows; runs without one for StaleAfter are
 	// failed by any replica (crashed worker). Defaults 30 s / 5 min.
 	Heartbeat, StaleAfter time.Duration
+	// Native is what native backups need; nil while the ingest endpoint is
+	// off (no ingest.url), when a native job's runs fail.
+	Native *NativeConfig
 
 	active atomic.Int32
 }
@@ -133,7 +137,10 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			return err
 		}
 		// A repair waits for its not_before (RepairDelays).
-		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until, r.repair_of IS NOT NULL, j.enabled, j.paused_reason FROM backup_runs r
+		// A run of a job whose method is native is a native run, also when it
+		// fails here (as the run API tells a run that has not finished).
+		rows, err := tx.Query(ctx, `SELECT r.id, t.cluster_id, c.status, r.retry_until, r.repair_of IS NOT NULL, j.enabled, j.paused_reason,
+			j.engine_options->>'method' IS NOT DISTINCT FROM 'native' FROM backup_runs r
 			JOIN backup_jobs j ON j.id = r.job_id JOIN targets t ON t.id = j.target_id JOIN clusters c ON c.id = t.cluster_id
 			WHERE r.status = 'queued' AND (r.not_before IS NULL OR r.not_before <= $1)
 			ORDER BY r.created_at LIMIT 200 FOR UPDATE OF r SKIP LOCKED`, time.Now())
@@ -147,11 +154,12 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 			repair      bool
 			enabled     bool
 			paused      string
+			native      bool
 		}
 		var cands []cand
 		for rows.Next() {
 			var c cand
-			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil, &c.repair, &c.enabled, &c.paused); err != nil {
+			if err := rows.Scan(&c.id, &c.cluster, &c.status, &c.retryUntil, &c.repair, &c.enabled, &c.paused, &c.native); err != nil {
 				rows.Close()
 				return err
 			}
@@ -177,7 +185,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 				if c.retryUntil != nil && time.Now().Before(*c.retryUntil) {
 					continue
 				}
-				o, err := disconnectedOutcome(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline}, time.Now())
+				o, err := disconnectedOutcome(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline, native: c.native}, time.Now())
 				if err != nil {
 					return err
 				}
@@ -188,7 +196,7 @@ func (w *Worker) Claim(ctx context.Context) (uuid.UUID, error) {
 				failed = append(failed, f)
 				continue
 			case "revoked", "pending":
-				f, err := finishRunTx(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline})
+				f, err := finishRunTx(ctx, tx, c.id, outcome{status: "failed", err: errAgentOffline, native: c.native})
 				if err != nil {
 					return err
 				}
@@ -254,7 +262,19 @@ func skippedRepair(repair, enabled bool, paused string) (o outcome, ok bool) {
 	return outcome{}, false
 }
 
-// ReapStale fails running runs whose worker stopped heartbeating.
+// errNativeRestart fails a native run whose ingest credential start-up
+// recovery revoked: its server restarted, and the credential's secret,
+// which ClickHouse writes with, was lost with the process. Its BACKUP may
+// still run on the target (R41).
+func errNativeRestart(runID uuid.UUID) string {
+	return "interrupted: the server restarted during the native backup; its ingest credential is revoked, " +
+		"and the objects it wrote stay incomplete; " + nativeOrphanHint(runID)
+}
+
+// ReapStale fails running runs whose worker stopped heartbeating, and at
+// once a native run whose ingest credential start-up recovery revoked
+// (ingest.MarkInterrupted, reason ingest.ReasonRestart): a run of the
+// process before, which cannot go on.
 func (w *Worker) ReapStale(ctx context.Context) error {
 	stale := w.StaleAfter
 	if stale <= 0 {
@@ -263,24 +283,40 @@ func (w *Worker) ReapStale(ctx context.Context) error {
 	var done []finished
 	err := store.Tx(ctx, w.DB, func(tx pgx.Tx) error {
 		// The olympos-self runner settles its own runs (SelfBackup).
-		rows, err := tx.Query(ctx, `SELECT id FROM backup_runs WHERE status = 'running' AND updated_at < now() - $1::interval
+		// A run with an ingest credential is a native run (restart: one that
+		// start-up recovery revoked).
+		rows, err := tx.Query(ctx, `SELECT id, EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2),
+			EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup')
+			FROM backup_runs r WHERE status = 'running'
+			AND (updated_at < now() - $1::interval OR EXISTS (SELECT 1 FROM ingest_credentials c WHERE c.run_id = r.id AND c.kind = 'backup' AND c.reason = $2))
 			AND job_id NOT IN (SELECT id FROM backup_jobs WHERE system <> '')
-			FOR UPDATE SKIP LOCKED`, fmt.Sprintf("%d seconds", int(stale.Seconds())))
+			FOR UPDATE SKIP LOCKED`, fmt.Sprintf("%d seconds", int(stale.Seconds())), ingest.ReasonRestart)
 		if err != nil {
 			return err
 		}
-		var ids []uuid.UUID
+		type reaped struct {
+			id              uuid.UUID
+			restart, native bool
+		}
+		var ids []reaped
 		for rows.Next() {
-			var id uuid.UUID
-			if err := rows.Scan(&id); err != nil {
+			var r reaped
+			if err := rows.Scan(&r.id, &r.restart, &r.native); err != nil {
 				rows.Close()
 				return err
 			}
-			ids = append(ids, id)
+			ids = append(ids, r)
 		}
 		rows.Close()
-		for _, id := range ids {
-			f, err := finishRunTx(ctx, tx, id, outcome{status: "failed", err: "interrupted: the worker running this backup stopped"})
+		for _, r := range ids {
+			o := outcome{status: "failed", err: "interrupted: the worker running this backup stopped", native: r.native}
+			switch {
+			case r.restart:
+				o = outcome{status: "failed", err: errNativeRestart(r.id), native: true}
+			case r.native:
+				o.err += "; " + nativeOrphanHint(r.id)
+			}
+			f, err := finishRunTx(ctx, tx, r.id, o)
 			if err != nil {
 				return err
 			}
@@ -312,6 +348,12 @@ type outcome struct {
 	// engineFailed: the run failed in the engine (or was interrupted), not
 	// in its copies; the dry-run checklist stops at the engine.
 	engineFailed bool
+	// native: a native run, which is never repaired (design §7): the next
+	// run is a full backup.
+	native bool
+	// objects: how many objects a native run stored (backup_runs.objects,
+	// NULL for other runs).
+	objects int
 }
 
 // fromFirstCopy fills the run's blob columns from its first succeeded copy
@@ -380,9 +422,13 @@ func finishRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome) (fi
 	}
 	o.fromFirstCopy()
 	steps, _ := json.Marshal(nonNilSteps(o.steps))
+	var objects *int
+	if o.native {
+		objects = &o.objects
+	}
 	tag, err := tx.Exec(ctx, `UPDATE backup_runs SET status = $2, finished_at = now(), bytes = $3, wire_bytes = $4, blob_path = $5,
-		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9 WHERE id = $1 AND finished_at IS NULL`,
-		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier, steps)
+		sha256 = $6, error = $7, tier = CASE WHEN $8 = '' THEN tier ELSE $8 END, steps = $9, objects = $10 WHERE id = $1 AND finished_at IS NULL`,
+		runID, o.status, o.bytes, o.wire, o.blobPath, o.sha256, o.err, o.tier, steps, objects)
 	if err != nil {
 		return finished{}, err
 	}
@@ -505,9 +551,12 @@ func settleRunTx(ctx context.Context, tx pgx.Tx, runID uuid.UUID, o outcome, now
 	n := runNotice{RepairOf: repairOf}
 	switch {
 	case o.status == "partial" && repairOf == nil:
-		next, err := queueRepairTx(ctx, tx, runID, now)
-		if err != nil {
-			return runNotice{}, err
+		var next *time.Time
+		if !o.native {
+			var err error
+			if next, err = queueRepairTx(ctx, tx, runID, now); err != nil {
+				return runNotice{}, err
+			}
 		}
 		missing, err := missingDestinationsTx(ctx, tx, runID, false)
 		if err != nil {
@@ -816,7 +865,8 @@ func (c *countingHash) Write(p []byte) (int, error) {
 // perform does the work of a run and returns its outcome. Errors are
 // scrubbed of secrets before they are returned.
 func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *Job) {
-	fail := func(msg string) outcome { return outcome{status: "failed", err: msg} }
+	var native bool // a native job's run fails as a native run (method native, 0 objects)
+	fail := func(msg string) outcome { return outcome{status: "failed", err: msg, native: native} }
 	var job *Job
 	jj, err := scanJob(w.DB.QueryRow(ctx, jobSelectAny+` AND j.id = $1`, r.jobID))
 	if err != nil {
@@ -825,10 +875,17 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	job = jj
 	tr := &secretTracker{}
 	defer tr.zero()
+	eng, ok := EngineFor(job.Target.Engine)
+	var nj NativeJob
+	if ne, isNative := eng.(NativeEngine); ok && isNative {
+		// Options that do not parse fail in the engine's Run, as they always did.
+		if j, err := ne.NativeJob(job.EngineOptions); err == nil && j.Native {
+			nj, native = j, true
+		}
+	}
 	if job.ClusterStatus == "offline" || job.ClusterStatus == "revoked" {
 		return fail(errAgentOffline), nil, job
 	}
-	eng, ok := EngineFor(job.Target.Engine)
 	if !ok {
 		return fail(fmt.Sprintf("no backup engine registered for %q", job.Target.Engine)), nil, job
 	}
@@ -872,7 +929,7 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 	path := func(prefix string) string {
 		return BlobPath(prefix, job.Target.ClusterName, job.Target.Namespace, job.Target.Service, eng.Name(), r.startedAt, r.id, eng.Ext())
 	}
-	manifest := func(d destRef, b ManifestBlob, tier string) Manifest {
+	envelope := func(d destRef, b ManifestBlob, tier string) Manifest {
 		return Manifest{
 			Format: ManifestFormat, RunID: r.id, JobID: job.ID, Trigger: r.trigger, Tier: tier, ScheduledFor: r.scheduledFor,
 			StartedAt: r.startedAt.UTC(), FinishedAt: time.Now().UTC(),
@@ -884,7 +941,15 @@ func (w *Worker) perform(ctx context.Context, r *runRow) (outcome, *RunResult, *
 			Destination: &ManifestDestination{Name: d.Name, Kind: d.Kind}, Group: group,
 		}
 	}
-	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, manifest, tr.scrub)
+	if native {
+		if r.repairOf != nil {
+			return fail(errNativeRepair), nil, job
+		}
+		o, rr := w.runNative(ctx, r, job, nativeJob{eng: eng.(NativeEngine), opts: nj, ec: ec, dests: dests, tiers: tiers,
+			envelope: envelope, wire: wc.total, scrub: tr.scrub})
+		return o, rr, job
+	}
+	rr, copies, streamed, engErr := streamCopies(ctx, eng, ec, dests, w.Blobs.ForDestination, path, tiers, envelope, tr.scrub)
 	return copiesOutcome(ctx, copies, streamed, wc.total(), tiers[dests[0].ID], engErr, tr.scrub), rr, job
 }
 

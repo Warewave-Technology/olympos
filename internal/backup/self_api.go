@@ -96,7 +96,7 @@ func LoadSelfView(ctx context.Context, q store.Querier, copyDest *uuid.UUID) (*S
 	}
 	defer rows.Close()
 	for rows.Next() {
-		run := &Run{TargetService: selfService, ClusterName: selfCluster, Engine: "postgresql", DestinationName: j.DestinationName, Copies: []RunCopy{}}
+		run := &Run{TargetService: selfService, ClusterName: selfCluster, Engine: "postgresql", DestinationName: j.DestinationName, Copies: []RunCopy{}, Method: "logical"}
 		if err := rows.Scan(&run.ID, &run.JobID, &run.Trigger, &run.Status, &run.ScheduledFor, &run.Tier, &run.StartedAt, &run.FinishedAt,
 			&run.Bytes, &run.WireBytes, &run.BlobPath, &run.SHA256, &run.Error, &run.CreatedAt, &run.Attempt, &run.RepairOf, &run.destIDs, &run.NotBefore); err != nil {
 			return nil, err

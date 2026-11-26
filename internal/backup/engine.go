@@ -103,6 +103,23 @@ type Engine interface {
 	Run(ctx context.Context, ec EngineContext, w io.Writer) (*RunResult, error)
 }
 
+// OptionsEnv is what the validation of engine_options may depend on besides
+// the options themselves: the server configuration.
+type OptionsEnv struct {
+	// IngestEnabled is true when the ingest endpoint of native ClickHouse
+	// backups is on (ingest.url is set).
+	IngestEnabled bool
+}
+
+// OptionsChecker is implemented by engines that validate engine_options when
+// a job is created or its options are changed. It returns field errors keyed
+// by the engine_options field ("method"), or "engine_options" for the whole
+// object; nil when the options are valid. Engines without it accept any
+// JSON object.
+type OptionsChecker interface {
+	CheckOptions(raw json.RawMessage, env OptionsEnv) map[string]string
+}
+
 var (
 	enginesMu sync.RWMutex
 	engines   = map[string]Engine{}

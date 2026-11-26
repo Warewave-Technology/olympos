@@ -271,3 +271,77 @@ func TestFSWriter(t *testing.T) {
 		}
 	}
 }
+
+// TestFSSetTagsNativeRun: a native run's objects are tagged complete after
+// its manifest is signed, so SetTags rewrites the tags of an object inside a
+// run's directory (<…>/<run-id>/<key>) that exists; never of anything else.
+func TestFSSetTagsNativeRun(t *testing.T) {
+	root, _ := nfsRoot(t)
+	ctx := context.Background()
+	w, err := blob.OpenFS(blob.FSTarget{Name: "nas", Path: root + "/nas/olympos/backups", Prefix: "pfx"}, blob.StorageOptions{NFSRoot: root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const run = "0f6b2a4e-8d1c-4f3a-9b7e-2c5d8a1f6e30"
+	dir := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run)
+	obj := dir + "/data/sales/orders/all_1_1_0/data.bin"
+	incomplete := map[string]string{"olympos-tier": "daily", "olympos-state": "incomplete"}
+	if _, err := w.Upload(ctx, obj, strings.NewReader("part"), "application/octet-stream", incomplete); err != nil {
+		t.Fatal(err)
+	}
+	complete := map[string]string{"olympos-tier": "daily", "olympos-state": "complete"}
+	if err := w.SetTags(ctx, obj, complete); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := w.GetTags(ctx, obj); err != nil || got["olympos-state"] != "complete" || got["olympos-tier"] != "daily" {
+		t.Fatalf("tags: %v %v", got, err)
+	}
+	if b, err := w.Download(ctx, obj, 100); err != nil || string(b) != "part" {
+		t.Fatalf("the object changed: %q %v", b, err)
+	}
+	ents, _ := os.ReadDir(filepath.Dir(filepath.Join(w.Dir(), filepath.FromSlash(obj))))
+	if len(ents) != 2 {
+		t.Fatalf("left behind: %v", ents)
+	}
+
+	// The run's manifest, next to its directory, is tagged complete last.
+	manifest := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+run+".manifest.json")
+	if _, err := w.Upload(ctx, manifest, strings.NewReader("{}"), "application/json", incomplete); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.SetTags(ctx, manifest, complete); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := w.GetTags(ctx, manifest); got["olympos-state"] != "complete" {
+		t.Fatalf("manifest tags: %v", got)
+	}
+
+	const other = "7c2e9d14-3b6a-4e8f-a1d5-9f0b4c7e2a61"
+	logical := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+other+".zip")
+	logicalManifest := blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/"+other+".manifest.json")
+	for _, p := range []string{logical, logicalManifest} {
+		if _, err := w.Upload(ctx, p, strings.NewReader("zip"), "", map[string]string{"olympos-tier": "daily"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, p := range map[string]string{
+		"a logical backup":            logical,
+		"a logical run's manifest":    logicalManifest,
+		"a native manifest missing":   blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/27/"+run+".manifest.json"),
+		"an object that is missing":   dir + "/data/sales/orders/all_1_1_0/missing.bin",
+		"the run's directory":         dir,
+		"under a name that is no run": blob.Join(w.Prefix(), "prod/db/orders/clickhouse/2026/11/26/run-1/data.bin"),
+		"under an upper-case run":     blob.Join(w.Prefix(), "x/"+strings.ToUpper(run)+"/data.bin"),
+		"a tags sidecar":              obj + blob.TagsSuffix,
+		"climbing out":                dir + "/../" + other + ".zip",
+	} {
+		if err := w.SetTags(ctx, p, complete); err == nil {
+			t.Errorf("SetTags on %s (%s)", name, p)
+		}
+	}
+	for _, p := range []string{logical, logicalManifest} {
+		if got, _ := w.GetTags(ctx, p); got["olympos-state"] != "" {
+			t.Fatalf("a logical run's tags changed: %v", got)
+		}
+	}
+}

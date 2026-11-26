@@ -50,6 +50,10 @@ const (
 	// ReasonMultipart: a multipart upload broke the protocol: a part sent
 	// again with another body, or a part list that does not match.
 	ReasonMultipart = "multipart"
+	// ReasonRewrite: the run sent another body for an object it had stored,
+	// or another part list for an upload it had completed. Objects are never
+	// overwritten, so the client broke the protocol.
+	ReasonRewrite = "object rewritten"
 	// ReasonUploadAborted: the run aborted a multipart upload. Its object is
 	// partly on the destinations and cannot be written again under its name,
 	// so the run cannot succeed.
@@ -347,7 +351,9 @@ func (q *request) finish() {
 		case q.s == nil:
 			// Refused before any session was found: anyone can send these,
 			// so they are counted but not logged above Debug.
-		case q.failed.status == http.StatusNotFound:
+		case q.failed.status == http.StatusNotFound, q.failed.code == errSlowDown.code:
+			// A 503 SlowDown (the rate, the spill budget) is back-pressure
+			// the client retries, not a refusal.
 			level = slog.LevelInfo
 		default:
 			level = slog.LevelWarn
@@ -743,7 +749,19 @@ func (q *request) put() *s3Error {
 	if q.key == s.LockKey() {
 		return q.putLock(wantMD5)
 	}
-	obj := q.h.newObject(q.r.Context(), s, q.key, nil)
+	stored, ok, release, err := s.claimPut(q.key)
+	switch {
+	case errors.Is(err, errUploadOpen):
+		q.h.log.Warn("ingest: the run sent a PutObject of a key it is uploading in parts", "run", s.RunID().String(), "key", q.key)
+		q.stop(ReasonRewrite)
+		return denied("An upload of the object is open; objects are written once.")
+	case err != nil:
+		return errStopped
+	case ok:
+		return q.repeatPut(stored, wantMD5)
+	}
+	defer release()
+	obj := q.h.newObject(q.r.Context(), s, q.key, s.Sink(), nil)
 	d, err := q.copyBody(obj, true)
 	if err != nil {
 		return q.objectFailed(err, obj.abort)
@@ -761,6 +779,34 @@ func (q *request) put() *s3Error {
 		return e
 	}
 	q.w.Header().Set("ETag", etag(rec.SHA256))
+	q.w.WriteHeader(http.StatusOK)
+	return nil
+}
+
+// repeatPut answers a PutObject of a key the run stored already. ClickHouse's
+// S3 client sends a PUT again when it did not see the answer (its connection
+// dropped after the body): the same body is read, nothing is written (every
+// destination would refuse to overwrite), and the stored object is the
+// answer. Another body would overwrite a stored object: the run is stopped.
+func (q *request) repeatPut(stored ObjectRecord, wantMD5 []byte) *s3Error {
+	d, err := q.copyBody(io.Discard, false)
+	switch {
+	case errors.Is(err, errRunStopped):
+		return errStopped
+	case err != nil:
+		q.stop(ReasonIncompleteBody)
+		return errIncomplete
+	}
+	if e := q.checkDigest(d, wantMD5); e != nil {
+		q.stop(ReasonBadDigest)
+		return e
+	}
+	if d.n != stored.Size || hex.EncodeToString(d.sha.Sum(nil)) != stored.SHA256 {
+		q.h.log.Warn("ingest: the run sent another body for a stored object", "run", q.s.RunID().String(), "key", q.key)
+		q.stop(ReasonRewrite)
+		return denied("The object is stored with other content; objects are not overwritten.")
+	}
+	q.w.Header().Set("ETag", etag(stored.SHA256))
 	q.w.WriteHeader(http.StatusOK)
 	return nil
 }
@@ -1057,9 +1103,9 @@ type objectStream struct {
 	keepMax int64
 }
 
-// newObject starts Sink.Put for key. When the session ends first, the stream
+// newObject starts sink.Put for key (the session's Sink, or a drainSink). When the session ends first, the stream
 // is aborted, and onEnd runs if it is not nil.
-func (h *handler) newObject(ctx context.Context, s *Session, key string, onEnd func()) *objectStream {
+func (h *handler) newObject(ctx context.Context, s *Session, key string, sink Sink, onEnd func()) *objectStream {
 	ctx, cancel := context.WithCancel(ctx)
 	pr, pw := io.Pipe()
 	o := &objectStream{key: key, pw: pw, cancel: cancel, done: make(chan struct{}), finished: make(chan struct{}),
@@ -1068,7 +1114,7 @@ func (h *handler) newObject(ctx context.Context, s *Session, key string, onEnd f
 		o.keepMax = limit + 1 // one more byte, so that Capture sees a body over its limit
 	}
 	go func() {
-		_, err := s.Sink().Put(ctx, key, pr)
+		_, err := sink.Put(ctx, key, pr)
 		// A sink that returned before EOF must not leave a writer blocked.
 		pr.CloseWithError(errSinkDone)
 		o.err = err

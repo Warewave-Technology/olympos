@@ -34,6 +34,8 @@ regexes = [
   '''^0123456789abcdef0123456789abcdef01234567$''',
   # internal/blob/s3_test.go: a wrong MinIO secret
   '''^WRONG-SECRET-123$''',
+  # internal/backup/engines/clickhouse/native_run_test.go: the fake ingest secret
+  '''^secret-canary-0123456789abcdefghijklmnop$''',
 ]
 
 [[allowlists]]

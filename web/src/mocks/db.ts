@@ -684,6 +684,8 @@ function run(p: Partial<BackupRun> & Pick<BackupRun, 'job_id' | 'target_service'
     sha256: '',
     error: '',
     destination_name: 'blob-weu-backups',
+    method: 'logical',
+    objects: null,
     ...p,
   };
 }

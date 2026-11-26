@@ -46,8 +46,17 @@ type chEnv struct {
 	caPEM          string
 }
 
+// docker runs the docker CLI. A stuck daemon or container fails the
+// caller (its message names the step) instead of running into the
+// package timeout; the bound leaves room for create to pull the image.
 func docker(args ...string) (string, error) {
-	out, err := exec.Command("docker", args...).CombinedOutput()
+	const timeout = 5 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", args...).CombinedOutput()
+	if ctx.Err() != nil {
+		err = fmt.Errorf("timed out after %v: %w", timeout, err)
+	}
 	return strings.TrimSpace(string(out)), err
 }
 
@@ -86,14 +95,14 @@ func startClickHouse(t *testing.T) *chEnv {
 		}
 	}
 
-	_, _ = docker("rm", "-f", chContainer)
+	_, _ = docker("rm", "-f", "-v", chContainer)
 	if out, err := docker("create", "--name", chContainer,
 		"-e", "CLICKHOUSE_USER="+chUser, "-e", "CLICKHOUSE_PASSWORD="+chPassword,
 		"-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
 		"-p", "127.0.0.1::9000", "-p", "127.0.0.1::9440", chImage); err != nil {
 		t.Fatalf("docker create: %v %s", err, out)
 	}
-	t.Cleanup(func() { _, _ = docker("rm", "-f", chContainer) })
+	t.Cleanup(func() { _, _ = docker("rm", "-f", "-v", chContainer) })
 	// docker cp (not bind mounts) so it works with any Docker host.
 	if out, err := docker("cp", dir+"/.", chContainer+":/etc/clickhouse-server/certs"); err != nil {
 		t.Fatalf("docker cp certs: %v %s", err, out)
@@ -161,10 +170,17 @@ func (e *chEnv) ec(useTLS bool, opts any) backup.EngineContext {
 // clickhouseClient runs clickhouse-client inside the container.
 func clickhouseClient(t *testing.T, stdin []byte, user, pass string, args ...string) string {
 	t.Helper()
-	full := append([]string{"exec", "-i", chContainer, "clickhouse-client", "-u", user, "--password", pass}, args...)
-	// A hung client (seen once on CI) fails with the server log instead of
-	// running into the package timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	return clickhouseClientIn(t, chContainer, stdin, user, pass, args...)
+}
+
+// clickhouseClientIn runs clickhouse-client inside container.
+func clickhouseClientIn(t *testing.T, container string, stdin []byte, user, pass string, args ...string) string {
+	t.Helper()
+	full := append([]string{"exec", "-i", container, "clickhouse-client", "-u", user, "--password", pass}, args...)
+	// A hung client (seen once on CI) fails with the server's error log
+	// instead of running into the package timeout.
+	const timeout = 3 * time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "docker", full...)
 	if stdin != nil {
@@ -174,11 +190,32 @@ func clickhouseClient(t *testing.T, stdin []byte, user, pass string, args ...str
 	if err != nil {
 		logs := ""
 		if ctx.Err() != nil {
-			logs, _ = docker("logs", "--tail", "80", chContainer)
+			err = fmt.Errorf("timed out after %v: %w", timeout, err)
+			logs = serverErrLog(t, container)
 		}
 		t.Fatalf("clickhouse-client %v: %v\n%s\n%s", args, err, out, logs)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// serverErrLog returns the tail of the server's error log (docker logs
+// only has the entrypoint's output). docker cp reads it even from a
+// server that no longer answers.
+func serverErrLog(t *testing.T, container string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "err.log")
+	if out, err := docker("cp", container+":/var/log/clickhouse-server/clickhouse-server.err.log", p); err != nil {
+		return fmt.Sprintf("server error log: %v %s", err, out)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return fmt.Sprintf("server error log: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) > 40 {
+		lines = lines[len(lines)-40:]
+	}
+	return "server error log (tail):\n" + strings.Join(lines, "\n")
 }
 
 func chq(t *testing.T, query string) string {

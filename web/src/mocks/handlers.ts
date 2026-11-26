@@ -231,6 +231,26 @@ function restoreGuide(blob: string, doc: string, d?: Pick<Destination, 'kind' | 
   };
 }
 
+/** The ingest endpoint of native ClickHouse backups is off: localStorage.setItem('olympos.mock.ingestOff', '1'). */
+function ingestOff() {
+  return localStorage.getItem('olympos.mock.ingestOff') === '1';
+}
+
+/** ClickHouse engine_options as the server checks them (docs/openapi.yaml POST /backup/jobs 422). */
+function clickHouseOptionErrors(o: Record<string, unknown> | undefined): MockRes | null {
+  const method = (o?.method as string | undefined) ?? '';
+  const incremental = (o?.incremental as string | undefined) ?? '';
+  const tables = (o?.tables as string[] | undefined) ?? [];
+  if (!['', 'native', 'logical'].includes(method)) return invalid('invalid job', { method: 'must be "native" or "logical"' });
+  if (incremental && incremental !== 'weekly_full_daily') return invalid('invalid job', { incremental: 'must be "weekly_full_daily" or empty' });
+  if (incremental && method !== 'native') return invalid('invalid job', { incremental: 'needs method "native"' });
+  if (method === 'native' && tables.length) return invalid('invalid job', { tables: 'cannot be used with method "native", which backs up whole databases' });
+  // R42: until task 13 builds them
+  if (incremental) return invalid('invalid job', { incremental: 'incremental native backups are not available yet' });
+  if (method === 'native' && ingestOff()) return invalid('invalid job', { method: 'native backups need the ingest endpoint, which is off (set ingest.url)' });
+  return null;
+}
+
 // The built-in olympos-self job starts unconfigured (Dashboard: Needs attention).
 const selfBackup: SelfBackup = { configured: false, job: null, runs: [] };
 
@@ -866,6 +886,7 @@ const routes: [string, string, Handler][] = [
   ],
 
   // -------------------------------------------------------- backups
+  ['GET', '/backup/settings', () => ok({ ingest_enabled: !ingestOff() })],
   ['GET', '/backup/jobs', () => items(db.jobs)],
   [
     'GET',
@@ -883,6 +904,8 @@ const routes: [string, string, Handler][] = [
       const b = r.body as BackupJobInput;
       const t = db.targets.find((x) => x.id === b.target_id);
       if (!t) return invalid('invalid job', { target_id: 'Target not found.' });
+      const refused = t.engine === 'clickhouse' ? clickHouseOptionErrors(b.engine_options) : null;
+      if (refused) return refused;
       if (t.engine === 'vault') {
         const v = db.vaults.find((x) => x.target.id === t.id);
         if (!v || v.status !== 'configured') return invalid('vault not configured', { target_id: 'Configure this vault in Olympos first (Vaults > Configure): backups use its Olympos AppRole.' });
@@ -930,6 +953,8 @@ const routes: [string, string, Handler][] = [
       // As the server: a stored credential that is sent needs its password
       // (the wizard leaves the credential out to keep the stored one).
       if (b.credential?.source === 'stored' && !b.credential.password) return invalid('invalid job', { 'credential.password': 'required' });
+      const refused = j.engine === 'clickhouse' && b.engine_options ? clickHouseOptionErrors(b.engine_options) : null;
+      if (refused) return refused;
       if (b.enabled !== undefined) {
         j.enabled = b.enabled;
         j.next_run_at = b.enabled ? (nextRuns(j.cron, 1, new Date(), j.timezone)[0] ?? null) : null;
@@ -991,6 +1016,8 @@ const routes: [string, string, Handler][] = [
         error: '',
         destination_name: j.destination_group?.name ?? j.destination?.name,
         steps: [],
+        method: j.engine_options?.method === 'native' ? 'native' : 'logical',
+        objects: null,
       };
       db.runs.unshift(run);
       return ok(run, 202);

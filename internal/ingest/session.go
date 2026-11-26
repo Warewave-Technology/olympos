@@ -43,11 +43,12 @@ const (
 	// Expiry ends the session like any stop, so that what still streams, and
 	// every open multipart upload, is aborted.
 	ReasonExpired = "expired"
+	// ReasonRestart is the revoke reason start-up recovery records
+	// (MarkInterrupted): the run belonged to the process before.
+	ReasonRestart = "server restart"
 )
 
 const (
-	// reasonRestart is the revoke reason start-up recovery records.
-	reasonRestart = "server restart"
 	// The capture limits: a kept .backup (it lists every file of the
 	// backup), a metadata/*.sql, a count.txt, and all kept bodies of one
 	// session together.
@@ -271,7 +272,8 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 		source:   o.Source,
 		maxBytes: o.MaxBytes, accessKey: cred.AccessKey, expires: now.Add(o.TTL),
 		secret: cred.Secret, stopped: make(chan string, 1), captured: map[string][]byte{},
-		ended: make(chan struct{}),
+		ended: make(chan struct{}), stored: map[string]int{}, writing: map[string]*keyWriter{},
+		completed: map[string]completedUpload{},
 	}
 	if err := insertCredential(ctx, r.db, cred.AccessKey, o.RunID, o.Kind, s.scope,
 		r.fp.Fingerprint([]byte(cred.Secret)), now, s.expires); err != nil {
@@ -325,7 +327,7 @@ func (r *Registry) MarkInterrupted(ctx context.Context) error {
 // MarkInterrupted is Registry.MarkInterrupted without a registry, for a
 // server whose endpoint is off now but may have been on before the restart.
 func MarkInterrupted(ctx context.Context, db *store.DB, at time.Time) error {
-	if err := revokeAllCredentials(ctx, db, reasonRestart, at); err != nil {
+	if err := revokeAllCredentials(ctx, db, ReasonRestart, at); err != nil {
 		return fmt.Errorf("ingest: mark interrupted credentials: %w", err)
 	}
 	return nil
@@ -390,7 +392,14 @@ type Session struct {
 	stopReason string
 	written    int64
 	objects    []ObjectRecord
-	captured   map[string][]byte
+	// stored indexes objects by key; writing holds the one writer of each
+	// key being written (R36: a PutObject or an open multipart upload).
+	// completed are the multipart uploads that completed, by upload ID, for
+	// a repeated CompleteMultipartUpload.
+	stored    map[string]int
+	writing   map[string]*keyWriter
+	completed map[string]completedUpload
+	captured  map[string][]byte
 	// capturedBytes is the size of all captured bodies.
 	capturedBytes int64
 	lock          []byte
@@ -536,11 +545,136 @@ func (s *Session) AddBytes(n int64) error {
 	return nil
 }
 
+// MaxBytes is how many bytes the run may write in all.
+func (s *Session) MaxBytes() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.maxBytes
+}
+
+// SetMaxBytes changes how many bytes the run may write in all: the run's
+// owner sets it when it knows more than at Open (a native run, the size of
+// the target's databases), before the client has the credential. A limit
+// under what the run already wrote stops it with ReasonQuota.
+func (s *Session) SetMaxBytes(n int64) {
+	s.mu.Lock()
+	s.maxBytes = n
+	over := s.written > n
+	s.mu.Unlock()
+	if over {
+		s.Stop(ReasonQuota)
+	}
+}
+
 // RecordObject records an object the Sink stored. Handler hook.
 func (s *Session) RecordObject(rec ObjectRecord) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.stored[rec.Key] = len(s.objects)
 	s.objects = append(s.objects, rec)
+}
+
+// keyWriter is the one write of a key in progress (R36): a PutObject, or
+// the multipart upload upload. done is closed when it ends, stored or not.
+type keyWriter struct {
+	upload string
+	done   chan struct{}
+}
+
+// errUploadOpen: a PutObject of a key whose multipart upload is open.
+var errUploadOpen = errors.New("ingest: an upload of the key is open")
+
+// claimPut reserves key for one PutObject (R35, R36). An object is written
+// once: when key is stored already, it returns its record and stored, and
+// nothing is to be written. When a PutObject of key is still writing (a
+// client that sent it again before it saw the answer), it waits for that
+// one to end. A key whose multipart upload is open is errUploadOpen.
+// Otherwise the caller writes key and calls release when it is done,
+// recorded or not. It fails with errRunStopped once the session has ended.
+func (s *Session) claimPut(key string) (rec ObjectRecord, stored bool, release func(), err error) {
+	for {
+		rec, stored, w, release := s.claimKey(key, "")
+		switch {
+		case stored || release != nil:
+			return rec, stored, release, nil
+		case w.upload != "":
+			return ObjectRecord{}, false, nil, errUploadOpen
+		}
+		select {
+		case <-w.done:
+		case <-s.ended:
+			return ObjectRecord{}, false, nil, errRunStopped
+		}
+	}
+}
+
+// claimUpload reserves key for the multipart upload id (R36). A stored key
+// is returned as for claimPut: the upload can only end as a repeat. When a
+// PutObject of key is writing, it waits for it. When another upload of key
+// is open, it returns that upload's ID and the channel its end closes: the
+// caller aborts it, waits, and claims again. Otherwise the caller writes key
+// and calls release when the upload ends.
+func (s *Session) claimUpload(key, id string) (rec ObjectRecord, stored bool, open string, ended <-chan struct{}, release func(), err error) {
+	for {
+		rec, stored, w, release := s.claimKey(key, id)
+		switch {
+		case stored || release != nil:
+			return rec, stored, "", nil, release, nil
+		case w.upload != "":
+			return ObjectRecord{}, false, w.upload, w.done, nil, nil
+		}
+		select {
+		case <-w.done:
+		case <-s.ended:
+			return ObjectRecord{}, false, "", nil, nil, errRunStopped
+		}
+	}
+}
+
+// claimKey returns key's record when it is stored; else takes key for the
+// writer upload ("" for a PutObject) and returns its release; else returns
+// the writer that holds it.
+func (s *Session) claimKey(key, upload string) (ObjectRecord, bool, *keyWriter, func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if i, ok := s.stored[key]; ok {
+		return s.objects[i], true, nil, nil
+	}
+	if w, ok := s.writing[key]; ok {
+		return ObjectRecord{}, false, w, nil
+	}
+	w := &keyWriter{upload: upload, done: make(chan struct{})}
+	s.writing[key] = w
+	var once sync.Once
+	return ObjectRecord{}, false, nil, func() {
+		once.Do(func() {
+			s.mu.Lock()
+			if s.writing[key] == w {
+				delete(s.writing, key)
+			}
+			s.mu.Unlock()
+			close(w.done)
+		})
+	}
+}
+
+// completedUpload is a multipart upload that completed: its key, the SHA-256
+// of the part list it completed with, and its answer's ETag.
+type completedUpload struct {
+	key, listSHA256, etag string
+}
+
+func (s *Session) completeUpload(id string, c completedUpload) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.completed[id] = c
+}
+
+func (s *Session) completedUpload(id string) (completedUpload, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.completed[id]
+	return c, ok
 }
 
 // Objects returns the recorded objects, in the order they were stored.

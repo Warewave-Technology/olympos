@@ -271,6 +271,14 @@ type fakeSink struct {
 	// first, when not nil, is closed once the first bytes arrived.
 	first     chan struct{}
 	firstOnce sync.Once
+	// hold, when not nil, keeps a Put that read its body from returning
+	// until it is closed.
+	hold chan struct{}
+	// stall, when not nil, stops the reading once stallAfter bytes arrived,
+	// until it is closed; stalled is closed when it stops.
+	stall, stalled chan struct{}
+	stallAfter     int
+	stallOnce      sync.Once
 
 	mu      sync.Mutex
 	puts    []sinkPut
@@ -305,6 +313,12 @@ func (f *fakeSink) Put(ctx context.Context, key string, r io.Reader) (ingest.Obj
 		if n > 0 && f.first != nil {
 			f.firstOnce.Do(func() { close(f.first) })
 		}
+		if f.stall != nil && buf.Len() >= f.stallAfter {
+			f.stallOnce.Do(func() {
+				close(f.stalled)
+				<-f.stall
+			})
+		}
 		if rerr == io.EOF {
 			break
 		}
@@ -312,6 +326,9 @@ func (f *fakeSink) Put(ctx context.Context, key string, r io.Reader) (ingest.Obj
 			err = rerr
 			break
 		}
+	}
+	if err == nil && f.hold != nil {
+		<-f.hold
 	}
 	f.record(sinkPut{key: key, body: buf.Bytes(), err: err})
 	if err != nil {
@@ -352,6 +369,20 @@ func (f *fakeSink) waitPuts(t *testing.T, n int) []sinkPut {
 	}
 	t.Fatalf("the sink has %d puts, want %d", len(f.all()), n)
 	return nil
+}
+
+// waitStarted waits until n Puts began: a Put starts in its own goroutine,
+// after the request that opened it may have returned.
+func (f *fakeSink) waitStarted(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.startedPuts() >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%d puts started, want %d", f.startedPuts(), n)
 }
 
 // fakeSource serves objects from a map. List ignores the prefix and returns
@@ -574,6 +605,79 @@ func TestHandlerPutObject(t *testing.T) {
 	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+".backup", backup), http.StatusOK)
 	if b, ok := a.s.Captured(a.prefix + ".backup"); !ok || string(b) != backup {
 		t.Errorf("captured .backup %q %v", b, ok)
+	}
+	notStopped(t, a.s)
+}
+
+// An object is written once (task 10 round 2). A client that did not see
+// the answer to its PUT sends it again: the same body is answered as stored,
+// nothing is written twice. Another body for a stored key stops the run as a
+// client that broke the protocol, never as a failed destination.
+func TestHandlerRepeatedPut(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	body := "a part's bytes"
+	key := a.prefix + "data/all_1_1_0/data.bin"
+	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+key, body), http.StatusOK)
+	r := e.do(t, a.cred, http.MethodPut, "/olympos/"+key, body, md5Header(body))
+	wantStatus(t, r, http.StatusOK)
+	if got := r.header.Get("ETag"); got != shaTag(body) {
+		t.Errorf("ETag %s", got)
+	}
+	if puts := a.sink.all(); len(puts) != 1 {
+		t.Fatalf("sink puts %d, want 1", len(puts))
+	}
+	if got := a.s.Objects(); len(got) != 1 {
+		t.Fatalf("objects %+v", got)
+	}
+	notStopped(t, a.s)
+
+	r = e.do(t, a.cred, http.MethodPut, "/olympos/"+key, "other bytes")
+	wantStatus(t, r, http.StatusForbidden)
+	if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+		t.Fatalf("stop reason %q, want %q", got, ingest.ReasonRewrite)
+	}
+	if puts := a.sink.all(); len(puts) != 1 {
+		t.Fatalf("sink puts %d, want 1", len(puts))
+	}
+}
+
+// A PUT sent again while the first one is still being stored waits for it,
+// then gets the stored object as its answer.
+func TestHandlerRepeatedPutInFlight(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	a.sink.first, a.sink.hold = make(chan struct{}), make(chan struct{})
+	body := "the body of a slow object"
+	key := a.prefix + "data/all_1_1_0/data.bin"
+	replies := make(chan reply, 2)
+	send := func() {
+		r, err := e.tryDo(a.cred, http.MethodPut, "/olympos/"+key, body)
+		if err != nil {
+			r.status = -1
+		}
+		replies <- r
+	}
+	go send()
+	<-a.sink.first
+	go send()
+	time.Sleep(200 * time.Millisecond)
+	a.sink.mu.Lock()
+	started := a.sink.started
+	a.sink.mu.Unlock()
+	if started != 1 {
+		t.Fatalf("the repeated PUT started a second write (%d)", started)
+	}
+	close(a.sink.hold)
+	for range 2 {
+		r := <-replies
+		wantStatus(t, r, http.StatusOK)
+		if got := r.header.Get("ETag"); got != shaTag(body) {
+			t.Errorf("ETag %s", got)
+		}
+	}
+	if got := a.s.Objects(); len(got) != 1 {
+		t.Fatalf("objects %+v", got)
 	}
 	notStopped(t, a.s)
 }
@@ -817,6 +921,13 @@ func TestHandlerRate(t *testing.T) {
 	if p := a.sink.all(); len(p) != 0 {
 		t.Errorf("a refused PUT reached the sink: %d puts", len(p))
 	}
+	// A 503 SlowDown is back-pressure the client retries, not a refusal:
+	// logged at Info, not Warn.
+	for _, line := range strings.Split(strings.TrimSpace(e.logs.String()), "\n") {
+		if strings.Contains(line, `"error":"SlowDown"`) && !strings.Contains(line, `"level":"INFO"`) {
+			t.Fatalf("a 503 SlowDown is not logged at Info: %s", line)
+		}
+	}
 	// The limit is per session.
 	wantStatus(t, e.do(t, b.cred, http.MethodGet, "/olympos/?prefix="+b.prefix, ""), http.StatusOK)
 	// Under the rate again, the run goes on.
@@ -1033,6 +1144,31 @@ func TestHandlerMultipart(t *testing.T) {
 	e := newEnv(t)
 	parts := []string{strings.Repeat("a", 100<<10), strings.Repeat("b", 70<<10), "the last part"}
 	whole := strings.Join(parts, "")
+
+	t.Run("complete sent again", func(t *testing.T) {
+		a := e.backup(t)
+		m := e.createUpload(t, a, a.prefix+"data/big.bin")
+		var tags []string
+		for i, p := range parts {
+			tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+		}
+		first := m.complete(t, tags...)
+		wantStatus(t, first, http.StatusOK)
+		again := m.complete(t, tags...)
+		wantStatus(t, again, http.StatusOK)
+		if again.body != first.body {
+			t.Errorf("repeated complete %q, want %q", again.body, first.body)
+		}
+		if puts := a.sink.all(); len(puts) != 1 || len(a.s.Objects()) != 1 {
+			t.Fatalf("sink puts %d, objects %d", len(puts), len(a.s.Objects()))
+		}
+		notStopped(t, a.s)
+		// Another part list for the completed upload: the run stops.
+		wantStatus(t, m.complete(t, tags[0]), http.StatusForbidden)
+		if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+			t.Fatalf("stop reason %q", got)
+		}
+	})
 
 	t.Run("in order", func(t *testing.T) {
 		a := e.backup(t)
@@ -1741,9 +1877,7 @@ func TestHandlerUploadCapStartsNoPut(t *testing.T) {
 		e.clock.add(10 * time.Millisecond) // under the rate
 		e.createUpload(t, a, fmt.Sprintf("%sdata/f%d.bin", a.prefix, i))
 	}
-	if n := a.sink.startedPuts(); n != maxUploads {
-		t.Fatalf("%d puts started, want %d", n, maxUploads)
-	}
+	a.sink.waitStarted(t, maxUploads)
 	r := e.do(t, a.cred, http.MethodPost, "/olympos/"+a.prefix+"data/one-more.bin?uploads", "")
 	wantRefused(t, r, http.StatusForbidden, "AccessDenied")
 	if n := a.sink.startedPuts(); n != maxUploads {
@@ -1834,5 +1968,280 @@ func TestRemoveSpillFiles(t *testing.T) {
 	}
 	if n, err := ingest.RemoveSpillFiles(dir + "/missing"); err != nil || n != 0 {
 		t.Errorf("a missing directory: %d, %v", n, err)
+	}
+}
+
+// completeXML is a CompleteMultipartUpload body listing etags.
+func completeXML(etags ...string) string {
+	var b strings.Builder
+	b.WriteString(`<CompleteMultipartUpload xmlns="http://s3.amazonaws.com/doc/2006-03-01/">`)
+	for i, tag := range etags {
+		fmt.Fprintf(&b, "<Part><PartNumber>%d</PartNumber><ETag>%s</ETag></Part>", i+1, tag)
+	}
+	b.WriteString("</CompleteMultipartUpload>")
+	return b.String()
+}
+
+// R35, R36: a Complete sent again while the first one still stores the
+// object (a slow destination) waits for it and gets its answer, never
+// NoSuchUpload.
+func TestHandlerRepeatedCompleteInFlight(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	a.sink.hold = make(chan struct{})
+	var release sync.Once
+	unhold := func() { release.Do(func() { close(a.sink.hold) }) }
+	defer unhold() // a failing test must not leave the server waiting on the sink
+	parts := []string{strings.Repeat("a", 64<<10), "the last part"}
+	m := e.createUpload(t, a, a.prefix+"data/big.bin")
+	var tags []string
+	for i, p := range parts {
+		tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+	}
+	replies := make(chan reply, 2)
+	send := func() {
+		r, err := e.tryDo(a.cred, http.MethodPost, "/olympos/"+m.key+"?uploadId="+m.id, completeXML(tags...))
+		if err != nil {
+			r.status = -1
+		}
+		replies <- r
+	}
+	go send()
+	time.Sleep(100 * time.Millisecond)
+	go send()
+	select {
+	case r := <-replies:
+		t.Fatalf("a Complete returned while the object is being stored: %d %s", r.status, r.body)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unhold()
+	first, second := <-replies, <-replies
+	wantStatus(t, first, http.StatusOK)
+	wantStatus(t, second, http.StatusOK)
+	if first.body != second.body || !strings.Contains(first.body, strings.Trim(multipartETag(parts...), `"`)) {
+		t.Fatalf("answers:\n%s\n%s", first.body, second.body)
+	}
+	if puts := a.sink.all(); len(puts) != 1 || len(a.s.Objects()) != 1 {
+		t.Fatalf("sink puts %d, objects %d", len(puts), len(a.s.Objects()))
+	}
+	notStopped(t, a.s)
+}
+
+// A part sent again while the request that streamed it still writes the
+// parts that waited on disk gets its answer at once. The Complete that
+// follows waits for those parts to be written, instead of finding the
+// part list short (seen on CI: ClickHouse sent a part again when the
+// destination was slow, then the Complete, and the upload failed with
+// InvalidPart).
+func TestHandlerCompleteWaitsForWaitingParts(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	parts := []string{"the first part", strings.Repeat("b", 64<<10)}
+	a.sink.stall, a.sink.stalled, a.sink.stallAfter = make(chan struct{}), make(chan struct{}), len(parts[0])+1
+	var release sync.Once
+	unstall := func() { release.Do(func() { close(a.sink.stall) }) }
+	defer unstall() // a failing test must not leave the server waiting on the sink
+	m := e.createUpload(t, a, a.prefix+"data/big.bin")
+	tags := []string{shaTag(parts[0]), etagOf(t, m.part(t, 2, parts[1]))}
+
+	first := make(chan reply, 1)
+	go func() {
+		r, err := e.tryDo(a.cred, http.MethodPut, fmt.Sprintf("/olympos/%s?partNumber=1&uploadId=%s", m.key, m.id),
+			parts[0], md5Header(parts[0]))
+		if err != nil {
+			r.status = -1
+		}
+		first <- r
+	}()
+	select {
+	case <-a.sink.stalled: // part 1 is written, part 2 is being written
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sink got nothing of part 2")
+	}
+	if tag := etagOf(t, m.part(t, 1, parts[0])); tag != tags[0] {
+		t.Fatalf("part 1 sent again: ETag %s, want %s", tag, tags[0])
+	}
+	completed := make(chan reply, 1)
+	go func() {
+		r, err := e.tryDo(a.cred, http.MethodPost, "/olympos/"+m.key+"?uploadId="+m.id, completeXML(tags...))
+		if err != nil {
+			r.status = -1
+		}
+		completed <- r
+	}()
+	select {
+	case r := <-completed:
+		t.Fatalf("the Complete returned while part 2 is being written: %d %s", r.status, r.body)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unstall()
+	r := <-completed
+	wantStatus(t, r, http.StatusOK)
+	wantStatus(t, <-first, http.StatusOK)
+	if !strings.Contains(r.body, strings.Trim(multipartETag(parts...), `"`)) {
+		t.Fatalf("complete: %s", r.body)
+	}
+	if puts := a.sink.all(); len(puts) != 1 || puts[0].err != nil || string(puts[0].body) != strings.Join(parts, "") {
+		t.Fatalf("sink puts: %d", len(puts))
+	}
+	notStopped(t, a.s)
+}
+
+// exclusiveSink refuses a second write of a key while one is in progress,
+// and of a key it stored, as a filesystem destination does (O_EXCL on
+// <file>.partial, link(2) on the file).
+type exclusiveSink struct {
+	mu       sync.Mutex
+	writing  map[string]bool
+	stored   map[string]string
+	refused  int
+	aborted  int
+	inFlight chan struct{} // closed once a write is in progress
+	once     sync.Once
+}
+
+func newExclusiveSink() *exclusiveSink {
+	return &exclusiveSink{writing: map[string]bool{}, stored: map[string]string{}, inFlight: make(chan struct{})}
+}
+
+func (x *exclusiveSink) Put(_ context.Context, key string, r io.Reader) (ingest.ObjectRecord, error) {
+	x.mu.Lock()
+	if x.writing[key] || x.stored[key] != "" {
+		x.refused++
+		x.mu.Unlock()
+		return ingest.ObjectRecord{}, errors.New("another upload in progress, or the file exists")
+	}
+	x.writing[key] = true
+	x.mu.Unlock()
+	x.once.Do(func() { close(x.inFlight) })
+	b, err := io.ReadAll(r)
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	delete(x.writing, key) // the partial file is removed either way
+	if err != nil {
+		x.aborted++
+		return ingest.ObjectRecord{}, err
+	}
+	x.stored[key] = string(b)
+	sum := sha256.Sum256(b)
+	return ingest.ObjectRecord{Key: key, Size: int64(len(b)), SHA256: hex.EncodeToString(sum[:])}, nil
+}
+
+// R36: ClickHouse sends CreateMultipartUpload again when it did not see the
+// answer. The earlier upload of the key is dropped, and its write ended,
+// before the new one starts: no destination refuses it, the run goes on and
+// stores the object once.
+func TestHandlerRetriedCreate(t *testing.T) {
+	e := newEnv(t)
+	x := newExclusiveSink()
+	a := e.backup(t, func(o *ingest.OpenOptions) { o.Sink = x })
+	key := a.prefix + "data/big.bin"
+	first := e.createUpload(t, a, key)
+	wantStatus(t, first.part(t, 1, "a part of the lost upload"), http.StatusOK)
+	<-x.inFlight
+	parts := []string{strings.Repeat("b", 64<<10), "the last part"}
+	second := e.createUpload(t, a, key)
+	var tags []string
+	for i, p := range parts {
+		tags = append(tags, etagOf(t, second.part(t, i+1, p)))
+	}
+	wantStatus(t, second.complete(t, tags...), http.StatusOK)
+	// The earlier upload is gone.
+	for _, r := range []reply{first.part(t, 2, "late"), first.complete(t, "x")} {
+		if r.code() != "NoSuchUpload" {
+			t.Fatalf("the replaced upload: %d %s", r.status, r.code())
+		}
+	}
+	x.mu.Lock()
+	refused, aborted, stored := x.refused, x.aborted, x.stored[key]
+	x.mu.Unlock()
+	if refused != 0 || aborted != 1 || stored != strings.Join(parts, "") {
+		t.Fatalf("sink: %d refused, %d aborted, stored %d bytes", refused, aborted, len(stored))
+	}
+	if got := a.s.Objects(); len(got) != 1 || got[0].Size != int64(len(stored)) {
+		t.Fatalf("objects %+v", got)
+	}
+	notStopped(t, a.s)
+}
+
+// R36: one writer per key. A PutObject beside an open upload of its key, or
+// an upload of a stored key that ends with another object, stops the run as
+// "object rewritten"; nothing is overwritten. The same object again is a
+// repeat, answered from the stored record.
+func TestHandlerOneWriterPerKey(t *testing.T) {
+	e := newEnv(t)
+	t.Run("PutObject beside an open upload", func(t *testing.T) {
+		a := e.backup(t)
+		key := a.prefix + "data/big.bin"
+		m := e.createUpload(t, a, key)
+		wantStatus(t, m.part(t, 1, "part"), http.StatusOK)
+		wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+key, "a whole object"), http.StatusForbidden)
+		if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+			t.Fatalf("stop reason %q", got)
+		}
+		for _, p := range a.sink.all() {
+			if string(p.body) == "a whole object" {
+				t.Fatal("the PutObject reached the sink")
+			}
+		}
+	})
+	upload := func(t *testing.T, a *run, key string, parts ...string) reply {
+		t.Helper()
+		m := e.createUpload(t, a, key)
+		var tags []string
+		for i, p := range parts {
+			tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+		}
+		return m.complete(t, tags...)
+	}
+	t.Run("a second upload of a stored key", func(t *testing.T) {
+		a := e.backup(t)
+		key := a.prefix + "data/big.bin"
+		parts := []string{strings.Repeat("c", 64<<10), "end"}
+		first := upload(t, a, key, parts...)
+		wantStatus(t, first, http.StatusOK)
+		// The same object again: answered, nothing written.
+		again := upload(t, a, key, parts...)
+		wantStatus(t, again, http.StatusOK)
+		if !strings.Contains(again.body, strings.Trim(multipartETag(parts...), `"`)) {
+			t.Fatalf("repeat: %s", again.body)
+		}
+		notStopped(t, a.s)
+		// Another object for the stored key: the run stops.
+		wantStatus(t, upload(t, a, key, "other", "bytes"), http.StatusForbidden)
+		if got := stopReason(t, a.s); got != ingest.ReasonRewrite {
+			t.Fatalf("stop reason %q", got)
+		}
+		if puts := a.sink.all(); len(puts) != 1 || string(puts[0].body) != strings.Join(parts, "") || len(a.s.Objects()) != 1 {
+			t.Fatalf("sink puts %d, objects %d", len(puts), len(a.s.Objects()))
+		}
+	})
+}
+
+// R39: the bytes of a repeat are drained, not stored, and not charged to the
+// run's quota: a PutObject or a multipart upload sent again whole is no
+// second object.
+func TestHandlerRepeatNotCharged(t *testing.T) {
+	e := newEnv(t)
+	parts := []string{strings.Repeat("c", 64<<10), "end"}
+	size := int64(len(parts[0]) + len(parts[1]))
+	a := e.backup(t, func(o *ingest.OpenOptions) { o.MaxBytes = 2*size + 10 })
+	put := a.prefix + "data/small.bin"
+	body := strings.Repeat("p", int(size))
+	for range 3 {
+		wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+put, body), http.StatusOK)
+	}
+	key := a.prefix + "data/big.bin"
+	for range 3 {
+		m := e.createUpload(t, a, key)
+		var tags []string
+		for i, p := range parts {
+			tags = append(tags, etagOf(t, m.part(t, i+1, p)))
+		}
+		wantStatus(t, m.complete(t, tags...), http.StatusOK)
+	}
+	notStopped(t, a.s)
+	if n := len(a.s.Objects()); n != 2 {
+		t.Fatalf("%d objects", n)
 	}
 }
