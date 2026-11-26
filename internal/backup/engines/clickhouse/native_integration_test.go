@@ -111,10 +111,11 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 	// its base from it.
 	st := newDirStore(t, 0)
 	var fullID string
+	var fullRun *nativeTestRun
 	t.Run("full", func(t *testing.T) {
 		in := newIngest(t, db)
 		r := in.open(t, st, nil)
-		fullID = r.id
+		fullID, fullRun = r.id, r
 		var target backup.NativeTarget
 		r.before = func(_ context.Context, nt backup.NativeTarget) ([]string, error) { target = nt; return nil, nil }
 		v, err := runNative(t, chc, r, nil, "spike", "big")
@@ -219,6 +220,94 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 			t.Fatal("the incremental read nothing of its base")
 		}
 		in.checkNoSecret(t, r, engineLogs)
+	})
+
+	// Task 13: a chain of three, as the worker takes it, on one endpoint: an
+	// incremental on the full, then one on that incremental, whose
+	// credential reads both runs before it. Their manifests build along the
+	// chain; a Log table's count.txt that grew from 2 to 20 rows (ClickHouse
+	// may take "2" from the base and write "0") counts 20.
+	t.Run("chain", func(t *testing.T) {
+		if fullRun == nil {
+			t.Skip("no full backup to take it on")
+		}
+		in := newIngest(t, db)
+		mid := in.open(t, st, []string{fullID + "/"})
+		midBase := &NativeBase{URL: in.url + "/olympos/" + fullID + "/", RunID: fullID}
+		if _, err := runNative(t, chc, mid, midBase, "spike", "big"); err != nil {
+			t.Fatalf("RunNative on the full: %v", err)
+		}
+		chc.wantStatus(t, mid.id, statusCreated)
+		mid.s.Revoke("run ended")
+		chc.query(t, `INSERT INTO spike.applog SELECT 100 + number, 'grown' FROM numbers(18);
+INSERT INTO spike.applog_copy SELECT 100 + number, 'grown' FROM numbers(18);`)
+		last := in.open(t, st, []string{fullID + "/", mid.id + "/"})
+		lastBase := &NativeBase{URL: in.url + "/olympos/" + mid.id + "/", RunID: mid.id}
+		if _, err := runNative(t, chc, last, lastBase, "spike", "big"); err != nil {
+			t.Fatalf("RunNative on the incremental: %v", err)
+		}
+		chc.wantStatus(t, last.id, statusCreated)
+		last.s.Revoke("run ended")
+
+		// What a run did not keep is its base chain's, read from the store.
+		body := func(s *ingest.Session) func(string) ([]byte, bool) {
+			return func(key string) ([]byte, bool) {
+				if b, ok := s.Captured(key); ok {
+					return b, true
+				}
+				b, err := os.ReadFile(st.path(key))
+				return b, err == nil
+			}
+		}
+		build := func(r *nativeTestRun, base *NativeBase, chain []*NativeManifest) *NativeManifest {
+			t.Helper()
+			baseURL := ""
+			if base != nil {
+				baseURL = base.URL
+			}
+			m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, false, baseURL),
+				Objects: r.s.Objects(), Body: body(r.s), Base: chain})
+			if err != nil {
+				t.Fatalf("manifest of %s: %v", r.id, err)
+			}
+			return m
+		}
+		mFull := build(fullRun, nil, nil)
+		mMid := build(mid, midBase, []*NativeManifest{mFull})
+		mLast := build(last, lastBase, []*NativeManifest{mFull, mMid})
+		for _, name := range []string{"applog", "applog_copy"} {
+			if got := rowsOf(t, mMid, "spike", name); got != 2 {
+				t.Errorf("%s in the first incremental: %d rows, want 2", name, got)
+			}
+			if got := rowsOf(t, mLast, "spike", name); got != 20 {
+				t.Errorf("%s in the second incremental: %d rows, want 20", name, got)
+			}
+		}
+		if got, want := rowsOf(t, mLast, "spike", "events"), rowsOf(t, mFull, "spike", "events")+1000; got != want {
+			t.Errorf("events: %d rows, want %d", got, want)
+		}
+		raw, _ := last.s.Captured(last.id + "/.backup")
+		meta, err := ParseBackupMeta(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range meta.Files {
+			if f.Name == "data/spike/applog/count.txt" {
+				t.Logf("applog/count.txt in the second incremental: size %d, use_base %v, base_size %d, data_file %q",
+					f.Size, f.UseBase, f.BaseSize, f.DataFile)
+			}
+		}
+		kv := newFakeVault()
+		var raws [][]byte
+		for _, m := range []*NativeManifest{mFull, mMid, mLast} {
+			raws = append(raws, signedJSON(t, kv, testManifestKey, m))
+		}
+		if _, err := VerifyChain(context.Background(), kv, testManifestKey, last.id, raws); err != nil {
+			t.Fatalf("the chain: %v", err)
+		}
+		t.Logf("requests of the chain:\n%s", in.rec.summary())
+		in.rec.checkR13(t)
+		in.checkNoSecret(t, last, engineLogs)
 	})
 
 	t.Run("stop kills", func(t *testing.T) {
