@@ -199,16 +199,23 @@ which writes to the Olympos server as if it were S3; a native restore is ClickHo
 through the same endpoint. This adds four things to the model (SPEC §0 principle 1 and §10.4, spec-changes
 #27). It is all off until `ingest.url` is set.
 
-**A listening port.** `listen.ingest` (`:9444`) speaks a small part of S3 on one bucket: list, put, the
-multipart upload calls, get, and the delete of a run's `.lock`, which lives in the run's memory and never
-reaches storage. Everything else (head, other deletes, copies, bucket operations) is refused `403`. Every request is
-signed (SigV4) with the credential of one run; the signature is checked before a body is read, and the body's
-SHA-256 (and `Content-MD5` when sent) while it streams. Over HTTPS the signature need not cover the body
-(`UNSIGNED-PAYLOAD`): ClickHouse signs no body over TLS, TLS protects it in transit, and the endpoint hashes every
-object it stores; over plain HTTP the body must be signed. `aws-chunked` is refused. The
-port serves HTTPS (TLS 1.2 or later, HTTP/1.1 only), plain HTTP only in a dev build with `devMode`. Limits per
-run bound what a misbehaving client can do: bytes written ([configuration](configuration.md#ingest)), 200
-requests a second (30 seconds over it stops the run), the run's duration, and `ingest.maxRuns` runs at once.
+**A listening port.** `listen.ingest` (`:9444`) speaks a small part of S3 on one bucket: list, put, the multipart
+upload calls, get, and the delete of a run's `.lock`, which lives in the run's memory and never reaches storage.
+Everything else (head, other deletes, copies, bucket operations) is refused `403`. Every request is signed (SigV4)
+with the credential of one run; the signature is checked before a body is read, and the body's SHA-256 (and
+`Content-MD5` when sent) while it streams. Over HTTPS the endpoint also accepts `UNSIGNED-PAYLOAD`, because
+ClickHouse's S3 client sends it on every request over HTTPS; over plain HTTP (`devMode` only) the body must be
+signed with its SHA-256, and `aws-chunked` is always refused. With `UNSIGNED-PAYLOAD` the signature no longer
+covers the body, so a PutObject or UploadPart must carry a `Content-MD5` that the signature covers, which binds the
+body again through its MD5 (ClickHouse 24.8 sends one, signed, on both). TLS protects the body in transit, and the
+endpoint's own SHA-256 of every object goes into the signed manifest. A CompleteMultipartUpload has no
+`Content-MD5`; its part list must match the parts received. Over TLS the signature then binds the body only through
+its MD5: someone who saw a request's headers within the 15 minutes of clock skew (a TLS-terminating middlebox,
+ClickHouse's trace log of S3 requests) could replay them, onto a key the run has not written yet, only with a body
+of the same MD5, which for a body they did not choose takes an MD5 second preimage ([spec-changes](spec-changes.md)
+#28). The port serves HTTPS (TLS 1.2 or later, HTTP/1.1 only), plain HTTP only in a dev build with `devMode`.
+Limits per run bound what a misbehaving client can do: bytes written ([configuration](configuration.md#ingest)),
+200 requests a second (30 seconds over it stops the run), the run's duration, and `ingest.maxRuns` runs at once.
 
 **A credential that enters the cluster** (the third exception to [Cluster ↛ credentials](#trust-boundaries),
 SPEC §0's second).

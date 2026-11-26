@@ -77,10 +77,13 @@ nothing was deleted, was rejected.
     `InvalidAccessKeyId`.
   - The body's SHA-256 is computed while it streams and compared with `x-amz-content-sha256` at the end, and
     the same for `Content-MD5` when it is sent.
-  - `aws-chunked` is refused, and so is `UNSIGNED-PAYLOAD` over plain HTTP. Over HTTPS `UNSIGNED-PAYLOAD` is
-    accepted: ClickHouse sends it on every request over TLS (the AWS SDK's `PayloadSigningPolicy::Never`; the
-    spike ran over HTTP, where the SDK signs the body), so the body is then checked only against `Content-MD5`
-    when sent; TLS protects it in transit, and its SHA-256 still goes into the manifest (Task 19, lab).
+  - Over HTTPS the endpoint also accepts `UNSIGNED-PAYLOAD`, because ClickHouse's S3 client sends it on every
+    request over HTTPS; over plain HTTP (`devMode` only) the body must be signed with its SHA-256, and
+    `aws-chunked` is always refused. With `UNSIGNED-PAYLOAD` the signature no longer covers the body, so a
+    PutObject or UploadPart must carry a `Content-MD5` that the signature covers, which binds the body again
+    through its MD5 (ClickHouse 24.8 sends one, signed, on both). TLS protects the body in transit, and the
+    endpoint's own SHA-256 of every object goes into the signed manifest. A CompleteMultipartUpload has no
+    `Content-MD5`; its part list must match the parts received. Decided in the lab (Task 19; spec-changes #28).
   - The signature code is tested against AWS's published SigV4 test vectors.
 - **The `.lock`.** `PUT`, `GET` and `List` of `<run-id>/.lock` use a map in the run's session; `DELETE` removes
   it. It never reaches storage, and it is not in the manifest.
