@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - unreleased
+
+Native ClickHouse backups and restores with ClickHouse's own `BACKUP` and `RESTORE`, written through a new
+ingest endpoint of the server and signed; installs with Argo CD or Flux; a release candidate first for every
+security-model change. Release candidate: v0.4.0-rc.1.
+
 ### Added
 - **Native ClickHouse backups and restores** ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).
   A ClickHouse job can take its backups with ClickHouse's own `BACKUP` instead of the logical export, and a
@@ -55,7 +61,7 @@ All notable changes to this project are documented here. The format follows
   the pull requests `security-model`. See `docs/development.md` › Releases.
 
 ### Upgrade notes
-- Nothing needs action: native backups stay off until `ingest.url` is set, and existing ClickHouse jobs keep
+- From v0.3.1 nothing needs action: native backups stay off until `ingest.url` is set, and existing ClickHouse jobs keep
   the logical method. Migrations `00026` (ingest credentials, without their secrets) and `00027` (the object
   count of a run) run at start.
 - To use native backups, follow `docs/install.md` §5: set `ingest.url`, let ClickHouse trust the endpoint's
