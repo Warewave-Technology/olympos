@@ -24,6 +24,7 @@ paths=(
   internal/backup/engines/clickhouse/replicated.go
   internal/backup/engines/clickhouse/native.go
   internal/backup/engines/clickhouse/native_restore.go
+  internal/backup/engines/clickhouse/restore_shared.go
   internal/backup/native.go
   internal/backup/native_chain.go
   internal/backup/native_restore.go

@@ -197,6 +197,19 @@ if printf 'internal/backup/restore_guide_test.go\ninternal/restore/api_test.go\n
   echo "FAIL: --files matched a file next to the restore source or the open-time rules" >&2
   fail=1
 fi
+# The helpers that decide what a restore creates (quoting, the databases it
+# creates or refuses, the schema bound); the files they were moved out of
+# are not on the list.
+if ! out=$(printf 'internal/backup/engines/clickhouse/restore_shared.go\ninternal/backup/engines/clickhouse/conn.go\ninternal/backup/engines/clickhouse/restore.go\ninternal/backup/engines/clickhouse/table.go\ninternal/backup/engines/clickhouse/options.go\ninternal/restore/request.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/restore_shared.go ]; then
+  echo "FAIL: --files with the restore's shared helpers: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/restore_shared_test.go\ninternal/backup/engines/clickhouse/restore_shared.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore's shared helpers" >&2
+  fail=1
+fi
 # The execution of a native restore: the decisions approved (R50), the
 # read-only credential over the chain and the source it is served from.
 if ! out=$(printf 'internal/restore/executor.go\ninternal/restore/native_execute.go\n' | "$script" --files) ||

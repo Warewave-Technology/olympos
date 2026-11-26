@@ -94,28 +94,6 @@ type Options struct {
 	Native *NativeOptions `json:"native,omitempty"`
 }
 
-// NativeOptions are what the check of a native copy decided when the
-// request was opened (R50): the databases restored and every object of
-// them the restore leaves out, with the reason, in the check's order. The
-// checker approves this list (the request page shows it), and the
-// executor refuses to start when the check it runs again at start decides
-// otherwise.
-type NativeOptions struct {
-	Databases []string                `json:"databases"`
-	Excluded  []backup.NativeDecision `json:"excluded"`
-}
-
-// nativeOptions is the R50 record of a check's decisions for databases.
-func nativeOptions(databases []string, objects []backup.NativeDecision) *NativeOptions {
-	o := &NativeOptions{Databases: append([]string{}, databases...), Excluded: []backup.NativeDecision{}}
-	for _, d := range objects {
-		if !d.Allowed {
-			o.Excluded = append(o.Excluded, d)
-		}
-	}
-	return o
-}
-
 // EngineOptions are the engine options of the target's EngineContext for a
 // request: only the CA bundle, under each engine's own key.
 func EngineOptions(engine string, o Options) json.RawMessage {

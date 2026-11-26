@@ -436,6 +436,3 @@ func buildTable(db, target string, t Table, ddl, requestID string) (*tableDef, s
 	def.notRestored = lost
 	return def, ""
 }
-
-// databaseSQL is the CREATE DATABASE of a restored database.
-func databaseSQL(db string) string { return "CREATE DATABASE " + quoteIdent(db) + " ENGINE = Atomic" }

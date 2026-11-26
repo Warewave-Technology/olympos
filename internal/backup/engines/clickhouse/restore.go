@@ -38,22 +38,6 @@ func init() {
 	restore.RegisterInspector(Name, Engine{})
 }
 
-// restorableDatabaseEngines are the database engines a restore creates. A
-// Replicated database is refused (its Keeper path could collide with the
-// source's when Keeper is shared); the others proxy external systems.
-var restorableDatabaseEngines = map[string]bool{"Atomic": true, "Ordinary": true, "Lazy": true, "Memory": true}
-
-func databaseEngineProblem(engine string) string {
-	switch {
-	case engine == "Replicated":
-		return "it has the Replicated database engine, which Olympos does not restore: its Keeper path could collide with the source's " +
-			"when Keeper is shared (restore its tables into an Atomic database by hand)"
-	case !restorableDatabaseEngines[engine]:
-		return "it has the " + engine + " database engine, a proxy for another system, which Olympos does not restore"
-	}
-	return ""
-}
-
 // targetDB is a selected database found on the target.
 type targetDB struct {
 	engine  string
@@ -211,16 +195,10 @@ func hasEntries(t Table) bool {
 	return false
 }
 
-// maxSchemaEntry bounds the bytes of a schema entry that are read into
-// memory and lexed, and maxManifest those of the manifest. A schema entry is
-// only read for its ENGINE clause, and the lexer's cost grows with the
-// number of tokens (a 16 MiB run of commas takes about 3.6 GB of heap), so
-// the cap is small: a longer entry is not read, and the table whose engine
-// parameters it would have given is reported as not created.
-const (
-	maxSchemaEntry = 1 << 20
-	maxManifest    = 256 << 20
-)
+// maxManifest bounds the bytes of the logical backup's manifest that are
+// read into memory (maxSchemaEntry, restore_shared.go, those of a schema
+// entry).
+const maxManifest = 256 << 20
 
 func readSmall(f *zip.File, max int64) ([]byte, error) {
 	if f.UncompressedSize64 > uint64(max) {
@@ -278,20 +256,6 @@ func planDatabase(md *Database, entries map[string]*zip.File, ts *targetState, r
 		p.notes[i] = printable(p.notes[i])
 	}
 	return p, printable(msg)
-}
-
-// printable escapes control characters (names in the backup may hold
-// any) so a message is one plain line.
-func printable(s string) string {
-	var b strings.Builder
-	for _, r := range s {
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r < 0xa0) {
-			fmt.Fprintf(&b, "\\x%02x", r)
-			continue
-		}
-		b.WriteRune(r)
-	}
-	return b.String()
 }
 
 // maxFileName is the longest file name the target's filesystem takes; a
