@@ -78,6 +78,81 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestOptionsMethod(t *testing.T) {
+	// Existing jobs have no method: empty means logical and still parses.
+	for _, raw := range []string{``, `{}`, `{"databases":["a"]}`, `{"method":""}`, `{"method":"logical"}`} {
+		o, err := ParseOptions(json.RawMessage(raw))
+		if err != nil {
+			t.Fatalf("%q: %v", raw, err)
+		}
+		if o.Native() || o.Incremental != "" {
+			t.Fatalf("%q: expected logical, got %+v", raw, o)
+		}
+	}
+	o, err := ParseOptions(json.RawMessage(`{"method":"native"}`))
+	if err != nil || !o.Native() || o.Incremental != "" {
+		t.Fatalf("native: %+v %v", o, err)
+	}
+	o, err = ParseOptions(json.RawMessage(`{"method":"native","incremental":"weekly_full_daily","databases":["a"]}`))
+	if err != nil || !o.Native() || o.Incremental != IncrementalWeeklyFullDaily {
+		t.Fatalf("native incremental: %+v %v", o, err)
+	}
+
+	bad := map[string]struct{ field, want string }{
+		`{"method":"fast"}`:                                      {"method", "native"},
+		`{"method":"Native"}`:                                    {"method", "native"},
+		`{"method":" native"}`:                                   {"method", "native"},
+		`{"method":"native","incremental":"hourly"}`:             {"incremental", "weekly_full_daily"},
+		`{"incremental":"weekly_full_daily"}`:                    {"incremental", `method "native"`},
+		`{"method":"logical","incremental":"weekly_full_daily"}`: {"incremental", `method "native"`},
+		`{"method":"","incremental":"weekly_full_daily"}`:        {"incremental", `method "native"`},
+		`{"method":"logical","incremental":"hourly"}`:            {"incremental", "weekly_full_daily"},
+	}
+	for raw, w := range bad {
+		_, err := ParseOptions(json.RawMessage(raw))
+		if err == nil || !strings.Contains(err.Error(), w.want) {
+			t.Errorf("%s: got %v, want error containing %q", raw, err, w.want)
+			continue
+		}
+		if f := (Engine{}).CheckOptions(json.RawMessage(raw), backup.OptionsEnv{IngestEnabled: true}); f[w.field] == "" || len(f) != 1 {
+			t.Errorf("%s: fields %v, want only %q", raw, f, w.field)
+		}
+	}
+}
+
+func TestCheckOptions(t *testing.T) {
+	on, off := backup.OptionsEnv{IngestEnabled: true}, backup.OptionsEnv{}
+	e := Engine{}
+	for _, raw := range []string{``, `{}`, `{"method":"logical"}`, `{"databases":["a"]}`} {
+		if f := e.CheckOptions(json.RawMessage(raw), off); f != nil {
+			t.Errorf("%q with ingest off: %v", raw, f)
+		}
+	}
+	native := json.RawMessage(`{"method":"native"}`)
+	if f := e.CheckOptions(native, on); f != nil {
+		t.Fatalf("native with ingest on: %v", f)
+	}
+	if f := e.CheckOptions(native, off); f["method"] == "" || len(f) != 1 {
+		t.Fatalf("native with ingest off: %v", f)
+	}
+	// R42: until incrementals are built (task 13), the API refuses them.
+	incr := json.RawMessage(`{"method":"native","incremental":"weekly_full_daily"}`)
+	if f := e.CheckOptions(incr, on); f["incremental"] != "incremental native backups are not available yet" || len(f) != 1 {
+		t.Fatalf("incrementals: %v", f)
+	}
+	// A native run backs up whole databases, so a table filter is refused.
+	tables := json.RawMessage(`{"method":"native","databases":["a"],"tables":["a.t"]}`)
+	if f := e.CheckOptions(tables, on); !strings.Contains(f["tables"], `method "native"`) || len(f) != 1 {
+		t.Fatalf("native with tables: %v", f)
+	}
+	if f := e.CheckOptions(json.RawMessage(`{"method":"logical","tables":["a.t"]}`), on); f != nil {
+		t.Fatalf("logical with tables: %v", f)
+	}
+	if f := e.CheckOptions(json.RawMessage(`{"databse":["a"]}`), on); !strings.Contains(f["engine_options"], "unknown field") || len(f) != 1 {
+		t.Fatalf("typo: %v", f)
+	}
+}
+
 func TestPathSegment(t *testing.T) {
 	cases := map[string]string{
 		"events":           "events",

@@ -37,7 +37,7 @@ var (
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if azStarted {
-		_ = exec.Command("docker", "rm", "-f", azuriteName).Run()
+		_ = exec.Command("docker", "rm", "-f", "-v", azuriteName).Run()
 	}
 	testutil.StopMinIO()
 	os.Exit(code)
@@ -47,7 +47,7 @@ func startAzurite() (string, error) {
 	if err := exec.Command("docker", "info").Run(); err != nil {
 		return "", fmt.Errorf("docker not available: %w", err)
 	}
-	_ = exec.Command("docker", "rm", "-f", azuriteName).Run()
+	_ = exec.Command("docker", "rm", "-f", "-v", azuriteName).Run()
 	out, err := exec.Command("docker", "run", "-d", "--name", azuriteName, "-p", "127.0.0.1::10000", azuriteImage,
 		"azurite-blob", "--blobHost", "0.0.0.0", "--skipApiVersionCheck", "--loose").CombinedOutput()
 	if err != nil {

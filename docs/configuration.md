@@ -156,9 +156,12 @@ At start the server retries the connection for up to two minutes.
 
 ### `ingest`
 
-> **In development ([#62](https://github.com/Warewave-Technology/olympos/issues/62)): native ClickHouse backups
-> are not available yet.** The endpoint and its keys below exist, but no backup method uses them, so leave
-> `ingest.url` unset in production.
+> **Native ClickHouse backups can be taken, not restored yet
+> ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).** With `ingest.url` set, a ClickHouse job
+> can use the native method: ClickHouse runs `BACKUP` to this endpoint, and the server stores the backup, with
+> a signed manifest, in the job's destinations. Restoring a native backup is not available yet (the backups are
+> kept), and neither are incremental native backups. New ClickHouse jobs start on the logical method, which
+> can be restored; choose native for a job only to try it out next to a logical job.
 
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
 listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS
@@ -174,7 +177,36 @@ because a run's session and its credential live in the one process that opened t
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
 | `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. |
+| `ingest.maxRunBytes` | int (bytes) | `0` (automatic) | no | How many bytes one native run may write, for every job alike. `0` is the automatic limit below; a positive value replaces it, for example `536870912000` for 500 GiB. |
 | `ingest.spillDir` | path | operating system's temporary directory | no | Where parts that arrive out of order wait for their turn: up to 1 GiB per run, so size the volume for `maxRuns` × 1 GiB. When a run's parts fill its 1 GiB, ClickHouse is told to send the next early part again later (`503 SlowDown`); the run goes on. Files a crash left here (`olympos-ingest-*.part`) are removed when the server starts. The Helm chart mounts a volume for it. |
+
+**The byte limit of a native run.** A run may write at most the largest of:
+
+- twice the job's last full native run that succeeded or partly succeeded (not a dry run);
+- 1.5 times what the run's databases hold on disk, the `bytes_on_disk` of their active parts in
+  `system.parts`, which the server reads on the target just before the `BACKUP`;
+- 1 GiB.
+
+So a large database is backed up the first time, and one that grew is backed up after its growth. A file
+that ClickHouse sends again whole (a retry) is not counted twice. The limit stops a client that writes far
+more than the database holds; it is not a retention or cost control. A run that goes over it is ended with
+`KILL QUERY` and fails with `native byte limit: the run wrote more than <limit> (…); set ingest.maxRunBytes to
+allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to
+every native job), or back to `0` for the automatic limit.
+
+**Dry runs.** The dry run of a native job (*Review & test run* in the backup wizard) is a `BACKUP` with
+`structure_only = 1`: ClickHouse writes the databases' definitions and no data, through the endpoint to the
+destinations. It checks egress, the endpoint's certificate, the run's credential, the signed manifest and the
+tags in seconds, however large the databases are; it does not show how long the data takes to upload.
+
+**Backups left running.** When the server stops in the middle of a native run, or loses the agent, the
+`BACKUP` can go on running on the ClickHouse server, retrying uploads the endpoint refuses. Before its own
+`BACKUP`, every native run lists the native backups running on that ClickHouse server (`system.processes`,
+query ids `olympos-backup-<run-id>`) and ends with `KILL QUERY` those whose runs are over; it never ends the
+backup of a run that is still running, such as another job's on the same target, nor one of a run this server
+does not know. The failed run's error names the statement to run by hand when you do not want to wait:
+`KILL QUERY WHERE query_id = 'olympos-backup-<run-id>' SYNC`. A Service with several ClickHouse pods sends a
+run to one of them, so a backup left on another pod waits for a run that lands there.
 
 ### `targetTLS`
 
@@ -284,6 +316,7 @@ Validation collects every problem and fails with `invalid config: <problem>; <pr
 | `ingest.url must be https unless devMode is on` | Use an `https` URL. Plain HTTP is for a lab on a dev build (`devMode`). |
 | `ingest.tlsCertFile needs an https ingest.url` / `listen.ingest must not be empty while ingest.url is set` | Use an `https` URL with certificate files; set `listen.ingest` to an address or leave it out for `:9444`. |
 | `ingest.maxRuns must be positive` / `ingest.maxRunDuration must be positive` | Use a positive value, or leave the key out for the default. |
+| `ingest.maxRunBytes must be 0 (automatic) or positive` | Use a byte count, or `0` (or leave the key out) for the automatic limit. |
 | `ingest.url cannot be set while experimental.multiReplica is true: ingest sessions live in one server process` | Run one server instance for native ClickHouse backups, or leave `ingest.url` unset. |
 | `backup.s3PartSizeMiB must be between 5 and 5120` | Fix the value. |
 | `set database.dsn or database.dsnRef, not both` | Remove one. `OLYMPOS_DATABASE_DSN` counts as `dsn`. |
@@ -342,9 +375,9 @@ The `olympos:` defaults in `values.yaml` are: `publicURL: https://olympos.contos
 `keyVault: {provider: azure, name: "", kekName: olympos-kek, hmacSecretName: olympos-hmac,
 managedIdentityClientID: ""}`, `database.dsnRef: ""`, `slack.botTokenRef: ""`, `deadMansSwitch.url: ""`,
 `backup: {globalConcurrency: 4, perClusterConcurrency: 2}`, `changeRequests.ttl: 72h`,
-`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h}`. Native ClickHouse backups are off until you set
+`ingest: {url: "", maxRuns: 4, maxRunDuration: 6h, maxRunBytes: 0}`. Native ClickHouse backups are off until you set
 `olympos.ingest.url`, for example the in-cluster Service,
-`https://<release>-ingest.<namespace>.svc:9444` (in development, see [`ingest`](#ingest): not available yet). You must at least
+`https://<release>-ingest.<namespace>.svc:9444` (native backups can be taken but not restored yet, see [`ingest`](#ingest)). You must at least
 set `publicURL`, `agentGatewayURL`, `entra.tenantID`, `entra.clientID` and `keyVault.name`.
 
 ### What the chart sets for you

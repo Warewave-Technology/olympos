@@ -35,6 +35,9 @@ type API struct {
 	Now    func() time.Time
 	// TestTimeout bounds a connection test (default 60 s).
 	TestTimeout time.Duration
+	// IngestEnabled is cfg.IngestEnabled(): the ingest endpoint of native
+	// ClickHouse backups is on (ingest.url is set).
+	IngestEnabled bool
 }
 
 // Routes mounts the module under /api/v1.
@@ -50,6 +53,7 @@ func (a *API) Routes(r chi.Router) {
 	r.Get("/backup/runs/{id}", a.getRun)
 	r.Post("/backup/test-connection", a.testConnection)
 	r.Get("/backup/schedule-preview", a.schedulePreview)
+	r.Get("/backup/settings", a.getSettings)
 	r.Get("/backup/self", a.getSelf)
 	r.Put("/backup/self", a.putSelf)
 	r.Post("/backup/self/run", a.runSelf)
@@ -120,6 +124,22 @@ func validOptions(raw json.RawMessage) bool {
 	}
 	var m map[string]any
 	return json.Unmarshal(raw, &m) == nil
+}
+
+// checkEngineOptions adds the field errors of engine's own check of raw, for
+// engines that have one (OptionsChecker). raw must be a valid JSON object.
+func (a *API) checkEngineOptions(engine string, raw json.RawMessage, fields map[string]string) {
+	e, ok := EngineFor(engine)
+	if !ok {
+		return
+	}
+	c, ok := e.(OptionsChecker)
+	if !ok {
+		return
+	}
+	for k, v := range c.CheckOptions(raw, OptionsEnv{IngestEnabled: a.IngestEnabled}) {
+		fields[k] = v
+	}
 }
 
 func validRetention(r Retention) bool {
@@ -347,6 +367,8 @@ func (a *API) createJob(w http.ResponseWriter, r *http.Request) {
 	}
 	if !validOptions(in.EngineOptions) {
 		fields["engine_options"] = "must be an object"
+	} else if engine != "" {
+		a.checkEngineOptions(engine, in.EngineOptions, fields)
 	}
 	ret := DefaultRetention
 	if in.Retention != nil {
@@ -461,6 +483,8 @@ func (a *API) patchJob(w http.ResponseWriter, r *http.Request) {
 	if len(in.EngineOptions) > 0 {
 		if !validOptions(in.EngineOptions) {
 			fields["engine_options"] = "must be an object"
+		} else {
+			a.checkEngineOptions(j.Target.Engine, in.EngineOptions, fields)
 		}
 		opts = in.EngineOptions
 		changed = append(changed, "engine_options")
@@ -1010,6 +1034,13 @@ func TargetEngineContext(ctx context.Context, q store.Querier, d Dialer, targetI
 	}
 	ec, _ := newEngineContext(d, t, opts, cred, false)
 	return ec, t.clusterID, nil
+}
+
+// getSettings answers GET /backup/settings: what the wizard needs to know
+// about the server's configuration (whether native ClickHouse backups are
+// available).
+func (a *API) getSettings(w http.ResponseWriter, r *http.Request) {
+	httpx.JSON(w, http.StatusOK, map[string]any{"ingest_enabled": a.IngestEnabled})
 }
 
 // schedulePreview answers GET /backup/schedule-preview.

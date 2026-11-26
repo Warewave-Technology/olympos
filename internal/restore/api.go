@@ -138,6 +138,9 @@ type sourceRun struct {
 	engine          string
 	clusterID       uuid.UUID
 	labels          map[string]string
+	// native: a ClickHouse native run, recognised as the run API does
+	// (backup.Run.Method).
+	native bool
 }
 
 // targetInfo is the target a request restores into.
@@ -388,9 +391,9 @@ func noInspectorMessage(engine string) string {
 func loadSourceRun(ctx context.Context, q store.Querier, runID uuid.UUID) (sourceRun, error) {
 	var run sourceRun
 	err := q.QueryRow(ctx, `SELECT r.status, r.trigger, j.target_id, COALESCE(t.engine, ''), COALESCE(t.cluster_id, '00000000-0000-0000-0000-000000000000'),
-		COALESCE(c.labels, '{}')
+		COALESCE(c.labels, '{}'), r.objects IS NOT NULL OR r.finished_at IS NULL AND COALESCE(j.engine_options->>'method' = 'native', false)
 		FROM backup_runs r JOIN backup_jobs j ON j.id = r.job_id LEFT JOIN targets t ON t.id = j.target_id LEFT JOIN clusters c ON c.id = t.cluster_id
-		WHERE r.id = $1`, runID).Scan(&run.status, &run.trigger, &run.targetID, &run.engine, &run.clusterID, &run.labels)
+		WHERE r.id = $1`, runID).Scan(&run.status, &run.trigger, &run.targetID, &run.engine, &run.clusterID, &run.labels, &run.native)
 	return run, err
 }
 
@@ -404,12 +407,18 @@ func loadTargetInfo(ctx context.Context, q store.Querier, targetID string) (targ
 	return t, err
 }
 
-// sourceRules: the run is succeeded or partial and not a test run, and the
-// chosen copy is a succeeded copy of it or of one of its repairs (as the
-// restore guide offers). Broken rules are added to fields; the copy is
-// returned when it was found. err is an internal error only.
+// errNativeSource refuses a native ClickHouse run as a source until native
+// restore is built (R38): its copy is a directory, not one blob.
+const errNativeSource = "native restore is not available yet; the backup is kept"
+
+// sourceRules: the run is succeeded or partial, not a test run and not a
+// native run, and the chosen copy is a succeeded copy of it or of one of its
+// repairs (as the restore guide offers). Broken rules are added to fields;
+// the copy is returned when it was found. err is an internal error only.
 func sourceRules(ctx context.Context, q store.Querier, run sourceRun, runID uuid.UUID, destID *uuid.UUID, fields map[string]string) (*backup.RestoreSource, error) {
 	switch {
+	case run.native:
+		fields["run_id"] = errNativeSource
 	case run.trigger == "test":
 		fields["run_id"] = "a dry run holds no data to restore"
 	case run.status != "succeeded" && run.status != "partial":

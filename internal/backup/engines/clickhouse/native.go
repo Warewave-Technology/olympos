@@ -1,194 +1,786 @@
 package clickhouse
 
-// Streaming ClickHouse data as "FORMAT Native" over the native protocol.
-//
-// Over the native TCP protocol the FORMAT clause of a SELECT is a client-side
-// concern: the server always answers with Data packets carrying blocks
-// (clickhouse-client is what turns them into the Native file format). So we
-// cannot ask the server for raw "FORMAT Native" bytes on port 9000/9440 the
-// way the HTTP interface would return them.
-//
-// Approach: we use github.com/ClickHouse/ch-go, which exposes the protocol
-// block by block (zstd network compression, custom net.Conn). nativeResult
-// is a proto.Result that decodes each incoming block into ch-go columns
-// (types inferred from the block header via proto.ColAuto) and
-// writeNativeBlock re-encodes it immediately in the Native *format* layout:
-//
-//	varuint columns, varuint rows,
-//	per column: String name, String type, [serialization state prefix], data
-//
-// This is exactly the layout ClickHouse's NativeWriter emits for
-// "FORMAT Native" (client revision 0: no BlockInfo, no custom-serialization
-// flag), so the files load with `INSERT INTO t FORMAT Native`. The column
-// data serialization is ClickHouse's own binary column encoding, which ch-go
-// reproduces byte-compatibly; only one block (default max_block_size rows) is
-// held in memory at a time, giving natural back-pressure from the Blob writer
-// to the socket.
-//
-// The type string written into the file is the one the server sent (not
-// ch-go's normalized type), so parameters such as Enum values, DateTime
-// time zones and Decimal scales are preserved verbatim.
-//
-// Types ch-go cannot decode (Tuple, most Map variants, AggregateFunction,
-// Variant/Dynamic/JSON, LowCardinality(Nullable(...)), Nested, ...) are
-// detected up front from system.columns. Such tables fall back to
-// RowBinaryWithNamesAndTypes: the server serializes each row with
-// formatRowNoNewline('RowBinary', *) (server-side, so every type including
-// aggregate function states is supported), the client concatenates the rows
-// behind a names-and-types header. See engine.go (streamRowBinary).
+// Native backups (#62, design docs/design/clickhouse-native.md §4): the
+// target runs BACKUP DATABASE … TO S3(…) against the Olympos ingest endpoint
+// (internal/ingest), with the run's own credential. Olympos sends the
+// statement, polls system.backups and, when the run must end early, KILLs
+// it, all over one connection: system.backups and the process list are per
+// server, and a Service may route a second connection to another pod.
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+	"log/slog"
+	"net/url"
+	"slices"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
+	"github.com/ClickHouse/ch-go"
 	"github.com/ClickHouse/ch-go/proto"
+
+	"github.com/Warewave-Technology/olympos/internal/backup"
 )
 
-// protocolVersion is the native protocol revision we announce. It is kept
-// below FeatureCustomSerialization (54454) defensively: a client of that
-// revision can never be sent sparse/custom column serializations, which
-// ch-go cannot decode and which the Native file format (revision 0) cannot
-// carry. (24.8 already materializes sparse columns in SELECT results; the
-// integration test covers a table with sparse parts.) Nothing we use needs
-// a newer revision.
-const protocolVersion = 54453
+const (
+	// nativeBucket is the ingest endpoint's one bucket.
+	nativeBucket = "olympos"
+	// nativePollInterval is how often system.backups is read while the
+	// backup runs.
+	nativePollInterval = 5 * time.Second
+	// nativeKillWait bounds the KILL and the wait for the backup to fail
+	// after it.
+	nativeKillWait = 30 * time.Second
+	// nativeQueryTimeout bounds one query on the run's connection. A query
+	// is never cut by the run's context: ch-go closes the connection on a
+	// cancelled query, and the KILL still needs it.
+	nativeQueryTimeout = time.Minute
+	// hidden replaces a secret in what is logged, as ClickHouse masks it.
+	hidden = "[HIDDEN]"
+)
 
-// nativeSupported reports whether ch-go can decode (and re-encode) type t.
-func nativeSupported(t string) bool {
-	var c proto.ColAuto
-	return c.Infer(proto.ColumnType(t)) == nil
-}
+// The statuses of system.backups a backup goes through. KILL ends one as
+// BACKUP_FAILED, or as BACKUP_CANCELLED on versions that have it.
+const (
+	statusCreating  = "CREATING_BACKUP"
+	statusCreated   = "BACKUP_CREATED"
+	statusFailed    = "BACKUP_FAILED"
+	statusCancelled = "BACKUP_CANCELLED"
+)
 
-type nativeColumn struct {
-	name string
-	typ  string
-	data proto.Column
-}
+var (
+	// ErrNativeVersion: the target is older than 24.8, the first version
+	// native backups were tested with (spike).
+	ErrNativeVersion = errors.New("clickhouse: native backups need ClickHouse 24.8 or later")
+	// ErrNativeSharded: the target is sharded. A BACKUP without ON CLUSTER
+	// saves the shard it runs on and reports success (design §4.1).
+	ErrNativeSharded = errors.New("clickhouse: native backups of sharded targets are not supported")
+	// ErrNativeOrphan: the run lost track of its backup (a lost connection,
+	// a missing row, a KILL that did not end it), and a KILL on a new
+	// connection did not end it either. The backup may still run on the
+	// server, retrying its uploads with the revoked credential. It wraps
+	// backup.ErrNativeOrphan, which the worker looks for.
+	ErrNativeOrphan = fmt.Errorf("clickhouse: %w", backup.ErrNativeOrphan)
+)
 
-// nativeResult decodes blocks into columns inferred from the first header.
-type nativeResult struct {
-	cols []nativeColumn
-	rows int
-}
+// Engine takes native backups for the worker.
+var _ backup.NativeEngine = Engine{}
 
-var _ proto.Result = (*nativeResult)(nil)
-
-func (r *nativeResult) DecodeResult(rd *proto.Reader, version int, b proto.Block) error {
-	first := r.cols == nil
-	if !first && b.Columns != len(r.cols) {
-		return fmt.Errorf("block has %d columns, expected %d", b.Columns, len(r.cols))
+// NativeJob implements backup.NativeEngine: a job is native with method
+// "native", and backs up its databases option.
+func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
+	o, err := ParseOptions(raw)
+	if err != nil {
+		return backup.NativeJob{}, err
 	}
-	if first {
-		r.cols = make([]nativeColumn, 0, b.Columns)
+	return backup.NativeJob{Native: o.Native(), Databases: o.Databases}, nil
+}
+
+// BackupNative implements backup.NativeEngine with RunNative.
+func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
+	return e.RunNative(ctx, ec, NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
+		Databases: run.Databases, StructureOnly: run.StructureOnly, Stop: run.Stop, Before: run.Before})
+}
+
+// statementSettings are the settings backupStatement writes into the BACKUP
+// statement of a full backup: what the manifest records.
+func statementSettings(runID string, structureOnly bool) map[string]string {
+	s := map[string]string{"async": "1", "allow_s3_native_copy": "0", "id": runID}
+	if structureOnly {
+		s["structure_only"] = "1"
 	}
-	r.rows = 0
-	for i := 0; i < b.Columns; i++ {
-		name, err := rd.Str()
+	return s
+}
+
+// NativeRun is one native backup: where ClickHouse writes it, with which
+// ingest credential, and what it backs up.
+type NativeRun struct {
+	// URL is the run's directory on the ingest endpoint,
+	// "<ingest.url>/olympos/<run-id>/".
+	URL string
+	// AccessKey and Secret are the run's ingest credential. The secret goes
+	// into the statement and nowhere else: it is never logged or returned.
+	AccessKey, Secret string
+	// RunID is the backup run, a lower-case UUID: the backup's id in
+	// system.backups and the last segment of URL.
+	RunID string
+	// Base is the base of an incremental; nil for a full backup.
+	Base *NativeBase
+	// Databases are backed up whole. Empty means every database the
+	// backup user sees, except the system databases.
+	Databases []string
+	// StructureOnly backs up the databases' DDL and no data (structure_only
+	// = 1): a test run's, which checks the path end to end in seconds (R40).
+	StructureOnly bool
+	// Stop delivers why the run's ingest session stopped (a quota, a rate
+	// storm, expiry). ClickHouse retries refused uploads almost forever, so
+	// the run is then ended with KILL QUERY (spike §3).
+	Stop <-chan string
+	// Before, when set, is called once the target is checked and before the
+	// BACKUP is sent, with what nativeTargetState read on the run's
+	// connection. The backups of the runs it returns, among t.Running, are
+	// ended first (endOrphans); an error ends the run there
+	// (backup.NativeRun.Before).
+	Before func(ctx context.Context, t backup.NativeTarget) (end []string, err error)
+}
+
+// NativeBase is the backup an incremental is taken on.
+type NativeBase struct {
+	// URL is the base run's directory, "<ingest.url>/olympos/<run-id>/". The
+	// run's own credential reads it (use_same_s3_credentials_for_base_backup,
+	// R26), so the base carries none.
+	URL   string
+	RunID string
+}
+
+// String and LogValue keep the secret out of every print and log of a run.
+func (nr NativeRun) String() string {
+	return fmt.Sprintf("clickhouse.NativeRun{run %s, key %s, secret redacted}", nr.RunID, nr.AccessKey)
+}
+func (nr NativeRun) GoString() string { return nr.String() }
+
+func (nr NativeRun) LogValue() slog.Value {
+	return slog.GroupValue(slog.String("run", nr.RunID), slog.String("access_key", nr.AccessKey))
+}
+
+// validate checks what the statement is built from. Its errors never hold
+// the secret.
+func (nr NativeRun) validate() error {
+	if !isRunID(nr.RunID) {
+		return fmt.Errorf("clickhouse: native run id %q is not a lower-case UUID", clip(nr.RunID))
+	}
+	if nr.AccessKey == "" || nr.Secret == "" {
+		return errors.New("clickhouse: a native run needs its ingest credential")
+	}
+	endpoint, err := runURL(nr.URL, nr.RunID)
+	if err != nil {
+		return err
+	}
+	if nr.Base != nil {
+		if !isRunID(nr.Base.RunID) || nr.Base.RunID == nr.RunID {
+			return fmt.Errorf("clickhouse: base run id %q is not another run's lower-case UUID", clip(nr.Base.RunID))
+		}
+		base, err := runURL(nr.Base.URL, nr.Base.RunID)
 		if err != nil {
-			return fmt.Errorf("column %d name: %w", i, err)
+			return fmt.Errorf("%w (the base)", err)
 		}
-		typ, err := rd.Str()
-		if err != nil {
-			return fmt.Errorf("column %d type: %w", i, err)
-		}
-		if proto.FeatureCustomSerialization.In(version) {
-			custom, err := rd.Bool()
-			if err != nil {
-				return fmt.Errorf("column %q serialization flag: %w", name, err)
-			}
-			if custom {
-				return fmt.Errorf("column %q uses a custom serialization (unsupported)", name)
-			}
-		}
-		if first {
-			var auto proto.ColAuto
-			if err := auto.Infer(proto.ColumnType(typ)); err != nil {
-				return fmt.Errorf("column %q: type %s: %w", name, typ, errUnsupportedType)
-			}
-			r.cols = append(r.cols, nativeColumn{name: name, typ: typ, data: auto.Data})
-		} else if r.cols[i].name != name || r.cols[i].typ != typ {
-			return fmt.Errorf("column %d changed from %s %s to %s %s", i, r.cols[i].name, r.cols[i].typ, name, typ)
-		}
-		c := r.cols[i].data
-		c.Reset()
-		if b.Rows == 0 {
-			continue
-		}
-		if s, ok := c.(proto.StateDecoder); ok {
-			if err := s.DecodeState(rd); err != nil {
-				return fmt.Errorf("column %q state: %w", name, err)
-			}
-		}
-		if err := c.DecodeColumn(rd, b.Rows); err != nil {
-			return fmt.Errorf("column %q: %w", name, err)
+		// The run's credential reads the base, so it is on the same endpoint.
+		if base != endpoint {
+			return errors.New("clickhouse: the base of a native run is not on the run's ingest endpoint")
 		}
 	}
-	r.rows = b.Rows
+	for _, db := range nr.Databases {
+		if db == "" || strings.ContainsRune(db, 0) {
+			return errors.New("clickhouse: a native run names an empty or invalid database")
+		}
+		if isSystemDatabase(db) {
+			return fmt.Errorf("clickhouse: database %q is a system database and cannot be backed up", db)
+		}
+	}
 	return nil
 }
 
-var errUnsupportedType = errors.New("type not supported by the native block codec")
+// runURL checks a run's directory URL, http(s) without user info, query or
+// fragment whose path ends in /olympos/<run-id>/, and returns the URL without
+// "<run-id>/": the endpoint's bucket.
+func runURL(raw, runID string) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
+		u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" || u.RawPath != "" ||
+		!strings.HasSuffix(u.Path, "/"+nativeBucket+"/"+runID+"/") || !strings.HasSuffix(raw, runID+"/") {
+		return "", fmt.Errorf("clickhouse: %q is not the ingest URL of run %s (<ingest.url>/%s/<run-id>/)", clip(raw), runID, nativeBucket)
+	}
+	return strings.TrimSuffix(raw, runID+"/"), nil
+}
 
-// writeNativeBlock encodes the current block of r in Native format into w.
-// buf is reused between calls.
-func writeNativeBlock(w io.Writer, buf *proto.Buffer, r *nativeResult) error {
-	buf.Reset()
-	buf.PutInt(len(r.cols))
-	buf.PutInt(r.rows)
-	for _, c := range r.cols {
-		if c.data.Rows() != r.rows {
-			return fmt.Errorf("column %q has %d rows, expected %d", c.name, c.data.Rows(), r.rows)
+// backupStatement is the BACKUP statement of a run (design §4, R26). It
+// holds the secret: never log it, log redactStatement of it.
+func backupStatement(nr NativeRun) string {
+	var b strings.Builder
+	b.WriteString("BACKUP ")
+	for i, db := range nr.Databases {
+		if i > 0 {
+			b.WriteString(", ")
 		}
-		buf.PutString(c.name)
-		buf.PutString(c.typ)
-		if r.rows == 0 {
+		b.WriteString("DATABASE " + quoteIdent(db))
+	}
+	b.WriteString(" TO S3(" + quoteString(nr.URL) + ", " + quoteString(nr.AccessKey) + ", " + quoteString(nr.Secret) + ")")
+	b.WriteString(" SETTINGS async = 1, allow_s3_native_copy = 0, id = " + quoteString(nr.RunID))
+	if nr.StructureOnly {
+		b.WriteString(", structure_only = 1")
+	}
+	if nr.Base != nil {
+		b.WriteString(", base_backup = S3(" + quoteString(nr.Base.URL) + "), use_same_s3_credentials_for_base_backup = 1")
+	}
+	return b.String()
+}
+
+// nativeThrottle are query settings (ch-go Query.Settings, not the BACKUP
+// SETTINGS clause) under which ClickHouse keeps its own S3 requests per
+// second, bursts included, below the endpoint's 200 per run (R29): without
+// them its backup threads stay over the rate, and a run of more than about
+// 6,000 objects is stopped for a rate storm (task 9, gate R17). The PUT
+// throttler counts PUT, POST, COPY and LIST, the GET throttler GET.
+func nativeThrottle(put, get int) []ch.Setting {
+	return []ch.Setting{
+		{Key: "s3_max_put_rps", Value: strconv.Itoa(put), Important: true},
+		{Key: "s3_max_put_burst", Value: strconv.Itoa(put), Important: true},
+		{Key: "s3_max_get_rps", Value: strconv.Itoa(get), Important: true},
+		{Key: "s3_max_get_burst", Value: strconv.Itoa(get), Important: true},
+	}
+}
+
+var (
+	// nativeBackupSettings go with every native BACKUP: it mostly writes.
+	nativeBackupSettings = nativeThrottle(150, 40)
+	// nativeRestoreSettings are the mirror for the native RESTORE (task 13):
+	// it mostly reads.
+	nativeRestoreSettings = nativeThrottle(40, 150)
+)
+
+// redactStatement returns s with the secret of every S3(url, key, secret,
+// …) replaced by '[HIDDEN]': the arguments from the third on. The URL and
+// the key stay. What it cannot read for certain, an unterminated quote or
+// an S3 argument that is not a string literal, is hidden from there to the
+// end.
+func redactStatement(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == '\'' || c == '`' || c == '"':
+			_, end, err := lexQuoted(s, i)
+			if err != nil {
+				return b.String() + hidden
+			}
+			b.WriteString(s[i:end])
+			i = end
+		case (c == 'S' || c == 's') && i+1 < len(s) && s[i+1] == '3' && (i == 0 || !isWordByte(s[i-1])):
+			open := skipSpace(s, i+2)
+			if open >= len(s) || s[open] != '(' {
+				b.WriteString(s[i : i+2])
+				i += 2
+				continue
+			}
+			call, end, ok := redactS3Args(s, open)
+			if !ok {
+				return b.String() + hidden
+			}
+			b.WriteString(s[i:open])
+			b.WriteString(call)
+			i = end
+		default:
+			b.WriteByte(c)
+			i++
+		}
+	}
+	return b.String()
+}
+
+// redactS3Args reads the argument list at s[open] == '(' of string literals
+// and returns it with the arguments from the third on hidden, and the index
+// after its ')'.
+func redactS3Args(s string, open int) (string, int, bool) {
+	var b strings.Builder
+	b.WriteByte('(')
+	i := skipSpace(s, open+1)
+	if i < len(s) && s[i] == ')' {
+		return "()", i + 1, true
+	}
+	for n := 0; ; n++ {
+		if i >= len(s) || s[i] != '\'' {
+			return "", 0, false
+		}
+		_, end, err := lexQuoted(s, i)
+		if err != nil {
+			return "", 0, false
+		}
+		if n >= 2 {
+			b.WriteString("'" + hidden + "'")
+		} else {
+			b.WriteString(s[i:end])
+		}
+		i = skipSpace(s, end)
+		if i >= len(s) {
+			return "", 0, false
+		}
+		switch s[i] {
+		case ')':
+			b.WriteByte(')')
+			return b.String(), i + 1, true
+		case ',':
+			b.WriteString(", ")
+			i = skipSpace(s, i+1)
+		default:
+			return "", 0, false
+		}
+	}
+}
+
+func skipSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// querier runs the queries of checkNativeTarget: a *session.
+type querier interface {
+	queryStrings(ctx context.Context, body string, settings ...ch.Setting) ([][]string, error)
+}
+
+// checkNativeTarget refuses a target native backups do not cover (design
+// §4.1): a version before 24.8, a Distributed table in one of the run's
+// databases, or a cluster of this server with more than one shard.
+func checkNativeTarget(ctx context.Context, c querier, databases []string) error {
+	rows, err := c.queryStrings(ctx, "SELECT version()")
+	if err != nil {
+		return fmt.Errorf("clickhouse: server version: %w", err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return errors.New("clickhouse: server version: no result")
+	}
+	version := rows[0][0]
+	major, minor, ok := parseVersion(version)
+	if !ok {
+		return fmt.Errorf("clickhouse: server version %q cannot be read", clip(version))
+	}
+	if major < 24 || major == 24 && minor < 8 {
+		return fmt.Errorf("%w, and this target runs %s. Use the logical method for this job, or upgrade the target", ErrNativeVersion, version)
+	}
+
+	if len(databases) > 0 {
+		quoted := make([]string, len(databases))
+		for i, db := range databases {
+			quoted[i] = quoteString(db)
+		}
+		rows, err := c.queryStrings(ctx, "SELECT database, name FROM system.tables WHERE engine = 'Distributed' AND database IN ("+
+			strings.Join(quoted, ", ")+") ORDER BY database, name LIMIT 6")
+		if err != nil {
+			return fmt.Errorf("clickhouse: list Distributed tables: %w", err)
+		}
+		if len(rows) > 0 {
+			names := make([]string, 0, len(rows))
+			for i, r := range rows {
+				if i == 5 {
+					names = append(names, "…")
+					break
+				}
+				names = append(names, r[0]+"."+r[1])
+			}
+			return fmt.Errorf("%w: it has Distributed tables (%s), and a native backup saves only the one shard it runs on. "+
+				"Use the logical method for this job", ErrNativeSharded, strings.Join(names, ", "))
+		}
+	}
+
+	rows, err = c.queryStrings(ctx, "SELECT cluster, toString(uniqExact(shard_num)) FROM system.clusters "+
+		"WHERE cluster IN (SELECT cluster FROM system.clusters WHERE is_local) "+
+		"GROUP BY cluster HAVING uniqExact(shard_num) > 1 ORDER BY cluster LIMIT 6")
+	if err != nil {
+		return fmt.Errorf("clickhouse: read system.clusters: %w", err)
+	}
+	var names []string
+	for _, r := range rows {
+		// The Altinity operator generates all-sharded for every install,
+		// with each replica as its own shard, so an unsharded replicated
+		// install has it too (R30). A really sharded one is still refused
+		// by its own cluster and its Distributed tables.
+		if r[0] == altinityAllSharded {
 			continue
 		}
-		if p, ok := c.data.(proto.Preparable); ok {
-			if err := p.Prepare(); err != nil {
-				return fmt.Errorf("prepare %q: %w", c.name, err)
-			}
-		}
-		if s, ok := c.data.(proto.StateEncoder); ok {
-			s.EncodeState(buf)
-		}
-		c.data.EncodeColumn(buf)
+		names = append(names, fmt.Sprintf("%s with %s shards", r[0], r[1]))
 	}
-	_, err := w.Write(buf.Buf)
+	if len(names) > 0 {
+		return fmt.Errorf("%w: this server is in a sharded cluster (%s), and a native backup saves only the one shard it runs on. "+
+			"Use the logical method for this job", ErrNativeSharded, strings.Join(names, ", "))
+	}
+	return nil
+}
+
+// altinityAllSharded is the cluster the Altinity operator generates with
+// every replica as a shard.
+const altinityAllSharded = "all-sharded"
+
+// parseVersion reads the major and minor of version() ("24.8.14.39").
+func parseVersion(v string) (major, minor int, ok bool) {
+	parts := strings.Split(v, ".")
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(parts[1])
+	return major, minor, err1 == nil && err2 == nil && major >= 0 && minor >= 0
+}
+
+// RunNative runs one native backup on the target and returns its server
+// version. It checks the target (checkNativeTarget), hands nr.Before what
+// the target holds (nativeTargetState), sends the BACKUP
+// statement with async = 1 and polls system.backups every 5 s until the
+// backup is created or failed, all on one connection from ec.Dial. When
+// nr.Stop delivers or ctx is cancelled, it KILLs the backup on that
+// connection, waits up to 30 s for system.backups to show it failed, and
+// returns an error that names the reason. When the run loses track of the
+// backup (its connection breaks, its row is gone, the KILL does not end it),
+// one more KILL goes over a new connection from ec.Dial; an error wrapping
+// ErrNativeOrphan says that this did not end it either. The caller revokes
+// the run's credential in every case.
+//
+// The statement and its secret are never logged or returned; errors from
+// the server have the secret masked as well.
+func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeRun) (serverVersion string, err error) {
+	if err := nr.validate(); err != nil {
+		return "", err
+	}
+	opts, err := ParseOptions(ec.Options)
+	if err != nil {
+		return "", err
+	}
+	s, err := connect(ctx, ec, opts)
+	if err != nil {
+		return "", err
+	}
+	defer s.close()
+
+	version, err := s.queryValue(ctx, "SELECT version()")
+	if err != nil {
+		return "", fmt.Errorf("clickhouse: server version: %w", err)
+	}
+	dbs, err := s.nativeDatabases(ctx, nr.Databases)
+	if err != nil {
+		return version, err
+	}
+	nr.Databases = dbs
+	if err := checkNativeTarget(ctx, s, dbs); err != nil {
+		return version, err
+	}
+	if nr.Before != nil {
+		t, err := nativeTargetState(ctx, s, dbs, nr.RunID)
+		if err != nil {
+			return version, err
+		}
+		end, err := nr.Before(ctx, t)
+		if err != nil {
+			return version, err
+		}
+		s.endOrphans(nr.RunID, t.Running, end)
+	}
+	again := func(ctx context.Context) (*session, error) { return connect(ctx, ec, opts) }
+	return version, s.runBackup(ctx, nr, again)
+}
+
+// nativeTargetState reads what the worker decides on before the BACKUP
+// (backup.NativeTarget): the bytes on disk of the active parts of the run's
+// databases, which a BACKUP writes about as they are, and the native
+// backups of other runs that run on this server (system.processes, where
+// an async BACKUP stays under its query id until it ends: seen on 24.8 and
+// 25.8). A process list that cannot be read is logged and taken as empty:
+// ending orphans is a clean-up and does not hold up the backup.
+func nativeTargetState(ctx context.Context, c querier, databases []string, self string) (backup.NativeTarget, error) {
+	quoted := make([]string, len(databases))
+	for i, db := range databases {
+		quoted[i] = quoteString(db)
+	}
+	rows, err := c.queryStrings(ctx, "SELECT toString(sum(bytes_on_disk)) FROM system.parts WHERE active AND database IN ("+
+		strings.Join(quoted, ", ")+")")
+	if err != nil {
+		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %w", err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return backup.NativeTarget{}, errors.New("clickhouse: size of the databases: no result")
+	}
+	n, err := strconv.ParseInt(rows[0][0], 10, 64)
+	if err != nil || n < 0 {
+		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %q is not a size", clip(rows[0][0]))
+	}
+	t := backup.NativeTarget{Bytes: n}
+	rows, err = c.queryStrings(ctx, "SELECT query_id FROM system.processes WHERE startsWith(query_id, "+
+		quoteString(nativeQueryID(""))+") ORDER BY query_id")
+	if err != nil {
+		slog.Default().Warn("clickhouse: cannot list the native backups that run on the server; none is ended",
+			"run", self, "err", err)
+		return t, nil
+	}
+	for _, r := range rows {
+		if id := strings.TrimPrefix(r[0], nativeQueryID("")); isRunID(id) && id != self && !slices.Contains(t.Running, id) {
+			t.Running = append(t.Running, id)
+		}
+	}
+	return t, nil
+}
+
+// endOrphans ends, with KILL QUERY … SYNC on the run's connection, the
+// native backups of the runs in end that nativeTargetState found running
+// (running): backups of runs that are over, which nothing else would end
+// (R41). Each is logged; one that does not end leaves the run to go on.
+func (s *session) endOrphans(self string, running, end []string) {
+	for _, id := range end {
+		if id == self || !slices.Contains(running, id) {
+			continue
+		}
+		log := slog.Default().With("run", self, "orphan_run", id)
+		ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
+		status, err := s.killOn(ctx, id, nativeQueryID(id))
+		cancel()
+		switch {
+		case err != nil:
+			log.Error("clickhouse: KILL QUERY of a left-over native backup failed", "kill", backup.NativeKillQuery(id),
+				"err", err)
+		case status == statusCreating:
+			log.Error("clickhouse: a left-over native backup still runs after KILL QUERY", "kill", backup.NativeKillQuery(id))
+		default:
+			log.Warn("clickhouse: ended a left-over native backup", "status", statusText(status))
+		}
+	}
+}
+
+// nativeDatabases is the run's databases, sorted: the ones named, each of
+// which must exist, or every non-system database the user sees.
+func (s *session) nativeDatabases(ctx context.Context, named []string) ([]string, error) {
+	all, err := s.listDatabases(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("clickhouse: %w", err)
+	}
+	present := map[string]bool{}
+	for _, r := range all {
+		present[r[0]] = true
+	}
+	var dbs []string
+	if len(named) == 0 {
+		for _, r := range all {
+			dbs = append(dbs, r[0])
+		}
+	}
+	for _, db := range named {
+		if !present[db] {
+			return nil, fmt.Errorf("clickhouse: database %q does not exist or is not visible to the backup user", db)
+		}
+		dbs = append(dbs, db)
+	}
+	if len(dbs) == 0 {
+		return nil, errors.New("clickhouse: no database to back up")
+	}
+	sort.Strings(dbs)
+	return compactStrings(dbs), nil
+}
+
+func compactStrings(sorted []string) []string {
+	out := sorted[:0]
+	for i, v := range sorted {
+		if i == 0 || v != sorted[i-1] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// nativeQueryID is the query id of a run's BACKUP, which KILL names.
+func nativeQueryID(runID string) string { return backup.NativeQueryID(runID) }
+
+// redial opens a new connection to the target, for the KILL of a backup
+// whose own connection was lost.
+type redial func(ctx context.Context) (*session, error)
+
+// runBackup sends the statement and follows the backup to its end. Once the
+// statement may have reached the server, every way out that did not see
+// the backup end goes through a KILL: on the run's connection when it
+// still works, else on a new one (orphanKill).
+func (s *session) runBackup(ctx context.Context, nr NativeRun, again redial) error {
+	log := slog.Default().With("run", nr.RunID)
+	select {
+	case reason, ok := <-nr.Stop:
+		return fmt.Errorf("clickhouse: native backup not started: the ingest session stopped (%s)", stopReason(reason, ok))
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("clickhouse: native backup not started: %w", err)
+	}
+
+	stmt := backupStatement(nr)
+	queryID := nativeQueryID(nr.RunID)
+	log.Info("clickhouse: starting a native backup", "query_id", queryID, "statement", redactStatement(stmt))
+	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, queryID, nativeBackupSettings...); err != nil {
+		msg := maskSecret(err.Error(), nr.Secret)
+		if _, refused := ch.AsException(err); refused {
+			// The server refused the statement: no backup runs.
+			return fmt.Errorf("clickhouse: BACKUP: %s", msg)
+		}
+		// The connection failed; the backup may have started.
+		return orphanKill(log, again, nr, queryID, "BACKUP: "+msg)
+	}
+
+	tick := time.NewTicker(nativePollInterval)
+	defer tick.Stop()
+	for {
+		status, msg, err := s.backupStatus(context.WithoutCancel(ctx), nr.RunID)
+		if err != nil {
+			return orphanKill(log, again, nr, queryID, "read system.backups: "+maskSecret(err.Error(), nr.Secret))
+		}
+		switch status {
+		case statusCreated:
+			log.Info("clickhouse: native backup created")
+			return nil
+		case statusFailed, statusCancelled:
+			return fmt.Errorf("clickhouse: native backup %s: %s", status, maskSecret(msg, nr.Secret))
+		case statusCreating:
+		case "":
+			return orphanKill(log, again, nr, queryID, "the native backup is no longer in system.backups (did the server restart?)")
+		default:
+			return orphanKill(log, again, nr, queryID, fmt.Sprintf("the native backup has the unexpected status %q", clip(status)))
+		}
+		select {
+		case <-tick.C:
+		case reason, ok := <-nr.Stop:
+			return s.killBackup(log, again, nr, queryID, "the ingest session stopped: "+stopReason(reason, ok))
+		case <-ctx.Done():
+			return s.killBackup(log, again, nr, queryID, ctx.Err().Error())
+		}
+	}
+}
+
+func stopReason(reason string, ok bool) string {
+	if !ok || reason == "" {
+		return "stopped"
+	}
+	return reason
+}
+
+// killBackup ends a running backup with KILL QUERY … SYNC on the run's
+// connection and waits up to nativeKillWait for system.backups to show it
+// ended. When the KILL or a read fails, or the wait runs out, it tries
+// again on a new connection. It always returns an error that names why.
+func (s *session) killBackup(log *slog.Logger, again redial, nr NativeRun, queryID, why string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
+	defer cancel()
+	log.Warn("clickhouse: ending the native backup with KILL QUERY", "query_id", queryID, "reason", why)
+	status, err := s.killOn(ctx, nr.RunID, queryID)
+	switch {
+	case status == statusFailed || status == statusCancelled:
+		log.Warn("clickhouse: native backup ended by KILL QUERY", "status", status)
+		return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY made it %s", why, status)
+	case status == statusCreated:
+		return fmt.Errorf("clickhouse: native backup ended (%s), although it was created before KILL QUERY", why)
+	case err != nil:
+		return orphanKill(log, again, nr, queryID, why+"; KILL QUERY: "+maskSecret(err.Error(), nr.Secret))
+	default:
+		return orphanKill(log, again, nr, queryID, fmt.Sprintf("%s; still %s %s after KILL QUERY", why, statusText(status), nativeKillWait))
+	}
+}
+
+// orphanKill is the last try to end a backup the run lost track of: one
+// KILL QUERY … SYNC on a new connection (ec.Dial; harmless when it reaches
+// another server, which runs no such query), within nativeKillWait of its
+// own. When that does not end the backup either, the error wraps
+// ErrNativeOrphan: the backup may still run on the server. why may hold
+// server messages, masked; never the statement.
+func orphanKill(log *slog.Logger, again redial, nr NativeRun, queryID, why string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
+	defer cancel()
+	log.Warn("clickhouse: lost the native backup; KILL QUERY on a new connection", "query_id", queryID, "reason", why)
+	s, err := again(ctx)
+	if err != nil {
+		err = orphanResult(why, nr.RunID, "", fmt.Errorf("a new connection: %s", maskSecret(err.Error(), nr.Secret)))
+	} else {
+		defer s.close()
+		status, kerr := s.killOn(ctx, nr.RunID, queryID)
+		if kerr != nil {
+			kerr = errors.New(maskSecret(kerr.Error(), nr.Secret))
+		}
+		err = orphanResult(why, nr.RunID, status, kerr)
+	}
+	if errors.Is(err, ErrNativeOrphan) {
+		log.Error("clickhouse: the native backup may still run on the server", "query_id", queryID, "err", err)
+	}
 	return err
 }
 
-// stringColumn returns row values of column i when it is a String (or
-// LowCardinality(String)) column.
-func (r *nativeResult) stringColumn(i int) ([]string, error) {
-	if i >= len(r.cols) {
-		return nil, fmt.Errorf("result has %d columns, want column %d", len(r.cols), i)
+// orphanResult is orphanKill's error from what the KILL on the new
+// connection left: the last status it read ("" when none) and its error.
+// An orphan's error names the statement that ends it (R41).
+func orphanResult(why, runID, status string, killErr error) error {
+	end := "; the next native run on this target ends it, or run " + backup.NativeKillQuery(runID) + " there"
+	switch {
+	case status == statusFailed || status == statusCancelled:
+		return fmt.Errorf("clickhouse: native backup ended (%s): KILL QUERY on a new connection made it %s", why, status)
+	case status == statusCreated:
+		return fmt.Errorf("clickhouse: native backup ended (%s), although it was created", why)
+	case killErr != nil:
+		return fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v%s", ErrNativeOrphan, why, killErr, end)
+	default:
+		return fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s%s", ErrNativeOrphan, why, statusText(status), end)
 	}
-	s, ok := r.cols[i].data.(interface {
-		Rows() int
-		Row(int) string
+}
+
+func statusText(status string) string {
+	if status == "" {
+		return "not in system.backups"
+	}
+	return clip(status)
+}
+
+// killOn sends KILL QUERY … SYNC for the run's backup on s and reads its
+// status once a second until it is BACKUP_FAILED, BACKUP_CANCELLED or
+// BACKUP_CREATED, ctx ends, or the row is missing (the server does not know
+// the backup). It returns the last status read and the error that stopped
+// it, if any.
+func (s *session) killOn(ctx context.Context, runID, queryID string) (string, error) {
+	if err := s.nativeExec(ctx, "KILL QUERY WHERE query_id = "+quoteString(queryID)+" SYNC", ""); err != nil {
+		return "", err
+	}
+	for {
+		status, _, err := s.backupStatus(ctx, runID)
+		if err != nil {
+			return "", err
+		}
+		switch status {
+		case statusFailed, statusCancelled, statusCreated, "":
+			return status, nil
+		}
+		select {
+		case <-ctx.Done():
+			return status, nil
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// backupStatus reads the run's row of system.backups: its status and error,
+// or "" when there is none.
+func (s *session) backupStatus(ctx context.Context, runID string) (status, msg string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, nativeQueryTimeout)
+	defer cancel()
+	rows, err := s.queryStrings(ctx, "SELECT toString(status), error FROM system.backups WHERE id = "+quoteString(runID))
+	if err != nil {
+		return "", "", err
+	}
+	if len(rows) == 0 {
+		return "", "", nil
+	}
+	return rows[0][0], rows[0][1], nil
+}
+
+// nativeExec runs a statement and drops its result, within nativeQueryTimeout.
+func (s *session) nativeExec(ctx context.Context, body, queryID string, settings ...ch.Setting) error {
+	ctx, cancel := context.WithTimeout(ctx, nativeQueryTimeout)
+	defer cancel()
+	var res nativeResult
+	return s.client.Do(ctx, ch.Query{
+		Body:     body,
+		QueryID:  queryID,
+		Settings: settings,
+		Result:   &res,
+		OnResult: func(context.Context, proto.Block) error { return nil },
 	})
-	if !ok {
-		return nil, fmt.Errorf("column %q is %s, want String", r.cols[i].name, r.cols[i].typ)
-	}
-	out := make([]string, s.Rows())
-	for j := range out {
-		out[j] = s.Row(j)
-	}
-	return out, nil
 }
 
-// rowBinaryHeader writes the RowBinaryWithNamesAndTypes header.
-func rowBinaryHeader(w io.Writer, names, types []string) error {
-	var buf proto.Buffer
-	buf.PutInt(len(names))
-	for _, n := range names {
-		buf.PutString(n)
+// maskSecret replaces the secret in a server message, in case one holds it
+// (24.8 and 25.8 mask it themselves, spike §6).
+func maskSecret(msg, secret string) string {
+	if secret == "" {
+		return msg
 	}
-	for _, t := range types {
-		buf.PutString(t)
-	}
-	_, err := w.Write(buf.Buf)
-	return err
+	return strings.ReplaceAll(msg, secret, hidden)
 }

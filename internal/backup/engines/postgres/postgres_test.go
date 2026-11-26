@@ -51,7 +51,7 @@ func TestMain(m *testing.M) {
 			skipMsg = err.Error()
 			fmt.Fprintln(os.Stderr, "postgres engine tests skipped:", skipMsg)
 		}
-		defer func() { _ = exec.Command("docker", "rm", "-f", container).Run() }()
+		defer func() { _ = exec.Command("docker", "rm", "-f", "-v", container).Run() }()
 		return m.Run()
 	}()
 	os.Exit(code)
@@ -94,7 +94,7 @@ func setup() error {
 		return err
 	}
 	caPEM = ca
-	_ = exec.Command("docker", "rm", "-f", container).Run()
+	_ = exec.Command("docker", "rm", "-f", "-v", container).Run()
 	script := `set -e
 printf '%s' "$SSL_CERT" > /var/lib/postgresql/server.crt
 printf '%s' "$SSL_KEY" > /var/lib/postgresql/server.key

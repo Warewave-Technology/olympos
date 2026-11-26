@@ -16,6 +16,9 @@ param longestRetentionDays int = 400
 param dailyDays int = 7
 param weeklyDays int = 28
 param monthlyDays int = 372
+@minValue(1)
+@description('Lifecycle: delete the objects of a native run that never completed (olympos-state=incomplete) after N days.')
+param incompleteDays int = 7
 param logAnalyticsWorkspaceId string = ''
 
 resource sa 'Microsoft.Storage/storageAccounts@2023-05-01' = {
@@ -65,28 +68,35 @@ resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers
 }
 
 // Retention is done by lifecycle rules on the olympos-tier index tag (SPEC §10.3).
+// The same policy deletes what a native ClickHouse run left behind when it died: its objects carry
+// olympos-state=incomplete until the run's signed manifest is written, and are retagged complete after it.
+// A run that completed is not touched: its objects are retagged olympos-state=complete, so the filter
+// no longer matches them. Every rule uses daysAfterCreationGreaterThan, as the tier rules do.
+// With the container's time-based immutability a delete waits until the immutability period of that
+// version ends (see https://github.com/Warewave-Technology/olympos/issues/79).
 resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
   parent: sa
   name: 'default'
   properties: {
     policy: {
-      rules: [for t in [
-        { tier: 'daily', days: dailyDays }
-        { tier: 'weekly', days: weeklyDays }
-        { tier: 'monthly', days: monthlyDays }
-        { tier: 'test', days: 2 }
+      rules: [for r in [
+        { name: 'olympos-daily', tag: 'olympos-tier', value: 'daily', days: dailyDays }
+        { name: 'olympos-weekly', tag: 'olympos-tier', value: 'weekly', days: weeklyDays }
+        { name: 'olympos-monthly', tag: 'olympos-tier', value: 'monthly', days: monthlyDays }
+        { name: 'olympos-test', tag: 'olympos-tier', value: 'test', days: 2 }
+        { name: 'olympos-incomplete', tag: 'olympos-state', value: 'incomplete', days: incompleteDays }
       ]: {
-        name: 'olympos-${t.tier}'
+        name: r.name
         enabled: true
         type: 'Lifecycle'
         definition: {
           filters: {
             blobTypes: [ 'blockBlob' ]
-            blobIndexMatch: [ { name: 'olympos-tier', op: '==', value: t.tier } ]
+            blobIndexMatch: [ { name: r.tag, op: '==', value: r.value } ]
           }
           actions: {
-            baseBlob: { delete: { daysAfterCreationGreaterThan: t.days } }
-            version: { delete: { daysAfterCreationGreaterThan: t.days } }
+            baseBlob: { delete: { daysAfterCreationGreaterThan: r.days } }
+            version: { delete: { daysAfterCreationGreaterThan: r.days } }
           }
         }
       }]

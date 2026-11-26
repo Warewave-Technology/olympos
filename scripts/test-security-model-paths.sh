@@ -89,6 +89,56 @@ if printf 'internal/backup/engines/clickhouse/native_manifest_test.go\ninternal/
   echo "FAIL: --files matched a file next to the native manifest" >&2
   fail=1
 fi
+# The native backup's metadata parsers decide which objects the restore's
+# allowlist sees.
+if ! out=$(printf 'internal/backup/engines/clickhouse/ddl.go\ninternal/backup/engines/clickhouse/backupmeta.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/backupmeta.go ]; then
+  echo "FAIL: --files with the native metadata parsers: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/backupmeta_test.go\ninternal/backup/engines/clickhouse/backupmeta_capture_test.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a test next to the native metadata parsers" >&2
+  fail=1
+fi
+# The native run puts the run's credential into the BACKUP statement and
+# keeps it out of the logs.
+if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/native.go ]; then
+  echo "FAIL: --files with the native run: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/native_run_test.go\ninternal/backup/engines/clickhouse/native_integration_test.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a test next to the native run" >&2
+  fail=1
+fi
+# The worker's native run scopes the run's credential and decides what its
+# signed manifest says and when its objects are complete.
+if ! out=$(printf 'internal/backup/worker.go\ninternal/backup/native.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/native.go ]; then
+  echo "FAIL: --files with the worker's native run: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/native_test.go\ninternal/backup/native_internal_test.go\ninternal/backup/engines/native.go\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the worker's native run" >&2
+  fail=1
+fi
+# The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,
+# whose SetTags rewrites the tags of stored backups.
+if ! out=$(printf 'internal/app/app.go\ninternal/app/ingest.go\n' | "$script" --files) || [ "$out" != internal/app/ingest.go ]; then
+  echo "FAIL: --files with the ingest listener: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if ! out=$(printf 'internal/blob/s3.go\ninternal/blob/fs.go\n' | "$script" --files) || [ "$out" != internal/blob/fs.go ]; then
+  echo "FAIL: --files with the NFS writer: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/app/ingest_test.go\ninternal/blob/fs_test.go\ninternal/blob/fs.go.orig\n' | "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the ingest listener or the NFS writer" >&2
+  fail=1
+fi
 if printf 'web/src/x.ts\ndocs/install.md\n' | "$script" --files >/dev/null; then
   echo "FAIL: --files without a security-model file matched" >&2
   fail=1

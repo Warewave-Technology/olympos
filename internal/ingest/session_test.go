@@ -538,3 +538,31 @@ func TestSecretNotJSON(t *testing.T) {
 		t.Errorf("the access key is not in the JSON: %s", b)
 	}
 }
+
+// SetMaxBytes moves the byte quota of a live session (R39: the worker raises
+// it once the engine read the target's size, before ClickHouse has the
+// credential). A limit under what the run already wrote stops it at once.
+func TestSessionSetMaxBytes(t *testing.T) {
+	reg, _, _, _ := newRegistry(t, 4)
+	o := backupOptions()
+	o.MaxBytes = 10
+	s, _ := open(t, reg, o)
+	s.SetMaxBytes(100)
+	if err := s.AddBytes(100); err != nil {
+		t.Fatalf("within the raised limit: %v", err)
+	}
+	select {
+	case r := <-s.Stopped():
+		t.Fatalf("stopped within the raised limit: %s", r)
+	default:
+	}
+	s.SetMaxBytes(50)
+	select {
+	case r := <-s.Stopped():
+		if r != ingest.ReasonQuota {
+			t.Fatalf("stop reason %q, want %q", r, ingest.ReasonQuota)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("a limit under what was written did not stop the session")
+	}
+}

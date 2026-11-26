@@ -95,14 +95,14 @@ func startClickHouse(t *testing.T) *chEnv {
 		}
 	}
 
-	_, _ = docker("rm", "-f", chContainer)
+	_, _ = docker("rm", "-f", "-v", chContainer)
 	if out, err := docker("create", "--name", chContainer,
 		"-e", "CLICKHOUSE_USER="+chUser, "-e", "CLICKHOUSE_PASSWORD="+chPassword,
 		"-e", "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1",
 		"-p", "127.0.0.1::9000", "-p", "127.0.0.1::9440", chImage); err != nil {
 		t.Fatalf("docker create: %v %s", err, out)
 	}
-	t.Cleanup(func() { _, _ = docker("rm", "-f", chContainer) })
+	t.Cleanup(func() { _, _ = docker("rm", "-f", "-v", chContainer) })
 	// docker cp (not bind mounts) so it works with any Docker host.
 	if out, err := docker("cp", dir+"/.", chContainer+":/etc/clickhouse-server/certs"); err != nil {
 		t.Fatalf("docker cp certs: %v %s", err, out)

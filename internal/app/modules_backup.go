@@ -35,13 +35,19 @@ func init() {
 		d.Inventory.OnTargetGone = append(d.Inventory.OnTargetGone, backup.OnTargetGone)
 		d.Inventory.OnTargetUpsert = append(d.Inventory.OnTargetUpsert, backup.OnTargetUpsert)
 
-		api := &backup.API{DB: d.DB, Log: log, Dialer: d.Gateway, Creds: creds}
+		api := &backup.API{DB: d.DB, Log: log, Dialer: d.Gateway, Creds: creds,
+			IngestEnabled: d.Cfg.IngestEnabled()}
 		sched := &backup.Scheduler{DB: d.DB, Log: log.With("loop", "scheduler"), DeadMansSwitchURL: d.Cfg.DeadMansSwitch.URL}
 		blobs := blob.NewResolver(d.DB, d.KV, d.Envelope, d.Cred, blob.WithStorage(storage))
 		worker := &backup.Worker{
 			DB: d.DB, Log: log.With("loop", "worker"), Dialer: d.Gateway, Creds: creds,
 			Blobs:  blobs,
 			Global: d.Cfg.Backup.GlobalConcurrency, PerCluster: d.Cfg.Backup.PerClusterConcurrency,
+		}
+		// Native ClickHouse backups, while the ingest endpoint is on (R14).
+		if d.Ingest != nil {
+			worker.Native = &backup.NativeConfig{Registry: d.Ingest, URL: d.Cfg.Ingest.URL, MaxRunDuration: d.Cfg.Ingest.MaxRunDuration,
+				MaxRunBytes: d.Cfg.Ingest.MaxRunBytes, KV: d.KV, ManifestKeyName: d.Cfg.KeyVault.ManifestKeyName}
 		}
 		// olympos-self: Olympos' own database (F17).
 		self := &backup.SelfBackup{DB: d.DB, Log: log.With("loop", "olympos-self"), Blobs: blobs,

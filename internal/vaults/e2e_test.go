@@ -90,7 +90,7 @@ type server_ struct {
 
 func startServer(t *testing.T, p provider) *server_ {
 	t.Helper()
-	_ = exec.Command("docker", "rm", "-f", p.container).Run()
+	_ = exec.Command("docker", "rm", "-f", "-v", p.container).Run()
 	cfg := map[string]any{
 		"storage":       map[string]any{"raft": map[string]any{"path": p.dataDir, "node_id": "n1"}},
 		"listener":      []any{map[string]any{"tcp": map[string]any{"address": "0.0.0.0:8200", "tls_disable": true}}},
@@ -106,7 +106,7 @@ func startServer(t *testing.T, p provider) *server_ {
 			out, _ := exec.Command("docker", "logs", "--tail", "40", p.container).CombinedOutput()
 			t.Logf("%s logs:\n%s", p.container, out)
 		}
-		_ = exec.Command("docker", "rm", "-f", p.container).Run()
+		_ = exec.Command("docker", "rm", "-f", "-v", p.container).Run()
 	})
 	port := docker(t, "port", p.container, "8200/tcp")
 	port = strings.Split(port, "\n")[0]

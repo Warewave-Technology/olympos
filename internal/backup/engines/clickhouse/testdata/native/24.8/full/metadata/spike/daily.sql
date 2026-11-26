@@ -1,0 +1,1 @@
+CREATE TABLE spike.daily UUID 'c46925e9-091a-4437-8735-333022f5cf95' (`day` Date, `users` AggregateFunction(uniq, UInt32), `total` AggregateFunction(sum, Float64)) ENGINE = AggregatingMergeTree ORDER BY day SETTINGS index_granularity = 8192

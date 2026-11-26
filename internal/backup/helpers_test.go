@@ -24,8 +24,9 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/targetid"
 )
 
-// fakeEngineName uses an engine name allowed by the targets CHECK; the
-// real ClickHouse engine is not linked into this test binary.
+// fakeEngineName uses an engine name allowed by the targets CHECK. The fake
+// is registered over the real ClickHouse engine, whose native manifest code
+// the native tests use (native_test.go).
 const fakeEngineName = "clickhouse"
 
 // fakeEngine dials the target twice, then writes payload.
@@ -99,6 +100,23 @@ func (fakeEngine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer)
 	return &backup.RunResult{ServerVersion: "fake 1.0", ToolVersion: "fakedump 2", TLS: &tls, Details: map[string]any{"restore": "cat"}}, nil
 }
 
+// CheckOptions mirrors the real engine's method and incremental checks, which
+// are tested in the engine's own package; here they let the API tests see
+// the field errors.
+func (fakeEngine) CheckOptions(raw json.RawMessage, env backup.OptionsEnv) map[string]string {
+	var o struct{ Method, Incremental string }
+	_ = json.Unmarshal(raw, &o)
+	switch {
+	case o.Method != "" && o.Method != "native" && o.Method != "logical":
+		return map[string]string{"method": `must be "native" or "logical"`}
+	case o.Incremental != "":
+		return map[string]string{"incremental": "incremental native backups are not available yet"}
+	case o.Method == "native" && !env.IngestEnabled:
+		return map[string]string{"method": "native backups need the ingest endpoint"}
+	}
+	return nil
+}
+
 func init() { backup.RegisterEngine(fakeEngine{}) }
 
 // fakeDialer pretends agents are connected; every tunnel reports wire bytes.
@@ -160,7 +178,23 @@ type fakeBlobs struct {
 	// wrapReadErr wraps a read error without %w, as the Azure and S3
 	// writers do.
 	wrapReadErr bool
-	dests       map[uuid.UUID]*fakeBlobs
+	// failOn: fail and failAfter apply only to paths that contain it.
+	failOn string
+	// failTags is what SetTags returns, after failTagsAfter calls that
+	// work.
+	failTags      error
+	failTagsAfter int
+	// holdOn: an upload of a path that contains it, once it read its body,
+	// closes held and waits for its context to end.
+	holdOn   string
+	held     chan struct{}
+	holdOnce sync.Once
+	// tagHook, when set, runs before every SetTags with its context; an
+	// error fails it, as a cancelled request does.
+	tagHook func(ctx context.Context) error
+	// uploads counts the stored uploads.
+	uploads int
+	dests   map[uuid.UUID]*fakeBlobs
 }
 
 func newBlobs(prefix string) *fakeBlobs {
@@ -194,6 +228,9 @@ func (f *fakeBlobs) ForDestination(ctx context.Context, id uuid.UUID) (blob.Writ
 func (f *fakeBlobs) Prefix() string { return f.prefix }
 
 func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct string, tags map[string]string) (blob.UploadResult, error) {
+	if f.failOn != "" && !strings.Contains(path, f.failOn) {
+		return f.storeCtx(ctx, path, r, tags)
+	}
 	if f.failAfter > 0 {
 		_, _ = io.CopyN(io.Discard, r, f.failAfter)
 		if f.fail != nil {
@@ -215,7 +252,20 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	if f.failManifest != nil && strings.HasSuffix(path, ".manifest.json") {
 		return blob.UploadResult{}, f.failManifest
 	}
+	return f.storeCtx(ctx, path, r, tags)
+}
+
+func (f *fakeBlobs) store(path string, r io.Reader, tags map[string]string) (blob.UploadResult, error) {
+	return f.storeCtx(context.Background(), path, r, tags)
+}
+
+func (f *fakeBlobs) storeCtx(ctx context.Context, path string, r io.Reader, tags map[string]string) (blob.UploadResult, error) {
 	b, err := io.ReadAll(r)
+	if err == nil && f.holdOn != "" && strings.Contains(path, f.holdOn) {
+		f.holdOnce.Do(func() { close(f.held) })
+		<-ctx.Done()
+		return blob.UploadResult{}, ctx.Err()
+	}
 	if err != nil {
 		if f.wrapReadErr {
 			return blob.UploadResult{}, fmt.Errorf("upload %s: %s", path, err)
@@ -224,9 +274,35 @@ func (f *fakeBlobs) Upload(ctx context.Context, path string, r io.Reader, ct str
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if _, ok := f.blobs[path]; ok {
+		return blob.UploadResult{}, fmt.Errorf("%s already exists; refusing to overwrite", path)
+	}
 	f.blobs[path] = b
 	f.tags[path] = tags
+	f.uploads++
 	return blob.UploadResult{Bytes: int64(len(b))}, nil
+}
+
+// SetTags replaces the tags of a stored blob, as every real writer does.
+func (f *fakeBlobs) SetTags(ctx context.Context, path string, tags map[string]string) error {
+	if f.tagHook != nil {
+		if err := f.tagHook(ctx); err != nil {
+			return err
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failTags != nil {
+		if f.failTagsAfter == 0 {
+			return f.failTags
+		}
+		f.failTagsAfter--
+	}
+	if _, ok := f.blobs[path]; !ok {
+		return fmt.Errorf("%s does not exist", path)
+	}
+	f.tags[path] = tags
+	return nil
 }
 
 // fixture is a cluster with one target and a destination.

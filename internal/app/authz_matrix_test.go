@@ -157,7 +157,11 @@ func TestAuthzMatrix(t *testing.T) {
 
 // wiredHandler is the user-facing router with the production module
 // wiring (every module factory), on db.
-func wiredHandler(t *testing.T, db *store.DB) http.Handler {
+func wiredHandler(t *testing.T, db *store.DB) http.Handler { return wiredHandlerYAML(t, db, "") }
+
+// wiredHandlerYAML is wiredHandler with extra YAML lines (indented under
+// olympos:) in the config.
+func wiredHandlerYAML(t *testing.T, db *store.DB, extra string) http.Handler {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -166,7 +170,7 @@ func wiredHandler(t *testing.T, db *store.DB) http.Handler {
   publicURL: http://olympos.test
   agentGatewayURL: gw.test:8443
   keyVault: {provider: local, name: test, localDir: `+dir+`/kv}
-`), 0o600); err != nil {
+`+extra), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(cfgPath)

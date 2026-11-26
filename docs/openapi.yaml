@@ -362,7 +362,7 @@ paths:
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "201": {description: Created, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
-        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, ...). Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
+        "422": {description: "Validation (cron, timezone, credential.*, destination_id, destination_group_id, engine_options, ...). ClickHouse engine_options: method must be native or logical (empty is logical) and is native only while the ingest endpoint is on (ingest_enabled of GET /backup/settings); incremental must be empty for now (422 on incremental: incremental native backups are not available yet); tables cannot be used with method native, which backs up whole databases. Exactly one of destination_id and destination_group_id is required: destination_id gets \"choose a destination or a destination group\" for both or neither."}
   /backup/jobs/{id}:
     parameters: [{$ref: "#/components/parameters/id"}]
     get:
@@ -371,10 +371,11 @@ paths:
         "200": {description: Job, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
     patch:
       tags: [backups]
-      summary: Partial update. target_id cannot change. A new credential replaces (and deletes) the old one. Enabling or changing the schedule restarts it from now.
+      summary: Partial update. target_id cannot change. A new credential replaces (and deletes) the old one. Enabling or changing the schedule restarts it from now. engine_options replaces the whole object and is checked like on create (a native ClickHouse job needs the ingest endpoint); a PATCH without engine_options does not re-check the stored ones.
       requestBody: {content: {application/json: {schema: {$ref: "#/components/schemas/BackupJobInput"}}}}
       responses:
         "200": {description: Updated, content: {application/json: {schema: {$ref: "#/components/schemas/BackupJob"}}}}
+        "422": {description: "Validation, as on create (fields: engine_options, method, incremental, cron, ...)"}
     delete:
       tags: [backups]
       summary: Delete the job (soft delete; runs and blobs are kept, the job's credential is removed, queued runs fail).
@@ -493,6 +494,19 @@ paths:
       responses:
         "202": {description: Queued, content: {application/json: {schema: {type: object, properties: {run_id: {type: string}}}}}}
         "409": {description: "Not configured yet, or a run is already queued/running (a repair waiting for its not_before does not count)"}
+  /backup/settings:
+    get:
+      tags: [backups]
+      summary: Server settings the backup wizard needs (any signed-in user).
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ingest_enabled: {type: boolean, description: "The ingest endpoint of native ClickHouse backups is on (ingest.url is set). New ClickHouse jobs default to method native when true; native jobs are refused (422, field method) when false."}
   /backup/schedule-preview:
     get:
       tags: [backups]
@@ -725,7 +739,7 @@ paths:
         "422":
           description: >-
             A check failed (fields name it): unknown run or target (also outside scope), run not succeeded/partial,
-            dry run, no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
+            dry run, a native ClickHouse run (run_id: "native restore is not available yet; the backup is kept"), no succeeded copy in copy_destination_id, the backup's own target, another engine, target gone,
             a Vault configured in Olympos, databases not in the backup, a selected database exists on the target
             with data in it, Vault not initialized/sealed/token without snapshot-force, credential or vault_token
             missing, justification 10–2000 chars, agent_offline, the target check failed, or "restores of <engine>
@@ -1836,7 +1850,7 @@ components:
         destination_group_id: {type: string, description: "Write to every destination of a group (docs/design/destination-groups.md)."}
         engine_options:
           type: object
-          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..]}; vault: {}"
+          description: "postgresql: {databases: [..] (empty = all), globals: true, tls_ca_pem: PEM bundle to verify the target (default system roots)}; clickhouse: {databases: [..], tables: [..] (logical only), method: native|logical (default logical), incremental: weekly_full_daily (native only; refused with 422 until incremental native backups are available)}; vault: {}"
         cron: {type: string, example: "0 2 * * *"}
         timezone: {type: string, example: Europe/Istanbul}
         retention: {$ref: "#/components/schemas/Retention"}
@@ -1947,6 +1961,8 @@ components:
         repair_of: {type: [string, "null"], format: uuid, description: "The run whose missing copies this run completes"}
         not_before: {type: [string, "null"], format: date-time, description: "A queued run is not started before then; set on repairs (5 min after the partial run, 30 min after the first repair, 2 h after the second), null = as soon as a worker is free"}
         destination_name: {type: string, description: "The destination the run wrote to when it wrote to exactly one, else the job's destination or group name"}
+        method: {type: string, enum: [native, logical], description: "native: a ClickHouse native run (BACKUP through the ingest endpoint; its copies' blob_path is the run's directory and their sha256 the signed manifest's; it is never repaired). A finished run is native when it recorded objects; a queued or running one has its job's method. logical for every other run."}
+        objects: {type: [integer, "null"], description: "How many objects a native run stored (0 when it failed before ClickHouse stored any); null for logical runs and for a native run that has not finished"}
         copies:
           type: array
           description: "One result per destination, in the order the run wrote them; empty for runs from before destination groups."

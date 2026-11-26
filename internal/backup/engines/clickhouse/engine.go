@@ -40,7 +40,10 @@ func init() { backup.RegisterEngine(Engine{}) }
 // Engine implements backup.Engine for ClickHouse.
 type Engine struct{}
 
-var _ backup.Engine = Engine{}
+var (
+	_ backup.Engine         = Engine{}
+	_ backup.OptionsChecker = Engine{}
+)
 
 func (Engine) Name() string        { return Name }
 func (Engine) Ext() string         { return "zip" }
