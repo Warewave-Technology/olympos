@@ -47,10 +47,20 @@ type upload struct {
 	// upload stays findable until it is recorded.
 	completing bool
 	// busy is set while one request writes into obj; next is the part obj
-	// waits for.
+	// waits for. idle is closed, and made anew, each time busy is given up
+	// (unbusy).
 	busy  bool
+	idle  chan struct{}
 	next  int
 	parts map[int]*part
+}
+
+// unbusy gives up u.busy and wakes the Completes that wait for the parts
+// being written. Call it with u.mu held.
+func (u *upload) unbusy() {
+	u.busy = false
+	close(u.idle)
+	u.idle = make(chan struct{})
 }
 
 // part is a part received, or still arriving.
@@ -77,7 +87,8 @@ func (q *request) createUpload() *s3Error {
 	if q.key == s.LockKey() {
 		return denied("The .lock is not uploaded in parts.")
 	}
-	u := &upload{id: randomHex(16), s: s, key: q.key, next: 1, parts: map[int]*part{}, finished: make(chan struct{})}
+	u := &upload{id: randomHex(16), s: s, key: q.key, next: 1, parts: map[int]*part{}, idle: make(chan struct{}),
+		finished: make(chan struct{})}
 	// One writer per key (R36). ClickHouse sends CreateMultipartUpload again
 	// when it did not see the answer: the earlier upload of the key is
 	// dropped, and its sink write ended, before this one starts (a
@@ -320,7 +331,7 @@ func (q *request) streamPart(u *upload, p *part, wantMD5 []byte) *s3Error {
 
 func (q *request) release(u *upload) {
 	u.mu.Lock()
-	u.busy = false
+	u.unbusy()
 	u.mu.Unlock()
 }
 
@@ -331,7 +342,7 @@ func (q *request) drain(u *upload) *s3Error {
 		u.mu.Lock()
 		p, ok := u.parts[u.next]
 		if u.closed || !ok || p.spill == "" {
-			u.busy = false
+			u.unbusy()
 			closed := u.closed
 			u.mu.Unlock()
 			if closed {
@@ -517,35 +528,48 @@ func (q *request) completeUpload() *s3Error {
 	}
 
 	u.mu.Lock()
-	if u.closed {
-		completing := u.completing
-		u.mu.Unlock()
-		if !completing {
-			return errNoSuchUpload
+	for {
+		if u.closed {
+			completing := u.completing
+			u.mu.Unlock()
+			if !completing {
+				return errNoSuchUpload
+			}
+			// A repeat of a Complete still storing its object waits for it,
+			// and gets its answer (R35, R36).
+			select {
+			case <-u.finished:
+			case <-s.ended:
+				return errStopped
+			}
+			c, ok := s.completedUpload(id)
+			if !ok || c.key != q.key {
+				return errNoSuchUpload
+			}
+			return q.answerRepeat(c, listSHA)
 		}
-		// A repeat of a Complete still storing its object waits for it, and
-		// gets its answer (R35, R36).
+		if !u.listsParts(list) {
+			u.mu.Unlock()
+			return q.brokenUpload(u, "The part list does not match the parts received.")
+		}
+		if !u.busy {
+			break
+		}
+		// Every part arrived, and parts that waited on disk are still being
+		// written into the object: a part sent again gets its answer at
+		// once, so its client can send the Complete before then. It waits
+		// for them.
+		idle := u.idle
+		u.mu.Unlock()
 		select {
-		case <-u.finished:
+		case <-idle:
 		case <-s.ended:
 			return errStopped
 		}
-		c, ok := s.completedUpload(id)
-		if !ok || c.key != q.key {
-			return errNoSuchUpload
-		}
-		return q.answerRepeat(c, listSHA)
+		u.mu.Lock()
 	}
 	// Every part from 1 was streamed, in order, and none waits.
-	ok := !u.busy && len(list.Parts) > 0 && len(list.Parts) == u.next-1 && len(u.parts) == u.next-1
-	for i, lp := range list.Parts {
-		p := u.parts[i+1]
-		if !ok || lp.PartNumber != i+1 || p == nil || p.pending || strings.Trim(lp.ETag, `"`) != strings.Trim(etag(p.sha256), `"`) {
-			ok = false
-			break
-		}
-	}
-	if !ok {
+	if len(list.Parts) != u.next-1 {
 		u.mu.Unlock()
 		return q.brokenUpload(u, "The part list does not match the parts received.")
 	}
@@ -576,6 +600,22 @@ func (q *request) completeUpload() *s3Error {
 	s.completeUpload(u.id, completedUpload{key: q.key, listSHA256: listSHA, etag: tag})
 	q.completed(tag)
 	return nil
+}
+
+// listsParts reports whether list names every part u received, from 1 and
+// in order, none of them still arriving, each with its ETag. Call it with
+// u.mu held.
+func (u *upload) listsParts(list completeRequest) bool {
+	if len(list.Parts) == 0 || len(list.Parts) != len(u.parts) {
+		return false
+	}
+	for i, lp := range list.Parts {
+		p := u.parts[i+1]
+		if lp.PartNumber != i+1 || p == nil || p.pending || strings.Trim(lp.ETag, `"`) != strings.Trim(etag(p.sha256), `"`) {
+			return false
+		}
+	}
+	return true
 }
 
 func (q *request) completed(tag string) {

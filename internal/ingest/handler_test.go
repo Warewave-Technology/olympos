@@ -274,6 +274,11 @@ type fakeSink struct {
 	// hold, when not nil, keeps a Put that read its body from returning
 	// until it is closed.
 	hold chan struct{}
+	// stall, when not nil, stops the reading once stallAfter bytes arrived,
+	// until it is closed; stalled is closed when it stops.
+	stall, stalled chan struct{}
+	stallAfter     int
+	stallOnce      sync.Once
 
 	mu      sync.Mutex
 	puts    []sinkPut
@@ -307,6 +312,12 @@ func (f *fakeSink) Put(ctx context.Context, key string, r io.Reader) (ingest.Obj
 		buf.Write(chunk[:n])
 		if n > 0 && f.first != nil {
 			f.firstOnce.Do(func() { close(f.first) })
+		}
+		if f.stall != nil && buf.Len() >= f.stallAfter {
+			f.stallOnce.Do(func() {
+				close(f.stalled)
+				<-f.stall
+			})
 		}
 		if rerr == io.EOF {
 			break
@@ -2000,6 +2011,66 @@ func TestHandlerRepeatedCompleteInFlight(t *testing.T) {
 	}
 	if puts := a.sink.all(); len(puts) != 1 || len(a.s.Objects()) != 1 {
 		t.Fatalf("sink puts %d, objects %d", len(puts), len(a.s.Objects()))
+	}
+	notStopped(t, a.s)
+}
+
+// A part sent again while the request that streamed it still writes the
+// parts that waited on disk gets its answer at once. The Complete that
+// follows waits for those parts to be written, instead of finding the
+// part list short (seen on CI: ClickHouse sent a part again when the
+// destination was slow, then the Complete, and the upload failed with
+// InvalidPart).
+func TestHandlerCompleteWaitsForWaitingParts(t *testing.T) {
+	e := newEnv(t)
+	a := e.backup(t)
+	parts := []string{"the first part", strings.Repeat("b", 64<<10)}
+	a.sink.stall, a.sink.stalled, a.sink.stallAfter = make(chan struct{}), make(chan struct{}), len(parts[0])+1
+	var release sync.Once
+	unstall := func() { release.Do(func() { close(a.sink.stall) }) }
+	defer unstall() // a failing test must not leave the server waiting on the sink
+	m := e.createUpload(t, a, a.prefix+"data/big.bin")
+	tags := []string{shaTag(parts[0]), etagOf(t, m.part(t, 2, parts[1]))}
+
+	first := make(chan reply, 1)
+	go func() {
+		r, err := e.tryDo(a.cred, http.MethodPut, fmt.Sprintf("/olympos/%s?partNumber=1&uploadId=%s", m.key, m.id),
+			parts[0], md5Header(parts[0]))
+		if err != nil {
+			r.status = -1
+		}
+		first <- r
+	}()
+	select {
+	case <-a.sink.stalled: // part 1 is written, part 2 is being written
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sink got nothing of part 2")
+	}
+	if tag := etagOf(t, m.part(t, 1, parts[0])); tag != tags[0] {
+		t.Fatalf("part 1 sent again: ETag %s, want %s", tag, tags[0])
+	}
+	completed := make(chan reply, 1)
+	go func() {
+		r, err := e.tryDo(a.cred, http.MethodPost, "/olympos/"+m.key+"?uploadId="+m.id, completeXML(tags...))
+		if err != nil {
+			r.status = -1
+		}
+		completed <- r
+	}()
+	select {
+	case r := <-completed:
+		t.Fatalf("the Complete returned while part 2 is being written: %d %s", r.status, r.body)
+	case <-time.After(200 * time.Millisecond):
+	}
+	unstall()
+	r := <-completed
+	wantStatus(t, r, http.StatusOK)
+	wantStatus(t, <-first, http.StatusOK)
+	if !strings.Contains(r.body, strings.Trim(multipartETag(parts...), `"`)) {
+		t.Fatalf("complete: %s", r.body)
+	}
+	if puts := a.sink.all(); len(puts) != 1 || puts[0].err != nil || string(puts[0].body) != strings.Join(parts, "") {
+		t.Fatalf("sink puts: %d", len(puts))
 	}
 	notStopped(t, a.s)
 }
