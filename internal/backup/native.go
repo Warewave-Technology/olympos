@@ -924,5 +924,6 @@ func quotaError(quota int64, configured bool) string {
 			"or set it to 0 for the automatic limit", humanBytes(quota))
 	}
 	return fmt.Sprintf("native byte limit: the run wrote more than %s (the largest of twice the last full native run, "+
-		"1.5 times the databases' size on disk, and 1 GiB); set ingest.maxRunBytes to allow more", humanBytes(quota))
+		"at most twice the databases' size on disk; 1.5 times that size; and 1 GiB); set ingest.maxRunBytes to allow more",
+		humanBytes(quota))
 }

@@ -35,8 +35,10 @@ var (
 	ErrSignature = errors.New("ingest: signature does not match")
 	// ErrClockSkew means the request date is too far from the server's clock.
 	ErrClockSkew = errors.New("ingest: request time is outside the allowed clock skew")
-	// ErrUnsignedPayload means x-amz-content-sha256 is missing or is not the
-	// hex SHA-256 of the body (UNSIGNED-PAYLOAD, aws-chunked).
+	// ErrUnsignedPayload means x-amz-content-sha256 is missing, a STREAMING-*
+	// (aws-chunked) value, or anything else that is neither a lower-case hex
+	// SHA-256 nor, over TLS, UNSIGNED-PAYLOAD. Over plain HTTP
+	// UNSIGNED-PAYLOAD is refused with it too.
 	ErrUnsignedPayload = errors.New("ingest: payload hash is not a signed SHA-256")
 )
 
@@ -48,18 +50,25 @@ const (
 	service     = "s3"
 	scopeEnd    = "aws4_request"
 	hexUpper    = "0123456789ABCDEF"
+	// UnsignedPayload is the x-amz-content-sha256 of a request whose body
+	// the signature does not cover. ClickHouse (the AWS SDK's
+	// PayloadSigningPolicy::Never) sends it on every request over HTTPS.
+	UnsignedPayload = "UNSIGNED-PAYLOAD"
 )
 
 // Verify checks the header-based SigV4 signature of r against the secret that
 // lookup returns for the request's access key. It returns the access key and
-// the payload hash the client declared in x-amz-content-sha256 (lower-case
-// hex). It does not read the body: the caller compares the body with the
-// returned hash while it streams.
+// the payload hash the client declared in x-amz-content-sha256: a lower-case
+// hex SHA-256, or UnsignedPayload when r came over TLS. It does not read the
+// body: the caller compares the body with a hex hash while it streams, and
+// for UnsignedPayload relies on a signed Content-MD5 (the handler requires
+// one on PutObject and UploadPart) and on TLS.
 //
 // Any region in the credential scope is accepted, but the service must be s3.
-// host, x-amz-date and x-amz-content-sha256 must be signed. The payload must
-// carry a real SHA-256, so UNSIGNED-PAYLOAD and the STREAMING-* values are
-// refused.
+// host, x-amz-date and x-amz-content-sha256 must be signed. Over plain HTTP the
+// payload must carry a real SHA-256; over TLS UNSIGNED-PAYLOAD is accepted too,
+// because ClickHouse sends it on every request over HTTPS. The STREAMING-*
+// (aws-chunked) values are always refused.
 func Verify(r *http.Request, lookup func(accessKey string) (secret string, ok bool), now time.Time) (accessKey, payloadHash string, err error) {
 	auth, ok := strings.CutPrefix(r.Header.Get("Authorization"), algorithm+" ")
 	if !ok {
@@ -89,8 +98,11 @@ func Verify(r *http.Request, lookup func(accessKey string) (secret string, ok bo
 		return "", "", ErrClockSkew
 	}
 
+	// Over TLS the body may be unsigned: TLS protects it in transit, and
+	// the handler hashes every object while it streams. Over plain HTTP
+	// (devMode only) the signature must cover it.
 	payloadHash = r.Header.Get("X-Amz-Content-Sha256")
-	if !isLowerHexSHA256(payloadHash) {
+	if !isLowerHexSHA256(payloadHash) && (payloadHash != UnsignedPayload || r.TLS == nil) {
 		return "", "", ErrUnsignedPayload
 	}
 	for _, h := range []string{"host", "x-amz-date", "x-amz-content-sha256"} {

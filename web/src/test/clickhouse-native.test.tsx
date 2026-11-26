@@ -107,6 +107,9 @@ describe('Backup wizard · ClickHouse method', () => {
     expect(note).toHaveTextContent(/ingest\.url/);
     expect(note).toHaveTextContent(/egress from the ClickHouse pods/);
     expect(note).toHaveTextContent(/openSSL\.client\.caConfig/);
+    // the data skips the agent; the BACKUP statement and the run's credential do not (docs/clickhouse-backups.md, Network)
+    expect(note).toHaveTextContent("The backup data does not pass through the agent; the BACKUP statement, with the run's credential, does, in the cluster's transfer mode (in the clear in compressed mode).");
+    expect(note).not.toHaveTextContent('does not apply');
     // incrementals are off, and can be picked with Native (task 13)
     expect(screen.getByRole('radio', { name: /^Off/ })).toBeChecked();
     const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });

@@ -662,13 +662,35 @@ func (q *request) copyBody(dst io.Writer, charge bool) (bodyDigest, error) {
 	}
 }
 
-// checkDigest compares the body with x-amz-content-sha256 and Content-MD5.
+// checkDigest compares the body with x-amz-content-sha256 (unless it is
+// UNSIGNED-PAYLOAD, over TLS, where Content-MD5 stands in for it on a
+// PutObject or UploadPart: unsignedNeedsMD5) and with Content-MD5.
 func (q *request) checkDigest(d bodyDigest, wantMD5 []byte) *s3Error {
-	if hex.EncodeToString(d.sha.Sum(nil)) != q.payloadHash {
+	if q.payloadHash != UnsignedPayload && hex.EncodeToString(d.sha.Sum(nil)) != q.payloadHash {
 		return errSHA256
 	}
 	if wantMD5 != nil && !bytes.Equal(d.md5.Sum(nil), wantMD5) {
 		return errBadDigest
+	}
+	return nil
+}
+
+// unsignedNeedsMD5 refuses a PutObject or UploadPart whose payload is
+// UNSIGNED-PAYLOAD (accepted over TLS only) unless it carries a Content-MD5
+// that the signature covers: the signature then binds the body again,
+// through its MD5. ClickHouse 24.8 sends a signed Content-MD5 on every
+// PutObject and UploadPart over HTTPS (lab, Task 19); checkDigest compares it
+// with the body.
+func (q *request) unsignedNeedsMD5() *s3Error {
+	if q.payloadHash != UnsignedPayload {
+		return nil
+	}
+	if q.r.Header.Get("Content-MD5") == "" {
+		return denied("A request with UNSIGNED-PAYLOAD needs a Content-MD5.")
+	}
+	auth, _ := strings.CutPrefix(q.r.Header.Get("Authorization"), algorithm+" ")
+	if _, signed, _, err := parseAuthorization(auth); err != nil || !slices.Contains(signed, "content-md5") {
+		return denied("A request with UNSIGNED-PAYLOAD needs a signed Content-MD5.")
 	}
 	return nil
 }
@@ -688,7 +710,7 @@ func (q *request) contentMD5() ([]byte, *s3Error) {
 
 // noBody refuses a body on a request that takes none.
 func (q *request) noBody() *s3Error {
-	if q.payloadHash != emptySHA256 {
+	if q.payloadHash != emptySHA256 && q.payloadHash != UnsignedPayload {
 		return denied("This request takes no body.")
 	}
 	if n, _ := io.Copy(io.Discard, io.LimitReader(q.r.Body, 1)); n > 0 {
@@ -756,6 +778,9 @@ func (q *request) put() *s3Error {
 	s := q.s
 	if !s.own(q.key) {
 		return denied("The key is outside the run's prefix.")
+	}
+	if e := q.unsignedNeedsMD5(); e != nil {
+		return e
 	}
 	wantMD5, e := q.contentMD5()
 	if e != nil {

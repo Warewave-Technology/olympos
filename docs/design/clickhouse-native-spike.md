@@ -69,9 +69,11 @@ the backup still ends `BACKUP_FAILED` at once.
 ### 4. Requests are signed with the real payload hash
 
 Every request carried `x-amz-content-sha256` with the hex SHA-256 of the body (never `UNSIGNED-PAYLOAD` or
-`aws-chunked`), and every upload a `Content-MD5`. The endpoint can verify the header signature before it reads
-a byte, stream the body to the destination while hashing it, and fail the object if the hash differs. That is
-the write-through of point 3.
+`aws-chunked`), and every upload a `Content-MD5`. (The spike ran over plain HTTP. The lab showed later that over
+HTTPS ClickHouse sends `UNSIGNED-PAYLOAD` on every request, and a signed `Content-MD5` on every PutObject and
+UploadPart; see the design's SigV4 notes and spec-changes #28.) The endpoint can verify the header signature before
+it reads a byte, stream the body to the destination while hashing it, and fail the object if the hash differs. That
+is the write-through of point 3.
 
 ### 5. An incremental reads its base
 

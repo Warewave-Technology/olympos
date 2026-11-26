@@ -258,6 +258,9 @@ func (q *request) uploadPart() *s3Error {
 	if q.r.ContentLength < 0 || len(q.r.TransferEncoding) > 0 {
 		return denied("A part needs a Content-Length.")
 	}
+	if e := q.unsignedNeedsMD5(); e != nil {
+		return e
+	}
 	wantMD5, e := q.contentMD5()
 	if e != nil {
 		return e

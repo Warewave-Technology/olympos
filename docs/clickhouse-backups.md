@@ -21,7 +21,11 @@ page compares them and explains what a native backup needs, keeps and does.
 | Restore | From the UI only: a native run has no commands to restore by hand | From the UI, or by hand with the run's commands ([Restore by hand](restore.md#clickhouse)) |
 
 New ClickHouse jobs start on **Native** (marked *Recommended* in the wizard) when the endpoint is on and the
-target runs 24.8 or later. A job created before native backups existed stays logical until you change its
+target runs 24.8 or later.
+
+![The wizard's Backup method step for a ClickHouse 24.8 target](images/clickhouse-native-01-method.png)
+
+A job created before native backups existed stays logical until you change its
 method. A job that backs up only some tables (`tables`, set through the API) cannot be native: the API refuses
 the combination, because a native run takes whole databases.
 
@@ -44,11 +48,26 @@ the combination, because a native run takes whole databases.
   really sharded installation is still refused by its own cluster and by its `Distributed` tables; only a
   cluster of your own named `all-sharded`, really sharded, with no `Distributed` table in the selected
   databases, would back up one shard. Use the logical method for sharded targets.
-- **The backup user's privileges.** ClickHouse's `BACKUP` privilege on the databases. Olympos also reads
-  `system.tables`, `system.clusters`, `system.parts`, `system.processes` and `system.backups` on the target.
-  Every user can read these by default. When the server sets `select_from_system_db_requires_grant`, grant
-  `SELECT` on them: without `system.parts` the run fails with `clickhouse: size of the databases: …`, and
-  without `system.processes` it cannot end a backup an earlier run left running.
+- **The backup user's privileges.** ClickHouse's `BACKUP` privilege on the databases; no `SELECT` on them and
+  no `S3` grant. Olympos also reads `system.tables`, `system.clusters`, `system.parts`, `system.processes` and
+  `system.backups` on the target. Every user can read these by default. When the server sets
+  `select_from_system_db_requires_grant`, grant `SELECT` on the last four (`system.tables` stays readable and
+  lists the tables the user may back up): without `system.parts` the run fails with
+  `clickhouse: size of the databases: …`, without `system.clusters` with `clickhouse: read system.clusters: …`,
+  without `system.backups` with `clickhouse: the native backup may still be running on the target …`, and
+  without `system.processes` it cannot end a backup an earlier run left running. For the database `shop`:
+
+  ```sql
+  CREATE USER backup IDENTIFIED BY '…';
+  GRANT BACKUP ON shop.* TO backup;
+  GRANT SELECT ON system.parts TO backup;
+  GRANT SELECT ON system.clusters TO backup;
+  GRANT SELECT ON system.backups TO backup;
+  GRANT SELECT ON system.processes TO backup;
+  ```
+
+  The wizard's *Test connection* checks what the logical method needs (`SHOW` and `SELECT` on every table) and
+  lists those as missing for this user; the native run does not need them. The dry run tests the native method.
 
 The wizard's dry run (*Review & test run*) tests all of this in seconds: it is a `BACKUP` of the definitions
 only, through the endpoint, to the destinations ([configuration › Dry runs](configuration.md#ingest)).
@@ -59,7 +78,10 @@ A native run backs up the databases of the job (or every database the backup use
 databases), with ClickHouse's own format: every table's data parts, and the definition of every database,
 table, view, materialized view and dictionary. The run is a directory in the destination,
 `<prefix>/<cluster>/<namespace>/<service>/clickhouse/YYYY/MM/DD/<run-id>/`, with ClickHouse's files in it
-(`.backup`, `metadata/…`, `data/…`), and its manifest `<run-id>.manifest.json` next to it.
+(`.backup`, `metadata/…`, `data/…`), and its manifest `<run-id>.manifest.json` next to it, which holds the
+signed native manifest (`details.native`).
+
+![A native run: the method, the object count, and Restore… instead of restore commands](images/clickhouse-native-02-run.png)
 
 The manifest lists every file the backup holds, with its size and SHA-256, the databases and their objects,
 and the rows of every table, and it is **signed** with a Key Vault key. Only what ClickHouse declares in its
@@ -97,7 +119,8 @@ incrementals of earlier weeks name the old one.
 ## Limits
 
 - **Bytes per run.** A run may write the largest of twice the job's last full (at most twice what its databases
-  hold), 1.5 times what its databases hold, and 1 GiB, or `ingest.maxRunBytes` when set ([configuration › `ingest`](configuration.md#ingest)).
+  hold), 1.5 times what its databases hold, and 1 GiB, or `ingest.maxRunBytes` when set
+  ([configuration › `ingest`](configuration.md#ingest)).
 - **Files per run.** A backup of more than about 250,000 files fails: its `.backup` file, which lists every
   file, would be over the 64 MiB the endpoint keeps of it, and the run is stopped (`capture limit`). A wide
   part of a MergeTree table has two files per column and a few more, so the limit is about parts and columns,
@@ -122,10 +145,10 @@ The run's error names the cause; the most common ones:
 |---|---|
 | `native backups need ClickHouse 24.8 or later, and this target runs …` | Use the logical method, or upgrade the target. |
 | `native backups of sharded targets are not supported: …` | Use the logical method. The error names the `Distributed` tables or the cluster. |
-| `clickhouse: size of the databases: …` | Grant `SELECT` on `system.parts` and `system.tables` ([above](#what-a-native-backup-needs)), or set `ingest.maxRunBytes`, which skips this query. |
+| `clickhouse: size of the databases: …` | Grant `SELECT` on `system.parts` ([above](#what-a-native-backup-needs)), or set `ingest.maxRunBytes`, which skips this query. |
 | `native byte limit: the run wrote more than …` | Set `ingest.maxRunBytes` above the largest backup you expect ([configuration](configuration.md#ingest)). |
 | a TLS or connection error from ClickHouse in `BACKUP` | ClickHouse cannot reach the endpoint or does not trust its certificate: check the egress and `openSSL.client` ([install](install.md#5-native-clickhouse-backups-optional)). |
-| `the backup's manifest does not verify` (a restore), or a full where an incremental was due (the server log: *the base chain cannot be used*) | The cause is in the server log. Key Vault did not answer, or the server's identity cannot read the manifest key (the server verifies fail-closed): check Key Vault and `keys/get` on the key, then check again. The key version that signed the manifest is disabled or deleted, or the manifest or a link of its chain was changed: the backup cannot be restored. The destination could not be read: check it, then check again. |
+| `the backup's manifest does not verify` (a restore), or a full where an incremental was due (the server log: *the base chain cannot be used*) | The cause is in the server log. Key Vault did not answer, or the server's identity cannot read the manifest key (the server verifies fail-closed): check Key Vault and `keys/get` on the key, then check again (a backup run needs nothing: the next one tries the chain again). The key version that signed the manifest is disabled or deleted, or the manifest or a link of its chain was changed: the backup cannot be restored or be the base of an incremental (the job's next run is a full backup). The destination could not be read: check it, then check again. |
 
 A run that dies while its `BACKUP` still runs on the target leaves it there; the next native run on that server
 ends it, and the error names the `KILL QUERY` to run by hand ([configuration › Backups left

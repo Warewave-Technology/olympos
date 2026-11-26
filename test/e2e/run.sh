@@ -150,7 +150,7 @@ kubectl -n lab rollout status statefulset/orders-pg --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/vault --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/openbao --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/metrics-ch --timeout=240s >/dev/null
-for d in restore-pg restore-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
+for d in native-ch restore-pg restore-ch restore-native-ch restore-vault; do kubectl -n lab rollout status "deploy/$d" --timeout=240s >/dev/null; done
 kubectl -n olympos rollout status deploy/azurite --timeout=180s >/dev/null
 kubectl -n lab rollout status deploy/synth-web --timeout=120s >/dev/null
 

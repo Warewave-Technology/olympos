@@ -781,7 +781,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                       ClickHouse must trust the endpoint&apos;s certificate: one from your PKI or a public CA, or else the Olympos CA in <span className="mono">openSSL.client.caConfig</span>.
                     </li>
                   </ul>
-                  <div style={{ marginTop: 6 }}>Each run gets its own credential for its own backup only, revoked when the run ends. The cluster&apos;s transfer mode does not apply: the backup does not pass through the agent.</div>
+                  <div style={{ marginTop: 6 }}>Each run gets its own credential for its own backup only, revoked when the run ends. The backup data does not pass through the agent; the <span className="mono">BACKUP</span> statement, with the run&apos;s credential, does, in the cluster&apos;s transfer mode (in the clear in <span className="mono">compressed</span> mode).</div>
                 </div>
               )}
               <div className="foot-actions">

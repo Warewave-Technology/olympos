@@ -34,6 +34,11 @@ All notable changes to this project are documented here. The format follows
     that did not finish, and the NFS clean-up for them in `docs/install.md`.
   - SPEC §0 principle 1 (a second documented exception: the per-run credential that ClickHouse receives) and
     §10.4 (a native rule next to the logical one): `docs/spec-changes.md` #27, `docs/security-model.md`.
+  - The ingest endpoint accepts `UNSIGNED-PAYLOAD` on its HTTPS listener only, because ClickHouse's S3 client
+    never signs the body over HTTPS. A PutObject or UploadPart with it must then carry a `Content-MD5` that the
+    signature covers; plain HTTP (`devMode`) still needs a body signed with its SHA-256, and `aws-chunked` is
+    refused. Over TLS the signature binds the body only through its MD5: `docs/spec-changes.md` #28,
+    `docs/security-model.md`.
 - **Install with Argo CD or Flux** ([#59](https://github.com/Warewave-Technology/olympos/issues/59)). Argo CD
   and other tools that render the charts with `helm template` could not keep two Secrets that the charts keep with `lookup`:
   every sync wrote the spent bootstrap token into the agent's identity Secrets again (the probe then retried

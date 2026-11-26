@@ -12,7 +12,8 @@ It builds `olympos-server:e2e` / `olympos-agent:e2e` / `olympos-probe:e2e` / `ol
 | `olympos` | `olympos-postgresql`, `azurite`, `minio` | Olympos's database (the chart's bundled PostgreSQL), Blob and S3 fakes |
 | `olympos-system` | `olympos-agent`, `olympos-probe` (installed by the tests from the local chart) | the agent and the synthetic monitoring probe |
 | `lab` | `orders-pg` (TLS, lab CA), `vault` and `openbao` (TLS, raft), `metrics-ch` | annotated targets |
-| `lab` | `restore-pg` (PostgreSQL 16, TLS), `restore-ch`, `restore-vault` (TLS, raft, not configured in Olympos) | new, empty servers that `TestM8Restores` and the docs tour restore backups into (emptied by every reset) |
+| `lab` | `native-ch` (ClickHouse 24.8, embedded Keeper, the Olympos CA in `config.d`, a least-privilege `backup` user) | native ClickHouse backups through the server's ingest endpoint (`TestM10ClickHouseNative`, the docs tour) |
+| `lab` | `restore-pg` (PostgreSQL 16, TLS), `restore-ch`, `restore-native-ch` (shares `native-ch`'s Keeper), `restore-vault` (TLS, raft, not configured in Olympos) | new, empty servers that `TestM8Restores`, `TestM10ClickHouseNative` and the docs tour restore backups into (emptied by every reset) |
 | `lab` | `synth-web` ([cmd/synth-web](cmd/synth-web), [manifests/synthetic.yaml](manifests/synthetic.yaml)), reachable from the probes only | the synthetic monitoring target: CoreDNS answers every `*.olympos-lab.test` name with it and `metadata.olympos-lab.test` with `169.254.169.254` (`lib.sh` `patch_coredns`); `/synth-web toggle ok\|500\|slow` switches it (reset to `ok` by every reset) |
 | `olympos-b` | a second agent and probe release (`TestM9SyntheticMonitoring`) | Olympos cluster `lab-b`, so a scenario runs on two clusters and can go critical |
 
@@ -29,6 +30,8 @@ where the legacy `ClusterPolicy` runs as well, so both agent code paths are exer
 SKIP_BUILD=1 ./test/e2e/run.sh   # reuse images
 # one milestone with the tests it builds on (M8 needs the enrolled agent, the M2 destination and M3's Vault job)
 E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM2BackupsPostgresAndClickHouse|TestM3VaultMakerChecker|TestM8Restores)$' ./test/e2e/run.sh
+# native ClickHouse backups and restores (M10 needs the enrolled lab cluster; it copies the Olympos CA to native-ch)
+E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM10ClickHouseNative)$' ./test/e2e/run.sh
 # synthetic monitoring (M9 needs the enrolled lab cluster and its probe)
 E2E_RUN='^(TestM1EnrollInventoryDiscovery|TestM9SyntheticMonitoring)$' ./test/e2e/run.sh
 E2E_CPUS=4 ./test/e2e/run.sh     # nodes limited to 4 CPUs, like a GitHub runner
