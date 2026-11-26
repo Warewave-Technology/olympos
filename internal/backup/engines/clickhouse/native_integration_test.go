@@ -232,7 +232,10 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 			t.Skip("no full backup to take it on")
 		}
 		in := newIngest(t, db)
-		mid := in.open(t, st, []string{fullID + "/"})
+		// The base is served as the worker serves it: whole objects only,
+		// a ranged GET refused (ingest.WholeSource).
+		whole := wholeStore{st}
+		mid := in.openWith(t, st, whole, []string{fullID + "/"})
 		midBase := &NativeBase{URL: in.url + "/olympos/" + fullID + "/", RunID: fullID}
 		if _, err := runNative(t, chc, mid, midBase, "spike", "big"); err != nil {
 			t.Fatalf("RunNative on the full: %v", err)
@@ -241,7 +244,7 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		mid.s.Revoke("run ended")
 		chc.query(t, `INSERT INTO spike.applog SELECT 100 + number, 'grown' FROM numbers(18);
 INSERT INTO spike.applog_copy SELECT 100 + number, 'grown' FROM numbers(18);`)
-		last := in.open(t, st, []string{fullID + "/", mid.id + "/"})
+		last := in.openWith(t, st, whole, []string{fullID + "/", mid.id + "/"})
 		lastBase := &NativeBase{URL: in.url + "/olympos/" + mid.id + "/", RunID: mid.id}
 		if _, err := runNative(t, chc, last, lastBase, "spike", "big"); err != nil {
 			t.Fatalf("RunNative on the incremental: %v", err)
@@ -305,6 +308,19 @@ INSERT INTO spike.applog_copy SELECT 100 + number, 'grown' FROM numbers(18);`)
 		if _, err := VerifyChain(context.Background(), kv, testManifestKey, last.id, raws); err != nil {
 			t.Fatalf("the chain: %v", err)
 		}
+		// ClickHouse reads its base whole: no GET with a Range, which the
+		// source would refuse.
+		gets, ranged := 0, 0
+		for _, r := range in.rec.all() {
+			if r.method == http.MethodGet && r.params == "" {
+				gets++
+				if r.rng != "" {
+					ranged++
+					t.Errorf("a ranged GET (%s), status %d", r.rng, r.status)
+				}
+			}
+		}
+		t.Logf("the chain's GetObjects: %d, with a Range: %d", gets, ranged)
 		t.Logf("requests of the chain:\n%s", in.rec.summary())
 		in.rec.checkR13(t)
 		in.checkNoSecret(t, last, engineLogs)
@@ -773,11 +789,17 @@ type nativeTestRun struct {
 
 func (in *nativeIngest) open(t *testing.T, st *dirStore, read []string) *nativeTestRun {
 	t.Helper()
+	return in.openWith(t, st, st, read)
+}
+
+// openWith is open with src serving the read prefixes.
+func (in *nativeIngest) openWith(t *testing.T, st *dirStore, src ingest.Source, read []string) *nativeTestRun {
+	t.Helper()
 	id := uuid.New()
 	o := ingest.OpenOptions{RunID: id, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: id.String() + "/", Read: read},
 		TTL: time.Hour, Sink: st, MaxBytes: 4 << 30}
 	if len(read) > 0 {
-		o.Source = st
+		o.Source = src
 	}
 	s, cred, err := in.reg.Open(context.Background(), o)
 	if err != nil {
@@ -866,9 +888,11 @@ func (rc *recorder) started(params string) int {
 
 type seenRequest struct {
 	method, params, sha256 string
-	length                 int64
-	status                 int
-	etag                   string
+	// rng is the request's Range header.
+	rng    string
+	length int64
+	status int
+	etag   string
 }
 
 const emptyBodySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -879,7 +903,7 @@ func (rc *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	seen := seenRequest{method: r.Method, params: strings.Join(names, ","), length: r.ContentLength}
+	seen := seenRequest{method: r.Method, params: strings.Join(names, ","), length: r.ContentLength, rng: r.Header.Get("Range")}
 	rc.mu.Lock()
 	if rc.begun == nil {
 		rc.begun = map[string]int{}
@@ -980,6 +1004,12 @@ func (w *statusRecorder) Write(b []byte) (int, error) {
 
 // Unwrap gives the handler's http.ResponseController the connection.
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// wholeStore is a dirStore served as the worker's chain source is: whole
+// objects only (ingest.WholeSource).
+type wholeStore struct{ *dirStore }
+
+func (wholeStore) WholeObjects() {}
 
 // dirStore is the run's sink and its base's source: objects in a temporary
 // directory, by bucket-relative key. With bytesPerSecond > 0 every Put

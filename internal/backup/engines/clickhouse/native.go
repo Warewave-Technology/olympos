@@ -249,7 +249,7 @@ func nativeThrottle(put, get int) []ch.Setting {
 var (
 	// nativeBackupSettings go with every native BACKUP: it mostly writes.
 	nativeBackupSettings = nativeThrottle(150, 40)
-	// nativeRestoreSettings are the mirror for the native RESTORE (task 13):
+	// nativeRestoreSettings are the mirror for the native RESTORE (task 16):
 	// it mostly reads.
 	nativeRestoreSettings = nativeThrottle(40, 150)
 )
