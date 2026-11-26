@@ -396,7 +396,7 @@ func TestNativeRestoreSourceKeys(t *testing.T) {
 	}
 }
 
-// TestNativeRestoreSourceBound (M-1): a chain past the serving path's
+// TestNativeRestoreSourceBound: a chain past the serving path's
 // bound (8 Mi objects, 1 GiB of keys; lowered here) is refused, with the
 // figures; one at it is served.
 func TestNativeRestoreSourceBound(t *testing.T) {

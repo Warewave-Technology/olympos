@@ -315,14 +315,20 @@ The existing flow, with these changes for a native source:
     (its request's context ends) is not a source failure: the session goes on.
   - The order is: the selected databases (`CREATE DATABASE … ENGINE = Atomic`, or an existing empty one), the
     allowed Replicated tables from the backup's own text with the Keeper path rewritten and the backup's
-    `UUID '…'` removed, then
-    `RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…) SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0, use_same_s3_credentials_for_base_backup = 1, id = '<request id>'`
+    `UUID '…'` removed, then:
+
+    ```sql
+    RESTORE DATABASE db [EXCEPT TABLES db.x, …], … FROM S3(…)
+    SETTINGS async = 1, allow_different_table_def = 1, allow_s3_native_copy = 0,
+      use_same_s3_credentials_for_base_backup = 1, id = '<request id>'
+    ```
+
     with query id `olympos-restore-<request id>` and the read throttle of R29; `allow_s3_native_copy = 0`
-    (R51), as on `BACKUP`, so a table on an S3 disk never copies its files server-side past the verified read. `RESTORE` fills a table it
-    finds and creates the others (24.8 and 25.8): a pre-created table is not named in `EXCEPT TABLES`, and
-    without `allow_different_table_def` it is refused as "a different definition". A pre-created table needs
-    no UUID of the backup: it gets its own, so on a shared Keeper nothing of the source's table (its
-    `table_shared_id`) is shared.
+    (R51), as on `BACKUP`, so a table on an S3 disk never copies its files server-side past the verified
+    read. `RESTORE` fills a table it finds and creates the others (24.8 and 25.8): a pre-created table is
+    not named in `EXCEPT TABLES`, and without `allow_different_table_def` it is refused as "a different
+    definition". A pre-created table needs no UUID of the backup: it gets its own, so on a shared Keeper
+    nothing of the source's table (its `table_shared_id`) is shared.
   - The `RESTORE` is polled every 5 s in `system.backups` (id = the request id) and ended with `KILL QUERY …
     SYNC` on a stop of the session, a cancelled restore (the request ended elsewhere, the lease, a shutdown)
     and every way out that did not see it end, on a new connection when its own is lost; when even that does
@@ -455,8 +461,7 @@ Options; the owner chose **1** on 2026-11-25:
    restores only what it can prove harmless:
    - MergeTree-family, Replicated, Log and Memory tables, with any column and table features (codecs, TTL,
      defaults, indexes, projections, settings), on the `default` disk and storage policy only. These cannot
-     reach outside the server; another disk or policy (an S3 disk, one defined inline) can, and is left out
-     (Task 14);
+     reach outside the server; another disk or policy (an S3 disk, one defined inline) can, and is left out;
    - views and materialized views whose query reads only tables in the restored set, with no table functions;
    - dictionaries with a local ClickHouse source in the restored set.
 

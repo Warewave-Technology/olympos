@@ -463,7 +463,7 @@ func TestServerErrorSummary(t *testing.T) {
 	}
 }
 
-// TestRestoredObjects (M-2): after RESTORED the restored databases hold
+// TestRestoredObjects: after RESTORED the restored databases hold
 // exactly the allowed objects, with the inner tables of the allowed
 // materialized views; an object left out that is there, an object no one
 // decided, or an allowed one that is missing fails the restore, named.
