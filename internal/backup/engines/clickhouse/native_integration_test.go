@@ -536,6 +536,7 @@ type nativeCH struct {
 func startNativeClickHouse(t *testing.T, image, wantServer string) *nativeCH {
 	t.Helper()
 	name := "olympos-native-" + randHex(t, 4)
+	pullMissing(t, image)
 	t.Cleanup(func() { _, _ = dockerT(t, time.Minute, "rm", "-f", "-v", name) })
 	// host-gateway makes host.docker.internal the host on Linux too.
 	mustDocker(t, 2*time.Minute, "run", "-d", "--pull", "never", "--name", name,
@@ -551,6 +552,17 @@ func startNativeClickHouse(t *testing.T, image, wantServer string) *nativeCH {
 		t.Fatalf("%s is ClickHouse %s, not %s", image, v, wantServer)
 	}
 	return c
+}
+
+// pullMissing pulls image when Docker does not have it yet. Only the 24.8
+// image comes with the other tests (by its tag); the run itself never pulls,
+// so that a pull is not timed as the start of a container.
+func pullMissing(t *testing.T, image string) {
+	t.Helper()
+	if _, err := dockerT(t, 30*time.Second, "image", "inspect", "--format", "{{.Id}}", image); err == nil {
+		return
+	}
+	mustDocker(t, 5*time.Minute, "pull", "--quiet", image)
 }
 
 func (c *nativeCH) query(t *testing.T, q string) string {
