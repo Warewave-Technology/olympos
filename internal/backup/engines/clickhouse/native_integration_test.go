@@ -45,12 +45,17 @@ import (
 // the endpoint against real ClickHouse (R13, R17, R18, 503 bodies): what it
 // sends, how it takes 503 SlowDown for the rate and for parts that wait.
 // Every request the handler sees is recorded, and the logs are checked for
-// the secret.
+// the secret. The versions run in parallel, each with its own container and
+// handlers; slog's default logger is global, so they share its capture.
 func TestRunNativeAgainstIngest(t *testing.T) {
 	requireDocker(t)
 	db := testutil.DB(t)
+	engineLogs := captureDefaultLog(t)
 	for _, img := range captureImages {
-		t.Run(img.ver, func(t *testing.T) { testRunNative(t, db, img.image, img.server) })
+		t.Run(img.ver, func(t *testing.T) {
+			t.Parallel()
+			testRunNative(t, db, img.image, img.server, engineLogs)
+		})
 	}
 }
 
@@ -100,15 +105,13 @@ var nativeParts = func() int {
 	return 1500
 }()
 
-func testRunNative(t *testing.T, db *store.DB, image, wantServer string) {
+func testRunNative(t *testing.T, db *store.DB, image, wantServer string, engineLogs *syncLog) {
 	chc := startNativeClickHouse(t, image, wantServer)
 	chc.query(t, captureSchema)
 	chc.query(t, nativeBigSchema)
 	chc.query(t, fmt.Sprintf(`CREATE DATABASE parts;
 CREATE TABLE parts.p (id UInt64) ENGINE = MergeTree PARTITION BY id ORDER BY id;
 INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_insert_block = 0;`, nativeParts))
-
-	engineLogs := captureDefaultLog(t)
 
 	// The full and incremental runs share a store: the incremental reads
 	// its base from it.

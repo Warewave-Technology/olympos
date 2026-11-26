@@ -46,7 +46,10 @@ func TestRestoreNativeAgainstIngest(t *testing.T) {
 	requireDocker(t)
 	db := testutil.DB(t)
 	for _, img := range captureImages {
-		t.Run(img.ver, func(t *testing.T) { testRestoreNative(t, db, img.image, img.server) })
+		t.Run(img.ver, func(t *testing.T) {
+			t.Parallel() // each version has its own containers, Keeper and handler
+			testRestoreNative(t, db, img.image, img.server)
+		})
 	}
 }
 
