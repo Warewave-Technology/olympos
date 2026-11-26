@@ -144,6 +144,15 @@ func TestClassifyTables(t *testing.T) {
 		{name: "a projection named like a table function", allowed: true, objs: tbl("CREATE TABLE db.x (`id` UInt64, PROJECTION file (SELECT id ORDER BY id)) ENGINE = MergeTree ORDER BY id")},
 		{name: "a default from a restored dictionary", allowed: true, objs: tbl("CREATE TABLE db.x (`id` UInt64, `msg` String DEFAULT dictGet('db.dict', 'msg', id)) ENGINE = Log")},
 
+		// R47: a Graphite table needs the target's graphite_rollup
+		// configuration, which Olympos does not know; what reads it drops.
+		{name: "GraphiteMergeTree", reason: "the GraphiteMergeTree engine needs the graphite_rollup configuration on the target server", objs: tbl("CREATE TABLE db.x (`Path` String, `Time` DateTime, `Value` Float64, `Version` UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY (Path, Time)")},
+		{name: "ReplicatedGraphiteMergeTree", reason: "the ReplicatedGraphiteMergeTree engine needs the graphite_rollup configuration on the target server", objs: tbl("CREATE TABLE db.x (`Path` String, `Time` DateTime, `Value` Float64, `Version` UInt32) ENGINE = ReplicatedGraphiteMergeTree('/clickhouse/x', '{replica}', 'graphite_rollup') ORDER BY (Path, Time)")},
+		{name: "a view on a Graphite table", check: "gv", reason: "it reads db.x, which is not restored", objs: []alObj{
+			{"db", "x", KindTable, "CREATE TABLE db.x (`Path` String, `Time` DateTime, `Value` Float64, `Version` UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY (Path, Time)"},
+			{"db", "gv", KindView, "CREATE VIEW db.gv AS SELECT Path FROM db.x"},
+		}},
+		{name: "an MV with an inner Graphite table", reason: "the GraphiteMergeTree engine needs the graphite_rollup configuration on the target server", objs: mv("CREATE MATERIALIZED VIEW db.x (`Path` String, `Time` DateTime, `Value` Float64, `Version` UInt32) ENGINE = GraphiteMergeTree('graphite_rollup') ORDER BY (Path, Time) AS SELECT toString(id) AS Path, now() AS Time, 0. AS Value, 1 AS Version FROM db.events")},
 		{name: "inline disk", reason: "its settings define a disk inline", objs: tbl(
 			"CREATE TABLE db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = disk(type = s3, endpoint = 'http://example.invalid/b/', access_key_id = 'a', secret_access_key = 'b'), index_granularity = 8192")},
 		{name: "inline disk on a Log", reason: "its settings define a disk inline", objs: tbl("CREATE TABLE db.x (`id` UInt64) ENGINE = Log SETTINGS disk = disk(type = local, path = '/tmp/x/')")},

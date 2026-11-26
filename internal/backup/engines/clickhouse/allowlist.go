@@ -66,11 +66,14 @@ const (
 const maxNesting = 256
 
 // allowedEngines are the table engines restored: they keep their data on
-// the server's own disks.
+// the server's own disks. GraphiteMergeTree is not among them (R47): it
+// needs the graphite_rollup section of the server's configuration, which
+// Olympos does not know on the target, and without it RESTORE fails as a
+// whole (the v0.2 restore leaves it out too).
 var allowedEngines = func() map[string]bool {
 	m := map[string]bool{"Log": true, "TinyLog": true, "StripeLog": true, "Memory": true}
 	for _, e := range []string{"MergeTree", "ReplacingMergeTree", "SummingMergeTree", "AggregatingMergeTree",
-		"CollapsingMergeTree", "VersionedCollapsingMergeTree", "GraphiteMergeTree", "CoalescingMergeTree"} {
+		"CollapsingMergeTree", "VersionedCollapsingMergeTree", "CoalescingMergeTree"} {
 		m[e] = true
 		m["Replicated"+e] = true
 	}
@@ -453,7 +456,11 @@ func (r *reader) engine(i int) int {
 		r.uncertain()
 		return i
 	}
-	if name := at(i + 2).val; !allowedEngines[name] {
+	switch name := at(i + 2).val; {
+	case name == "GraphiteMergeTree" || name == "ReplicatedGraphiteMergeTree":
+		r.fail("the " + name + " engine needs the graphite_rollup configuration on the target server")
+		return i
+	case !allowedEngines[name]:
 		r.fail("the " + shortName(name) + " engine is not on the restore allowlist")
 		return i
 	}
