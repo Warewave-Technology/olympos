@@ -253,15 +253,15 @@ func TestParseBackupMetaAccepts(t *testing.T) {
 		{"base, credentials from the backup", metaXML(baseXML+`<base_backup_copy_s3_credentials_from_backup>true</base_backup_copy_s3_credentials_from_backup>`, ""),
 			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45"}},
 		{"partial base", metaXML(baseXML, fileXML("a", 9, "<checksum>"+sumA+"</checksum><use_base>true</use_base><base_size>4</base_size><base_checksum>"+sumB+"</base_checksum>")),
-			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4}}}},
+			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4, BaseChecksum: sumB}}}},
 		{"deduplicated", metaXML("", fileXML("b", 2, "<checksum>"+sumA+"</checksum><data_file>a</data_file>")+fileXML("a", 2, "<checksum>"+sumA+"</checksum>")),
 			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", Files: []MetaFile{{Name: "b", Size: 2, Checksum: sumA, DataFile: "a"}, {Name: "a", Size: 2, Checksum: sumA}}}},
 		// Two files appended alike: the second's bytes are the first's, and
 		// both start with the base's.
 		{"deduplicated partial base", metaXML(baseXML, fileXML("b", 9, partialXML+"<data_file>a</data_file>")+fileXML("a", 9, partialXML)),
 			BackupMeta{Version: 1, UUID: "62c08f3c-f80a-4c02-aabb-255897f0c3fc", BaseBackup: "http://h/olympos/r/", BaseBackupUUID: "5d1492d5-3a5e-46db-a6ae-3e8afa751a45", Files: []MetaFile{
-				{Name: "b", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4, DataFile: "a"},
-				{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4}}}},
+				{Name: "b", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4, BaseChecksum: sumB, DataFile: "a"},
+				{Name: "a", Size: 9, Checksum: sumA, UseBase: true, BaseSize: 4, BaseChecksum: sumB}}}},
 		{"xml declaration and whitespace", []byte("<?xml version=\"1.0\"?>\n<config>\n  <version>1</version>\n  <contents>\n    <file><name>x&amp;y</name><size>1</size><checksum>" + sumA + "</checksum></file>\n  </contents>\n</config>\n"),
 			BackupMeta{Version: 1, Files: []MetaFile{{Name: "x&y", Size: 1, Checksum: sumA}}}},
 	}
@@ -355,6 +355,9 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 			fileXML("a", 9, "<checksum>"+sumA+"</checksum><use_base>true</use_base><base_size>5</base_size><base_checksum>"+sumB+"</base_checksum>")),
 		"stored data_file to a partial file": metaXML(baseXML, fileXML("b", 9, "<checksum>"+sumA+"</checksum><data_file>a</data_file>")+
 			fileXML("a", 9, partialXML)),
+		// The two files start with the same bytes of the base (task 13).
+		"data_file to another base_checksum": metaXML(baseXML, fileXML("b", 9, partialXML+"<data_file>a</data_file>")+
+			fileXML("a", 9, "<checksum>"+sumA+"</checksum><use_base>true</use_base><base_size>4</base_size><base_checksum>"+sumA+"</base_checksum>")),
 		"base without uuid":       metaXML(`<base_backup>S3('http://h/olympos/r/')</base_backup>`, ok),
 		"uuid without base":       metaXML(`<base_backup_uuid>5d1492d5-3a5e-46db-a6ae-3e8afa751a45</base_backup_uuid>`, ok),
 		"bad uuid":                []byte(`<config><version>1</version><uuid>x</uuid><contents></contents></config>`),
@@ -429,6 +432,7 @@ func TestParseBackupMetaRefuses(t *testing.T) {
 		"partial data_file to a stored file": `data_file "a" is not a stored file with the same size, checksum and base`,
 		"data_file to another base_size":     `data_file "a" is not a stored file with the same size, checksum and base`,
 		"stored data_file to a partial file": `data_file "a" is not a stored file with the same size, checksum and base`,
+		"data_file to another base_checksum": `data_file "a" is not a stored file with the same size, checksum and base`,
 		"base without uuid":                  "base_backup and base_backup_uuid go together",
 		"uuid without base":                  "base_backup and base_backup_uuid go together",
 		"bad uuid":                           `uuid "x"`,

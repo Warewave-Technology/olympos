@@ -62,9 +62,11 @@ func (d nativeRunData) body(key string) ([]byte, bool) {
 	return b, ok
 }
 
+// build builds the run's manifest on base; an incremental's base URL is the
+// one its .backup names (the capture's).
 func (d nativeRunData) build(runID string, base []*NativeManifest) (*NativeManifest, error) {
 	return BuildNativeManifest(NativeBuild{RunID: runID, ServerVersion: "25.8.33.6", Settings: map[string]string{"id": runID},
-		Objects: d.objects, Body: d.body, Base: base})
+		Objects: d.objects, Body: d.body, Base: base, BaseURL: d.meta.BaseBackup})
 }
 
 // wantPartRows is what a .backup's count.txt files hold: a written one its
@@ -366,7 +368,7 @@ func TestBuildNativeManifestStructureOnly(t *testing.T) {
 			full := nativeRunOf(t, ver, "full", captureFullRun)
 			so := full.structureOnly(t, captureFullRun)
 			m, err := BuildNativeManifest(NativeBuild{RunID: captureFullRun, ServerVersion: "25.8.33.6",
-				Settings: statementSettings(captureFullRun, true), Objects: so.objects, Body: so.body, StructureOnly: true})
+				Settings: statementSettings(captureFullRun, true, ""), Objects: so.objects, Body: so.body, StructureOnly: true})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -377,7 +379,7 @@ func TestBuildNativeManifestStructureOnly(t *testing.T) {
 				t.Fatal(err)
 			}
 			_, err = BuildNativeManifest(NativeBuild{RunID: captureFullRun, ServerVersion: "25.8.33.6",
-				Settings: statementSettings(captureFullRun, true), Objects: full.objects, Body: full.body, StructureOnly: true})
+				Settings: statementSettings(captureFullRun, true, ""), Objects: full.objects, Body: full.body, StructureOnly: true})
 			if !errors.Is(err, ErrNativeMeta) || !strings.Contains(err.Error(), "structure-only") {
 				t.Fatalf("a structure-only build of a backup with data: %v", err)
 			}
@@ -425,5 +427,230 @@ func TestBuildNativeManifestUnlisted(t *testing.T) {
 	}
 	if len(res.Objects) != declared || !slices.Equal(res.Unlisted, []string{extra[0].Key, extra[1].Key}) {
 		t.Fatalf("signed %d objects, unlisted %v", len(res.Objects), res.Unlisted)
+	}
+}
+
+// partRun is a small synthetic run of Log tables db.t and db.u, whose
+// count.txt files sit right under the table: files are the .backup's file
+// entries, written the bodies of what the run stored.
+func partRun(t *testing.T, runID, extra, files string, written map[string]string) nativeRunData {
+	t.Helper()
+	raw := metaXML(extra, files)
+	meta, err := ParseBackupMeta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := nativeRunData{meta: meta, bodies: map[string][]byte{runID + "/.backup": raw}}
+	d.objects = append(d.objects, ingest.ObjectRecord{Key: runID + "/.backup", Size: int64(len(raw)), SHA256: sum(runID + "/.backup")})
+	for name, body := range written {
+		key := runID + "/" + name
+		d.bodies[key] = []byte(body)
+		d.objects = append(d.objects, ingest.ObjectRecord{Key: key, Size: int64(len(body)), SHA256: sum(key)})
+	}
+	return d
+}
+
+const (
+	partDB  = "CREATE DATABASE db ENGINE = Atomic"
+	partT   = "CREATE TABLE db.t (`id` UInt64) ENGINE = Log"
+	partU   = "CREATE TABLE db.u (`id` UInt64) ENGINE = Log"
+	sumC    = "0b3e1f8a9c7d6e5f4a3b2c1d0e9f8a7b"
+	sumD    = "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+	sumMeta = "5ba78923f51d5edd121a52d16eff03fc"
+)
+
+// partFull is a full run whose db.t holds 7 rows ("7", checksum sumC).
+func partFull(t *testing.T) (nativeRunData, *NativeManifest) {
+	t.Helper()
+	files := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum>") +
+		fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum>") +
+		fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum>") +
+		fileXML("data/db/t/count.txt", 1, "<checksum>"+sumC+"</checksum>")
+	d := partRun(t, testBaseRunID, "", files, map[string]string{"metadata/db.sql": partDB, "metadata/db/t.sql": partT,
+		"metadata/db/u.sql": partU, "data/db/t/count.txt": "7"})
+	m, err := d.build(testBaseRunID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d, m
+}
+
+// TestBuildNativeManifestPartlyInBase (task 13): a count.txt whose first
+// bytes are its base's (a Log table that grew from 7 to 73 rows: ClickHouse
+// writes "3" and takes "7" from the base) is the base's bytes followed by the
+// run's, not the run's tail alone; one deduplicated to it counts the same.
+// The base's bytes are the base's count.txt of that size and checksum
+// (base_size, base_checksum), counted from the base's manifest.
+func TestBuildNativeManifestPartlyInBase(t *testing.T) {
+	full, base := partFull(t)
+	baseXML := `<base_backup>S3('http://h/olympos/` + testBaseRunID + `/')</base_backup>` +
+		`<base_backup_uuid>62c08f3c-f80a-4c02-aabb-255897f0c3fc</base_backup_uuid>`
+	inMeta := fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
+		fileXML("metadata/db/t.sql", len(partT), "<checksum>"+sumA+"</checksum><use_base>true</use_base>") +
+		fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>")
+	partly := func(baseSize int, baseSum string) string {
+		return fmt.Sprintf("<checksum>%s</checksum><use_base>true</use_base><base_size>%d</base_size><base_checksum>%s</base_checksum>",
+			sumD, baseSize, baseSum)
+	}
+	incr := func(t *testing.T, count, tail string) nativeRunData {
+		d := partRun(t, testRunID, baseXML, inMeta+count, map[string]string{"data/db/t/count.txt": tail})
+		maps.Copy(d.bodies, full.bodies)
+		return d
+	}
+
+	d := incr(t, fileXML("data/db/u/count.txt", 2, partly(1, sumC)+"<data_file>data/db/t/count.txt</data_file>")+
+		fileXML("data/db/t/count.txt", 2, partly(1, sumC)), "3")
+	m, err := d.build(testRunID, []*NativeManifest{base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.PartRows["data/db/t/count.txt"] != 73 || m.PartRows["data/db/u/count.txt"] != 73 || rowsOf(t, m, "db", "t") != 73 {
+		t.Fatalf("part rows %v", m.PartRows)
+	}
+
+	for name, d := range map[string]nativeRunData{
+		// No count.txt of the base has that size and checksum.
+		"another base checksum": incr(t, fileXML("data/db/t/count.txt", 2, partly(1, sumD)), "3"),
+		// The base's bytes and the run's are no row count together.
+		"no count": incr(t, fileXML("data/db/t/count.txt", 2, partly(1, sumC)), "x"),
+	} {
+		if _, err := d.build(testRunID, []*NativeManifest{base}); !errors.Is(err, ErrNativeMeta) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// A base whose rows for that count.txt are not base_size digits.
+	wrong := *base
+	wrong.PartRows = map[string]uint64{"data/db/t/count.txt": 70}
+	d = incr(t, fileXML("data/db/t/count.txt", 2, partly(1, sumC)), "3")
+	if _, err := d.build(testRunID, []*NativeManifest{&wrong}); !errors.Is(err, ErrNativeMeta) {
+		t.Errorf("base rows of another length: %v", err)
+	}
+}
+
+// TestSignNativeManifestIncremental (task 13): the worker hands the engine
+// its base chain's signed manifests and a reader of the chain's objects. The
+// engine verifies the chain itself, reads from it only what is not the
+// run's own (the base's .backup and the metadata the run did not write
+// again), and the manifest names its base and the BACKUP's base settings.
+func TestSignNativeManifestIncremental(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeVault()
+	full := nativeRunOf(t, "25.8", "full", captureFullRun)
+	fullM, err := full.build(captureFullRun, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signedFull := signedJSON(t, kv, testManifestKey, fullM)
+	incr := nativeRunOf(t, "25.8", "incremental", captureIncrRun)
+	var read []string
+	baseURL := incr.meta.BaseBackup // the URL the BACKUP named its base by
+	in := backup.NativeManifestInput{KV: kv, KeyName: testManifestKey, RunID: captureIncrRun, ServerVersion: "25.8.33.6",
+		Objects: incr.objects, Captured: incr.body,
+		Base: &backup.NativeManifestBase{RunID: captureFullRun, URL: baseURL, Signed: [][]byte{signedFull},
+			Read: func(_ context.Context, key string, limit int64) ([]byte, error) {
+				read = append(read, key)
+				b, ok := full.bodies[key]
+				if !ok || int64(len(b)) > limit {
+					return nil, fmt.Errorf("no %s", key)
+				}
+				return b, nil
+			}}}
+	res, err := Engine{}.SignNativeManifest(ctx, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := VerifySigned(ctx, kv, testManifestKey, captureIncrRun, res.Signed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.BaseRunID != captureFullRun || m.BaseManifestSHA256 != fullM.SHA256() || m.Settings["base_backup"] != "S3('"+baseURL+"')" ||
+		m.Settings["use_same_s3_credentials_for_base_backup"] != "1" {
+		t.Fatalf("manifest: base %s %s, settings %v", m.BaseRunID, m.BaseManifestSHA256, m.Settings)
+	}
+	if len(read) == 0 || !slices.Contains(read, captureFullRun+"/.backup") {
+		t.Fatalf("read of the base: %v", read)
+	}
+	for _, k := range read {
+		if !strings.HasPrefix(k, captureFullRun+"/") {
+			t.Errorf("read %s, not an object of the base", k)
+		}
+	}
+	if _, err := VerifyChain(ctx, kv, testManifestKey, captureIncrRun, [][]byte{signedFull, res.Signed}); err != nil {
+		t.Fatalf("the chain: %v", err)
+	}
+
+	// A base chain that does not verify as the base run's is no base.
+	other := in
+	other.Base = &backup.NativeManifestBase{RunID: testOtherRunID, URL: baseURL, Signed: [][]byte{signedFull}, Read: in.Base.Read}
+	if _, err := (Engine{}).SignNativeManifest(ctx, other); !IsNotVerified(err) {
+		t.Fatalf("a chain of another run: %v", err)
+	}
+	// A base the reader cannot read fails the build, with the reader's error.
+	broken := in
+	broken.Base = &backup.NativeManifestBase{RunID: captureFullRun, URL: baseURL, Signed: [][]byte{signedFull},
+		Read: func(context.Context, string, int64) ([]byte, error) { return nil, errors.New("storage unreachable") }}
+	if _, err := (Engine{}).SignNativeManifest(ctx, broken); !errors.Is(err, ErrNativeMeta) || !strings.Contains(err.Error(), "storage unreachable") {
+		t.Fatalf("an unreadable base: %v", err)
+	}
+}
+
+// TestVerifyNativeChain: the worker verifies a base chain through the
+// engine, and gets each run's objects and manifest hash.
+func TestVerifyNativeChain(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeVault()
+	base := chainBase()
+	inc := chainIncremental(base, testRunID)
+	raws := [][]byte{signedJSON(t, kv, testManifestKey, base), signedJSON(t, kv, testManifestKey, inc)}
+	got, err := Engine{}.VerifyNativeChain(ctx, kv, testManifestKey, testRunID, raws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].RunID != testBaseRunID || got[0].SHA256 != base.SHA256() || got[1].SHA256 != inc.SHA256() ||
+		len(got[1].Objects) != len(inc.Objects) {
+		t.Fatalf("chain: %+v", got)
+	}
+	if _, err := (Engine{}).VerifyNativeChain(ctx, kv, testManifestKey, testOtherRunID, raws); !IsNotVerified(err) {
+		t.Fatalf("another run expected: %v", err)
+	}
+}
+
+// TestBuildNativeManifestBoundToBase (task 13, fix round 1): an incremental
+// is built only on the base it names: its .backup's base_backup is the URL
+// the run gave ClickHouse, its base_backup_uuid the verified base .backup's
+// <uuid>, and every file it takes from the base is a file of the base's
+// .backup of that size and checksum.
+func TestBuildNativeManifestBoundToBase(t *testing.T) {
+	full, base := partFull(t)
+	baseURL := "http://h/olympos/" + testBaseRunID + "/"
+	baseXML := func(url, id string) string {
+		return `<base_backup>S3('` + url + `')</base_backup><base_backup_uuid>` + id + `</base_backup_uuid>`
+	}
+	const fullUUID = "62c08f3c-f80a-4c02-aabb-255897f0c3fc"
+	meta := func(tSum string) string {
+		return fileXML("metadata/db.sql", len(partDB), "<checksum>"+sumMeta+"</checksum><use_base>true</use_base>") +
+			fileXML("metadata/db/t.sql", len(partT), "<checksum>"+tSum+"</checksum><use_base>true</use_base>") +
+			fileXML("metadata/db/u.sql", len(partU), "<checksum>"+sumB+"</checksum><use_base>true</use_base>") +
+			fileXML("data/db/t/count.txt", 1, "<checksum>"+sumC+"</checksum><use_base>true</use_base>")
+	}
+	build := func(extra, files, url string) error {
+		d := partRun(t, testRunID, extra, files, nil)
+		maps.Copy(d.bodies, full.bodies)
+		_, err := BuildNativeManifest(NativeBuild{RunID: testRunID, ServerVersion: "25.8.33.6", Settings: map[string]string{"id": testRunID},
+			Objects: d.objects, Body: d.body, Base: []*NativeManifest{base}, BaseURL: url})
+		return err
+	}
+	if err := build(baseXML(baseURL, fullUUID), meta(sumA), baseURL); err != nil {
+		t.Fatalf("bound to its base: %v", err)
+	}
+	for name, err := range map[string]error{
+		"another base URL":       build(baseXML("http://h/olympos/"+testOtherRunID+"/", fullUUID), meta(sumA), baseURL),
+		"another URL expected":   build(baseXML(baseURL, fullUUID), meta(sumA), "http://other/olympos/"+testBaseRunID+"/"),
+		"another base .backup":   build(baseXML(baseURL, "5d1492d5-3a5e-46db-a6ae-3e8afa751a45"), meta(sumA), baseURL),
+		"a file not in the base": build(baseXML(baseURL, fullUUID), meta(sumD), baseURL),
+	} {
+		if !errors.Is(err, ErrNativeMeta) || !strings.Contains(err.Error(), "base") {
+			t.Errorf("%s: %v", name, err)
+		}
 	}
 }

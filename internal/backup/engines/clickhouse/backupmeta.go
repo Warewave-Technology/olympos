@@ -86,9 +86,11 @@ type MetaFile struct {
 	Checksum string // 32 lower-case hex digits (ClickHouse's 128-bit checksum); "" for an empty file
 	// UseBase: the base holds the file's first BaseSize bytes. BaseSize is
 	// Size when the base holds all of it, less for an appended file; 0
-	// without UseBase.
-	UseBase  bool
-	BaseSize uint64
+	// without UseBase. BaseChecksum is the checksum of those bytes for an
+	// appended file, the base's file of that size and checksum; "" otherwise.
+	UseBase      bool
+	BaseSize     uint64
+	BaseChecksum string
 	// DataFile is the file of this run whose object holds this file's bytes,
 	// when ClickHouse stored identical files once; "" otherwise. That file
 	// has the same Size, Checksum, UseBase and BaseSize, and is Written: for
@@ -220,9 +222,10 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 		// name of the file data_file names, and the two files are the same
 		// bytes with the same part in the base. (Equal checksums of the
 		// whole files make their first BaseSize bytes, and so their
-		// base_checksum, equal too.)
+		// base_checksum, equal too: a .backup that says otherwise is
+		// refused.)
 		if t := m.Files[i]; t.DataFile != "" || !t.Written() || t.Size != f.Size || t.Checksum != f.Checksum ||
-			t.UseBase != f.UseBase || t.BaseSize != f.BaseSize {
+			t.UseBase != f.UseBase || t.BaseSize != f.BaseSize || t.BaseChecksum != f.BaseChecksum {
 			return nil, metaErr(".backup: file %s: data_file %s is not a stored file with the same size, checksum and base", clip(f.Name), clip(f.DataFile))
 		}
 	}
@@ -301,6 +304,7 @@ func parseMetaFile(n *xmlNode, incremental bool) (MetaFile, error) {
 		if !isChecksum(bc) {
 			return f, bad("base_checksum %s", clip(bc))
 		}
+		f.BaseChecksum = bc
 	}
 	if d, ok := vals["data_file"]; ok {
 		// ClickHouse deduplicates files the base does not hold all of; a

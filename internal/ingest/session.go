@@ -105,6 +105,14 @@ type Source interface {
 	List(ctx context.Context, prefix string) ([]ObjectRecord, error)
 }
 
+// WholeSource is a Source that serves whole objects only: it checks each
+// object against its signed digest when the object ends, so a range would
+// reach the client unchecked. The handler refuses a ranged GET of it.
+type WholeSource interface {
+	Source
+	WholeObjects()
+}
+
 // OpenOptions describe the run a session is opened for.
 type OpenOptions struct {
 	// RunID is the backup run or the restore request.

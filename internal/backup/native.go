@@ -57,11 +57,28 @@ type NativeEngine interface {
 	// target created, from what its ingest session stored and kept, signs it
 	// with the Key Vault key in.KeyName and verifies what it signed.
 	SignNativeManifest(ctx context.Context, in NativeManifestInput) (*NativeManifestResult, error)
+	// VerifyNativeChain verifies the signed manifests of a backup chain, the
+	// full first, whose last is run runID's, signed by the Key Vault key
+	// keyName. It returns what the worker needs of each, in the same order.
+	VerifyNativeChain(ctx context.Context, kv secrets.KeyVault, keyName, runID string, signed [][]byte) ([]NativeChainManifest, error)
+}
+
+// NativeChainManifest is a verified manifest of a backup chain.
+type NativeChainManifest struct {
+	RunID string
+	// SHA256 is the hex SHA-256 of the canonical manifest, as
+	// NativeManifestResult.SHA256.
+	SHA256 string
+	// Objects are the run's objects, under "<run-id>/".
+	Objects []ingest.ObjectRecord
 }
 
 // NativeJob is what a job's engine_options say about native backups.
 type NativeJob struct {
 	Native bool
+	// Incremental takes a full backup weekly and incrementals on the other
+	// days (design §7).
+	Incremental bool
 	// Databases are backed up whole; empty means every database the backup
 	// user sees, except the system databases.
 	Databases []string
@@ -81,6 +98,12 @@ type NativeRun struct {
 	// run's (R40), which checks the whole path (egress, certificate,
 	// credential, signing, tagging) without copying the data.
 	StructureOnly bool
+	// Base is an incremental's base, nil for a full backup. The run's own
+	// credential reads it.
+	Base *NativeBase
+	// SkipSize: the run's byte limit is set (ingest.maxRunBytes), so the
+	// engine does not read the databases' size; Before gets 0 Bytes.
+	SkipSize bool
 	// Stop delivers why the run's ingest session stopped (a quota, a failed
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
@@ -89,6 +112,13 @@ type NativeRun struct {
 	// the runs among t.Running whose backups the engine ends first (R41). An
 	// error ends the run there, with no backup started.
 	Before func(ctx context.Context, t NativeTarget) (end []string, err error)
+}
+
+// NativeBase is the backup an incremental is taken on: the base run's
+// directory on the ingest endpoint, "<ingest.url>/olympos/<run-id>/", and
+// the run.
+type NativeBase struct {
+	URL, RunID string
 }
 
 // NativeTarget is what the engine reads on the target before its BACKUP.
@@ -140,6 +170,22 @@ type NativeManifestInput struct {
 	Captured func(key string) ([]byte, bool)
 	// StructureOnly is a test run's backup (NativeRun.StructureOnly).
 	StructureOnly bool
+	// Base is an incremental's base chain; nil for a full backup.
+	Base *NativeManifestBase
+}
+
+// NativeManifestBase is the base chain of an incremental, as the manifest is
+// built from it.
+type NativeManifestBase struct {
+	// RunID and URL are the base's (NativeRun.Base).
+	RunID, URL string
+	// Signed are the chain's signed manifests, as stored, the full first and
+	// the base last. The engine verifies them itself.
+	Signed [][]byte
+	// Read returns an object of the chain by bucket-relative key, at most
+	// limit bytes: only an object of one of those manifests, checked against
+	// it.
+	Read func(ctx context.Context, key string, limit int64) ([]byte, error)
 }
 
 // NativeManifestResult is a signed native manifest.
@@ -445,6 +491,35 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	if err != nil {
 		return fail("native byte limit: " + err.Error()), nil
 	}
+	// An incremental's base chain (design §7). A test run is always a full,
+	// and so is a run with a weekly or monthly copy (R45): only daily copies
+	// depend on a chain.
+	var chain *nativeChain
+	var src *chainSource
+	if n.opts.Incremental && !test && !longTier(n.tiers) {
+		ref := r.startedAt
+		if r.scheduledFor != nil {
+			ref = *r.scheduledFor
+		}
+		chain, err = selectBase(ctx, w.DB, job, ref)
+		switch {
+		case errors.Is(err, errChainUnusable):
+			w.Log.Warn("native backup: the latest run is no base; the run is a full backup", "run_id", r.id, "err", err)
+		case err != nil:
+			return fail("select the base of the incremental: " + err.Error()), nil
+		}
+		if chain != nil {
+			err := w.loadChain(ctx, n.eng, chain, live)
+			if err == nil {
+				src, err = newChainSource(chain, w.Log.With("run_id", r.id, "base_run_id", chain.base()))
+			}
+			if err != nil {
+				w.Log.Warn("native backup: the base chain cannot be used; the run is a full backup", "run_id", r.id,
+					"base_run_id", chain.base(), "err", n.scrub(err.Error()))
+				chain = nil
+			}
+		}
+	}
 	// Until the engine read the databases' size (Before), the limit leaves
 	// it out; no one has the credential yet.
 	quota := nativeQuota(lastFull, 0, cfg.MaxRunBytes)
@@ -454,8 +529,14 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	}
 
 	sink := newNativeSink(ctx, runID, live)
-	sess, cred, err := cfg.Registry.Open(ctx, ingest.OpenOptions{RunID: r.id, Kind: ingest.KindBackup,
-		Scope: ingest.Scope{Write: runID + "/"}, TTL: ttl, Sink: sink, MaxBytes: quota})
+	opts := ingest.OpenOptions{RunID: r.id, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: runID + "/"}, TTL: ttl, Sink: sink,
+		MaxBytes: quota}
+	var base *NativeBase
+	if chain != nil {
+		opts.Scope.Read, opts.Source = chain.prefixes(), src
+		base = &NativeBase{URL: nativeURL(cfg.URL, chain.base().String()), RunID: chain.base().String()}
+	}
+	sess, cred, err := cfg.Registry.Open(ctx, opts)
 	if err != nil {
 		sink.close()
 		return fail("open the ingest session: " + err.Error()), nil
@@ -477,7 +558,8 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		return w.nativeOrphans(ctx, r.id, t.Running), nil
 	}
 	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: nativeURL(cfg.URL, runID), AccessKey: cred.AccessKey,
-		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Stop: stopped.ch, Before: before})
+		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Base: base, SkipSize: cfg.MaxRunBytes > 0,
+		Stop: stopped.ch, Before: before})
 	cred = ingest.Credential{}
 	reason := done()
 	sess.Revoke(nativeRunEnded)
@@ -525,8 +607,12 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 		w.Log.Warn("native backup: created, and its ingest session stopped meanwhile", "run_id", r.id, "reason", reason)
 	}
 
-	res, err := n.eng.SignNativeManifest(ctx, NativeManifestInput{KV: cfg.KV, KeyName: cfg.ManifestKeyName, RunID: runID,
-		ServerVersion: version, Objects: objects, Captured: sess.Captured, StructureOnly: test})
+	in := NativeManifestInput{KV: cfg.KV, KeyName: cfg.ManifestKeyName, RunID: runID,
+		ServerVersion: version, Objects: objects, Captured: sess.Captured, StructureOnly: test}
+	if chain != nil {
+		in.Base = &NativeManifestBase{RunID: base.RunID, URL: base.URL, Signed: chain.signed, Read: src.read}
+	}
+	res, err := n.eng.SignNativeManifest(ctx, in)
 	if err != nil {
 		msg := n.scrub("native manifest: " + err.Error())
 		for _, d := range live {
@@ -561,7 +647,11 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 				c.Err, c.FinishedAt = n.scrub(err.Error()), time.Now().UTC()
 				return
 			}
-			err := w.completeNative(cctx, d, r.id, objects, total, version, res, n.envelope)
+			var dc *nativeChain
+			if chain != nil {
+				dc = chain.on(d)
+			}
+			err := w.completeNative(cctx, d, r.id, objects, total, version, res, dc, n.envelope)
 			c.FinishedAt = time.Now().UTC()
 			c.BlobPath, c.Bytes, c.SHA256 = d.dir, total, res.SHA256
 			if err != nil {
@@ -573,6 +663,16 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	}
 	wg.Wait()
 	return finish(total, nil), rr
+}
+
+// longTier reports whether a copy of the run is weekly or monthly.
+func longTier(tiers map[uuid.UUID]string) bool {
+	for _, t := range tiers {
+		if t == "weekly" || t == "monthly" {
+			return true
+		}
+	}
+	return false
 }
 
 // nativeOrphans is which of the native backups running on the target
@@ -647,12 +747,14 @@ func nativeCopyError(d *nativeDest, scrub func(string) string, msg string) strin
 
 // completeNative finishes a native copy on one destination whose objects are
 // all stored: its sidecar, holding the signed manifest, next to the run's
-// directory, then every object tagged complete, then the sidecar tagged
+// directory, then an incremental's base chain kept for the copy's tier
+// (retagChain), then every object tagged complete, then the sidecar tagged
 // complete. Until that last step the sidecar is incomplete like the objects:
 // a copy left half tagged (a failed SetTags, a shutdown) never shows a
-// complete manifest over objects the lifecycle rule is going to delete.
+// complete manifest over objects the lifecycle rule is going to delete, and
+// an incremental is never complete over a base kept for less long.
 func (w *Worker) completeNative(ctx context.Context, d *nativeDest, runID uuid.UUID, objects []ingest.ObjectRecord, total int64,
-	version string, res *NativeManifestResult, envelope func(destRef, ManifestBlob, string) Manifest) error {
+	version string, res *NativeManifestResult, chain *nativeChain, envelope func(destRef, ManifestBlob, string) Manifest) error {
 	m := envelope(d.ref, ManifestBlob{Path: d.dir, Size: total, SHA256: res.SHA256}, d.tier)
 	m.ServerVersion = version
 	m.Details = map[string]any{NativeManifestDetail: res.Signed}
@@ -663,6 +765,11 @@ func (w *Worker) completeNative(ctx context.Context, d *nativeDest, runID uuid.U
 	side := ManifestPath(d.dir, runID)
 	if _, err := d.w.Upload(ctx, side, bytes.NewReader(b), "application/json", d.tags(StateIncomplete)); err != nil {
 		return errors.New("upload manifest: " + err.Error())
+	}
+	if chain != nil {
+		if err := retagChain(ctx, chain, d.tier); err != nil {
+			return errors.New("keep the base chain: " + err.Error())
+		}
 	}
 	if err := retag(ctx, d, runID.String(), objects); err != nil {
 		return errors.New("tag the objects complete: " + err.Error())
@@ -797,14 +904,16 @@ func nativeLastFull(ctx context.Context, q store.Querier, jobID uuid.UUID) (int6
 
 // nativeQuota is how many bytes a native run may write (design §9, R39):
 // the largest of twice the job's last full native run, 1.5 times what the
-// run's databases hold on disk and nativeQuotaMin; override
-// (ingest.maxRunBytes), when set, instead. The databases' size lets a large
-// database with no full yet, or one that grew since, be backed up.
+// run's databases hold and nativeQuotaMin; override (ingest.maxRunBytes),
+// when set, instead. The databases' size lets a large database with no full
+// yet, or one that grew since, be backed up. Twice the last full counts up
+// to twice the databases' size (R44): a run that wrote far more than its
+// databases hold does not raise the limit of the next, and so on.
 func nativeQuota(lastFull, databases, override int64) int64 {
 	if override > 0 {
 		return override
 	}
-	return max(2*lastFull, databases+databases/2, nativeQuotaMin)
+	return max(min(2*lastFull, 2*databases), databases+databases/2, nativeQuotaMin)
 }
 
 // quotaError says that a run went over its byte limit, and how to allow more.

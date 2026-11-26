@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"golang.org/x/sys/unix"
@@ -380,17 +381,24 @@ func (f *FS) SetTags(ctx context.Context, path string, tags map[string]string) e
 }
 
 // IsNativeRunObject reports whether path is an object inside a native run's
-// directory: a segment before the last is a run ID, a canonical lower-case
-// UUID (<…>/<run-id>/<key>). A logical backup is a file named after its run
-// (<run-id>.<ext>), not inside a directory of it.
+// directory of the native layout, <…>/YYYY/MM/DD/<run-id>/<key>: the run ID a
+// canonical lower-case UUID right after a date. A logical backup is a file
+// named after its run (<run-id>.<ext>), not inside a directory of it.
 func IsNativeRunObject(path string) bool {
 	segs := strings.Split(path, "/")
-	for _, s := range segs[:len(segs)-1] {
-		if u, err := uuid.Parse(s); err == nil && u.String() == s {
+	for i := 3; i < len(segs)-1; i++ {
+		if u, err := uuid.Parse(segs[i]); err == nil && u.String() == segs[i] && isLayoutDate(segs[i-3], segs[i-2], segs[i-1]) {
 			return true
 		}
 	}
 	return false
+}
+
+// isLayoutDate reports whether y, m and d are a date's segments of a run's
+// path: YYYY, MM and DD, as RunDir writes them.
+func isLayoutDate(y, m, d string) bool {
+	_, err := time.Parse("2006/01/02", y+"/"+m+"/"+d)
+	return err == nil && len(y) == 4 && len(m) == 2 && len(d) == 2
 }
 
 // isNativeManifest reports whether path is the manifest of a native run:

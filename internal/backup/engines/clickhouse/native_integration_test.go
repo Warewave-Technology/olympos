@@ -111,10 +111,11 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 	// its base from it.
 	st := newDirStore(t, 0)
 	var fullID string
+	var fullRun *nativeTestRun
 	t.Run("full", func(t *testing.T) {
 		in := newIngest(t, db)
 		r := in.open(t, st, nil)
-		fullID = r.id
+		fullID, fullRun = r.id, r
 		var target backup.NativeTarget
 		r.before = func(_ context.Context, nt backup.NativeTarget) ([]string, error) { target = nt; return nil, nil }
 		v, err := runNative(t, chc, r, nil, "spike", "big")
@@ -174,7 +175,7 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		if err != nil {
 			t.Fatal(err)
 		}
-		m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, true),
+		m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, true, ""),
 			Objects: objs, Body: r.s.Captured, StructureOnly: true})
 		if err != nil {
 			t.Fatalf("manifest: %v", err)
@@ -219,6 +220,110 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 			t.Fatal("the incremental read nothing of its base")
 		}
 		in.checkNoSecret(t, r, engineLogs)
+	})
+
+	// Task 13: a chain of three, as the worker takes it, on one endpoint: an
+	// incremental on the full, then one on that incremental, whose
+	// credential reads both runs before it. Their manifests build along the
+	// chain; a Log table's count.txt that grew from 2 to 20 rows (ClickHouse
+	// may take "2" from the base and write "0") counts 20.
+	t.Run("chain", func(t *testing.T) {
+		if fullRun == nil {
+			t.Skip("no full backup to take it on")
+		}
+		in := newIngest(t, db)
+		// The base is served as the worker serves it: whole objects only,
+		// a ranged GET refused (ingest.WholeSource).
+		whole := wholeStore{st}
+		mid := in.openWith(t, st, whole, []string{fullID + "/"})
+		midBase := &NativeBase{URL: in.url + "/olympos/" + fullID + "/", RunID: fullID}
+		if _, err := runNative(t, chc, mid, midBase, "spike", "big"); err != nil {
+			t.Fatalf("RunNative on the full: %v", err)
+		}
+		chc.wantStatus(t, mid.id, statusCreated)
+		mid.s.Revoke("run ended")
+		chc.query(t, `INSERT INTO spike.applog SELECT 100 + number, 'grown' FROM numbers(18);
+INSERT INTO spike.applog_copy SELECT 100 + number, 'grown' FROM numbers(18);`)
+		last := in.openWith(t, st, whole, []string{fullID + "/", mid.id + "/"})
+		lastBase := &NativeBase{URL: in.url + "/olympos/" + mid.id + "/", RunID: mid.id}
+		if _, err := runNative(t, chc, last, lastBase, "spike", "big"); err != nil {
+			t.Fatalf("RunNative on the incremental: %v", err)
+		}
+		chc.wantStatus(t, last.id, statusCreated)
+		last.s.Revoke("run ended")
+
+		// What a run did not keep is its base chain's, read from the store.
+		body := func(s *ingest.Session) func(string) ([]byte, bool) {
+			return func(key string) ([]byte, bool) {
+				if b, ok := s.Captured(key); ok {
+					return b, true
+				}
+				b, err := os.ReadFile(st.path(key))
+				return b, err == nil
+			}
+		}
+		build := func(r *nativeTestRun, base *NativeBase, chain []*NativeManifest) *NativeManifest {
+			t.Helper()
+			baseURL := ""
+			if base != nil {
+				baseURL = base.URL
+			}
+			m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, false, baseURL),
+				Objects: r.s.Objects(), Body: body(r.s), Base: chain, BaseURL: baseURL})
+			if err != nil {
+				t.Fatalf("manifest of %s: %v", r.id, err)
+			}
+			return m
+		}
+		mFull := build(fullRun, nil, nil)
+		mMid := build(mid, midBase, []*NativeManifest{mFull})
+		mLast := build(last, lastBase, []*NativeManifest{mFull, mMid})
+		for _, name := range []string{"applog", "applog_copy"} {
+			if got := rowsOf(t, mMid, "spike", name); got != 2 {
+				t.Errorf("%s in the first incremental: %d rows, want 2", name, got)
+			}
+			if got := rowsOf(t, mLast, "spike", name); got != 20 {
+				t.Errorf("%s in the second incremental: %d rows, want 20", name, got)
+			}
+		}
+		if got, want := rowsOf(t, mLast, "spike", "events"), rowsOf(t, mFull, "spike", "events")+1000; got != want {
+			t.Errorf("events: %d rows, want %d", got, want)
+		}
+		raw, _ := last.s.Captured(last.id + "/.backup")
+		meta, err := ParseBackupMeta(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range meta.Files {
+			if f.Name == "data/spike/applog/count.txt" {
+				t.Logf("applog/count.txt in the second incremental: size %d, use_base %v, base_size %d, data_file %q",
+					f.Size, f.UseBase, f.BaseSize, f.DataFile)
+			}
+		}
+		kv := newFakeVault()
+		var raws [][]byte
+		for _, m := range []*NativeManifest{mFull, mMid, mLast} {
+			raws = append(raws, signedJSON(t, kv, testManifestKey, m))
+		}
+		if _, err := VerifyChain(context.Background(), kv, testManifestKey, last.id, raws); err != nil {
+			t.Fatalf("the chain: %v", err)
+		}
+		// ClickHouse reads its base whole: no GET with a Range, which the
+		// source would refuse.
+		gets, ranged := 0, 0
+		for _, r := range in.rec.all() {
+			if r.method == http.MethodGet && r.params == "" {
+				gets++
+				if r.rng != "" {
+					ranged++
+					t.Errorf("a ranged GET (%s), status %d", r.rng, r.status)
+				}
+			}
+		}
+		t.Logf("the chain's GetObjects: %d, with a Range: %d", gets, ranged)
+		t.Logf("requests of the chain:\n%s", in.rec.summary())
+		in.rec.checkR13(t)
+		in.checkNoSecret(t, last, engineLogs)
 	})
 
 	t.Run("stop kills", func(t *testing.T) {
@@ -684,11 +789,17 @@ type nativeTestRun struct {
 
 func (in *nativeIngest) open(t *testing.T, st *dirStore, read []string) *nativeTestRun {
 	t.Helper()
+	return in.openWith(t, st, st, read)
+}
+
+// openWith is open with src serving the read prefixes.
+func (in *nativeIngest) openWith(t *testing.T, st *dirStore, src ingest.Source, read []string) *nativeTestRun {
+	t.Helper()
 	id := uuid.New()
 	o := ingest.OpenOptions{RunID: id, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: id.String() + "/", Read: read},
 		TTL: time.Hour, Sink: st, MaxBytes: 4 << 30}
 	if len(read) > 0 {
-		o.Source = st
+		o.Source = src
 	}
 	s, cred, err := in.reg.Open(context.Background(), o)
 	if err != nil {
@@ -777,9 +888,11 @@ func (rc *recorder) started(params string) int {
 
 type seenRequest struct {
 	method, params, sha256 string
-	length                 int64
-	status                 int
-	etag                   string
+	// rng is the request's Range header.
+	rng    string
+	length int64
+	status int
+	etag   string
 }
 
 const emptyBodySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -790,7 +903,7 @@ func (rc *recorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	seen := seenRequest{method: r.Method, params: strings.Join(names, ","), length: r.ContentLength}
+	seen := seenRequest{method: r.Method, params: strings.Join(names, ","), length: r.ContentLength, rng: r.Header.Get("Range")}
 	rc.mu.Lock()
 	if rc.begun == nil {
 		rc.begun = map[string]int{}
@@ -891,6 +1004,12 @@ func (w *statusRecorder) Write(b []byte) (int, error) {
 
 // Unwrap gives the handler's http.ResponseController the connection.
 func (w *statusRecorder) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// wholeStore is a dirStore served as the worker's chain source is: whole
+// objects only (ingest.WholeSource).
+type wholeStore struct{ *dirStore }
+
+func (wholeStore) WholeObjects() {}
 
 // dirStore is the run's sink and its base's source: objects in a temporary
 // directory, by bucket-relative key. With bytesPerSecond > 0 every Put

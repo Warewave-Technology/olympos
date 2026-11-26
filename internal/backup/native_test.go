@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,14 @@ type nativeCall struct {
 	// run.Before said to end of the native backups running (R41).
 	quota int64
 	kill  []string
+	// An incremental's reads of its base chain (run.Base): the status of
+	// the GET of the base's .backup, the keys a LIST of each prefix of the
+	// chain returned, and the statuses of a GET of an object no manifest
+	// lists and of a key outside the run's scope.
+	baseGet  int
+	listed   map[string][]string
+	unlisted int
+	outside  int
 }
 
 // nativeRegistry is the ingest registry of the test's endpoint, in which
@@ -103,13 +112,14 @@ func nativeCallOf(t *testing.T, run uuid.UUID) nativeCall {
 
 func (fakeEngine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
 	var o struct {
-		Method    string   `json:"method"`
-		Databases []string `json:"databases"`
+		Method      string   `json:"method"`
+		Databases   []string `json:"databases"`
+		Incremental string   `json:"incremental"`
 	}
 	if err := json.Unmarshal(raw, &o); err != nil {
 		return backup.NativeJob{}, err
 	}
-	return backup.NativeJob{Native: o.Method == "native", Databases: o.Databases}, nil
+	return backup.NativeJob{Native: o.Method == "native", Incremental: o.Incremental != "", Databases: o.Databases}, nil
 }
 
 // BackupNative plays ClickHouse: it takes the .lock, PUTs every object of
@@ -175,7 +185,15 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 	if o.Extra {
 		steps = append(steps, nativeObject{"data/shop/orders/extra.bin", []byte("not in .backup")})
 	}
-	steps = append(steps, nativeBackupOf(run.StructureOnly)...)
+	if run.Base != nil {
+		incr, err := nativeIncrementalOf(ctx, run, call)
+		if err != nil {
+			return "", err
+		}
+		steps = append(steps, incr...)
+	} else {
+		steps = append(steps, nativeBackupOf(run.StructureOnly)...)
+	}
 	for _, obj := range steps {
 		select {
 		case reason := <-run.Stop:
@@ -207,6 +225,79 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		return "", fmt.Errorf("DELETE .lock: %d %v", status, err)
 	}
 	return "fake 25.8", nil
+}
+
+// nativeGet is a GET signed with the run's credential: its status and body.
+func nativeGet(ctx context.Context, run backup.NativeRun, url string) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	sum := sha256.Sum256(nil)
+	req.Header.Set("X-Amz-Content-Sha256", hex.EncodeToString(sum[:]))
+	resp, err := http.DefaultClient.Do(signer.SignV4(*req, run.AccessKey, run.Secret, "", "us-east-1"))
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	return resp.StatusCode, b, err
+}
+
+// nativeIncrementalOf plays an incremental BACKUP on run.Base: it reads the
+// base's .backup and lists the run's read prefixes, as ClickHouse does, and
+// returns what it writes: one new part of shop.orders (5 rows) and a
+// .backup that takes every file of the base from the base.
+func nativeIncrementalOf(ctx context.Context, run backup.NativeRun, call *nativeCall) ([]nativeObject, error) {
+	bucket := strings.TrimSuffix(run.URL, run.RunID+"/")
+	status, raw, err := nativeGet(ctx, run, run.Base.URL+".backup")
+	nativeCalls.mu.Lock()
+	call.baseGet = status
+	nativeCalls.mu.Unlock()
+	if err != nil || status != http.StatusOK {
+		return nil, fmt.Errorf("clickhouse: read the base's .backup: %d %v", status, err)
+	}
+	base, err := clickhouse.ParseBackupMeta(raw)
+	if err != nil {
+		return nil, err
+	}
+	listed := map[string][]string{}
+	s, _, _ := nativeRegistry.Lookup(run.AccessKey)
+	for _, prefix := range s.Scope().Read {
+		_, body, err := nativeGet(ctx, run, strings.TrimSuffix(bucket, "/")+"?prefix="+prefix)
+		if err != nil {
+			return nil, err
+		}
+		var res struct {
+			Contents []struct{ Key string } `xml:"Contents"`
+		}
+		if err := xml.Unmarshal(body, &res); err != nil {
+			return nil, fmt.Errorf("list %s: %v: %s", prefix, err, body)
+		}
+		for _, c := range res.Contents {
+			listed[prefix] = append(listed[prefix], c.Key)
+		}
+	}
+	unlisted, _, _ := nativeGet(ctx, run, run.Base.URL+"data/shop/orders/not-in-the-manifest.bin")
+	outside, _, _ := nativeGet(ctx, run, bucket+uuid.NewString()+"/.backup")
+	nativeCalls.mu.Lock()
+	call.listed, call.unlisted, call.outside = listed, unlisted, outside
+	nativeCalls.mu.Unlock()
+
+	part := "data/shop/orders/inc_" + run.RunID[:8] + "/"
+	objs := []nativeObject{{part + "data.bin", []byte("incremental part")}, {part + "count.txt", []byte("5")}}
+	var files strings.Builder
+	for _, f := range base.Files {
+		fmt.Fprintf(&files, "<file><name>%s</name><size>%d</size><checksum>%s</checksum><use_base>true</use_base></file>", f.Name, f.Size, f.Checksum)
+	}
+	for _, o := range objs {
+		sum := sha256.Sum256(o.body)
+		fmt.Fprintf(&files, "<file><name>%s</name><size>%d</size><checksum>%s</checksum></file>", o.rel, len(o.body), hex.EncodeToString(sum[:16]))
+	}
+	meta := "<config><version>1</version><deduplicate_files>1</deduplicate_files><timestamp>2026-11-26 02:00:00</timestamp>" +
+		"<uuid>" + uuid.NewString() + "</uuid><base_backup>S3('" + run.Base.URL + "')</base_backup><base_backup_uuid>" + base.UUID +
+		"</base_backup_uuid><contents>" + files.String() + "</contents></config>"
+	return append(objs, nativeObject{".backup", []byte(meta)}), nil
 }
 
 // SignNativeManifest is the real engine's.
@@ -766,6 +857,9 @@ func TestNativeRunQuota(t *testing.T) {
 	if q := nativeCallOf(t, big).quota; q != 300<<30 {
 		t.Fatalf("quota %d, want 1.5 x 200 GiB", q)
 	}
+	if nativeCallOf(t, big).run.SkipSize {
+		t.Fatal("the automatic limit needs the databases' size")
+	}
 
 	// After that full, a small database: twice the full.
 	var full int64
@@ -784,7 +878,8 @@ func TestNativeRunQuota(t *testing.T) {
 	over := queue(t, db, e.Job, "manual", nil)
 	claimAndRun(t, e.W, over)
 	call := nativeCallOf(t, over)
-	if call.quota != 1000 || call.killed != ingest.ReasonQuota {
+	// A configured limit needs no size: the engine does not read it.
+	if call.quota != 1000 || call.killed != ingest.ReasonQuota || !call.run.SkipSize {
 		t.Fatalf("quota %d, killed for %q", call.quota, call.killed)
 	}
 	r := loadRun(t, db, over)
@@ -975,5 +1070,343 @@ func TestNativeRunShutdownMidRetag(t *testing.T) {
 	}
 	if tg := e.B1.tags[backup.ManifestPath(dir, run)]; tg[backup.StateTag] != backup.StateComplete {
 		t.Fatalf("manifest tagged %v", tg)
+	}
+}
+
+// VerifyNativeChain is the real engine's.
+func (fakeEngine) VerifyNativeChain(ctx context.Context, kv secrets.KeyVault, keyName, runID string, signed [][]byte) ([]backup.NativeChainManifest, error) {
+	return clickhouse.Engine{}.VerifyNativeChain(ctx, kv, keyName, runID, signed)
+}
+
+// seedIncremental is seedNative with weekly fulls and daily incrementals.
+func seedIncremental(t *testing.T, db *store.DB) nativeEnv {
+	t.Helper()
+	e := seedNative(t, db)
+	setOptions(t, db, e.Job, `{"method":"native","databases":["shop"],"incremental":"weekly_full_daily"}`)
+	return e
+}
+
+// scheduled queues and runs a scheduled run of the job for at.
+func scheduled(t *testing.T, e nativeEnv, db *store.DB, at time.Time) uuid.UUID {
+	t.Helper()
+	return runAt(t, e, db, "schedule", at)
+}
+
+// runAt queues and runs a run of the job with trigger for at (a manual one
+// with scheduled_for set, so that its week and month are at's).
+func runAt(t *testing.T, e nativeEnv, db *store.DB, trigger string, at time.Time) uuid.UUID {
+	t.Helper()
+	run := queue(t, db, e.Job, trigger, &at)
+	claimAndRun(t, e.W, run)
+	if r := loadRun(t, db, run); r.Status != "succeeded" {
+		t.Fatalf("run for %s: %+v", at, r)
+	}
+	return run
+}
+
+// baseOf is the base the engine was given for run, "" for a full backup.
+func baseOf(t *testing.T, e nativeEnv, run uuid.UUID) string {
+	t.Helper()
+	b := nativeCallOf(t, run).run.Base
+	if b == nil {
+		return ""
+	}
+	if b.URL != e.srv.URL+"/olympos/"+b.RunID+"/" {
+		t.Fatalf("base URL %s of base %s", b.URL, b.RunID)
+	}
+	return b.RunID
+}
+
+// sidecarOf reads the signed manifest of run's copy on b, as stored.
+func sidecarOf(t *testing.T, b *fakeBlobs, dir string, run uuid.UUID) []byte {
+	t.Helper()
+	var side struct {
+		Details map[string]json.RawMessage `json:"details"`
+	}
+	if err := json.Unmarshal(b.blobs[backup.ManifestPath(dir, run)], &side); err != nil {
+		t.Fatal(err)
+	}
+	return side.Details[backup.NativeManifestDetail]
+}
+
+// tagsOf checks the tier every object and the manifest of run's copy on b
+// is tagged with, complete.
+func tagsOf(t *testing.T, db *store.DB, b *fakeBlobs, prefix string, run uuid.UUID, tier string) {
+	t.Helper()
+	dir := runDir(t, db, prefix, run)
+	if tg := b.tags[backup.ManifestPath(dir, run)]; tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
+		t.Errorf("%s: manifest of %s tagged %v, want %s", prefix, run, tg, tier)
+	}
+	n := 0
+	for p, tg := range b.tags {
+		if strings.HasPrefix(p, dir+"/") {
+			n++
+			if tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
+				t.Errorf("%s: %s tagged %v, want %s", prefix, p, tg, tier)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s: no objects of %s", prefix, run)
+	}
+}
+
+// TestNativeIncrementalChain (task 13, R45): weekly fulls, daily
+// incrementals, by the job's time zone. The first run of the week, and of
+// the month, is a full; the next one is an incremental on the latest run
+// that succeeded on every destination and whose manifests verify. Its
+// credential reads the chain's prefixes, the full first, and the endpoint
+// serves it the chain's objects from storage, only those its manifests
+// list. Its manifest is based on the base's and counts the parts it takes
+// from it. The chain is kept at least weekly: a daily member is re-tagged
+// weekly, objects and manifest, on every destination; a monthly one stays.
+func TestNativeIncrementalChain(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	// Mon 23 Nov: the first scheduled run of the month (monthly), a full.
+	full := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	// Tue 24 and Wed 25 Nov: daily incrementals.
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	inc2 := scheduled(t, e, db, time.Date(2026, 11, 25, 2, 0, 0, 0, time.UTC))
+
+	if b := baseOf(t, e, full); b != "" {
+		t.Fatalf("the first run is based on %s", b)
+	}
+	if b := baseOf(t, e, inc); b != full.String() {
+		t.Fatalf("the incremental is based on %q, want %s", b, full)
+	}
+	if b := baseOf(t, e, inc2); b != inc.String() {
+		t.Fatalf("the second incremental is based on %q, want %s", b, inc)
+	}
+
+	// The credential reads the chain, the full first; a full's reads nothing.
+	for run, want := range map[uuid.UUID]string{
+		full: `{"write": "` + full.String() + `/"}`,
+		inc:  `{"read": ["` + full.String() + `/"], "write": "` + inc.String() + `/"}`,
+		inc2: `{"read": ["` + full.String() + `/", "` + inc.String() + `/"], "write": "` + inc2.String() + `/"}`,
+	} {
+		if got := credentialOf(t, db, run).Scope; got != want {
+			t.Errorf("scope of %s: %s, want %s", run, got, want)
+		}
+	}
+
+	// The endpoint served the base's .backup and listed each prefix of the
+	// chain with the objects of its manifest; nothing else.
+	call := nativeCallOf(t, inc2)
+	if call.baseGet != http.StatusOK || call.unlisted != http.StatusNotFound || call.outside != http.StatusForbidden {
+		t.Fatalf("reads of the base: .backup %d, unlisted %d, outside %d", call.baseGet, call.unlisted, call.outside)
+	}
+	_, mFull := readSidecar(t, e.B1, e.kv, runDir(t, db, "a", full), full)
+	_, mInc := readSidecar(t, e.B1, e.kv, runDir(t, db, "a", inc), inc)
+	for prefix, m := range map[string]*clickhouse.NativeManifest{full.String() + "/": mFull, inc.String() + "/": mInc} {
+		var want []string
+		for _, o := range m.Objects {
+			want = append(want, o.Key)
+		}
+		if got := call.listed[prefix]; strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("list %s:\n got %v\nwant %v", prefix, got, want)
+		}
+	}
+
+	// The manifests are a chain: each based on the one before, the rows of
+	// the parts taken from the base counted from the base's manifest.
+	for i, b := range []*fakeBlobs{e.B1, e.B2} {
+		prefix := []string{"a", "b"}[i]
+		var raws [][]byte
+		for _, run := range []uuid.UUID{full, inc, inc2} {
+			raws = append(raws, sidecarOf(t, b, runDir(t, db, prefix, run), run))
+		}
+		ms, err := clickhouse.VerifyChain(context.Background(), e.kv, nativeKey, inc2.String(), raws)
+		if err != nil {
+			t.Fatalf("copy %d: %v", i, err)
+		}
+		if rows := ms[2].Databases[0].Objects[0].Rows; rows != 52 || ms[1].Databases[0].Objects[0].Rows != 47 {
+			t.Fatalf("copy %d: rows %d and %d, want 47 and 52", i, ms[1].Databases[0].Objects[0].Rows, rows)
+		}
+		if ms[2].Settings["base_backup"] != "S3('"+e.srv.URL+"/olympos/"+inc.String()+"/')" {
+			t.Fatalf("copy %d settings: %v", i, ms[2].Settings)
+		}
+		// An incremental stores only what is new.
+		if len(ms[1].Objects) != 3 {
+			t.Fatalf("copy %d: the incremental stored %d objects", i, len(ms[1].Objects))
+		}
+	}
+
+	// Retention (R45): the daily member inc is kept weekly now, the monthly
+	// full stays monthly, the newest run is daily until it is a base. The
+	// copy rows keep the tier each run was written with.
+	for run, tier := range map[uuid.UUID]string{full: "monthly", inc: "daily", inc2: "daily"} {
+		if cs := loadCopies(t, db, run); cs[0].Tier != tier || cs[1].Tier != tier {
+			t.Fatalf("copies of %s: %+v, want %s", run, cs, tier)
+		}
+	}
+	for i, b := range []*fakeBlobs{e.B1, e.B2} {
+		prefix := []string{"a", "b"}[i]
+		for run, tier := range map[uuid.UUID]string{full: "monthly", inc: "weekly", inc2: "daily"} {
+			tagsOf(t, db, b, prefix, run, tier)
+		}
+	}
+
+	// Mon 30 Nov: the first run of the week is a full (weekly).
+	week := scheduled(t, e, db, time.Date(2026, 11, 30, 2, 0, 0, 0, time.UTC))
+	// Tue 1 Dec: the first run of the month is a full, even a manual one
+	// (daily) within the week (R45).
+	month := runAt(t, e, db, "manual", time.Date(2026, 12, 1, 1, 0, 0, 0, time.UTC))
+	// Tue 1 Dec: the first scheduled run of the month is monthly, and a
+	// monthly copy is always a full.
+	monthly := scheduled(t, e, db, time.Date(2026, 12, 1, 2, 0, 0, 0, time.UTC))
+	// Wed 2 Dec: an incremental on it, which leaves it monthly.
+	daily := scheduled(t, e, db, time.Date(2026, 12, 2, 2, 0, 0, 0, time.UTC))
+	for run, want := range map[uuid.UUID]string{week: "", month: "", monthly: "", daily: monthly.String()} {
+		if b := baseOf(t, e, run); b != want {
+			t.Errorf("run %s based on %q, want %q", run, b, want)
+		}
+	}
+	if cs := loadCopies(t, db, monthly); cs[0].Tier != "monthly" {
+		t.Fatalf("the first scheduled run of December: %+v", cs)
+	}
+	tagsOf(t, db, e.B1, "a", monthly, "monthly")
+
+	// Next Monday a full again.
+	next := scheduled(t, e, db, time.Date(2026, 12, 7, 2, 0, 0, 0, time.UTC))
+	if b := baseOf(t, e, next); b != "" {
+		t.Fatalf("the first run of the next week is based on %s", b)
+	}
+}
+
+// TestNativeIncrementalWeeklyCopyIsFull (R45): a weekly copy is a full too,
+// although a manual run came first in the week.
+func TestNativeIncrementalWeeklyCopyIsFull(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC)) // monthly
+	manual := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 1, 0, 0, 0, time.UTC))
+	weekly := scheduled(t, e, db, time.Date(2026, 11, 30, 2, 0, 0, 0, time.UTC))
+	if cs := loadCopies(t, db, weekly); cs[0].Tier != "weekly" || baseOf(t, e, weekly) != "" {
+		t.Fatalf("the weekly copy: %+v, base %q (manual %s)", cs, baseOf(t, e, weekly), manual)
+	}
+}
+
+// TestNativeIncrementalWeekByTimezone: the week and the month start in the
+// job's time zone, not in UTC.
+func TestNativeIncrementalWeekByTimezone(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	if _, err := db.Exec(context.Background(), `UPDATE backup_jobs SET timezone = 'Asia/Tokyo' WHERE id = $1`, e.Job); err != nil {
+		t.Fatal(err)
+	}
+	at := func(d, h int) time.Time { return time.Date(2026, 11, d, h, 0, 0, 0, time.UTC) }
+	// Sun 22 Nov 14:00 UTC is Sun 23:00 in Tokyo; 16:00 UTC is already
+	// Monday there: a full. Mon 23 Nov 16:00 UTC is Tuesday there.
+	sunday := runAt(t, e, db, "manual", at(22, 14))
+	monday := runAt(t, e, db, "manual", at(22, 16))
+	tuesday := runAt(t, e, db, "manual", at(23, 16))
+	if baseOf(t, e, sunday) != "" || baseOf(t, e, monday) != "" || baseOf(t, e, tuesday) != monday.String() {
+		t.Fatalf("week: %q %q %q", baseOf(t, e, sunday), baseOf(t, e, monday), baseOf(t, e, tuesday))
+	}
+	// Mon 30 Nov 14:00 UTC is Mon 23:00 in Tokyo (a new week: a full);
+	// 15:30 UTC is Tue 1 Dec there, the first run of the month: a full
+	// again; 16:30 UTC an incremental on it.
+	mon := runAt(t, e, db, "manual", at(30, 14))
+	dec := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 15, 30, 0, 0, time.UTC))
+	after := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 16, 30, 0, 0, time.UTC))
+	if baseOf(t, e, mon) != "" || baseOf(t, e, dec) != "" || baseOf(t, e, after) != dec.String() {
+		t.Fatalf("month: %q %q %q", baseOf(t, e, mon), baseOf(t, e, dec), baseOf(t, e, after))
+	}
+}
+
+// TestNativeIncrementalAfterPartial: a partial run is never a base, and the
+// next run after one is a full.
+func TestNativeIncrementalAfterPartial(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	first := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, first)
+	e.B2.fail, e.B2.failOn = errors.New("503 ServerBusy"), "count.txt"
+	partial := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, partial)
+	if r := loadRun(t, db, partial); r.Status != "partial" {
+		t.Fatalf("run: %+v", r)
+	}
+	e.B2.fail, e.B2.failOn = nil, ""
+	after := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, after)
+	if r := loadRun(t, db, after); r.Status != "succeeded" || baseOf(t, e, after) != "" {
+		t.Fatalf("after a partial run: %+v, base %q", r, baseOf(t, e, after))
+	}
+	if baseOf(t, e, partial) != first.String() {
+		t.Fatalf("the run after the first: base %q", baseOf(t, e, partial))
+	}
+}
+
+// TestNativeIncrementalNotOnTestRun (R40): a test run holds no data; it is
+// never a base, and is a full itself.
+func TestNativeIncrementalNotOnTestRun(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	first := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, first)
+	dry := queue(t, db, e.Job, "test", nil)
+	claimAndRun(t, e.W, dry)
+	if r := loadRun(t, db, dry); r.Status != "succeeded" || baseOf(t, e, dry) != "" || !nativeCallOf(t, dry).run.StructureOnly {
+		t.Fatalf("test run: %+v, base %q", r, baseOf(t, e, dry))
+	}
+	next := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, next)
+	if b := baseOf(t, e, next); b != first.String() {
+		t.Fatalf("based on %q, want %s, not the test run %s", b, first, dry)
+	}
+}
+
+// TestNativeIncrementalBaseDoesNotVerify: a base whose manifest does not
+// verify is no base: the run is a full.
+func TestNativeIncrementalBaseDoesNotVerify(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	first := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, first)
+	// Its manifest on the destination the base is read from, changed.
+	side := backup.ManifestPath(runDir(t, db, "a", first), first)
+	e.B1.blobs[side] = bytes.Replace(e.B1.blobs[side], []byte(`"rows":42`), []byte(`"rows":43`), 1)
+	next := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, next)
+	if r := loadRun(t, db, next); r.Status != "succeeded" || baseOf(t, e, next) != "" {
+		t.Fatalf("on a base that does not verify: %+v, base %q", r, baseOf(t, e, next))
+	}
+}
+
+// TestNativeIncrementalTamperedBaseObject: the endpoint checks every object
+// of the chain against its manifest while it serves it; one that changed in
+// storage fails the GET, and so the run. The next run is a full: an
+// incremental that failed may have failed on its base.
+func TestNativeIncrementalTamperedBaseObject(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	first := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, first)
+	p := runDir(t, db, "a", first) + "/.backup"
+	e.B1.blobs[p] = bytes.Replace(e.B1.blobs[p], []byte("count.txt"), []byte("count.txT"), 1)
+	bad := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, bad)
+	if r := loadRun(t, db, bad); r.Status != "failed" || nativeCallOf(t, bad).baseGet == http.StatusOK {
+		t.Fatalf("on a tampered base: %+v, GET %d", r, nativeCallOf(t, bad).baseGet)
+	}
+	next := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, next)
+	if r := loadRun(t, db, next); r.Status != "succeeded" || baseOf(t, e, next) != "" {
+		t.Fatalf("after a failed incremental: %+v, base %q", r, baseOf(t, e, next))
+	}
+}
+
+// TestNativeIncrementalOff: without the option every run is a full.
+func TestNativeIncrementalOff(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	for range 2 {
+		run := queue(t, db, e.Job, "manual", nil)
+		claimAndRun(t, e.W, run)
+		if baseOf(t, e, run) != "" {
+			t.Fatal("an incremental without the option")
+		}
 	}
 }

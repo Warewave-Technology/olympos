@@ -891,6 +891,9 @@ func (q *request) serveBytes(b []byte) *s3Error {
 
 func (q *request) serveSource() *s3Error {
 	s := q.s
+	if _, whole := s.Source().(WholeSource); whole && q.r.Header.Get("Range") != "" {
+		return denied("Objects of this run are served whole only.")
+	}
 	rc, rec, err := s.Source().Open(q.r.Context(), q.key)
 	if errors.Is(err, fs.ErrNotExist) {
 		return errNoSuchKey

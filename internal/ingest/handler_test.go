@@ -1069,6 +1069,20 @@ func TestHandlerRange(t *testing.T) {
 	wantRefused(t, e.do(t, ro.cred, http.MethodGet, target, "", withHeader("Range", "bytes=10-")),
 		http.StatusRequestedRangeNotSatisfiable, "InvalidRange")
 
+	// A source that serves whole objects only refuses every range, before it
+	// opens the object; a GET without one is served.
+	whole := &wholeSource{fakeSource: src}
+	wo := e.restore(t, whole, base)
+	for _, rng := range []string{"bytes=2-4", "bytes=0-"} {
+		wantRefused(t, e.do(t, wo.cred, http.MethodGet, target, "", withHeader("Range", rng)), http.StatusForbidden, "AccessDenied")
+	}
+	if whole.opened != 0 {
+		t.Fatalf("a ranged GET opened the object %d times", whole.opened)
+	}
+	if r := e.do(t, wo.cred, http.MethodGet, target, ""); r.status != http.StatusOK || r.body != "0123456789" {
+		t.Errorf("whole GET: %s", r)
+	}
+
 	// A captured body serves ranges too.
 	a := e.backup(t)
 	wantStatus(t, e.do(t, a.cred, http.MethodPut, "/olympos/"+a.prefix+".backup", "abcdef"), http.StatusOK)
@@ -2244,4 +2258,17 @@ func TestHandlerRepeatNotCharged(t *testing.T) {
 	if n := len(a.s.Objects()); n != 2 {
 		t.Fatalf("%d objects", n)
 	}
+}
+
+// wholeSource is a fakeSource that serves whole objects only.
+type wholeSource struct {
+	*fakeSource
+	opened int
+}
+
+func (w *wholeSource) WholeObjects() {}
+
+func (w *wholeSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
+	w.opened++
+	return w.fakeSource.Open(ctx, key)
 }

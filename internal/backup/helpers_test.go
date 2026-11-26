@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"strings"
 	"sync"
@@ -109,8 +110,8 @@ func (fakeEngine) CheckOptions(raw json.RawMessage, env backup.OptionsEnv) map[s
 	switch {
 	case o.Method != "" && o.Method != "native" && o.Method != "logical":
 		return map[string]string{"method": `must be "native" or "logical"`}
-	case o.Incremental != "":
-		return map[string]string{"incremental": "incremental native backups are not available yet"}
+	case o.Incremental != "" && o.Method != "native":
+		return map[string]string{"incremental": `needs method "native"`}
 	case o.Method == "native" && !env.IngestEnabled:
 		return map[string]string{"method": "native backups need the ingest endpoint"}
 	}
@@ -282,6 +283,22 @@ func (f *fakeBlobs) storeCtx(ctx context.Context, path string, r io.Reader, tags
 	f.uploads++
 	return blob.UploadResult{Bytes: int64(len(b))}, nil
 }
+
+// Open reads a stored blob, as every real writer does (blob.Reader).
+func (f *fakeBlobs) Open(ctx context.Context, path string) (blob.Object, error) {
+	f.mu.Lock()
+	b, ok := f.blobs[path]
+	f.mu.Unlock()
+	if !ok {
+		return nil, fmt.Errorf("%s: %w", path, fs.ErrNotExist)
+	}
+	return memObject{bytes.NewReader(b)}, nil
+}
+
+// memObject is a stored blob opened for reads.
+type memObject struct{ *bytes.Reader }
+
+func (o memObject) Close() error { return nil }
 
 // SetTags replaces the tags of a stored blob, as every real writer does.
 func (f *fakeBlobs) SetTags(ctx context.Context, path string, tags map[string]string) error {
