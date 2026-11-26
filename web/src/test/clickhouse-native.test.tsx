@@ -7,6 +7,7 @@ import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { BackupRunDetail, Me } from '../api/types';
 import { MeProvider } from '../auth/me';
+import { relDateTime } from '../lib/format';
 import * as db from '../mocks/db';
 import { renderApp } from './renderApp';
 
@@ -89,19 +90,18 @@ function keepJobs() {
 }
 
 describe('Backup wizard · ClickHouse method', () => {
-  it('starts a new job on Logical with Native selectable, not recommended, and incrementals off until Native is picked (R42)', async () => {
+  it('starts a new job on Native, recommended, with incrementals off until they are picked (R42 lifted)', async () => {
     const user = userEvent.setup();
     const reset = keepJobs();
     await toMethod(user);
     expect(screen.getByText('Step 3 of 5')).toBeInTheDocument();
-    // until native restore lands, a new job starts on Logical, even with the ingest endpoint on
-    expect(screen.getByRole('radio', { name: /^Logical/ })).toBeChecked();
+    // with the ingest endpoint on and ClickHouse 24.8, a new job is native: native backups are restored now (task 16)
     const native = screen.getByRole('radio', { name: /^Native/ });
-    expect(native).not.toBeChecked();
+    expect(native).toBeChecked();
     expect(native).toBeEnabled();
-    expect(within(native.closest('label')!).queryByText('Recommended')).toBeNull();
-    expect(native).toHaveAccessibleDescription(/Native restore is not available yet; the backups are kept\./);
-    await user.click(native);
+    expect(within(native.closest('label')!).getByText('Recommended')).toHaveClass('badge');
+    expect(native).toHaveAccessibleDescription(/Whole databases, ClickHouse 24\.8 or later\.$/);
+    expect(screen.getByRole('radio', { name: /^Logical/ })).not.toBeChecked();
     // the note on egress and the certificate
     const note = screen.getByText('Before the first native run').closest('.note')!;
     expect(note).toHaveTextContent(/ingest\.url/);
@@ -286,7 +286,7 @@ const nativeRun = (over: Partial<BackupRunDetail> = {}): BackupRunDetail => ({
 });
 
 describe('run page · native run', () => {
-  it('shows the Native badge and the object count, says the next run is a full backup, and has no restore commands', async () => {
+  it('shows the Native badge and the object count, says the next run is a full backup, and offers Restore… without restore commands', async () => {
     await renderRun(nativeRun());
     const dt = await screen.findByText('Method', { selector: 'dt' }, T);
     const dd = dt.nextElementSibling as HTMLElement;
@@ -298,9 +298,18 @@ describe('run page · native run', () => {
     expect(screen.queryByText(/To restore by hand/)).toBeNull();
     expect(screen.queryByText('Download the backup and its manifest')).toBeNull();
     expect(screen.queryByRole('group', { name: 'Restore from copy' })).toBeNull();
-    // R38: native restore is not available yet
-    expect(screen.getByText('Native restore is not available yet; the backup is kept. A native backup has no commands to restore by hand.')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Restore…' })).toBeNull();
+    // R38 lifted: a native run is restored from the UI (task 16), never by hand
+    expect(screen.getByText('A native backup has no commands to restore by hand: ClickHouse reads it back through the ingest endpoint.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore…' })).toBeEnabled();
+    expect(screen.queryByText(/Or restore by hand/)).toBeNull();
+    // the tier it was written with
+    expect(screen.getByText('Tier', { selector: 'dt' }).nextElementSibling).toHaveTextContent(/^daily$/);
+  });
+
+  it('says when a daily copy is kept at least as long as weekly as a chain member (R45)', async () => {
+    await renderRun(nativeRun({ status: 'succeeded', error: '', copies: [nativeRun().copies![0]], kept_as: 'weekly' }));
+    const dt = await screen.findByText('Tier', { selector: 'dt' }, T);
+    expect(dt.nextElementSibling).toHaveTextContent('daily · kept at least as long as weekly: a later incremental is based on it');
   });
 
   it('shows a succeeded native run with no repair note, and a logical run with no method row', async () => {
@@ -315,4 +324,86 @@ describe('run page · native run', () => {
     await screen.findByText(/To restore by hand/, {}, T);
     expect(screen.queryByText('Method', { selector: 'dt' })).toBeNull();
   });
+});
+
+/** A succeeded native run of events-ch in the mock database, first in Backups › Runs; the returned function drops it. */
+function addNativeRun(over: Partial<BackupRunDetail> = {}) {
+  const run: BackupRunDetail = { ...nativeRun(), id: 'native-run-1', target_service: 'events-ch', cluster_name: 'eks-fra-data', status: 'succeeded', error: '', started_at: new Date(Date.now() - 3600_000).toISOString(), copies: [nativeRun().copies![0]], ...over };
+  const { restore: _, next_repair_at: __, ...stored } = run;
+  db.runs.unshift(stored);
+  return { run, drop: () => void db.runs.splice(db.runs.findIndex((r) => r.id === run.id), 1) };
+}
+
+async function openNativeRestore(user: ReturnType<typeof userEvent.setup>, run: BackupRunDetail) {
+  await renderApp('/backups?tab=runs');
+  const rows = await screen.findAllByLabelText(`Details of the ${run.target_service} run of ${relDateTime(run.started_at)}`, {}, T);
+  await user.click(rows[0]);
+  await user.click(await screen.findByRole('button', { name: 'Restore…' }, T));
+  const dlg = await screen.findByRole('dialog', { name: `Restore ${run.target_service} into a new target` }, T);
+  await user.click(within(dlg).getByRole('combobox', { name: /^Target/ }));
+  await user.click(await screen.findByRole('option', { name: /\/ metrics-ch-dr/ }, T));
+  await user.click(within(dlg).getByRole('radio', { name: /Store in Olympos/ }));
+  await user.type(within(dlg).getByLabelText('Username'), 'admin');
+  await user.type(within(dlg).getByLabelText('Password'), 'pw-native-123');
+  await user.click(within(dlg).getByRole('button', { name: 'Check target' }));
+  return dlg;
+}
+
+describe('restore dialog · native run', () => {
+  it('lists the objects by database; a left out object shows its reason and cannot be selected', async () => {
+    const user = userEvent.setup();
+    const { run, drop } = addNativeRun();
+    try {
+      const dlg = await openNativeRestore(user, run);
+      expect(within(dlg).getByText(/ClickHouse · native backup · run of/)).toBeInTheDocument();
+      await within(dlg).findByText('The target can take this restore.', {}, T);
+      const report = within(dlg).getByRole('region', { name: 'Target check' });
+      expect(within(report).getByText("The backup's signed manifests verify: this run and every run it is based on")).toBeInTheDocument();
+      // databases are what the maker selects
+      const analytics = within(report).getByRole('checkbox', { name: /^analytics/ });
+      expect(analytics).toBeChecked();
+      expect(analytics.closest('label')).toHaveTextContent('4 of 6 objects restored');
+      const objs = within(report).getByRole('list', { name: 'Objects of analytics' });
+      const left = within(objs).getByText('events_all').closest('li')!;
+      expect(left).toHaveTextContent('Left out');
+      expect(left).toHaveTextContent('The Distributed engine is not on the restore allowlist');
+      expect(left).toHaveAttribute('aria-disabled', 'true');
+      // nothing per object can be selected: no control on a left out object (nor on a restored one)
+      expect(within(left).queryByRole('checkbox')).toBeNull();
+      expect(within(objs).queryAllByRole('checkbox')).toHaveLength(0);
+      expect(within(objs).getByText('live_events').closest('li')).toHaveTextContent('otherLeft outA live view is not restored');
+      expect(within(objs).getByText('events').closest('li')).toHaveTextContent('Restored');
+      expect(within(report).getByRole('list', { name: 'Objects of dicts' })).toHaveTextContent('Its ClickHouse source names a host');
+      // the note on what a native restore creates
+      expect(within(dlg).getByText('What a native restore creates').closest('.note')).toHaveTextContent('Left out objects are re-applied by hand after the restore.');
+
+      // the decisions are for the selection: a view that reads a database left out is left out
+      await user.click(within(report).getByRole('checkbox', { name: /^dicts/ }));
+      await user.click(within(dlg).getByRole('button', { name: 'Check again' }));
+      await waitFor(() => expect(within(dlg).getByRole('checkbox', { name: /^dicts/ }).closest('label')).toHaveTextContent('not selected'), T);
+      expect(within(dlg).getByText('top_countries').closest('li')).toHaveTextContent('It reads dicts.countries, which is not restored');
+      expect(within(dlg).queryByRole('list', { name: 'Objects of dicts' })).toBeNull();
+      expect(document.body.innerHTML).not.toContain('pw-native-123');
+    } finally {
+      drop();
+    }
+  }, 20_000);
+
+  it('refuses a copy whose manifest does not verify, with its objects all left out', async () => {
+    const user = userEvent.setup();
+    const { run, drop } = addNativeRun({ sha256: 'unverified' });
+    try {
+      const dlg = await openNativeRestore(user, run);
+      await within(dlg).findByText('Invalid restore request. Check the highlighted fields.', {}, T);
+      // the refusal is on the copy, shown once above the form
+      expect(within(dlg).getAllByRole('alert')[0]).toHaveTextContent(/^the backup's manifest does not verify$/);
+      const objs = within(dlg).getByRole('list', { name: 'Objects of analytics' });
+      expect(within(objs).getAllByRole('listitem').every((li) => li.textContent?.includes("The backup's manifest does not verify"))).toBe(true);
+      expect(within(dlg).queryAllByRole('checkbox', { name: /^analytics/ })).toHaveLength(0);
+      expect(screen.getByRole('button', { name: 'Submit for approval' })).toBeDisabled();
+      expect(within(dlg).queryByText(/signed manifests verify/)).toBeNull();
+    } finally {
+      drop();
+    }
+  }, 20_000);
 });

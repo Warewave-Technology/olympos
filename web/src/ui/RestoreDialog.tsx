@@ -8,7 +8,20 @@ import { useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import type { BackupJob, BackupRunDetail, CredentialInput, DestinationKind, ItemList, RestoreCheck, RestoreInput, RestoreRequest, RestoreTargetReport, Target, Vault } from '../api/types';
+import type {
+  BackupJob,
+  BackupRunDetail,
+  CredentialInput,
+  DestinationKind,
+  ItemList,
+  RestoreCheck,
+  RestoreInput,
+  RestoreNativeObject,
+  RestoreRequest,
+  RestoreTargetReport,
+  Target,
+  Vault,
+} from '../api/types';
 import { useMaybeMe } from '../auth/me';
 import { can } from '../auth/permissions';
 import { dateTime, engineLabel, relDateTime } from '../lib/format';
@@ -16,7 +29,7 @@ import { CheckIcon } from './icons';
 import { Badge, Field, FormError, Modal, aria, fieldError, useAction } from './kit';
 import { KindBadge } from './destinations';
 import { Select } from './Select';
-import { ClickHouseScopeNote, VaultTokenNeeds, VaultUnsealNote, restoreEngineName } from './restore';
+import { ClickHouseScopeNote, NativeScopeNote, VaultTokenNeeds, VaultUnsealNote, restoreEngineName } from './restore';
 
 /** Justification bounds (the server's approvals.ValidateJustification). */
 const MIN_WHY = 10;
@@ -87,6 +100,38 @@ function learn(prev: Known, checkedDbs: string[] | null, r: RestoreTargetReport 
   return next;
 }
 
+const KIND_NAME: Record<string, string> = { table: 'table', view: 'view', materialized_view: 'materialized view', dictionary: 'dictionary', other: 'other' };
+
+/** "4 of 6 objects restored" */
+const restoredOf = (objs: RestoreNativeObject[]) => `${objs.filter((o) => o.allowed).length} of ${objs.length} ${objs.length === 1 ? 'object' : 'objects'} restored`;
+
+/**
+ * The objects of one database of a native backup and what the restore does with each (docs/design/restore-native.html).
+ * The maker selects databases; a left out object shows its reason and has no control of its own.
+ */
+function NativeObjects({ db, objects }: { db: string; objects: RestoreNativeObject[] }) {
+  return (
+    <ul className="plain-list native-objs" aria-label={`Objects of ${db}`}>
+      {objects.map((o) => (
+        <li key={o.name} className={o.allowed ? undefined : 'out'} aria-disabled={o.allowed ? undefined : true}>
+          <span className="what">
+            <span className="mono">{o.name}</span> <span className="muted small">{KIND_NAME[o.kind] ?? o.kind}</span>
+          </span>
+          {o.allowed ? <Badge tone="ok">Restored</Badge> : <Badge tone="mute">Left out</Badge>}
+          {!o.allowed && o.reason && <span className="why">{sentenceCase(o.reason)}</span>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** A native check's objects by database, in the order the server listed them. */
+function byDatabase(objects: RestoreNativeObject[]): [string, RestoreNativeObject[]][] {
+  const m = new Map<string, RestoreNativeObject[]>();
+  for (const o of objects) m.set(o.database, [...(m.get(o.database) ?? []), o]);
+  return [...m];
+}
+
 /** The Vault checks in the order the server applies them; after the first failure the rest were not reached. */
 function VaultChecks({ r }: { r: RestoreTargetReport }) {
   const rows: { label: React.ReactNode; ok: boolean }[] = [
@@ -127,6 +172,8 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
   const qc = useQueryClient();
   const engine = run.engine as Engine;
   const isVault = engine === 'vault';
+  // A native ClickHouse backup: the check lists every object and what the restore does with it.
+  const native = run.method === 'native';
   const mayBreakGlass = can(me, 'admin') && !me?.is_guest;
 
   const copies = copyRows(run);
@@ -313,7 +360,7 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
   }
 
   return (
-    <Modal open onClose={close} closeOnBackdrop={!dirty} size="wide" eyebrow={`Restore · ${run.target_service}`} title={title} description={`${kind} · run of ${relDateTime(run.started_at ?? run.scheduled_for)} · ${run.cluster_name}`}>
+    <Modal open onClose={close} closeOnBackdrop={!dirty} size="wide" eyebrow={`Restore · ${run.target_service}`} title={title} description={`${kind}${native ? ' · native backup' : ''} · run of ${relDateTime(run.started_at ?? run.scheduled_for)} · ${run.cluster_name}`}>
       <form onSubmit={open} className="stack-sm" style={{ gap: 18 }} noValidate autoComplete="off">
         <div className="note">
           {isVault ? (
@@ -565,6 +612,12 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
                 </span>
               </div>
             )}
+            {res.native && (res.databases_in_backup?.length ?? 0) > 0 && (
+              <div className="chk">
+                <CheckIcon ok />
+                <span>The backup&apos;s signed manifests verify: this run and every run it is based on</span>
+              </div>
+            )}
             {isVault && res.report && <VaultChecks r={res.report} />}
             {!isVault && res.report && (
               <div className="chk">
@@ -576,26 +629,60 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
             )}
             {!isVault && databases && (res.databases_in_backup?.length ?? 0) > 0 && (
               <fieldset className="plain" aria-describedby={fe('databases') ? 'rs-dbs-err' : undefined}>
-                <legend className="lbl">Databases ({databases.length} of {res.databases_in_backup!.length} in the backup selected)</legend>
-                {res.databases_in_backup!.map((d) => (
-                  <label className="chk" key={d}>
-                    <input
-                      type="checkbox"
-                      checked={databases.includes(d)}
-                      onChange={(e) => {
-                        setDatabases(e.target.checked ? [...databases, d] : databases.filter((x) => x !== d));
-                        touch();
-                      }}
-                    />
-                    <span className="mono">{d}</span> <DbState state={known.target === targetId ? known.dbs[d] : undefined} />
-                  </label>
-                ))}
+                <legend className="lbl">
+                  Databases ({databases.length} of {res.databases_in_backup!.length} in the backup selected){res.native ? ' and what is restored' : ''}
+                </legend>
+                {res.databases_in_backup!.map((d) => {
+                  const box = (
+                    <>
+                      <input
+                        type="checkbox"
+                        checked={databases.includes(d)}
+                        onChange={(e) => {
+                          setDatabases(e.target.checked ? [...databases, d] : databases.filter((x) => x !== d));
+                          touch();
+                        }}
+                      />
+                      <span className="mono">{d}</span> <DbState state={known.target === targetId ? known.dbs[d] : undefined} />
+                    </>
+                  );
+                  if (!res.native)
+                    return (
+                      <label className="chk" key={d}>
+                        {box}
+                      </label>
+                    );
+                  // the decisions are for the databases the check was given
+                  const objs = res.native.objects.filter((o) => o.database === d);
+                  const checkedHere = res.databases?.includes(d) ?? false;
+                  return (
+                    <div className="native-db" key={d}>
+                      <label className="chk native-db-head">
+                        {box} <span className="muted small">{checkedHere ? restoredOf(objs) : 'not selected'}</span>
+                      </label>
+                      {objs.length > 0 && <NativeObjects db={d} objects={objs} />}
+                    </div>
+                  );
+                })}
                 {fe('databases') && (
                   <div className="field-error" id="rs-dbs-err" role="alert">
                     {sentenceCase(fe('databases')!)}. Change the selection and check again.
                   </div>
                 )}
               </fieldset>
+            )}
+            {/* a backup that does not verify: what its own signed manifest lists, every object left out, nothing to select */}
+            {res.native && !res.databases_in_backup?.length && res.native.objects.length > 0 && (
+              <div>
+                {byDatabase(res.native.objects).map(([d, objs]) => (
+                  <div className="native-db" key={d}>
+                    <div className="native-db-head small">
+                      <span className="mono">{d}</span> <span className="muted small">{restoredOf(objs)}</span>
+                    </div>
+                    <NativeObjects db={d} objects={objs} />
+                  </div>
+                ))}
+              </div>
             )}
             {!isVault && !databases && fe('databases') && (
               <div className="field-error" role="alert">
@@ -616,7 +703,7 @@ export function RestoreDialog({ run, onClose }: { run: BackupRunDetail; onClose:
           </section>
         )}
 
-        {engine === 'clickhouse' && <ClickHouseScopeNote />}
+        {engine === 'clickhouse' && (native ? <NativeScopeNote /> : <ClickHouseScopeNote />)}
         {isVault && <VaultUnsealNote />}
 
         <Field label="Justification" htmlFor="rs-why" error={fe('justification')} hint={`${MIN_WHY} to ${MAX_WHY} characters. The checker and the audit log see it.`}>

@@ -688,9 +688,7 @@ const stages = {
       await dbs.press('Enter');
       await page.getByRole('button', { name: 'Next: method' }).click();
       await page.getByRole('heading', { name: 'Backup method' }).waitFor();
-      // a new job starts on Logical until native restore lands (R42); incrementals are not available yet
-      await page.getByRole('radio', { name: /^Logical/ }).and(page.locator(':checked')).waitFor();
-      await page.getByText('Native', { exact: true }).click();
+      // with the ingest endpoint on, a new job on 24.8 or later starts on Native, recommended (R42 lifted in task 16)
       await page.getByRole('radio', { name: /^Native/ }).and(page.locator(':checked')).waitFor();
       await dump(page, 'native method step');
       await shot(page, 'clickhouse-native-01-method');
@@ -704,13 +702,14 @@ const stages = {
       await page.getByRole('button', { name: 'Enable backup' }).click();
       await page.waitForURL(/\/backups(?!\/new)/, { timeout: 30_000 });
 
-      // A native run: the run page shows the Native badge and the object count, and no restore commands.
+      // A native run: the run page shows the Native badge and the object count, Restore…, and no restore commands.
       const run = await runJob(page, NATIVE_CH, (r) => !r.repair_of);
       if (run.status !== 'succeeded' || run.method !== 'native' || !run.objects) throw new Error(`native run ended ${run.status} (${run.method}, ${run.objects} objects): ${run.error}`);
       await openRun(page, NATIVE_CH, (rows) => rows.filter({ hasText: 'Succeeded' }).filter({ hasNotText: 'test' }));
       const dlg = page.getByRole('dialog');
       await dlg.getByText(/^· [\d,]+ objects?$/).waitFor();
-      await dlg.getByText('Native restore is not available yet; the backup is kept.', { exact: false }).waitFor();
+      await dlg.getByText('A native backup has no commands to restore by hand', { exact: false }).waitFor();
+      await dlg.getByRole('button', { name: 'Restore…' }).waitFor();
       await dump(page, 'native run dialog');
       await shot(page, 'clickhouse-native-02-run', dlg);
       await page.keyboard.press('Escape');

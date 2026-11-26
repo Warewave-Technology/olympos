@@ -50,6 +50,18 @@ export function ClickHouseScopeNote() {
   );
 }
 
+/** What a native ClickHouse restore creates (docs/design/restore-native.html). */
+export function NativeScopeNote() {
+  return (
+    <div className="note">
+      <div className="note-title">What a native restore creates</div>
+      ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that
+      Olympos cannot read with certainty, is left out, with the reason in the check. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (
+      <span className="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source&apos;s replicas.
+    </div>
+  );
+}
+
 /** Shown before and after a Vault restore: the snapshot brings the source's seal, root token and policies. */
 export function VaultUnsealNote({ after }: { after?: boolean }) {
   return (

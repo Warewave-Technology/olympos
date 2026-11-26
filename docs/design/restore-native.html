@@ -97,7 +97,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px"><b style="font-weight: 600; font-size: 13px">Target check</b><span class="muted mono" style="font-size: 12px">ClickHouse 25.8 &middot; nothing was written</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The target can take this restore.</span></div>
 <div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The credential works</span></div>
-<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The signed manifests verify: this run and the 2 runs it is based on</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The backup's signed manifests verify: this run and every run it is based on</span></div>
 
 <fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
 <legend class="lbl">Databases (2 of 3 in the backup selected) and what is restored</legend>
@@ -127,7 +127,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </div>
 </fieldset>
 
-<div class="note"><div class="note-title">What a native restore creates</div>ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that Olympos cannot read with certainty, is left out with the reason above. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (<span class="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source's replicas. The checker sees this list with the request.</div>
+<div class="note"><div class="note-title">What a native restore creates</div>ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that Olympos cannot read with certainty, is left out with the reason above. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (<span class="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source's replicas.</div>
 </div>
 
 <div><label class="lbl" for="w1">Justification</label><textarea id="w1" class="in" rows="2">events-ch lost its volumes in eks-fra-data (INC-5120). Restore Wednesday's backup into the DR server.</textarea><div class="hint">10 to 2000 characters. The checker and the audit log see it.</div></div>
@@ -165,7 +165,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 </section>
 
 <p class="state">Other refusals of the check, shown the same way on the copy: the chain was taken through another ingest.url; a run of the chain has no copy on this destination; the chain is longer than 32 runs</p>
-<div class="note crit" style="max-width: 980px; box-sizing: border-box">The backup chain was taken through another ingest endpoint (https://olympos-ingest.old.example:9444): ClickHouse would read its base from there. Restore a full backup, or the next chain taken through this one</div>
+<div class="note crit" style="max-width: 980px; box-sizing: border-box">the backup chain cannot be restored: run 2c4e9a1f-7b3d-4e8a-9f60-5a1b2c3d4e5f was taken through another ingest endpoint (its base is https://olympos-ingest.old.example:9444/olympos/7f3c2a90-5e1b-4c39-9a61-0c1d4f2b8e17/), and ClickHouse would read its base from there; restore a full backup, or a run whose chain was taken through ingest.url as it is now</div>
 </div>
 </body>
 </html>
