@@ -371,6 +371,20 @@ func (f *fakeSink) waitPuts(t *testing.T, n int) []sinkPut {
 	return nil
 }
 
+// waitStarted waits until n Puts began: a Put starts in its own goroutine,
+// after the request that opened it may have returned.
+func (f *fakeSink) waitStarted(t *testing.T, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if f.startedPuts() >= n {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%d puts started, want %d", f.startedPuts(), n)
+}
+
 // fakeSource serves objects from a map. List ignores the prefix and returns
 // everything, so that the tests see the handler filter what a source returns.
 // It records every key and prefix it is asked for.
@@ -1863,9 +1877,7 @@ func TestHandlerUploadCapStartsNoPut(t *testing.T) {
 		e.clock.add(10 * time.Millisecond) // under the rate
 		e.createUpload(t, a, fmt.Sprintf("%sdata/f%d.bin", a.prefix, i))
 	}
-	if n := a.sink.startedPuts(); n != maxUploads {
-		t.Fatalf("%d puts started, want %d", n, maxUploads)
-	}
+	a.sink.waitStarted(t, maxUploads)
 	r := e.do(t, a.cred, http.MethodPost, "/olympos/"+a.prefix+"data/one-more.bin?uploads", "")
 	wantRefused(t, r, http.StatusForbidden, "AccessDenied")
 	if n := a.sink.startedPuts(); n != maxUploads {
