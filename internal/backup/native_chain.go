@@ -322,7 +322,13 @@ type chainObject struct {
 	path string
 }
 
-var _ ingest.Source = (*chainSource)(nil)
+// chainSource checks an object when it ends, so it serves whole objects
+// only and the endpoint refuses a ranged GET of it (ClickHouse sends none,
+// spike §1). Task 16's restore source revisits this.
+var _ ingest.WholeSource = (*chainSource)(nil)
+
+// WholeObjects implements ingest.WholeSource.
+func (*chainSource) WholeObjects() {}
 
 // errChainObject: an object of the chain is not the one its manifest signed.
 var errChainObject = errors.New("the stored object is not the one its signed manifest lists")
