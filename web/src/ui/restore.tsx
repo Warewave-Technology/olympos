@@ -58,7 +58,7 @@ export function NativeScopeNote() {
       ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that
       Olympos cannot read with certainty, is left out, with the reason in the check. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (
       <span className="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source&apos;s replicas. While the restore runs, the target can read through Olympos only
-      what it restores: the backup&apos;s file lists, the definitions of the selected databases and the data of the objects it creates, never a database or an object left out.
+      what it restores: the backup&apos;s file lists and the definitions and data of the objects it creates, never a database or an object left out.
     </div>
   );
 }

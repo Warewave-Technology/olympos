@@ -221,6 +221,8 @@ These limits are fixed, not settings:
 - A check ends after 5 minutes (*it took longer than 5m0s*), the wait for a slot included in the dialog. At the
   start of a restore the 5 minutes run from when it holds its slot; the request then fails before anything is
   sent to the target.
+- Two users who check over and over can keep both slots of the dialog busy, so another user's check waits up to
+  5 minutes for one; approved restores are not held up.
 
 **What is created: the allowlist.** Olympos reads each object's definition from the verified backup, with a
 strict parser, and creates only what it can prove harmless:
@@ -286,11 +288,12 @@ request was approved: …*): open a new request.
 
 1. It opens a read-only ingest session over the chain, with its own short-lived credential (it counts against
    `ingest.maxRuns` and ends with the restore). The session serves only what the `RESTORE` reads: the `.backup`
-   file of every run, the definitions of the selected databases and the data of the objects it creates. The
-   target holds the credential while the restore runs, so it can read nothing else of the backup: not a database
-   you did not select, not an object left out (a request for one is refused, `403`). A file whose bytes are those
-   of a file the restore reads is served, whatever its name: ClickHouse reads a file of a backup by its size and
-   checksum.
+   file of every run, the definitions of the selected databases, and the definitions and data of the objects it
+   creates. The target holds the credential while the restore runs, so it can read nothing else of the backup:
+   not a database you did not select, not the definition or data of an object left out (a request for one is
+   refused, `403`). A file whose bytes are those of a file the restore reads is served, whatever its name:
+   ClickHouse reads a file of a backup by its size and checksum. The `.backup` files list every file of the
+   backup with its size, so the target learns the names of what it does not restore, not their contents.
 2. It creates the selected databases (`ENGINE = Atomic`), or uses an existing empty one.
 3. It creates every allowed Replicated table itself, from the backup's own `CREATE TABLE`, with only the
    engine's Keeper path and replica changed to `/olympos-restore/<request id>/<db>/<table>` and `{replica}` and
@@ -312,7 +315,10 @@ request was approved: …*): open a new request.
    restored databases held nothing before the restore, so that object is the restore's own, and what it is was
    never approved: it could read the target's other tables or reach outside it. This is checked after a
    `RESTORE` that fails or is ended too. An object in those databases that the restore was not to create at all
-   is someone else's: it is named, never dropped. A drop that fails is named with the statement to run.
+   is someone else's: it is named, never dropped. A drop that fails is named with the statement to run. Do not
+   create objects in a database that is being restored: one created there under the name of an object of the
+   backup while the restore runs is taken for the restore's own, and may be dropped. An honest object that calls
+   `encrypt` or `decrypt` is restored as approved, although ClickHouse hides its key arguments (`'[HIDDEN]'`).
 
 **Errors.** ClickHouse's error message can quote the backup's DDL, which can hold a password (a dictionary's
 source, for example), so the result keeps only its code, its name and the start of its first line. The whole

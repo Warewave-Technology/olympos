@@ -379,7 +379,7 @@ describe('restore dialog · native run', () => {
       // the note on what a native restore creates
       expect(within(dlg).getByText('What a native restore creates').closest('.note')).toHaveTextContent('Left out objects are re-applied by hand after the restore.');
       expect(within(dlg).getByText('What a native restore creates').closest('.note')).toHaveTextContent(
-        'the target can read through Olympos only what it restores: the backup\'s file lists, the definitions of the selected databases and the data of the objects it creates, never a database or an object left out.',
+        'the target can read through Olympos only what it restores: the backup\'s file lists and the definitions and data of the objects it creates, never a database or an object left out.',
       );
 
       // the decisions are for the selection: a view that reads a database left out is left out

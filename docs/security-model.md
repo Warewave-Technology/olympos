@@ -263,10 +263,15 @@ TLS end to end in `e2e-tls`). Its scope is the run:
 
 - a backup writes and lists its own run prefix, and reads its base chain (an incremental);
 - a restore reads only what its `RESTORE` reads of the copy's chain: the `.backup` file of every run, the
-  definitions of the selected databases and the data of the objects it creates, each resolved as ClickHouse
-  resolves it (by size and checksum). Every other object of the chain, of a database left unselected or an
-  object left out, is refused `403`. The target holds the credential while the restore runs, so the request's
-  approval bounds what the target can read of the backup, not only what it creates.
+  definitions of the selected databases themselves (`metadata/<db>.sql`), and the definitions and data of the
+  objects it creates, each resolved as ClickHouse resolves it (by size and checksum). Every other object of the
+  chain is refused `403`: anything of a database left unselected, and the definition and data of an object left
+  out (whose definition can hold an external source's credentials in plain text: an S3, URL or MySQL table, a
+  remote dictionary). The target holds the credential while the restore runs, so the request's approval bounds
+  what the target can read of the backup, not only what it creates. The `.backup` files are served whole, as
+  ClickHouse needs them, and they list the name, size and checksum of every file of the backup, of the
+  databases left unselected too: the target learns the backup's object and file names and sizes, not their
+  contents.
 
 It can never delete (except its own `.lock`) or overwrite: a stored object is written once, a repeat with the
 same body is answered with the stored one, and another body stops the run. It ends when the run ends, or after
@@ -328,7 +333,10 @@ without its database could only reach what the restore creates. After the `RESTO
 ended), each allowed object's engine and `create_table_query` must be its approved definition (without its
 UUIDs, a dictionary's password shown as `[HIDDEN]`), which the allowlist must allow again; an object other than
 approved, or one that was left out, is dropped and the restore fails naming it. An object the restore was not
-to create at all is named, never dropped.
+to create at all is named, never dropped. ClickHouse shows the arguments of `encrypt`, `decrypt`, `tryDecrypt`,
+`aes_encrypt_mysql` and `aes_decrypt_mysql` from the second on as one `'[HIDDEN]'`, and that form is accepted:
+what those arguments hold on the target is the one part of a definition this comparison cannot see, so there
+it rests on the checks of the backup's files above.
 
 **Checks are bounded.** Checking a native copy holds its chain in memory. The API's checks share 2 slots and a
 user runs one at a time (a second is refused at once); the check at the start of an approved restore has a
