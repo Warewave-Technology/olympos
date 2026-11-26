@@ -27,6 +27,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/targettls"
+	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
 // Integration tests against a real ClickHouse in Docker (container
@@ -62,6 +63,9 @@ func docker(args ...string) (string, error) {
 
 func startClickHouse(t *testing.T) *chEnv {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	require := os.Getenv("OLYMPOS_REQUIRE_DOCKER") == "1"
 	if _, err := exec.LookPath("docker"); err != nil {
 		if require {

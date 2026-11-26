@@ -55,6 +55,9 @@ var (
 // MinIO starts (once per test binary) and returns the MinIO server.
 func MinIO(t testing.TB) *MinIOServer {
 	t.Helper()
+	if DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	minioOnce.Do(func() { minioSrv, minioErr = startMinIO() })
 	if minioErr != nil {
 		if os.Getenv("OLYMPOS_REQUIRE_DOCKER") == "1" {

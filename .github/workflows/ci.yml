@@ -16,7 +16,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  go:
+  # The Go checks run as three jobs side by side; "go", the required check,
+  # passes only when all three did.
+  go-checks:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v7
+        with: {go-version-file: go.mod}
+      - name: protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: gofmt
+        run: test -z "$(gofmt -l internal cmd deploy test)" || { gofmt -l internal cmd deploy test; exit 1; }
+      - name: Generated code is up to date
+        run: |
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+          make proto && git diff --exit-code -I '^// .*(protoc|protoc-gen-go)' internal/gen
+      - run: go vet -tags dev ./... && go vet ./... && go vet -tags e2e ./test/...
+      - name: Pinned tools in sync (image and packages)
+        run: ./scripts/check-tool-versions.sh
+      - name: Migrations (ordering, merged ones immutable)
+        run: ./scripts/check-migrations.sh origin/${{ github.base_ref || 'main' }}
+      - name: systemd unit hardening (exposure ≤ 3.0)
+        run: systemd-analyze security --offline=yes --threshold=30 deploy/systemd/olympos-server.service
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...
+
+  go-test:
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -35,32 +63,54 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y postgresql-common
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y postgresql-client-17 protobuf-compiler
-      - name: gofmt
-        run: test -z "$(gofmt -l internal cmd deploy test)" || { gofmt -l internal cmd deploy test; exit 1; }
-      - name: Generated code is up to date
-        run: |
-          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.11
-          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
-          make proto && git diff --exit-code -I '^// .*(protoc|protoc-gen-go)' internal/gen
-      - run: go vet -tags dev ./... && go vet ./... && go vet -tags e2e ./test/...
+          sudo apt-get install -y postgresql-client-17
       - name: Unit + integration tests (dev build; incl. SPEC §18 security checks)
         env: {OLYMPOS_REQUIRE_DB: "1", OLYMPOS_REQUIRE_DOCKER: "1", OLYMPOS_PG_BIN: /usr/lib/postgresql/17/bin}
         run: go test -tags dev -race -count=1 -timeout 25m ./...
+      - name: Secret canary scan of test logs
+        run: ./scripts/check-no-secrets.sh
+
+  # The release build's tests skip what needs Docker (OLYMPOS_SKIP_DOCKER):
+  # go-test runs those, and what differs between the builds (the dev login,
+  # the local key vault) is not in them.
+  go-release:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: {POSTGRES_USER: olympos, POSTGRES_PASSWORD: olympos}
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U olympos" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+        with: {fetch-depth: 0}
+      - uses: actions/setup-go@v7
+        with: {go-version-file: go.mod}
+      - uses: azure/setup-helm@v5
+      - name: pg_dump 16/17 (PGDG)
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-client-17
       - name: Release build (no dev login, no local key vault)
+        env: {OLYMPOS_SKIP_DOCKER: "1"}
         run: |
           go test -count=1 -timeout 25m ./...
           ./scripts/check-release-binary.sh
-      - name: Pinned tools in sync (image and packages)
-        run: ./scripts/check-tool-versions.sh
-      - name: Migrations (ordering, merged ones immutable)
-        run: ./scripts/check-migrations.sh origin/${{ github.base_ref || 'main' }}
-      - name: systemd unit hardening (exposure ≤ 3.0)
-        run: systemd-analyze security --offline=yes --threshold=30 deploy/systemd/olympos-server.service
       - name: Secret canary scan of test logs
         run: ./scripts/check-no-secrets.sh
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.4.0 ./...
+
+  go:
+    if: always()
+    needs: [go-checks, go-test, go-release]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Every Go job passed
+        env: {RESULTS: "${{ join(needs.*.result, ' ') }}"}
+        run: |
+          echo "go-checks, go-test, go-release: $RESULTS"
+          for r in $RESULTS; do [ "$r" = success ] || exit 1; done
 
   hygiene:
     runs-on: ubuntu-24.04

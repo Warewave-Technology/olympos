@@ -16,6 +16,7 @@ import (
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
 	"github.com/Warewave-Technology/olympos/internal/restore"
+	"github.com/Warewave-Technology/olympos/internal/testutil"
 )
 
 // Integration test against real single-node raft servers in Docker (dev
@@ -36,6 +37,9 @@ const itCanary = "CANARY-restored-secret-3d7a"
 
 func itRequireDocker(t *testing.T) {
 	t.Helper()
+	if testutil.DockerSkipped() {
+		t.Skip("OLYMPOS_SKIP_DOCKER=1")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := exec.LookPath("docker"); err != nil {
