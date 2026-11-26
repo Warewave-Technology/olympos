@@ -86,8 +86,9 @@ the lab installs the chart from the repository and the locally built image.
 ## 4. Add a backup destination
 
 Backups go to Azure Blob, S3 (or an S3-compatible service) or NFS. Olympos writes but should not be able to
-delete: retention is enforced by the storage (lifecycle rules or object lock), so a stolen Olympos
-credential cannot erase backups.
+delete: retention is enforced by the storage's lifecycle rules, so a stolen Olympos credential cannot delete
+a backup itself. It can still re-tag or overwrite one and let the lifecycle rules delete it; storage immutability,
+your choice, stops that ([install › Immutability (optional)](install.md#immutability-optional)).
 
 Go to **Settings › Destinations › New destination** and enter the lab's MinIO, with a key that may write but
 not delete:

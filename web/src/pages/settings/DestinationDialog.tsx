@@ -5,6 +5,7 @@ import type { Destination, DestinationInput, DestinationKind, DestinationMount, 
 import { date } from '../../lib/format';
 import { parseSas, type SasCheck } from '../../lib/sas';
 import { KIND_LABEL, TestReport, deleteRefusal } from '../../ui/destinations';
+import { DocLink } from '../../ui/DocLinks';
 import { CheckIcon } from '../../ui/icons';
 import { Badge, Field, FormError, Modal, aria, fieldError, useAction, useToast } from '../../ui/kit';
 import { Select } from '../../ui/Select';
@@ -435,7 +436,7 @@ export function DestinationDialog({ dest, onClose }: { dest?: Destination; onClo
               </div>
             </div>
             <div className="note">
-              Give the key <span className="mono">s3:PutObject</span>, <span className="mono">s3:GetObject</span> and <span className="mono">s3:PutObjectTagging</span> on the bucket, and no <span className="mono">s3:DeleteObject</span>. Retention is enforced by bucket lifecycle rules (or Object Lock), not by Olympos.
+              Give the key <span className="mono">s3:PutObject</span>, <span className="mono">s3:GetObject</span> and <span className="mono">s3:PutObjectTagging</span> on the bucket, and no <span className="mono">s3:DeleteObject</span>. Retention is enforced by bucket lifecycle rules, not by Olympos; Object Lock is optional (<DocLink path="docs/install.md#s3-and-s3-compatible-storage">install</DocLink>).
 
             </div>
           </>
