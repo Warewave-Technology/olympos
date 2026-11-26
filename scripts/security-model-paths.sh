@@ -23,8 +23,10 @@ paths=(
   internal/backup/engines/clickhouse/sqllex.go
   internal/backup/engines/clickhouse/replicated.go
   internal/backup/engines/clickhouse/native.go
+  internal/backup/engines/clickhouse/native_restore.go
   internal/backup/native.go
   internal/backup/native_chain.go
+  internal/backup/native_restore.go
   internal/app/ingest.go
   internal/blob/fs.go
   deploy/helm/olympos-agent/templates/clusterrole.yaml

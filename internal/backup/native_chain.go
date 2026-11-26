@@ -344,10 +344,12 @@ func retagChain(ctx context.Context, chain *nativeChain, tier string) error {
 }
 
 // chainSource is the ingest.Source of an incremental's run: the objects of
-// its base chain, read from the chain's first destination. It serves only
-// objects the chain's verified manifests list, by bucket-relative key, and
-// checks each against its manifest's size and SHA-256 while it streams: a
-// reader never gets an object that is not the one signed.
+// its base chain, read from the chain's first destination; and the source a
+// native restore reads its chain from, on the copy's destination
+// (NativeRestore). It serves only objects the chain's verified manifests
+// list, by bucket-relative key, and checks each against its manifest's size
+// and SHA-256 while it streams: a reader never gets an object that is not
+// the one signed.
 type chainSource struct {
 	r       blob.Reader
 	objects map[string]chainObject
@@ -378,9 +380,19 @@ func newChainSource(c *nativeChain, log *slog.Logger) (*chainSource, error) {
 	if !ok {
 		return nil, fmt.Errorf("%s cannot be read", d.ref.Name)
 	}
+	dirs := make([]string, len(c.manifests))
+	for i := range c.manifests {
+		dirs[i] = c.copies[i][d.ref.ID].dir
+	}
+	return newChainSourceOn(r, dirs, c.manifests, log)
+}
+
+// newChainSourceOn serves the verified manifests ms from r, each run's
+// objects from its directory in dirs (as ms).
+func newChainSourceOn(r blob.Reader, dirs []string, ms []NativeChainManifest, log *slog.Logger) (*chainSource, error) {
 	s := &chainSource{r: r, objects: map[string]chainObject{}, log: log}
-	for i, m := range c.manifests {
-		dir := c.copies[i][d.ref.ID].dir
+	for i, m := range ms {
+		dir := dirs[i]
 		for _, o := range m.Objects {
 			rel, ok := strings.CutPrefix(o.Key, m.RunID+"/")
 			if !ok {

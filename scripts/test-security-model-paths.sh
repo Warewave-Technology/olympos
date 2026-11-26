@@ -173,6 +173,18 @@ if printf 'internal/backup/native_chain_test.go\ninternal/backup/native_chain.go
   echo "FAIL: --files matched a file next to the base chain" >&2
   fail=1
 fi
+# The restore check of a native copy: which chain a restore reads, from
+# where, whether it verifies, and what of it the restore creates.
+if ! out=$(printf 'internal/backup/restore_guide.go\ninternal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go\n' |
+  "$script" --files) || [ "$out" != $'internal/backup/native_restore.go\ninternal/backup/engines/clickhouse/native_restore.go' ]; then
+  echo "FAIL: --files with the native restore check: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/native_restore_test.go\ninternal/backup/engines/clickhouse/native_restore_test.go\ninternal/backup/native_restore.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the native restore check" >&2
+  fail=1
+fi
 # The ingest endpoint's listener (its TLS and timeouts) and the NFS writer,
 # whose SetTags rewrites the tags of stored backups.
 if ! out=$(printf 'internal/app/app.go\ninternal/app/ingest.go\n' | "$script" --files) || [ "$out" != internal/app/ingest.go ]; then

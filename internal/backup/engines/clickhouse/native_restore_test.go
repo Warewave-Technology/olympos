@@ -1,0 +1,300 @@
+package clickhouse
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io/fs"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/Warewave-Technology/olympos/internal/backup"
+	"github.com/Warewave-Technology/olympos/internal/ingest"
+)
+
+// The restore check of a native backup (design docs/design/clickhouse-native.md
+// §6, task 16): the copy's chain verifies, the DDL of every object is read
+// from the chain through a checked reader, and the allowlist decides for the
+// selected databases only, with the Replicated rewrite run at check time.
+
+const (
+	nrFull        = "a0000000-0000-4000-8000-000000000001"
+	nrInc         = "a0000000-0000-4000-8000-000000000002"
+	nrURL         = "https://ingest.olympos.test:9444"
+	nrManifestKey = "olympos-manifest"
+)
+
+// nrObj is an object of a fixture run: a metadata/*.sql (an object of a
+// database) when db is set.
+type nrObj struct {
+	db, name, kind, ddl string
+}
+
+// nrChain builds and signs a chain of fixture runs, the full first; inc
+// holds the objects of an incremental on it (nil: a full only). An
+// incremental reuses the full's DDL of every object it does not list
+// again, as ClickHouse does for unchanged metadata.
+type nrChain struct {
+	kv     *fakeVault
+	signed [][]byte
+	runs   []string
+	bodies map[string][]byte // by bucket-relative key
+	bound  [][]backup.NativeChainManifest
+}
+
+func nrDDLKey(run, db, name string) string {
+	return run + "/metadata/" + escapeForFileName(db) + "/" + escapeForFileName(name) + ".sql"
+}
+
+func newNRChain(t *testing.T, full, inc []nrObj, baseURL string) *nrChain {
+	t.Helper()
+	c := &nrChain{kv: newFakeVault(), bodies: map[string][]byte{}}
+	m1 := c.manifest(full, nrFull, nil, "")
+	c.sign(t, m1)
+	if inc != nil {
+		m2 := c.manifest(inc, nrInc, m1, baseURL)
+		c.sign(t, m2)
+	}
+	return c
+}
+
+// manifest is the manifest of run with objs; on base, the objects of base
+// that objs does not list are carried with the base's DDL key.
+func (c *nrChain) manifest(objs []nrObj, run string, base *NativeManifest, baseURL string) *NativeManifest {
+	m := &NativeManifest{Format: NativeManifestFormat, RunID: run, ServerVersion: "25.8.1.1",
+		Settings: statementSettings(run, false, baseURL), PartRows: map[string]uint64{}}
+	if base != nil {
+		m.BaseRunID, m.BaseManifestSHA256 = base.RunID, base.SHA256()
+	}
+	add := func(key string, body []byte) {
+		c.bodies[key] = body
+		m.Objects = append(m.Objects, ingest.ObjectRecord{Key: key, Size: int64(len(body)), SHA256: sum(string(body))})
+	}
+	add(run+"/.backup", []byte("<config/>"))
+	at := map[string]int{}
+	listed := map[string]bool{}
+	put := func(db string, o NativeObject) {
+		i, ok := at[db]
+		if !ok {
+			i = len(m.Databases)
+			at[db] = i
+			m.Databases = append(m.Databases, NativeDatabase{Name: db})
+		}
+		m.Databases[i].Objects = append(m.Databases[i].Objects, o)
+	}
+	for _, o := range objs {
+		key := nrDDLKey(run, o.db, o.name)
+		add(key, []byte(o.ddl))
+		put(o.db, NativeObject{Name: o.name, Kind: o.kind, DDLKey: key})
+		listed[o.db+"."+o.name] = true
+	}
+	if base != nil {
+		for _, d := range base.Databases {
+			for _, o := range d.Objects {
+				if !listed[d.Name+"."+o.Name] {
+					put(d.Name, o)
+				}
+			}
+		}
+	}
+	return m
+}
+
+func (c *nrChain) sign(t *testing.T, m *NativeManifest) {
+	t.Helper()
+	c.signed = append(c.signed, signedJSON(t, c.kv, nrManifestKey, m))
+	c.runs = append(c.runs, m.RunID)
+}
+
+// input is the check of the chain's last run for databases.
+func (c *nrChain) input(databases ...string) backup.NativeRestoreInput {
+	return backup.NativeRestoreInput{
+		KV: c.kv, KeyName: nrManifestKey, RunID: c.runs[len(c.runs)-1], Signed: c.signed, IngestURL: nrURL, Databases: databases,
+		Bind: func(ms []backup.NativeChainManifest) (backup.NativeObjectReader, error) {
+			c.bound = append(c.bound, ms)
+			listed := map[string]bool{}
+			for _, m := range ms {
+				for _, o := range m.Objects {
+					listed[o.Key] = true
+				}
+			}
+			return func(_ context.Context, key string, limit int64) ([]byte, error) {
+				b, ok := c.bodies[key]
+				if !listed[key] || !ok {
+					return nil, fmt.Errorf("%s: %w", key, fs.ErrNotExist)
+				}
+				if int64(len(b)) > limit {
+					return nil, fmt.Errorf("%s is over %d bytes", key, limit)
+				}
+				return b, nil
+			}, nil
+		},
+	}
+}
+
+func nrDecisions(ds []backup.NativeDecision) []string {
+	var out []string
+	for _, d := range ds {
+		s := d.Database + "." + d.Name + " " + d.Kind
+		if d.Allowed {
+			s += " allowed"
+		} else {
+			s += ": " + d.Reason
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+var nrSchema = []nrObj{
+	{"shop", "orders", KindTable, "CREATE TABLE shop.orders (`id` UInt64) ENGINE = MergeTree ORDER BY id"},
+	{"shop", "report", KindView, "CREATE VIEW shop.report (`id` UInt64) AS SELECT o.id FROM shop.orders AS o JOIN stats.daily AS d ON o.id = d.id"},
+	{"stats", "daily", KindTable, "CREATE TABLE stats.daily (`id` UInt64) ENGINE = Log"},
+	{"x", "live", KindOther, "CREATE LIVE VIEW x.live AS SELECT 1"},
+}
+
+// TestCheckNativeRestoreSelection: the decisions are for the selected
+// databases only, and an object that reads a database left unselected is
+// left out ("which is not restored"); an object of kind other is left out
+// with its reason. Every database of the backup is listed.
+func TestCheckNativeRestoreSelection(t *testing.T) {
+	c := newNRChain(t, nrSchema, nil, "")
+	got, err := Engine{}.CheckNativeRestore(context.Background(), c.input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"shop", "stats", "x"}; !reflect.DeepEqual(got.Databases, want) {
+		t.Fatalf("databases %v, want %v", got.Databases, want)
+	}
+	want := []string{"shop.orders table allowed", "shop.report view allowed", "stats.daily table allowed", "x.live other: a live view is not restored"}
+	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
+		t.Fatalf("all databases:\n got %q\nwant %q", d, want)
+	}
+	if len(got.Manifests) != 1 || got.Manifests[0].RunID != nrFull || len(c.bound) != 1 {
+		t.Fatalf("manifests %+v, bound %d", got.Manifests, len(c.bound))
+	}
+
+	got, err = Engine{}.CheckNativeRestore(context.Background(), c.input("shop"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"shop.orders table allowed", "shop.report view: it reads stats.daily, which is not restored"}
+	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
+		t.Fatalf("shop only:\n got %q\nwant %q", d, want)
+	}
+	if !reflect.DeepEqual(got.Databases, []string{"shop", "stats", "x"}) {
+		t.Fatalf("a selection lists every database of the backup: %v", got.Databases)
+	}
+}
+
+// TestCheckNativeRestoreReplicatedRewrite: an allowed Replicated table whose
+// Keeper path the rewrite refuses is left out at check time with the
+// rewrite's reason, and so is what depends on it.
+func TestCheckNativeRestoreReplicatedRewrite(t *testing.T) {
+	c := newNRChain(t, []nrObj{
+		{"shop", "good", KindTable, "CREATE TABLE shop.good (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/shop/good', '{replica}') ORDER BY id"},
+		{"shop", "bad", KindTable, "CREATE TABLE shop.bad (`id` UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}') ORDER BY id"},
+		{"shop", "defaults", KindTable, "CREATE TABLE shop.defaults (`id` UInt64) ENGINE = ReplicatedMergeTree ORDER BY id"},
+		{"shop", "to_bad", KindMaterializedView, "CREATE MATERIALIZED VIEW shop.to_bad TO shop.bad (`id` UInt64) AS SELECT id FROM shop.good"},
+	}, nil, "")
+	got, err := Engine{}.CheckNativeRestore(context.Background(), c.input())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"shop.bad table: its Replicated engine's Keeper path and replica could not be found exactly (its Keeper path holds {uuid})",
+		"shop.defaults table: its Replicated engine's Keeper path and replica could not be found exactly (no Keeper path or replica (the server's defaults))",
+		"shop.good table allowed",
+		"shop.to_bad materialized_view: its target shop.bad is not restored",
+	}
+	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
+		t.Fatalf("\n got %q\nwant %q", d, want)
+	}
+}
+
+// TestCheckNativeRestoreChain: an incremental's chain verifies, and the DDL
+// it reuses is read from its base.
+func TestCheckNativeRestoreChain(t *testing.T) {
+	c := newNRChain(t, nrSchema[:3], []nrObj{
+		{"shop", "orders", KindTable, "CREATE TABLE shop.orders (`id` UInt64, `n` UInt8) ENGINE = MergeTree ORDER BY id"},
+	}, nrURL+"/olympos/"+nrFull+"/")
+	in := c.input()
+	in.IngestURL = nrURL + "/" // a trailing slash names the same endpoint
+	got, err := Engine{}.CheckNativeRestore(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"shop.orders table allowed", "shop.report view allowed", "stats.daily table allowed"}
+	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
+		t.Fatalf("\n got %q\nwant %q", d, want)
+	}
+	if len(got.Manifests) != 2 || got.Manifests[0].RunID != nrFull || got.Manifests[1].RunID != nrInc {
+		t.Fatalf("manifests %+v", got.Manifests)
+	}
+}
+
+// TestCheckNativeRestoreNotVerified: a chain whose base manifest does not
+// verify is refused (backup.ErrNativeNotVerified); the objects of the copy's
+// own manifest, which verifies by itself, are listed, every one left out
+// with "the backup's manifest does not verify", and nothing was read. A copy
+// whose own manifest does not verify lists nothing.
+func TestCheckNativeRestoreNotVerified(t *testing.T) {
+	c := newNRChain(t, nrSchema[:3], []nrObj{nrSchema[0]}, nrURL+"/olympos/"+nrFull+"/")
+	c.signed[0] = []byte(strings.Replace(string(c.signed[0]), `"server_version":"25.8.1.1"`, `"server_version":"25.8.1.2"`, 1))
+	got, err := Engine{}.CheckNativeRestore(context.Background(), c.input("shop"))
+	if !errors.Is(err, backup.ErrNativeNotVerified) || got == nil {
+		t.Fatalf("a base that does not verify: %+v, %v", got, err)
+	}
+	want := []string{
+		"shop.orders table: the backup's manifest does not verify",
+		"shop.report view: the backup's manifest does not verify",
+	}
+	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
+		t.Fatalf("\n got %q\nwant %q", d, want)
+	}
+	if len(c.bound) != 0 || got.Manifests != nil {
+		t.Fatalf("an unverified chain was bound for reads: %d, %+v", len(c.bound), got.Manifests)
+	}
+
+	c = newNRChain(t, nrSchema[:3], nil, "")
+	c.signed[0] = []byte(strings.Replace(string(c.signed[0]), `"server_version":"25.8.1.1"`, `"server_version":"25.8.1.2"`, 1))
+	got, err = Engine{}.CheckNativeRestore(context.Background(), c.input())
+	if !errors.Is(err, backup.ErrNativeNotVerified) || got == nil || len(got.Objects) != 0 || len(got.Databases) != 0 {
+		t.Fatalf("a copy whose manifest does not verify: %+v, %v", got, err)
+	}
+}
+
+// TestCheckNativeRestoreDDLUnreadable: a DDL object the checked reader
+// refuses (changed in storage) refuses the check as not verified.
+func TestCheckNativeRestoreDDLUnreadable(t *testing.T) {
+	c := newNRChain(t, nrSchema[:1], nil, "")
+	delete(c.bodies, nrDDLKey(nrFull, "shop", "orders"))
+	if got, err := (Engine{}).CheckNativeRestore(context.Background(), c.input()); !errors.Is(err, backup.ErrNativeNotVerified) || got == nil || len(got.Objects) != 0 {
+		t.Fatalf("an unreadable definition: %+v, %v", got, err)
+	}
+	c = newNRChain(t, nrSchema[:1], nil, "")
+	in := c.input()
+	in.Bind = func([]backup.NativeChainManifest) (backup.NativeObjectReader, error) {
+		return nil, errors.New("the manifest of run x is not the one its copy was written with")
+	}
+	if _, err := (Engine{}).CheckNativeRestore(context.Background(), in); !errors.Is(err, backup.ErrNativeNotVerified) {
+		t.Fatalf("a chain that cannot be bound: %v", err)
+	}
+}
+
+// TestCheckNativeRestoreIngestURL: each .backup names its base by URL, so a
+// chain taken through another ingest.url is refused (backup.ErrNativeChain):
+// ClickHouse would read its base from the old endpoint.
+func TestCheckNativeRestoreIngestURL(t *testing.T) {
+	c := newNRChain(t, nrSchema[:1], []nrObj{nrSchema[0]}, "https://old-ingest.test:9444/olympos/"+nrFull+"/")
+	got, err := Engine{}.CheckNativeRestore(context.Background(), c.input())
+	if !errors.Is(err, backup.ErrNativeChain) || errors.Is(err, backup.ErrNativeNotVerified) ||
+		!strings.Contains(err.Error(), "https://old-ingest.test:9444/olympos/"+nrFull+"/") {
+		t.Fatalf("a chain through another endpoint: %+v, %v", got, err)
+	}
+	if got != nil && slices.ContainsFunc(got.Objects, func(d backup.NativeDecision) bool { return d.Allowed }) {
+		t.Fatalf("an object is allowed on a refused chain: %+v", got.Objects)
+	}
+}

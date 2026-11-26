@@ -125,6 +125,16 @@ var fromEnds = map[string]bool{"WHERE": true, "PREWHERE": true, "GROUP": true, "
 // creates it. ddl holds the metadata/*.sql bodies of the backup's chain, by
 // DDLKey. The decisions are in the order of dbs and their objects.
 func Classify(dbs []NativeDatabase, ddl map[string][]byte) []Decision {
+	return classify(dbs, nil, ddl)
+}
+
+// classify is Classify for the databases in selected only (nil: every one):
+// what the restore creates of a selection. An object of another database of
+// the backup is not restored, so what reads one is left out ("which is not
+// restored"). An allowed Replicated table is left out when its Keeper path
+// cannot be rewritten (rewriteReplicatedEngine), so the refusal shows when
+// the restore is checked, not when it runs.
+func classify(dbs []NativeDatabase, selected map[string]bool, ddl map[string][]byte) []Decision {
 	listed := map[objRef]int{}
 	for _, d := range dbs {
 		for _, o := range d.Objects {
@@ -134,6 +144,9 @@ func Classify(dbs []NativeDatabase, ddl map[string][]byte) []Decision {
 	var out []Decision
 	var defs []definition
 	for _, d := range dbs {
+		if selected != nil && !selected[d.Name] {
+			continue
+		}
 		for _, o := range d.Objects {
 			reason, def := classifyObject(d.Name, o, ddl, listed)
 			out = append(out, Decision{Database: d.Name, Name: o.Name, Kind: o.Kind, Reason: reason})
@@ -217,9 +230,20 @@ func classifyObject(db string, o NativeObject, ddl map[string][]byte, listed map
 		return "the backup lists it as an object Olympos does not classify", definition{}
 	case def.kind != "" && def.kind != o.Kind:
 		return fmt.Sprintf("its definition is a %s, not the %s the backup lists", kindName(def.kind), kindName(o.Kind)), definition{}
+	case def.reason == "" && def.replicated && def.kind == KindTable:
+		// The restore creates it from this text with only the engine's Keeper
+		// path and replica replaced; the request id does not change whether
+		// that can be done.
+		if _, err := rewriteReplicatedEngine(string(body), checkRequestID, db, o.Name); err != nil {
+			return err.Error(), definition{}
+		}
 	}
 	return def.reason, def
 }
+
+// checkRequestID stands for the request id when a restore is checked,
+// before the request exists.
+const checkRequestID = "00000000-0000-0000-0000-000000000000"
 
 func kindName(kind string) string {
 	if kind == KindMaterializedView {
@@ -266,6 +290,9 @@ type definition struct {
 	reads  []objRef // the objects it reads, in order
 	target *objRef  // a materialized view's TO table
 	reason string   // why its own text leaves it out; "" when it does not
+	// replicated: a table on a Replicated engine (its Keeper path is
+	// rewritten when it is restored).
+	replicated bool
 }
 
 func (d definition) deps() []objRef {
@@ -466,6 +493,8 @@ func (r *reader) engine(i int) int {
 	case !allowedEngines[name]:
 		r.fail("the " + shortName(name) + " engine is not on the restore allowlist")
 		return i
+	case strings.HasPrefix(name, "Replicated"):
+		r.def.replicated = true
 	}
 	i += 3
 	if at(i).punct("(") {
