@@ -357,13 +357,14 @@ func TestOrphanResult(t *testing.T) {
 func TestNativeEngine(t *testing.T) {
 	e := Engine{}
 	for raw, want := range map[string]backup.NativeJob{
-		`{"method":"native","databases":["b","a"]}`: {Native: true, Databases: []string{"a", "b"}},
-		`{"method":"native"}`:                       {Native: true, Databases: []string{}},
-		`{"method":"logical"}`:                      {Databases: []string{}},
-		`{}`:                                        {Databases: []string{}},
+		`{"method":"native","databases":["b","a"]}`:             {Native: true, Databases: []string{"a", "b"}},
+		`{"method":"native"}`:                                   {Native: true, Databases: []string{}},
+		`{"method":"native","incremental":"weekly_full_daily"}`: {Native: true, Incremental: true, Databases: []string{}},
+		`{"method":"logical"}`:                                  {Databases: []string{}},
+		`{}`:                                                    {Databases: []string{}},
 	} {
 		got, err := e.NativeJob(json.RawMessage(raw))
-		if err != nil || got.Native != want.Native || !slices.Equal(got.Databases, want.Databases) {
+		if err != nil || got.Native != want.Native || got.Incremental != want.Incremental || !slices.Equal(got.Databases, want.Databases) {
 			t.Errorf("%s: %+v, %v", raw, got, err)
 		}
 	}
@@ -378,12 +379,22 @@ func TestNativeEngine(t *testing.T) {
 		t.Fatalf("orphan error: %v", err)
 	}
 
-	// The manifest records the settings the statement has.
-	for _, so := range []bool{false, true} {
+	// The manifest records the settings the statement has, an
+	// incremental's base too.
+	for _, tc := range []struct{ so, base bool }{{false, false}, {true, false}, {false, true}} {
+		so := tc.so
 		nr := testNativeRun()
 		nr.StructureOnly = so
+		baseURL := ""
+		if tc.base {
+			nr.Base = &NativeBase{URL: strings.TrimSuffix(nr.URL, nrRunID+"/") + nrBaseID + "/", RunID: nrBaseID}
+			baseURL = nr.Base.URL
+		}
 		stmt := backupStatement(nr)
-		settings := statementSettings(nrRunID, so)
+		settings := statementSettings(nrRunID, so, baseURL)
+		if _, ok := settings["base_backup"]; ok != tc.base {
+			t.Errorf("base %v: settings %v", tc.base, settings)
+		}
 		if _, ok := settings["structure_only"]; ok != so {
 			t.Errorf("structure only %v: settings %v", so, settings)
 		}
@@ -404,7 +415,7 @@ func TestNativeTargetState(t *testing.T) {
 	q := &fakeQuerier{answers: map[string][][]string{"system.parts": {{"214748364800"}},
 		// R41: the native backups that run on the server, by their query id.
 		"system.processes": {{"olympos-backup-" + nrBaseID}, {"olympos-backup-" + nrRunID}, {"olympos-backup-NOT-A-RUN"}}}}
-	got, err := nativeTargetState(context.Background(), q, []string{"db1", "web-shop"}, nrRunID)
+	got, err := nativeTargetState(context.Background(), q, []string{"db1", "web-shop"}, nrRunID, false)
 	if err != nil || got.Bytes != 200<<30 || !slices.Equal(got.Running, []string{nrBaseID}) {
 		t.Fatalf("state %+v, %v", got, err)
 	}
@@ -412,19 +423,33 @@ func TestNativeTargetState(t *testing.T) {
 		!strings.Contains(q.asked[1], "startsWith(query_id, 'olympos-backup-')") {
 		t.Fatalf("asked %q", q.asked)
 	}
+	// R44: the size counts the tables system.parts does not hold (Log,
+	// StripeLog, Memory) from system.tables.
+	if !strings.Contains(q.asked[0], "system.tables") || !strings.Contains(q.asked[0], "total_bytes") ||
+		!strings.Contains(q.asked[0], "MergeTree") {
+		t.Fatalf("the size leaves out the other tables: %s", q.asked[0])
+	}
+	// With ingest.maxRunBytes set the size is not needed, and not read: a
+	// backup user without SELECT on system.parts can still back up.
+	q = &fakeQuerier{answers: map[string][][]string{"system.processes": {{"olympos-backup-" + nrBaseID}}},
+		fail: map[string]error{"system.parts": errors.New("ACCESS_DENIED")}}
+	if got, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID, true); err != nil || got.Bytes != 0 ||
+		!slices.Equal(got.Running, []string{nrBaseID}) || len(q.asked) != 1 {
+		t.Fatalf("size skipped: %+v %v, asked %q", got, err, q.asked)
+	}
 	for name, q := range map[string]*fakeQuerier{
 		"unreadable": {answers: map[string][][]string{"system.parts": {{"lots"}}}},
 		"no row":     {answers: map[string][][]string{}},
 		"refused":    {fail: map[string]error{"system.parts": errors.New("ACCESS_DENIED")}},
 	} {
-		if _, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID); err == nil || !strings.Contains(err.Error(), "size of the databases") {
+		if _, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID, false); err == nil || !strings.Contains(err.Error(), "size of the databases") {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
 	// Ending orphans is a clean-up: a process list that cannot be read does
 	// not hold up the backup.
 	q = &fakeQuerier{answers: map[string][][]string{"system.parts": {{"1"}}}, fail: map[string]error{"system.processes": errors.New("ACCESS_DENIED")}}
-	if got, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID); err != nil || got.Bytes != 1 || len(got.Running) != 0 {
+	if got, err := nativeTargetState(context.Background(), q, []string{"db1"}, nrRunID, false); err != nil || got.Bytes != 1 || len(got.Running) != 0 {
 		t.Errorf("processes refused: %+v %v", got, err)
 	}
 }

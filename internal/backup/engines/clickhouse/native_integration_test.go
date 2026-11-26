@@ -174,7 +174,7 @@ INSERT INTO parts.p SELECT number FROM numbers(%d) SETTINGS max_partitions_per_i
 		if err != nil {
 			t.Fatal(err)
 		}
-		m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, true),
+		m, err := BuildNativeManifest(NativeBuild{RunID: r.id, ServerVersion: wantServer, Settings: statementSettings(r.id, true, ""),
 			Objects: objs, Body: r.s.Captured, StructureOnly: true})
 		if err != nil {
 			t.Fatalf("manifest: %v", err)

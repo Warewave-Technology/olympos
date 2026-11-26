@@ -462,9 +462,10 @@ func VerifySigned(ctx context.Context, kv secrets.KeyVault, trustedKeyName, expe
 // backup. Each manifest verifies (VerifySigned); the first has no base; each
 // other one's BaseRunID and BaseManifestSHA256 are the previous one's RunID
 // and SHA256(); the last is run expectedRunID; no run is in the chain twice;
-// and every DDL key of every manifest is an object of the chain. It returns
-// the verified manifests in the same order. A chain that is not one is
-// ErrManifestInvalid.
+// and every DDL key of every manifest is an object of that manifest's run or
+// of a run before it in the chain: a run reuses the metadata of the runs it
+// is based on, never of a later one. It returns the verified manifests in the
+// same order. A chain that is not one is ErrManifestInvalid.
 func VerifyChain(ctx context.Context, kv secrets.KeyVault, trustedKeyName, expectedRunID string, raws [][]byte) ([]*NativeManifest, error) {
 	refuse := func(format string, a ...any) ([]*NativeManifest, error) {
 		return nil, fmt.Errorf("%w: chain: %s", ErrManifestInvalid, fmt.Sprintf(format, a...))
@@ -497,17 +498,15 @@ func VerifyChain(ctx context.Context, kv secrets.KeyVault, trustedKeyName, expec
 			return refuse("run %s is a full backup, not the first of the chain", clip(m.RunID))
 		}
 	}
-	keys := map[string]bool{}
+	keys := map[string]bool{} // the objects of the runs up to m
 	for _, m := range ms {
 		for _, o := range m.Objects {
 			keys[o.Key] = true
 		}
-	}
-	for _, m := range ms {
 		for _, d := range m.Databases {
 			for _, o := range d.Objects {
 				if !keys[o.DDLKey] {
-					return refuse("run %s: %s.%s: DDL %s is not an object of the chain",
+					return refuse("run %s: %s.%s: DDL %s is not an object of the run or of a run before it in the chain",
 						clip(m.RunID), clip(d.Name), clip(o.Name), clip(o.DDLKey))
 				}
 			}
@@ -679,13 +678,15 @@ func baseObject(base []*NativeManifest, f MetaFile) (string, error) {
 
 // baseCounts returns the rows of a count.txt of the base by its size and
 // checksum, read from the base's .backup and its manifest's part rows; it
-// reads the .backup on its first call. Without a base it finds nothing.
-func baseCounts(base []*NativeManifest, body func(string) ([]byte, error)) func(f MetaFile) (uint64, error) {
+// reads the .backup on its first call. name, the file of the run that
+// takes those bytes from the base, is for errors. Without a base it finds
+// nothing.
+func baseCounts(base []*NativeManifest, body func(string) ([]byte, error)) func(name string, size uint64, checksum string) (uint64, error) {
 	var byContent map[[2]string]uint64
 	var readErr error
-	return func(f MetaFile) (uint64, error) {
+	return func(name string, size uint64, checksum string) (uint64, error) {
 		if len(base) == 0 {
-			return 0, metaErr("%s is in the base, and the run has none", clip(f.Name))
+			return 0, metaErr("%s is in the base, and the run has none", clip(name))
 		}
 		last := base[len(base)-1]
 		if byContent == nil && readErr == nil {
@@ -708,36 +709,53 @@ func baseCounts(base []*NativeManifest, body func(string) ([]byte, error)) func(
 		if readErr != nil {
 			return 0, readErr
 		}
-		n, ok := byContent[[2]string{strconv.FormatUint(f.Size, 10), f.Checksum}]
+		n, ok := byContent[[2]string{strconv.FormatUint(size, 10), checksum}]
 		if !ok {
-			return 0, metaErr("%s is in the base, and the base has no rows for a count.txt of its size and checksum", clip(f.Name))
+			return 0, metaErr("%s is in the base, and the base has no rows for a count.txt of its size and checksum", clip(name))
 		}
 		return n, nil
 	}
 }
 
 // partRows is the row count of the part whose count.txt is f, a file of run.
+// A count.txt partly in the base (a Log table that grew from 7 to 73 rows:
+// ClickHouse takes "7" from the base and writes "3") is the base's bytes,
+// the base's count.txt of size BaseSize and checksum BaseChecksum, followed
+// by the bytes the run stored. A count.txt is a row count in decimal and
+// nothing else (ParseCount), so the base's bytes are its rows in decimal.
 func partRows(run string, byName map[string]MetaFile, f MetaFile, body func(string) ([]byte, error),
-	inBase func(MetaFile) (uint64, error)) (uint64, error) {
-	name := f.Name
+	inBase func(name string, size uint64, checksum string) (uint64, error)) (uint64, error) {
 	switch {
-	case f.Written():
-	case f.DataFile != "":
-		// ParseBackupMeta checked that the data file is a written file of
-		// the same size and checksum: the same bytes.
-		name = byName[f.DataFile].Name
+	case f.Size == 0:
+		return 0, metaErr("%s: the rows of an empty count.txt cannot be read", clip(f.Name))
 	case f.UseBase && f.BaseSize == f.Size:
-		return inBase(f)
-	default:
-		return 0, metaErr("%s: the rows of an empty or partly stored count.txt cannot be read", clip(f.Name))
+		return inBase(f.Name, f.Size, f.Checksum)
+	}
+	name := f.Name
+	if f.DataFile != "" {
+		// ParseBackupMeta checked that the data file is a written file of
+		// the same size, checksum and base: the same bytes.
+		name = byName[f.DataFile].Name
 	}
 	raw, err := body(run + "/" + name)
 	if err != nil {
 		return 0, err
 	}
+	if f.UseBase {
+		n, err := inBase(f.Name, f.BaseSize, f.BaseChecksum)
+		if err != nil {
+			return 0, err
+		}
+		head := strconv.FormatUint(n, 10)
+		if uint64(len(head)) != f.BaseSize {
+			return 0, metaErr("%s: its first %d bytes are in the base, whose count.txt of that size and checksum holds %d rows",
+				clip(f.Name), f.BaseSize, n)
+		}
+		raw = append([]byte(head), raw...)
+	}
 	n, err := ParseCount(raw)
 	if err != nil {
-		return 0, fmt.Errorf("%s: %w", clip(name), err)
+		return 0, fmt.Errorf("%s: %w", clip(f.Name), err)
 	}
 	return n, nil
 }
@@ -763,11 +781,44 @@ func tableRows(parts map[string]uint64, db, name string) (uint64, error) {
 // SignNativeManifest implements backup.NativeEngine: it builds the run's
 // manifest (BuildNativeManifest), signs it, and verifies the stored form, as
 // a reader will (VerifySigned, the trusted key and the run), before anything
-// writes it (R25).
+// writes it (R25). An incremental's base chain is verified here (VerifyChain),
+// whatever the worker checked, and what the run did not keep itself is read
+// from the chain through in.Base.Read.
 func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestInput) (*backup.NativeManifestResult, error) {
-	m, err := BuildNativeManifest(NativeBuild{RunID: in.RunID, ServerVersion: in.ServerVersion,
-		Settings: statementSettings(in.RunID, in.StructureOnly), Objects: in.Objects, Body: in.Captured, StructureOnly: in.StructureOnly})
+	b := NativeBuild{RunID: in.RunID, ServerVersion: in.ServerVersion, Settings: statementSettings(in.RunID, in.StructureOnly, ""),
+		Objects: in.Objects, Body: in.Captured, StructureOnly: in.StructureOnly}
+	var readErr error
+	if in.Base != nil {
+		chain, err := VerifyChain(ctx, in.KV, in.KeyName, in.Base.RunID, in.Base.Signed)
+		if err != nil {
+			return nil, fmt.Errorf("the base chain: %w", err)
+		}
+		b.Base, b.Settings = chain, statementSettings(in.RunID, in.StructureOnly, in.Base.URL)
+		inChain := map[string]bool{}
+		for _, m := range chain {
+			inChain[m.RunID] = true
+		}
+		b.Body = func(key string) ([]byte, bool) {
+			if body, ok := in.Captured(key); ok {
+				return body, true
+			}
+			run, _, _ := strings.Cut(key, "/")
+			if !inChain[run] {
+				return nil, false
+			}
+			body, err := in.Base.Read(ctx, key, MaxBackupMetaBytes)
+			if err != nil {
+				readErr = errors.Join(readErr, err)
+				return nil, false
+			}
+			return body, true
+		}
+	}
+	m, err := BuildNativeManifest(b)
 	if err != nil {
+		if readErr != nil {
+			err = fmt.Errorf("%w (reading the base chain: %v)", err, readErr)
+		}
 		return nil, err
 	}
 	s, err := Sign(ctx, in.KV, in.KeyName, m)
@@ -793,6 +844,19 @@ func (Engine) SignNativeManifest(ctx context.Context, in backup.NativeManifestIn
 		}
 	}
 	return res, nil
+}
+
+// VerifyNativeChain implements backup.NativeEngine with VerifyChain.
+func (Engine) VerifyNativeChain(ctx context.Context, kv secrets.KeyVault, keyName, runID string, signed [][]byte) ([]backup.NativeChainManifest, error) {
+	ms, err := VerifyChain(ctx, kv, keyName, runID, signed)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]backup.NativeChainManifest, len(ms))
+	for i, m := range ms {
+		out[i] = backup.NativeChainManifest{RunID: m.RunID, SHA256: m.SHA256(), Objects: slices.Clone(m.Objects)}
+	}
+	return out, nil
 }
 
 // manifestJSON is the manifest as it is parsed. Objects has its own type as
@@ -1015,13 +1079,16 @@ func (m *NativeManifest) validate() error {
 			// The DDL runs as SQL on the target, so its SHA-256 must be signed:
 			// it is an object of this run, or a well-formed key of another run
 			// (an incremental's unchanged metadata, stored by its base) that
-			// VerifyChain finds among the chain's objects.
+			// VerifyChain finds among the chain's objects. A full backup has no
+			// chain: its DDL is its own.
 			run, rest, _ := strings.Cut(o.DDLKey, "/")
 			switch {
 			case !isRunID(run) || !validPath(rest):
 				return bad("%s.%s: DDL %s is not <run-id>/<path>", clip(d.Name), clip(o.Name), clip(o.DDLKey))
 			case run == m.RunID && !keys[o.DDLKey]:
 				return bad("%s.%s: DDL %s is not an object of the run", clip(d.Name), clip(o.Name), clip(o.DDLKey))
+			case run != m.RunID && m.BaseRunID == "":
+				return bad("%s.%s: DDL %s is another run's, and a full backup has no base", clip(d.Name), clip(o.Name), clip(o.DDLKey))
 			}
 			strs = append(strs, d.Name, o.Name, o.Engine)
 		}

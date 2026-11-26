@@ -842,6 +842,12 @@ func TestVerifyChain(t *testing.T) {
 	stranger := chainIncremental(base, testRunID)
 	stranger.Databases[0].Objects[0].DDLKey = "5b0c3e8a-1f2d-4c6b-8a9e-7d4f2b1c0e93/metadata/sales/orders.sql"
 	refused("DDL under a run not in the chain", testRunID, rawBase, sign(stranger))
+	// A DDL key under a later run of the chain (task 13): a run reuses the
+	// metadata of the runs before it, never of one after it.
+	early := chainIncremental(base, testRunID)
+	early.Databases[0].Objects[2].DDLKey = testOtherRunID + "/metadata/sales/refunds.sql"
+	early.Objects = slices.DeleteFunc(early.Objects, func(o ingest.ObjectRecord) bool { return strings.HasSuffix(o.Key, "refunds.sql") })
+	refused("DDL of a later run", testOtherRunID, rawBase, sign(early), sign(chainIncremental(early, testOtherRunID)))
 
 	// Broken links: the incremental names another base, or the base's hash
 	// is not this base's.
@@ -1104,5 +1110,26 @@ func TestWriteStringMatchesByRune(t *testing.T) {
 		if !bytes.Equal(got.Bytes(), want.Bytes()) {
 			t.Fatalf("%q:\n got %q\nwant %q", s.String(), got.Bytes(), want.Bytes())
 		}
+	}
+}
+
+// TestValidateFullRefusesForeignDDL (task 13): a full backup has no chain,
+// so its every DDL key is its own: one under another run is refused on its
+// own, by Sign and VerifySigned alike.
+func TestValidateFullRefusesForeignDDL(t *testing.T) {
+	ctx := context.Background()
+	kv := newFakeVault()
+	m := chainBase()
+	m.Databases[0].Objects[0].DDLKey = testRunID + "/metadata/sales/orders.sql"
+	if _, err := Sign(ctx, kv, testManifestKey, m); !errors.Is(err, ErrManifestInvalid) || !strings.Contains(err.Error(), "full backup") {
+		t.Fatalf("sign: %v", err)
+	}
+	s := Signed{Manifest: m, KeyID: testManifestKey + "/1", Signature: base64.StdEncoding.EncodeToString(make([]byte, 64))}
+	raw, err := s.MarshalJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := VerifySigned(ctx, kv, testManifestKey, testBaseRunID, raw); !errors.Is(err, ErrManifestInvalid) {
+		t.Fatalf("verify: %v", err)
 	}
 }

@@ -57,11 +57,28 @@ type NativeEngine interface {
 	// target created, from what its ingest session stored and kept, signs it
 	// with the Key Vault key in.KeyName and verifies what it signed.
 	SignNativeManifest(ctx context.Context, in NativeManifestInput) (*NativeManifestResult, error)
+	// VerifyNativeChain verifies the signed manifests of a backup chain, the
+	// full first, whose last is run runID's, signed by the Key Vault key
+	// keyName. It returns what the worker needs of each, in the same order.
+	VerifyNativeChain(ctx context.Context, kv secrets.KeyVault, keyName, runID string, signed [][]byte) ([]NativeChainManifest, error)
+}
+
+// NativeChainManifest is a verified manifest of a backup chain.
+type NativeChainManifest struct {
+	RunID string
+	// SHA256 is the hex SHA-256 of the canonical manifest, as
+	// NativeManifestResult.SHA256.
+	SHA256 string
+	// Objects are the run's objects, under "<run-id>/".
+	Objects []ingest.ObjectRecord
 }
 
 // NativeJob is what a job's engine_options say about native backups.
 type NativeJob struct {
 	Native bool
+	// Incremental takes a full backup weekly and incrementals on the other
+	// days (design §7).
+	Incremental bool
 	// Databases are backed up whole; empty means every database the backup
 	// user sees, except the system databases.
 	Databases []string
@@ -81,6 +98,12 @@ type NativeRun struct {
 	// run's (R40), which checks the whole path (egress, certificate,
 	// credential, signing, tagging) without copying the data.
 	StructureOnly bool
+	// Base is an incremental's base, nil for a full backup. The run's own
+	// credential reads it.
+	Base *NativeBase
+	// SkipSize: the run's byte limit is set (ingest.maxRunBytes), so the
+	// engine does not read the databases' size; Before gets 0 Bytes.
+	SkipSize bool
 	// Stop delivers why the run's ingest session stopped (a quota, a failed
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
@@ -89,6 +112,13 @@ type NativeRun struct {
 	// the runs among t.Running whose backups the engine ends first (R41). An
 	// error ends the run there, with no backup started.
 	Before func(ctx context.Context, t NativeTarget) (end []string, err error)
+}
+
+// NativeBase is the backup an incremental is taken on: the base run's
+// directory on the ingest endpoint, "<ingest.url>/olympos/<run-id>/", and
+// the run.
+type NativeBase struct {
+	URL, RunID string
 }
 
 // NativeTarget is what the engine reads on the target before its BACKUP.
@@ -140,6 +170,22 @@ type NativeManifestInput struct {
 	Captured func(key string) ([]byte, bool)
 	// StructureOnly is a test run's backup (NativeRun.StructureOnly).
 	StructureOnly bool
+	// Base is an incremental's base chain; nil for a full backup.
+	Base *NativeManifestBase
+}
+
+// NativeManifestBase is the base chain of an incremental, as the manifest is
+// built from it.
+type NativeManifestBase struct {
+	// RunID and URL are the base's (NativeRun.Base).
+	RunID, URL string
+	// Signed are the chain's signed manifests, as stored, the full first and
+	// the base last. The engine verifies them itself.
+	Signed [][]byte
+	// Read returns an object of the chain by bucket-relative key, at most
+	// limit bytes: only an object of one of those manifests, checked against
+	// it.
+	Read func(ctx context.Context, key string, limit int64) ([]byte, error)
 }
 
 // NativeManifestResult is a signed native manifest.

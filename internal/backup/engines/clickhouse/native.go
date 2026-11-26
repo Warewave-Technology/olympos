@@ -77,21 +77,30 @@ func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
 	if err != nil {
 		return backup.NativeJob{}, err
 	}
-	return backup.NativeJob{Native: o.Native(), Databases: o.Databases}, nil
+	return backup.NativeJob{Native: o.Native(), Incremental: o.Incremental != "", Databases: o.Databases}, nil
 }
 
 // BackupNative implements backup.NativeEngine with RunNative.
 func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
-	return e.RunNative(ctx, ec, NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
-		Databases: run.Databases, StructureOnly: run.StructureOnly, Stop: run.Stop, Before: run.Before})
+	nr := NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
+		Databases: run.Databases, StructureOnly: run.StructureOnly, SkipSize: run.SkipSize, Stop: run.Stop, Before: run.Before}
+	if run.Base != nil {
+		nr.Base = &NativeBase{URL: run.Base.URL, RunID: run.Base.RunID}
+	}
+	return e.RunNative(ctx, ec, nr)
 }
 
 // statementSettings are the settings backupStatement writes into the BACKUP
-// statement of a full backup: what the manifest records.
-func statementSettings(runID string, structureOnly bool) map[string]string {
+// statement: what the manifest records. baseURL is an incremental's base
+// (NativeBase.URL), "" for a full backup.
+func statementSettings(runID string, structureOnly bool, baseURL string) map[string]string {
 	s := map[string]string{"async": "1", "allow_s3_native_copy": "0", "id": runID}
 	if structureOnly {
 		s["structure_only"] = "1"
+	}
+	if baseURL != "" {
+		s["base_backup"] = "S3(" + quoteString(baseURL) + ")"
+		s["use_same_s3_credentials_for_base_backup"] = "1"
 	}
 	return s
 }
@@ -116,6 +125,9 @@ type NativeRun struct {
 	// StructureOnly backs up the databases' DDL and no data (structure_only
 	// = 1): a test run's, which checks the path end to end in seconds (R40).
 	StructureOnly bool
+	// SkipSize: the worker does not need the databases' size (its byte limit
+	// is configured), so it is not read: NativeTarget.Bytes is 0.
+	SkipSize bool
 	// Stop delivers why the run's ingest session stopped (a quota, a rate
 	// storm, expiry). ClickHouse retries refused uploads almost forever, so
 	// the run is then ended with KILL QUERY (spike §3).
@@ -458,7 +470,7 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 		return version, err
 	}
 	if nr.Before != nil {
-		t, err := nativeTargetState(ctx, s, dbs, nr.RunID)
+		t, err := nativeTargetState(ctx, s, dbs, nr.RunID, nr.SkipSize)
 		if err != nil {
 			return version, err
 		}
@@ -473,31 +485,25 @@ func (Engine) RunNative(ctx context.Context, ec backup.EngineContext, nr NativeR
 }
 
 // nativeTargetState reads what the worker decides on before the BACKUP
-// (backup.NativeTarget): the bytes on disk of the active parts of the run's
-// databases, which a BACKUP writes about as they are, and the native
-// backups of other runs that run on this server (system.processes, where
-// an async BACKUP stays under its query id until it ends: seen on 24.8 and
-// 25.8). A process list that cannot be read is logged and taken as empty:
-// ending orphans is a clean-up and does not hold up the backup.
-func nativeTargetState(ctx context.Context, c querier, databases []string, self string) (backup.NativeTarget, error) {
-	quoted := make([]string, len(databases))
-	for i, db := range databases {
-		quoted[i] = quoteString(db)
+// (backup.NativeTarget): what the run's databases hold, which a BACKUP
+// writes about as it is, unless skipSize; and the native backups of other
+// runs that run on this server (system.processes, where an async BACKUP
+// stays under its query id until it ends: seen on 24.8 and 25.8). What the
+// databases hold is the bytes on disk of their MergeTree tables' active
+// parts and, for the other tables, which system.parts does not hold (Log,
+// StripeLog, Memory), their total_bytes where ClickHouse knows it (R44). A
+// process list that cannot be read is logged and taken as empty: ending
+// orphans is a clean-up and does not hold up the backup.
+func nativeTargetState(ctx context.Context, c querier, databases []string, self string, skipSize bool) (backup.NativeTarget, error) {
+	var t backup.NativeTarget
+	if !skipSize {
+		n, err := databasesSize(ctx, c, databases)
+		if err != nil {
+			return backup.NativeTarget{}, err
+		}
+		t.Bytes = n
 	}
-	rows, err := c.queryStrings(ctx, "SELECT toString(sum(bytes_on_disk)) FROM system.parts WHERE active AND database IN ("+
-		strings.Join(quoted, ", ")+")")
-	if err != nil {
-		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %w", err)
-	}
-	if len(rows) != 1 || len(rows[0]) != 1 {
-		return backup.NativeTarget{}, errors.New("clickhouse: size of the databases: no result")
-	}
-	n, err := strconv.ParseInt(rows[0][0], 10, 64)
-	if err != nil || n < 0 {
-		return backup.NativeTarget{}, fmt.Errorf("clickhouse: size of the databases: %q is not a size", clip(rows[0][0]))
-	}
-	t := backup.NativeTarget{Bytes: n}
-	rows, err = c.queryStrings(ctx, "SELECT query_id FROM system.processes WHERE startsWith(query_id, "+
+	rows, err := c.queryStrings(ctx, "SELECT query_id FROM system.processes WHERE startsWith(query_id, "+
 		quoteString(nativeQueryID(""))+") ORDER BY query_id")
 	if err != nil {
 		slog.Default().Warn("clickhouse: cannot list the native backups that run on the server; none is ended",
@@ -510,6 +516,29 @@ func nativeTargetState(ctx context.Context, c querier, databases []string, self 
 		}
 	}
 	return t, nil
+}
+
+// databasesSize is what the databases hold (nativeTargetState).
+func databasesSize(ctx context.Context, c querier, databases []string) (int64, error) {
+	quoted := make([]string, len(databases))
+	for i, db := range databases {
+		quoted[i] = quoteString(db)
+	}
+	in := "database IN (" + strings.Join(quoted, ", ") + ")"
+	// A scalar subquery is Nullable: each is 0 when it finds nothing.
+	rows, err := c.queryStrings(ctx, "SELECT toString(ifNull((SELECT sum(bytes_on_disk) FROM system.parts WHERE active AND "+in+"), 0) + "+
+		"ifNull((SELECT sum(ifNull(total_bytes, 0)) FROM system.tables WHERE "+in+" AND NOT endsWith(engine, 'MergeTree')), 0))")
+	if err != nil {
+		return 0, fmt.Errorf("clickhouse: size of the databases: %w", err)
+	}
+	if len(rows) != 1 || len(rows[0]) != 1 {
+		return 0, errors.New("clickhouse: size of the databases: no result")
+	}
+	n, err := strconv.ParseInt(rows[0][0], 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("clickhouse: size of the databases: %q is not a size", clip(rows[0][0]))
+	}
+	return n, nil
 }
 
 // endOrphans ends, with KILL QUERY … SYNC on the run's connection, the

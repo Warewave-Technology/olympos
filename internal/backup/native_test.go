@@ -977,3 +977,8 @@ func TestNativeRunShutdownMidRetag(t *testing.T) {
 		t.Fatalf("manifest tagged %v", tg)
 	}
 }
+
+// VerifyNativeChain is the real engine's.
+func (fakeEngine) VerifyNativeChain(ctx context.Context, kv secrets.KeyVault, keyName, runID string, signed [][]byte) ([]backup.NativeChainManifest, error) {
+	return clickhouse.Engine{}.VerifyNativeChain(ctx, kv, keyName, runID, signed)
+}
