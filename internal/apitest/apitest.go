@@ -14,6 +14,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"sync"
 	"testing"
 	"testing/fstest"
 
@@ -43,7 +44,26 @@ type Env struct {
 	Envelope *secrets.Envelope
 	HMAC     *secrets.Fingerprinter
 	Log      *slog.Logger
-	LogBuf   *bytes.Buffer
+	LogBuf   *LogBuffer
+}
+
+// LogBuffer is a buffer that handlers may log into from their own
+// goroutines while a test reads it.
+type LogBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *LogBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *LogBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // Options customize New.
@@ -61,7 +81,7 @@ type Options struct {
 func New(t testing.TB, opt Options) *Env {
 	t.Helper()
 	db := testutil.DB(t)
-	buf := &bytes.Buffer{}
+	buf := &LogBuffer{}
 	log := slog.New(secrets.NewRedactingHandler(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	kv := &secrets.LocalKeyVault{Dir: t.TempDir()}
 	fp, _ := secrets.NewFingerprinter(bytes.Repeat([]byte{42}, 32))
