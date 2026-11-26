@@ -10,8 +10,10 @@ param containerName string = 'olympos-backups'
 param serverIdentityPrincipalId string
 @description('Subnet ID for the private endpoint (the server VNet).')
 param privateEndpointSubnetId string
-@description('Longest retention tier in days (monthly × 31). Immutability and soft delete cover it.')
-param longestRetentionDays int = 400
+@minValue(0)
+@maxValue(146000)
+@description('Days the container default immutability policy keeps every new blob version from delete and overwrite. 0 (the default) sets no policy. A policy holds every version that long, whatever its tier, so lifecycle rules cannot delete it earlier. The policy is created unlocked (docs/install.md, Backup storage hardening).')
+param defaultImmutabilityDays int = 0
 @description('Lifecycle: delete by tier after N days.')
 param dailyDays int = 7
 param weeklyDays int = 28
@@ -33,7 +35,7 @@ resource sa 'Microsoft.Storage/storageAccounts@2023-05-01' = {
     minimumTlsVersion: 'TLS1_2'
     supportsHttpsTrafficOnly: true
     defaultToOAuthAuthentication: true
-    immutableStorageWithVersioning: { enabled: true }
+    immutableStorageWithVersioning: { enabled: true }   // 4. version-level immutability support (no policy by itself)
     networkAcls: { defaultAction: 'Deny', bypass: 'None' }
   }
 }
@@ -57,12 +59,20 @@ resource container 'Microsoft.Storage/storageAccounts/blobServices/containers@20
   }
 }
 
-// 4. Version-level immutability (time-based) >= longest retention.
-resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies@2023-05-01' = {
+// 4. Optional container default immutability policy (time-based), the storage owner's choice.
+// Version-level immutability support above makes nothing immutable by itself; it lets a default policy,
+// or a policy on one version, be set later without changing the account. A default policy applies to
+// every new blob version of every tier, probe blobs and dry runs included, and a version under it cannot
+// be deleted before its period ends: it keeps every backup at least defaultImmutabilityDays.
+// Without it, the server still cannot delete, but it can re-tag or overwrite a backup, and the lifecycle
+// rules below then delete it. ARM creates the policy unlocked: its owner can shorten or remove it.
+// Locking it (az storage container immutability-policy lock) cannot be undone.
+// Per-tier locks set by the server at write time are planned (https://github.com/Warewave-Technology/olympos/issues/79).
+resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers/immutabilityPolicies@2023-05-01' = if (defaultImmutabilityDays > 0) {
   parent: container
   name: 'default'
   properties: {
-    immutabilityPeriodSinceCreationInDays: longestRetentionDays
+    immutabilityPeriodSinceCreationInDays: defaultImmutabilityDays
     allowProtectedAppendWrites: false
   }
 }
@@ -72,8 +82,9 @@ resource immutability 'Microsoft.Storage/storageAccounts/blobServices/containers
 // olympos-state=incomplete until the run's signed manifest is written, and are retagged complete after it.
 // A run that completed is not touched: its objects are retagged olympos-state=complete, so the filter
 // no longer matches them. Every rule uses daysAfterCreationGreaterThan, as the tier rules do.
-// With the container's time-based immutability a delete waits until the immutability period of that
-// version ends (see https://github.com/Warewave-Technology/olympos/issues/79).
+// With a container default immutability policy (defaultImmutabilityDays > 0), a delete waits until the
+// immutability period of that version ends, for every rule alike.
+// With soft delete on, a version a rule deletes stays soft-deleted for 30 days and can be restored.
 resource lifecycle 'Microsoft.Storage/storageAccounts/managementPolicies@2023-05-01' = {
   parent: sa
   name: 'default'

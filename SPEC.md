@@ -15,7 +15,7 @@ This document is the source of truth for the implementation. Where it says **MUS
 3. **The agent only tunnels to targets it discovered itself.** The server can never ask for an arbitrary `host:port`.
 4. **Secret values are never shown in the UI.** Users see keys, never values; values can only be replaced, through maker/checker approval.
 5. **Every sensitive action is auditable.** Append-only logs for grants, change requests, backup runs, logins.
-6. **The server is the only writer to backup storage.** Nothing in a cluster ever gets a Blob credential; the server cannot delete backups (retention is done by Blob lifecycle rules; on NFS a file system cannot enforce this, so the destination shows a permanent warning, see `docs/spec-changes.md` #13).
+6. **The server is the only writer to backup storage.** Nothing in a cluster ever gets a Blob credential; the server cannot delete backups (retention is done by Blob lifecycle rules; on NFS a file system cannot enforce this, so the destination shows a permanent warning, see `docs/spec-changes.md` #13). It can re-tag and overwrite them, and a lifecycle rule then deletes what it re-tagged or replaced; only storage immutability, the storage owner's choice, stops that (§10.3.1, `docs/spec-changes.md` #29).
 7. **Simple to install and operate.** One Helm chart for the server, one for the agent. Sensible defaults; dangerous features opt-in.
 8. **Tech terms and UI copy in English.**
 
@@ -504,14 +504,17 @@ path "sys/storage/raft/snapshot" { capabilities = ["read"] }
 Both options are used **only by the server**. No SAS or Blob credential is ever sent to a cluster.
 
 - Layout: `{prefix}/{cluster}/{namespace}/{service}/{engine}/{YYYY}/{MM}/{DD}/{run_id}.{ext}` + `{run_id}.manifest.json` (sha256, size, wire_bytes, engine, versions, started/finished, job id).
-- **Retention is done by Blob Lifecycle Management, not by the server.** The server writes blob index tag `olympos-tier=daily|weekly|monthly` on each backup (GFS promotion decided at write time). Lifecycle rules (rendered by the install docs / optional Bicep module) delete by tag + age. The server has **no delete permission**.
+- **Retention is done by Blob Lifecycle Management, not by the server.** The server writes blob index tag `olympos-tier=daily|weekly|monthly` on each backup (GFS promotion decided at write time). Lifecycle rules (rendered by the install docs / optional Bicep module) delete by tag + age. The server has **no delete permission**. It does have tag and write permissions, so without storage immutability a compromised server can have the lifecycle rules delete a backup (§10.3.1 step 4).
 - Validation on save: "Test destination" writes and reads a small probe blob, sets a tag, and verifies that **delete is refused** (warns if the credential can delete).
 
 ### 10.3.1 Storage account hardening (install guide + optional Bicep module)
 1. Public network access **disabled**; access only via **Private Endpoint** in the server's VNet.
 2. MI option: `allowSharedKeyAccess = false`.
 3. Data-plane RBAC only for the server MI, custom role: `blobs/read`, `blobs/write`, `blobs/add/action`, `blobs/tags/read`, `blobs/tags/write` — **no `blobs/delete`**. No human data-plane roles; break-glass via PIM time-bound assignment.
-4. Blob **versioning + soft delete + version-level immutability (time-based retention)** ≥ the longest retention tier.
+4. Blob **versioning + soft delete**, and **version-level immutability support** on the account and container. A time-based immutability policy is the **storage owner's choice**, off by default (`docs/spec-changes.md` #29):
+   - **With a container default policy** of N days, no version can be deleted or overwritten during its first N days, so within them a compromised server cannot destroy a backup by re-tagging it to a shorter tier or by overwriting it. The default applies to every version of every tier, so every backup, dry run and probe is kept, and billed, for at least N days; only N ≥ the longest tier protects each backup for its whole retention.
+   - **Without one**, the server still cannot delete, but a re-tag or an overwrite leads to a deletion by the lifecycle rules within days (the shortest rule, `test`, deletes after 2 days in the Bicep module); on Azure the deleted version stays soft-deleted for the soft-delete period.
+   - **Per-tier locks** that the server sets on each object at write time (an S3 retention per object, an Azure per-version policy on a short locked default) are planned for v0.5 ([#79](https://github.com/Warewave-Technology/olympos/issues/79)); version-level support is on so that they need no account change.
 5. Resource lock `CanNotDelete` on the storage account.
 6. Azure Policy: deny public network access and shared key re-enablement (MI option).
 7. Diagnostic logs → Log Analytics; alert on any data-plane operation by a principal other than the server MI.

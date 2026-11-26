@@ -6,6 +6,39 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **Storage immutability is the storage owner's choice**
+  ([#79](https://github.com/Warewave-Technology/olympos/issues/79)). `deploy/bicep/backup-storage.bicep` put a
+  400-day default immutability policy on the backup container (`longestRetentionDays`). A version under it
+  cannot be deleted, so no lifecycle rule deleted anything before day 400: every backup, dry run and probe
+  blob was kept, and billed, for 400 days, whatever its tier. The module now takes `defaultImmutabilityDays`,
+  0 by default, which sets no policy; versioning, soft delete and version-level immutability support stay.
+  The S3 docs no longer ask for an Object Lock default of at least the longest tier: Object Lock is optional.
+  `docs/install.md` (*Immutability (optional)*) and `docs/security-model.md` say what a policy protects (a
+  compromised server cannot have backups deleted by re-tagging or overwriting them within its period), what it
+  costs (every object is kept at least that long) and what remains without one. SPEC §0 principle 6, §10.3
+  and §10.3.1 step 4: `docs/spec-changes.md` #29. Per-tier locks set by the server at write time are planned
+  for v0.5.
+
+### Upgrade notes
+- **A storage account deployed with the old module keeps its 400-day policy.** Deploying the new module does
+  not remove it: a deployment leaves resources that the template no longer has. The module created the policy
+  **unlocked**, and nothing in Olympos locks it; check with
+  `az storage container immutability-policy show -g $RG --account-name $SA --container-name olympos-backups --query state`.
+  - Unlocked: its owner can remove it (`az storage container immutability-policy delete … --if-match <etag>`)
+    or shorten it, and from then on new versions follow the lifecycle rules. Versions already written keep
+    the 400-day policy they were written with; a principal with
+    `blobs/immutableStorage/runAsSuperUser/action` (*Storage Blob Data Owner*) can shorten or remove theirs.
+  - Locked (if someone locked it by hand): it can only be extended, never shortened or removed, and the
+    versions written under it stay for their 400 days. Deploy the module with `defaultImmutabilityDays=0`
+    (the default), so that it leaves the policy alone.
+  - To keep immutability, leave an unlocked policy as it is, or redeploy with `defaultImmutabilityDays=<days>`
+    to change its period; read *Immutability (optional)* in `docs/install.md` first.
+- A deployment command or parameter file that passes `longestRetentionDays` fails with the new module: remove
+  it, or pass `defaultImmutabilityDays` instead.
+- An S3 bucket with an Object Lock default keeps it; Olympos works with or without one. A compliance-mode
+  retention cannot be shortened or removed, and versions already written keep their lock.
+
 ## [0.4.0] - unreleased
 
 Native ClickHouse backups and restores with ClickHouse's own `BACKUP` and `RESTORE`, written through a new
