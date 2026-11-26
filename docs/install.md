@@ -353,6 +353,13 @@ Use `deploy/bicep/backup-storage.bicep`, or apply the same settings by hand:
 The Bicep module renders one lifecycle rule per tier. The server has no delete permission and no
 delete code path; *Settings › Destinations › Test destination* warns if the credential can delete.
 
+**Weekly retention must be at least daily retention plus 7 days** for native ClickHouse jobs with incrementals.
+A chain of native backups (a full and the daily incrementals on it) spans at most one week, and the server
+re-tags the chain's daily runs `weekly` when it takes an incremental on them, so a week's incrementals are
+kept as long as the weekly tier ([configuration.md](configuration.md#ingest), *Retention of incrementals*).
+The first run of a month is a full, so monthly backups never depend on a chain. The same holds for the S3 and
+NFS rules below.
+
 **Objects of runs that did not finish.** A native ClickHouse backup writes its objects with the tag
 `olympos-state=incomplete` and retags them `olympos-state=complete` only after the run's signed manifest is
 written, the manifest itself last; every object also carries its `olympos-tier`. A run that dies (a server
@@ -460,8 +467,9 @@ shortened or removed, not even by the root user.
 ```
 
 Apply with `aws s3api put-bucket-lifecycle-configuration --bucket olympos-backups --lifecycle-configuration file://lifecycle.json`
-(MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …) and adjust the
-probe prefix to your destination prefix. With Object Lock, an expiration only adds a delete marker
+(MinIO: `mc ilm import`). Choose `Days` from the job retention (`daily: 7` → 8 days, …), with the weekly
+`Days` at least the daily ones plus 7 for native incrementals, and adjust the probe prefix to your destination
+prefix. With Object Lock, an expiration only adds a delete marker
 until the lock period of the version has ended.
 
 The `incomplete` rule removes what a native ClickHouse backup left behind when its run died: the run writes

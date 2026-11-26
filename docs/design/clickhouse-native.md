@@ -284,24 +284,38 @@ The existing flow, with these changes for a native source:
   partial one) is the remedy, and the run page says so.
 - **Retention.** A base must outlive every incremental that depends on it. When an incremental's tier is longer
   than its base's (a monthly incremental on a weekly full), the server re-tags the base chain's objects and
-  manifests to that tier.
+  manifests to that tier. Amended by R45 below: the chain is kept at least weekly, and monthly copies are fulls.
 - **Restore.** A restore resolves the chain from the manifests and verifies every link (§6).
 - **Decided while building Milestone D (Task 13).**
-  - The week starts on Monday at 00:00 in the job's time zone. The base is the latest run of the week (not a
-    test run) that ended succeeded or partial; a partial one makes the run a full. Its chain is its
-    credential's read scope and itself, and every run of it must have succeeded and be of the job, the first
-    within the week.
+  - The week starts on Monday at 00:00 in the job's time zone. The first run of the week and the first run of
+    the month (job time zone) are fulls, and so is every run with a weekly or monthly copy (R45): a chain
+    spans at most one week, and only daily copies depend on one. The base is the latest run since the
+    period's start (not a test run) that ended succeeded or partial; a partial one makes the run a full. Its
+    chain is its credential's read scope and itself, and every run of it must have succeeded and be of the
+    job, the first within the period. A read scope that is not a chain makes the run a full, with a warning.
   - An incremental that failed after the base makes the next run a full: it may have failed on its base (an
     object that no longer matches its manifest fails every incremental on that base).
-  - A chain longer than 32 runs makes the run a full: it bounds what a run reads and verifies before its
-    `BACKUP`.
+  - A run that would make its chain (its full and the run included) longer than 32 runs is a full: it bounds
+    what a run reads and verifies before its `BACKUP`.
   - Every run of the chain must have a succeeded copy, of the same manifest, on every destination of the run.
     The manifests are read from the run's first destination and verified there as a chain; anything that
     does not hold makes the run a full, with a warning in the log.
   - A test run is always a full (structure only) and is never a base.
-  - The base chain is re-tagged on each destination whose copy's tier is longer than the chain's, before the
-    incremental's objects are tagged complete; a copy whose re-tag fails fails. The copy rows keep the tier
-    each run was written with.
+  - Retention (R45, amends "Retention" above). Lifecycle rules count from when an object was written, so a
+    base written days before its incremental would go first. When an incremental is taken, every run of its
+    chain whose copy's tier is shorter than weekly, or than the incremental's when that is longer, is
+    re-tagged to it, objects and manifest, on each destination, before the incremental's objects are tagged
+    complete. A member then lives at least the weekly retention from its creation, which outlasts the week's
+    daily incrementals when weekly retention ≥ daily retention + 7 days (the docs say so); a week's
+    incrementals are kept as long as the weekly tier. No tier is lowered; an unknown tier fails the re-tag,
+    and that copy. A copy whose re-tag fails fails. The copy rows keep the tier each run was written with,
+    which is what the re-tag compares: every incremental is a daily copy, so a member's tags only go from its
+    copy's tier to weekly.
+  - The chain's source serves whole objects only: it checks an object when it ends, so the endpoint refuses
+    a ranged GET of it (ClickHouse sends none). Task 16's restore source revisits this.
+  - An incremental's manifest is bound to its verified base: its `.backup` names the base URL the run gave
+    ClickHouse and the base `.backup`'s `<uuid>`, and every file it takes from the base is a file of the base's
+    `.backup` of that size and checksum.
   - A count.txt partly in the base (a Log table's, `base_size` < `size`) is the base's count.txt of that
     size and `base_checksum`, whose rows the base's manifest holds, followed by the bytes the run stored.
   - A full backup's DDL keys are all its own; in a chain, a DDL key is an object of its run or of a run

@@ -2,14 +2,17 @@ package backup
 
 // Incrementals of native backups (design docs/design/clickhouse-native.md
 // §7): a job with incrementals takes a full backup on the first run of the
-// week, by its time zone, and an incremental on the other runs. The base is
+// week and of the month, by its time zone, and on every run with a weekly or
+// monthly copy; an incremental on the other runs, so a chain spans at most
+// one week and holds daily copies only after its full (R45). The base is
 // the latest run of the job that succeeded on every destination and whose
 // manifests verify; a partial run is never a base, nor a test run (R40). The
 // run's credential reads the base chain, and the endpoint serves it from
 // the run's first destination: only objects the chain's verified manifests
 // list, each checked against its manifest while it streams (chainSource).
-// When the incremental's tier is longer than its base's, the base chain is
-// re-tagged to that tier on the destination (retagChain).
+// An incremental keeps its chain at least weekly (retagChain): every member
+// lives at least the weekly retention from its creation, which outlasts the
+// week's daily incrementals when weekly retention ≥ daily retention + 7 days.
 
 import (
 	"bytes"
@@ -35,16 +38,21 @@ import (
 	"github.com/Warewave-Technology/olympos/internal/store"
 )
 
-// nativeMaxChain is the longest chain, its full included, an incremental is
-// taken on; a longer one makes the run a full. It bounds what a run reads
-// and verifies before its BACKUP (each manifest up to 64 MiB): a job that
-// runs more often than daily gets a full every nativeMaxChain runs.
+// nativeMaxChain is the longest chain, its full and the new incremental
+// included; a run that would make it longer is a full. It bounds what a run
+// reads and verifies before its BACKUP (each manifest up to 64 MiB): a job
+// that runs more often than daily gets a full every nativeMaxChain runs.
 const nativeMaxChain = 32
+
+// errChainUnusable: what the database holds of the latest run is not a
+// chain (its read scope). The run is a full, with a warning.
+var errChainUnusable = errors.New("not a base chain")
 
 // nativeChain is the base chain of an incremental: its runs, the full first
 // and the base last, and where each run's copies are. loadChain adds the
 // verified manifests and the destinations they are on.
 type nativeChain struct {
+	// Runs are the chain's runs, the full first, the base last.
 	Runs []uuid.UUID
 	// copies are each run's succeeded copies by destination, as Runs.
 	copies []map[uuid.UUID]chainCopy
@@ -64,8 +72,8 @@ type chainCopy struct {
 // base is the chain's last run, the incremental's base.
 func (c *nativeChain) base() uuid.UUID { return c.Runs[len(c.Runs)-1] }
 
-// prefixes are the chain's bucket prefixes, base first: the credential's
-// read scope.
+// prefixes are the chain's bucket prefixes, the full first: the
+// credential's read scope.
 func (c *nativeChain) prefixes() []string {
 	out := make([]string, len(c.Runs))
 	for i, r := range c.Runs {
@@ -81,28 +89,36 @@ func (c *nativeChain) on(d *nativeDest) *nativeChain {
 	return &o
 }
 
-// weekStart is the start of now's ISO week (Monday 00:00) in loc.
-func weekStart(now time.Time, loc *time.Location) time.Time {
+// periodStart is when the chain of a run at now may start, in loc: the
+// start of now's ISO week (Monday 00:00), or of its month when that is
+// later. The first run of the week and of the month is a full (R45).
+func periodStart(now time.Time, loc *time.Location) time.Time {
 	t := now.In(loc)
 	wd := (int(t.Weekday()) + 6) % 7 // Monday = 0
-	return time.Date(t.Year(), t.Month(), t.Day()-wd, 0, 0, 0, 0, loc)
+	week := time.Date(t.Year(), t.Month(), t.Day()-wd, 0, 0, 0, 0, loc)
+	if month := time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, loc); month.After(week) {
+		return month
+	}
+	return week
 }
 
 // selectBase returns the base chain of the job's next native run at now, or
 // nil when the run is a full backup. The candidate is the latest native run
-// of the job in now's week (job time zone) that ended succeeded or partial,
-// other than a test run. It is no base, and the run a full, when it is
-// partial, when an incremental of the job failed after it (it may have
-// failed on its base), or when its chain is longer than nativeMaxChain,
-// starts before the week, or holds a run that did not succeed. Its chain is
-// its credential's read scope and itself. Whether the chain is on every
-// destination, and verifies, is loadChain's.
+// of the job since the start of now's week, or month when later (job time
+// zone, periodStart), that ended succeeded or partial, other than a test
+// run. It is no base, and the run a full, when it is partial, when an
+// incremental of the job failed after it (it may have failed on its base),
+// or when its chain with the new run is longer than nativeMaxChain, starts
+// before the period, or holds a run that is not a succeeded run of the job
+// or is a test run. Its chain is its credential's read scope and itself; a
+// read scope that is not a chain is errChainUnusable. Whether the chain is
+// on every destination, and verifies, is loadChain's.
 func selectBase(ctx context.Context, q store.Querier, job *Job, now time.Time) (*nativeChain, error) {
 	loc, err := time.LoadLocation(job.Timezone)
 	if err != nil {
 		loc = time.UTC
 	}
-	week := weekStart(now, loc)
+	start := periodStart(now, loc)
 	var base uuid.UUID
 	var status string
 	var read []byte
@@ -111,7 +127,7 @@ func selectBase(ctx context.Context, q store.Querier, job *Job, now time.Time) (
 		FROM backup_runs r JOIN ingest_credentials c ON c.run_id = r.id AND c.kind = 'backup'
 		WHERE r.job_id = $1 AND r.trigger <> 'test' AND r.status IN ('succeeded', 'partial') AND r.finished_at IS NOT NULL
 			AND COALESCE(r.scheduled_for, r.started_at) >= $2
-		ORDER BY COALESCE(r.scheduled_for, r.started_at) DESC, r.started_at DESC LIMIT 1`, job.ID, week).Scan(&base, &status, &read, &at)
+		ORDER BY COALESCE(r.scheduled_for, r.started_at) DESC, r.started_at DESC LIMIT 1`, job.ID, start).Scan(&base, &status, &read, &at)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -132,16 +148,17 @@ func selectBase(ctx context.Context, q store.Querier, job *Job, now time.Time) (
 	}
 	var prefixes []string
 	if err := json.Unmarshal(read, &prefixes); err != nil {
-		return nil, fmt.Errorf("the read scope of run %s: %w", base, err)
+		return nil, fmt.Errorf("%w: the read scope of run %s: %v", errChainUnusable, base, err)
 	}
-	if len(prefixes)+1 > nativeMaxChain {
+	// The chain is the base's and the base; the new run makes one more.
+	if len(prefixes)+2 > nativeMaxChain {
 		return nil, nil
 	}
 	c := &nativeChain{}
 	for _, p := range prefixes {
 		id, err := uuid.Parse(strings.TrimSuffix(p, "/"))
 		if err != nil || id.String()+"/" != p {
-			return nil, fmt.Errorf("the read scope of run %s holds %q, not a run's prefix", base, p)
+			return nil, fmt.Errorf("%w: the read scope of run %s holds %q, not a run's prefix", errChainUnusable, base, p)
 		}
 		c.Runs = append(c.Runs, id)
 	}
@@ -175,7 +192,7 @@ func selectBase(ctx context.Context, q store.Querier, job *Job, now time.Time) (
 			return nil, nil
 		}
 	}
-	if first.Before(week) {
+	if first.Before(start) {
 		return nil, nil
 	}
 
@@ -277,23 +294,42 @@ func readSidecarManifest(ctx context.Context, r blob.Reader, path string) ([]byt
 	return raw, nil
 }
 
-// tierRank orders the tiers by how long they are kept.
+// tierRank orders the tiers by how long they are kept; -1 for a tier it
+// does not know.
 func tierRank(tier string) int {
 	return slices.Index([]string{"test", "daily", "weekly", "monthly"}, tier)
 }
 
-// retagChain keeps the chain as long as an incremental of tier on it (design
-// §7, Retention): on each of the chain's destinations, every run whose copy
-// is of a shorter tier gets its objects and its manifest re-tagged tier,
-// complete. The copies' rows keep the tier they were written with.
+// retagChain keeps the chain of an incremental of tier (design §7,
+// Retention; R45): on each of the chain's destinations, every run whose copy
+// is of a shorter tier than weekly, or than tier when that is longer, gets
+// its objects and its manifest re-tagged to it, complete. A member then
+// lives at least the weekly retention from its creation, and no tier is
+// lowered. An unknown tier, the incremental's or a member's, fails it.
+//
+// The comparison is with the tier a member's copy was written with (its row
+// is frozen), not with its tags now. That is safe: a member's tags only ever
+// go from its copy's tier to weekly, as every incremental is a daily copy
+// (monthly and weekly copies are fulls), so a re-tag to weekly again is the
+// same, and a member written weekly or monthly is left alone.
 func retagChain(ctx context.Context, chain *nativeChain, tier string) error {
+	if tierRank(tier) < 0 {
+		return fmt.Errorf("the incremental's tier %q is not one Olympos knows", tier)
+	}
+	target := "weekly"
+	if tierRank(tier) > tierRank(target) {
+		target = tier
+	}
 	for _, d := range chain.dests {
 		for i, run := range chain.Runs {
 			cc := chain.copies[i][d.ref.ID]
-			if tierRank(cc.tier) >= tierRank(tier) {
+			switch rank := tierRank(cc.tier); {
+			case rank < 0:
+				return fmt.Errorf("run %s: its copy's tier %q is not one Olympos knows", run, cc.tier)
+			case rank >= tierRank(target):
 				continue
 			}
-			rd := &nativeDest{ref: d.ref, w: d.w, dir: cc.dir, tier: tier}
+			rd := &nativeDest{ref: d.ref, w: d.w, dir: cc.dir, tier: target}
 			if err := retag(ctx, rd, run.String(), chain.manifests[i].Objects); err != nil {
 				return fmt.Errorf("run %s: %w", run, err)
 			}

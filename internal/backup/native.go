@@ -491,15 +491,21 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	if err != nil {
 		return fail("native byte limit: " + err.Error()), nil
 	}
-	// An incremental's base chain (design §7); a test run is always a full.
+	// An incremental's base chain (design §7). A test run is always a full,
+	// and so is a run with a weekly or monthly copy (R45): only daily copies
+	// depend on a chain.
 	var chain *nativeChain
 	var src *chainSource
-	if n.opts.Incremental && !test {
+	if n.opts.Incremental && !test && !longTier(n.tiers) {
 		ref := r.startedAt
 		if r.scheduledFor != nil {
 			ref = *r.scheduledFor
 		}
-		if chain, err = selectBase(ctx, w.DB, job, ref); err != nil {
+		chain, err = selectBase(ctx, w.DB, job, ref)
+		switch {
+		case errors.Is(err, errChainUnusable):
+			w.Log.Warn("native backup: the latest run is no base; the run is a full backup", "run_id", r.id, "err", err)
+		case err != nil:
 			return fail("select the base of the incremental: " + err.Error()), nil
 		}
 		if chain != nil {
@@ -659,6 +665,16 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	return finish(total, nil), rr
 }
 
+// longTier reports whether a copy of the run is weekly or monthly.
+func longTier(tiers map[uuid.UUID]string) bool {
+	for _, t := range tiers {
+		if t == "weekly" || t == "monthly" {
+			return true
+		}
+	}
+	return false
+}
+
 // nativeOrphans is which of the native backups running on the target
 // (NativeTarget.Running) run self ends before its own (R41): those whose
 // runs are over in this server's database, left behind by a server that
@@ -752,7 +768,7 @@ func (w *Worker) completeNative(ctx context.Context, d *nativeDest, runID uuid.U
 	}
 	if chain != nil {
 		if err := retagChain(ctx, chain, d.tier); err != nil {
-			return errors.New("keep the base chain " + d.tier + ": " + err.Error())
+			return errors.New("keep the base chain: " + err.Error())
 		}
 	}
 	if err := retag(ctx, d, runID.String(), objects); err != nil {

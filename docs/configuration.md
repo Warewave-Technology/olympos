@@ -199,16 +199,23 @@ allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backu
 every native job), or back to `0` for the automatic limit.
 
 **Incrementals.** A native job with *Weekly full, daily incrementals* (`engine_options.incremental:
-weekly_full_daily`) takes a full backup on the first run of each week (Monday, in the job's time zone) and an
-incremental on the other runs. An incremental stores only what changed since its base: the latest run of the
-job that succeeded on every destination of the run and whose signed manifests verify. ClickHouse reads the
-base chain through the endpoint, which serves it from the run's first destination, and only the objects the
-chain's verified manifests list, each checked against its manifest. The run is a full backup instead when the
-latest run is partial, when an incremental failed after it, when the chain is not on every destination of the
-run, when its manifests do not verify, or when the chain has 32 runs. A dry run is always a full, structure
-only, and never a base. When an incremental's retention tier is longer than its base's (a monthly incremental
-on a weekly full), the server re-tags the base chain's objects and manifests to the longer tier, so the base
-is kept as long as the incremental.
+weekly_full_daily`) takes a full backup on the first run of each week (Monday, in the job's time zone), on the
+first run of each month, and on every run whose copy is weekly or monthly; the other runs are incrementals. So
+a chain, a full and the incrementals on it, spans at most one week. An incremental stores only what changed
+since its base: the latest run of the job that succeeded on every destination of the run and whose signed
+manifests verify. ClickHouse reads the base chain through the endpoint, which serves it from the run's first
+destination, and only the objects the chain's verified manifests list, each checked against its manifest. The
+run is a full backup instead when the latest run is partial, when an incremental failed after it, when the
+chain is not on every destination of the run, when its manifests do not verify, or when the new run would
+make the chain longer than 32 runs. A dry run is always a full, structure only, and never a base.
+
+**Retention of incrementals.** A backup is deleted by the lifecycle rule of its tier, counted from when it was
+written, and an incremental needs every run of its chain. So when an incremental is taken, the server re-tags
+the runs of its chain that are tagged `daily` to `weekly`, objects and manifests, on every destination: a
+week's incrementals are kept as long as the weekly tier, and the newest one, still daily, is never kept longer
+than its chain. This holds when the weekly retention is at least the daily retention plus 7 days (the Bicep
+module's defaults, 7 and 28 days, do; see [install.md](install.md) for the lifecycle rules). A copy whose
+chain cannot be re-tagged fails, and so does one whose chain holds a tier the server does not know.
 
 **Dry runs.** The dry run of a native job (*Review & test run* in the backup wizard) is a `BACKUP` with
 `structure_only = 1`: ClickHouse writes the databases' definitions and no data, through the endpoint to the

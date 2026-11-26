@@ -1089,7 +1089,14 @@ func seedIncremental(t *testing.T, db *store.DB) nativeEnv {
 // scheduled queues and runs a scheduled run of the job for at.
 func scheduled(t *testing.T, e nativeEnv, db *store.DB, at time.Time) uuid.UUID {
 	t.Helper()
-	run := queue(t, db, e.Job, "schedule", &at)
+	return runAt(t, e, db, "schedule", at)
+}
+
+// runAt queues and runs a run of the job with trigger for at (a manual one
+// with scheduled_for set, so that its week and month are at's).
+func runAt(t *testing.T, e nativeEnv, db *store.DB, trigger string, at time.Time) uuid.UUID {
+	t.Helper()
+	run := queue(t, db, e.Job, trigger, &at)
 	claimAndRun(t, e.W, run)
 	if r := loadRun(t, db, run); r.Status != "succeeded" {
 		t.Fatalf("run for %s: %+v", at, r)
@@ -1122,31 +1129,48 @@ func sidecarOf(t *testing.T, b *fakeBlobs, dir string, run uuid.UUID) []byte {
 	return side.Details[backup.NativeManifestDetail]
 }
 
-// TestNativeIncrementalChain (task 13): weekly fulls, daily incrementals, by
-// the job's time zone. The first run of the week is a full; the next one is
-// an incremental on the latest run that succeeded on every destination and
-// whose manifests verify. Its credential reads the chain's prefixes, base
-// first, and the endpoint serves it the chain's objects from storage, only
-// those its manifests list. Its manifest is based on the base's and counts
-// the parts it takes from it. A monthly incremental on a weekly base keeps
-// the base chain monthly: its objects and manifests are re-tagged.
+// tagsOf checks the tier every object and the manifest of run's copy on b
+// is tagged with, complete.
+func tagsOf(t *testing.T, db *store.DB, b *fakeBlobs, prefix string, run uuid.UUID, tier string) {
+	t.Helper()
+	dir := runDir(t, db, prefix, run)
+	if tg := b.tags[backup.ManifestPath(dir, run)]; tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
+		t.Errorf("%s: manifest of %s tagged %v, want %s", prefix, run, tg, tier)
+	}
+	n := 0
+	for p, tg := range b.tags {
+		if strings.HasPrefix(p, dir+"/") {
+			n++
+			if tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
+				t.Errorf("%s: %s tagged %v, want %s", prefix, p, tg, tier)
+			}
+		}
+	}
+	if n == 0 {
+		t.Fatalf("%s: no objects of %s", prefix, run)
+	}
+}
+
+// TestNativeIncrementalChain (task 13, R45): weekly fulls, daily
+// incrementals, by the job's time zone. The first run of the week, and of
+// the month, is a full; the next one is an incremental on the latest run
+// that succeeded on every destination and whose manifests verify. Its
+// credential reads the chain's prefixes, the full first, and the endpoint
+// serves it the chain's objects from storage, only those its manifests
+// list. Its manifest is based on the base's and counts the parts it takes
+// from it. The chain is kept at least weekly: a daily member is re-tagged
+// weekly, objects and manifest, on every destination; a monthly one stays.
 func TestNativeIncrementalChain(t *testing.T) {
 	db := testutil.DB(t)
 	e := seedIncremental(t, db)
 	// Mon 23 Nov: the first scheduled run of the month (monthly), a full.
-	prev := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
-	// Mon 30 Nov: the first run of the week is a full again, weekly.
-	full := scheduled(t, e, db, time.Date(2026, 11, 30, 2, 0, 0, 0, time.UTC))
-	// Tue 1 Dec: an incremental on it, the first of December: monthly.
-	inc := scheduled(t, e, db, time.Date(2026, 12, 1, 2, 0, 0, 0, time.UTC))
-	// Wed 2 Dec: an incremental on the incremental, daily.
-	inc2 := scheduled(t, e, db, time.Date(2026, 12, 2, 2, 0, 0, 0, time.UTC))
+	full := scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC))
+	// Tue 24 and Wed 25 Nov: daily incrementals.
+	inc := scheduled(t, e, db, time.Date(2026, 11, 24, 2, 0, 0, 0, time.UTC))
+	inc2 := scheduled(t, e, db, time.Date(2026, 11, 25, 2, 0, 0, 0, time.UTC))
 
-	if b := baseOf(t, e, prev); b != "" {
-		t.Fatalf("the first run is based on %s", b)
-	}
 	if b := baseOf(t, e, full); b != "" {
-		t.Fatalf("the first run of the week is based on %s", b)
+		t.Fatalf("the first run is based on %s", b)
 	}
 	if b := baseOf(t, e, inc); b != full.String() {
 		t.Fatalf("the incremental is based on %q, want %s", b, full)
@@ -1155,7 +1179,7 @@ func TestNativeIncrementalChain(t *testing.T) {
 		t.Fatalf("the second incremental is based on %q, want %s", b, inc)
 	}
 
-	// The credential reads the chain, base first; a full's reads nothing.
+	// The credential reads the chain, the full first; a full's reads nothing.
 	for run, want := range map[uuid.UUID]string{
 		full: `{"write": "` + full.String() + `/"}`,
 		inc:  `{"read": ["` + full.String() + `/"], "write": "` + inc.String() + `/"}`,
@@ -1172,9 +1196,8 @@ func TestNativeIncrementalChain(t *testing.T) {
 	if call.baseGet != http.StatusOK || call.unlisted != http.StatusNotFound || call.outside != http.StatusForbidden {
 		t.Fatalf("reads of the base: .backup %d, unlisted %d, outside %d", call.baseGet, call.unlisted, call.outside)
 	}
-	dirFull, dirInc := runDir(t, db, "a", full), runDir(t, db, "a", inc)
-	_, mFull := readSidecar(t, e.B1, e.kv, dirFull, full)
-	_, mInc := readSidecar(t, e.B1, e.kv, dirInc, inc)
+	_, mFull := readSidecar(t, e.B1, e.kv, runDir(t, db, "a", full), full)
+	_, mInc := readSidecar(t, e.B1, e.kv, runDir(t, db, "a", inc), inc)
 	for prefix, m := range map[string]*clickhouse.NativeManifest{full.String() + "/": mFull, inc.String() + "/": mInc} {
 		var want []string
 		for _, o := range m.Objects {
@@ -1209,39 +1232,40 @@ func TestNativeIncrementalChain(t *testing.T) {
 		}
 	}
 
-	// Retention: the monthly incremental re-tagged its weekly base monthly,
-	// objects and manifest, on each destination; the daily one changed no
-	// tier. The copy rows keep the tier each run was written with.
-	if cs := loadCopies(t, db, full); cs[0].Tier != "weekly" || cs[1].Tier != "weekly" {
-		t.Fatalf("the full's copies: %+v", cs)
-	}
-	if cs := loadCopies(t, db, inc); cs[0].Tier != "monthly" {
-		t.Fatalf("the incremental's copies: %+v", cs)
-	}
-	if cs := loadCopies(t, db, inc2); cs[0].Tier != "daily" {
-		t.Fatalf("the second incremental's copies: %+v", cs)
+	// Retention (R45): the daily member inc is kept weekly now, the monthly
+	// full stays monthly, the newest run is daily until it is a base. The
+	// copy rows keep the tier each run was written with.
+	for run, tier := range map[uuid.UUID]string{full: "monthly", inc: "daily", inc2: "daily"} {
+		if cs := loadCopies(t, db, run); cs[0].Tier != tier || cs[1].Tier != tier {
+			t.Fatalf("copies of %s: %+v, want %s", run, cs, tier)
+		}
 	}
 	for i, b := range []*fakeBlobs{e.B1, e.B2} {
 		prefix := []string{"a", "b"}[i]
-		for run, tier := range map[uuid.UUID]string{full: "monthly", inc: "monthly", inc2: "daily", prev: "monthly"} {
-			dir := runDir(t, db, prefix, run)
-			if tg := b.tags[backup.ManifestPath(dir, run)]; tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
-				t.Errorf("copy %d: manifest of %s tagged %v, want %s", i, run, tg, tier)
-			}
-			n := 0
-			for p, tg := range b.tags {
-				if strings.HasPrefix(p, dir+"/") {
-					n++
-					if tg[backup.TierTag] != tier || tg[backup.StateTag] != backup.StateComplete {
-						t.Errorf("copy %d: %s tagged %v, want %s", i, p, tg, tier)
-					}
-				}
-			}
-			if n == 0 {
-				t.Fatalf("copy %d: no objects of %s", i, run)
-			}
+		for run, tier := range map[uuid.UUID]string{full: "monthly", inc: "weekly", inc2: "daily"} {
+			tagsOf(t, db, b, prefix, run, tier)
 		}
 	}
+
+	// Mon 30 Nov: the first run of the week is a full (weekly).
+	week := scheduled(t, e, db, time.Date(2026, 11, 30, 2, 0, 0, 0, time.UTC))
+	// Tue 1 Dec: the first run of the month is a full, even a manual one
+	// (daily) within the week (R45).
+	month := runAt(t, e, db, "manual", time.Date(2026, 12, 1, 1, 0, 0, 0, time.UTC))
+	// Tue 1 Dec: the first scheduled run of the month is monthly, and a
+	// monthly copy is always a full.
+	monthly := scheduled(t, e, db, time.Date(2026, 12, 1, 2, 0, 0, 0, time.UTC))
+	// Wed 2 Dec: an incremental on it, which leaves it monthly.
+	daily := scheduled(t, e, db, time.Date(2026, 12, 2, 2, 0, 0, 0, time.UTC))
+	for run, want := range map[uuid.UUID]string{week: "", month: "", monthly: "", daily: monthly.String()} {
+		if b := baseOf(t, e, run); b != want {
+			t.Errorf("run %s based on %q, want %q", run, b, want)
+		}
+	}
+	if cs := loadCopies(t, db, monthly); cs[0].Tier != "monthly" {
+		t.Fatalf("the first scheduled run of December: %+v", cs)
+	}
+	tagsOf(t, db, e.B1, "a", monthly, "monthly")
 
 	// Next Monday a full again.
 	next := scheduled(t, e, db, time.Date(2026, 12, 7, 2, 0, 0, 0, time.UTC))
@@ -1250,7 +1274,20 @@ func TestNativeIncrementalChain(t *testing.T) {
 	}
 }
 
-// TestNativeIncrementalWeekByTimezone: the week starts on Monday in the
+// TestNativeIncrementalWeeklyCopyIsFull (R45): a weekly copy is a full too,
+// although a manual run came first in the week.
+func TestNativeIncrementalWeeklyCopyIsFull(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedIncremental(t, db)
+	scheduled(t, e, db, time.Date(2026, 11, 23, 2, 0, 0, 0, time.UTC)) // monthly
+	manual := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 1, 0, 0, 0, time.UTC))
+	weekly := scheduled(t, e, db, time.Date(2026, 11, 30, 2, 0, 0, 0, time.UTC))
+	if cs := loadCopies(t, db, weekly); cs[0].Tier != "weekly" || baseOf(t, e, weekly) != "" {
+		t.Fatalf("the weekly copy: %+v, base %q (manual %s)", cs, baseOf(t, e, weekly), manual)
+	}
+}
+
+// TestNativeIncrementalWeekByTimezone: the week and the month start in the
 // job's time zone, not in UTC.
 func TestNativeIncrementalWeekByTimezone(t *testing.T) {
 	db := testutil.DB(t)
@@ -1258,13 +1295,23 @@ func TestNativeIncrementalWeekByTimezone(t *testing.T) {
 	if _, err := db.Exec(context.Background(), `UPDATE backup_jobs SET timezone = 'Asia/Tokyo' WHERE id = $1`, e.Job); err != nil {
 		t.Fatal(err)
 	}
-	// Sun 29 Nov 14:00 UTC is Sun 23:00 in Tokyo; Sun 29 Nov 16:00 UTC is
-	// already Monday there.
-	sunday := scheduled(t, e, db, time.Date(2026, 11, 29, 14, 0, 0, 0, time.UTC))
-	monday := scheduled(t, e, db, time.Date(2026, 11, 29, 16, 0, 0, 0, time.UTC))
-	tuesday := scheduled(t, e, db, time.Date(2026, 11, 30, 16, 0, 0, 0, time.UTC))
+	at := func(d, h int) time.Time { return time.Date(2026, 11, d, h, 0, 0, 0, time.UTC) }
+	// Sun 22 Nov 14:00 UTC is Sun 23:00 in Tokyo; 16:00 UTC is already
+	// Monday there: a full. Mon 23 Nov 16:00 UTC is Tuesday there.
+	sunday := runAt(t, e, db, "manual", at(22, 14))
+	monday := runAt(t, e, db, "manual", at(22, 16))
+	tuesday := runAt(t, e, db, "manual", at(23, 16))
 	if baseOf(t, e, sunday) != "" || baseOf(t, e, monday) != "" || baseOf(t, e, tuesday) != monday.String() {
-		t.Fatalf("bases: %q %q %q", baseOf(t, e, sunday), baseOf(t, e, monday), baseOf(t, e, tuesday))
+		t.Fatalf("week: %q %q %q", baseOf(t, e, sunday), baseOf(t, e, monday), baseOf(t, e, tuesday))
+	}
+	// Mon 30 Nov 14:00 UTC is Mon 23:00 in Tokyo (a new week: a full);
+	// 15:30 UTC is Tue 1 Dec there, the first run of the month: a full
+	// again; 16:30 UTC an incremental on it.
+	mon := runAt(t, e, db, "manual", at(30, 14))
+	dec := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 15, 30, 0, 0, time.UTC))
+	after := runAt(t, e, db, "manual", time.Date(2026, 11, 30, 16, 30, 0, 0, time.UTC))
+	if baseOf(t, e, mon) != "" || baseOf(t, e, dec) != "" || baseOf(t, e, after) != dec.String() {
+		t.Fatalf("month: %q %q %q", baseOf(t, e, mon), baseOf(t, e, dec), baseOf(t, e, after))
 	}
 }
 
