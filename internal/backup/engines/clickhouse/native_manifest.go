@@ -725,17 +725,24 @@ func sameContentSameBytes(meta *BackupMeta, objects []ingest.ObjectRecord, run s
 type chainMeta struct {
 	base  []*NativeManifest
 	metas []*BackupMeta
-	body  func(string) ([]byte, error)
+	// holders and objects are each run's, made when it is first read.
+	holders []map[contentKey]int
+	objects []map[string]bool
+	body    func(string) ([]byte, error)
 }
 
 func baseChainMeta(b NativeBuild, last *BackupMeta, body func(string) ([]byte, error)) *chainMeta {
-	c := &chainMeta{base: b.Base, metas: make([]*BackupMeta, len(b.Base)), body: body}
-	if len(b.Base) > 0 {
-		c.metas[len(b.Base)-1] = last
+	n := len(b.Base)
+	c := &chainMeta{base: b.Base, metas: make([]*BackupMeta, n), holders: make([]map[contentKey]int, n), objects: make([]map[string]bool, n),
+		body: body}
+	if n > 0 {
+		c.metas[n-1] = last
 	}
 	return c
 }
 
+// meta is base run k's .backup, with the index of its files by content and
+// the set of its objects.
 func (c *chainMeta) meta(k int) (*BackupMeta, error) {
 	if c.metas[k] == nil {
 		raw, err := c.body(c.base[k].RunID + "/.backup")
@@ -747,6 +754,13 @@ func (c *chainMeta) meta(k int) (*BackupMeta, error) {
 			return nil, fmt.Errorf("the .backup of base run %s: %w", c.base[k].RunID, err)
 		}
 		c.metas[k] = m
+	}
+	if c.holders[k] == nil {
+		c.holders[k] = c.metas[k].holders()
+		c.objects[k] = make(map[string]bool, len(c.base[k].Objects))
+		for _, o := range c.base[k].Objects {
+			c.objects[k][o.Key] = true
+		}
 	}
 	return c.metas[k], nil
 }
@@ -761,7 +775,7 @@ func (c *chainMeta) definition(f MetaFile, k int) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		i, ok := m.holders()[f.content()]
+		i, ok := c.holders[k][f.content()]
 		if !ok {
 			return "", metaErr("%s is in the base, and base run %s has no file of its size and checksum", clip(f.Name), c.base[k].RunID)
 		}
@@ -775,7 +789,7 @@ func (c *chainMeta) definition(f MetaFile, k int) (string, error) {
 				clip(f.Name), c.base[k].RunID)
 		default:
 			key := c.base[k].RunID + "/" + f.Name
-			if !slices.ContainsFunc(c.base[k].Objects, func(o ingest.ObjectRecord) bool { return o.Key == key }) {
+			if !c.objects[k][key] {
 				return "", metaErr("%s is in the base, and base run %s did not store it", clip(f.Name), c.base[k].RunID)
 			}
 			return key, nil

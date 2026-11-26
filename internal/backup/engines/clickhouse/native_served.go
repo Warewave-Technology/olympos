@@ -10,11 +10,9 @@ package clickhouse
 import (
 	"context"
 	"fmt"
-	"slices"
 	"strings"
 
 	"github.com/Warewave-Technology/olympos/internal/backup"
-	"github.com/Warewave-Technology/olympos/internal/ingest"
 )
 
 // NativeServed implements backup.NativeRestoreEngine: the keys of the objects of the
@@ -92,6 +90,7 @@ func (Engine) NativeServed(ctx context.Context, read backup.NativeObjectReader, 
 			}
 		}
 		next := map[contentKey]bool{}
+		var objects map[string]bool // run k's, when a file of it is served
 		for _, c := range wants {
 			i, ok := holders[c]
 			if !ok {
@@ -108,7 +107,13 @@ func (Engine) NativeServed(ctx context.Context, read backup.NativeObjectReader, 
 				name = h.DataFile
 			}
 			key := ms[k].RunID + "/" + name
-			if !slices.ContainsFunc(ms[k].Objects, func(o ingest.ObjectRecord) bool { return o.Key == key }) {
+			if objects == nil {
+				objects = make(map[string]bool, len(ms[k].Objects))
+				for _, o := range ms[k].Objects {
+					objects[o.Key] = true
+				}
+			}
+			if !objects[key] {
 				return nil, fmt.Errorf("%w: the restore reads %s, which the manifest of run %s does not list", backup.ErrNativeChain, clip(key), ms[k].RunID)
 			}
 			served[key] = true

@@ -31,29 +31,32 @@ func (d definition) engineName() string {
 	return d.engine
 }
 
-// definitionTokens lexes a definition without its UUID clauses (UUID '…'
-// after the name, TO INNER UUID '…'), which RESTORE does not keep; false
-// when the lexer does not read it.
+// definitionTokens lexes a definition without its UUID clauses, which
+// RESTORE does not keep: UUID '…' right after "CREATE <kind> db.name", and a
+// materialized view's TO INNER UUID '…' right after that; false when the
+// lexer does not read it.
 func definitionTokens(text string) ([]token, bool) {
 	toks, err := lexSQL(text)
 	if err != nil {
 		return nil, false
 	}
-	out := make([]token, 0, len(toks))
-	for i := 0; i < len(toks); i++ {
-		t := toks[i]
-		switch {
-		case t.is("TO") && tokenAt(toks, i+1).is("INNER") && tokenAt(toks, i+2).is("UUID") && tokenAt(toks, i+3).kind == tokString:
-			i += 3
-			continue
-		case t.is("UUID") && tokenAt(toks, i+1).kind == tokString && i >= 3 && tokenAt(toks, i-2).punct("."):
-			// CREATE <kind> db.name UUID '…'
-			i++
-			continue
-		}
-		out = append(out, t)
+	at := func(i int) token { return tokenAt(toks, i) }
+	h := 5 // after CREATE TABLE|VIEW|DICTIONARY db . name
+	if at(1).is("MATERIALIZED") {
+		h = 6
 	}
-	return out, true
+	if !at(0).is("CREATE") || !at(h-2).punct(".") {
+		return toks, true
+	}
+	out := append([]token(nil), toks[:h]...)
+	i := h
+	if at(i).is("UUID") && at(i+1).kind == tokString {
+		i += 2
+	}
+	if h == 6 && at(i).is("TO") && at(i+1).is("INNER") && at(i+2).is("UUID") && at(i+3).kind == tokString {
+		i += 4
+	}
+	return append(out, toks[min(i, len(toks)):]...), true
 }
 
 // sameDefinition reports whether got, a create_table_query, is approved, the
