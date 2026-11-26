@@ -316,7 +316,9 @@ The existing flow, with these changes for a native source:
 
 - **Job setting.** `engine_options.method`: `native` or `logical` (the default for existing jobs, which keep
   their behaviour). New ClickHouse jobs default to `native` when the endpoint is configured and the target is
-  24.8 or later.
+  24.8 or later. Until native restore lands (Milestone E, Task 16) they default to `logical`, and Native is
+  offered without "Recommended" and with the note that native backups cannot be restored yet (R42). Until
+  incrementals land (Task 13) the API refuses `incremental` (422) and the wizard shows the option disabled.
 - **UI.** The backup wizard gets a ClickHouse step:
   - the method;
   - incrementals (native only);

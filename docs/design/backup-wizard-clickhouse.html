@@ -79,7 +79,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <p class="muted" style="margin: 4px 0 0; font-size: 13px">eks-fra-data / analytics · ClickHouse 24.8 · discovered by annotation 2 h ago</p>
 </header>
 
-<p class="state">The ingest endpoint is on (ingest.url is set) and the target runs ClickHouse 24.8 or later: a new job starts on Native, incrementals Off</p>
+<p class="state">The ingest endpoint is on (ingest.url is set) and the target runs ClickHouse 24.8 or later. Until native restore is available a new job starts on Logical and Native is not recommended; here Native is picked. Incremental native backups are not available yet</p>
 <div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
 <ol aria-label="Steps" class="card" style="flex: 1 1 240px; max-width: 300px; list-style: none; margin: 0; padding: 10px; display: flex; flex-direction: column; gap: 4px"><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-1-target.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Target</a><br><span class="muted" style="font-size: 12px">events-ch · no TLS</span></span></li><li class="step done"><span class="num">✓</span><span><a href="backup-wizard-2-credentials.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Credentials</a><br><span class="muted" style="font-size: 12px">Where the password comes from</span></span></li><li class="step on" aria-current="step"><span class="num">3</span><span><a href="backup-wizard-clickhouse.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Backup method</a><br><span class="muted" style="font-size: 12px">Native or logical, incrementals</span></span></li><li class="step"><span class="num">4</span><span><a href="backup-wizard-3-schedule.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Destination &amp; schedule</a><br><span class="muted" style="font-size: 12px">Storage, cron, retention</span></span></li><li class="step"><span class="num">5</span><span><a href="backup-wizard-4-review.html" style="color: #ebdbb2; text-decoration: none; font-weight: 500">Review &amp; test run</a><br><span class="muted" style="font-size: 12px">Dry run before enabling</span></span></li></ol>
 <section class="card" style="flex: 999 1 560px; min-width: 0; max-width: 820px; padding: 28px; display: flex; flex-direction: column; gap: 22px">
@@ -88,13 +88,13 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <p class="muted" style="margin: 6px 0 0; font-size: 13px">How ClickHouse is backed up. Either way the backup goes to the job's destination, with the same tiers and retention.</p></div>
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
 <legend class="lbl">Method</legend>
-<label class="opt on"><input type="radio" name="m" checked style="margin-top: 2px"><span><b style="font-weight: 500">Native</b> <span class="badge ok">Recommended</span><br><span class="muted" style="font-size: 12px">ClickHouse runs <span class="mono">BACKUP</span> and sends it to Olympos, which stores it. Keeps views, dictionaries, defaults, TTLs and codecs, consistent per table. Whole databases, ClickHouse 24.8 or later.</span></span></label>
+<label class="opt on"><input type="radio" name="m" checked style="margin-top: 2px"><span><b style="font-weight: 500">Native</b><br><span class="muted" style="font-size: 12px">ClickHouse runs <span class="mono">BACKUP</span> and sends it to Olympos, which stores it. Keeps views, dictionaries, defaults, TTLs and codecs, consistent per table. Whole databases, ClickHouse 24.8 or later. Native restore is not available yet; the backups are kept.</span></span></label>
 <label class="opt"><input type="radio" name="m" style="margin-top: 2px"><span><b style="font-weight: 500">Logical</b><br><span class="muted" style="font-size: 12px">Olympos reads every table through the agent tunnel, and a restore regenerates the DDL. Views, materialized views, dictionaries, defaults, TTLs, skip indexes and codecs are not kept.</span></span></label>
 </fieldset>
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
 <legend class="lbl">Incrementals</legend>
 <label class="opt on"><input type="radio" name="inc" checked style="margin-top: 2px"><span><b style="font-weight: 500">Off</b><br><span class="muted" style="font-size: 12px">Every run is a full backup.</span></span></label>
-<label class="opt"><input type="radio" name="inc" style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination.</span></span></label>
+<label class="opt off"><input type="radio" name="inc" disabled style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">Incremental native backups are not available yet.</span></span></label>
 </fieldset>
 <div class="note">
 <div class="note-title">Before the first native run</div>
@@ -124,7 +124,7 @@ ClickHouse connects to the server's ingest endpoint (<span class="mono">ingest.u
 <fieldset style="border: 0; padding: 0; margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
 <legend class="lbl">Incrementals</legend>
 <label class="opt on"><input type="radio" name="inc2" checked style="margin-top: 2px"><span><b style="font-weight: 500">Off</b><br><span class="muted" style="font-size: 12px">Every run is a full backup.</span></span></label>
-<label class="opt off"><input type="radio" name="inc2" disabled style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">Incrementals need the native method.</span></span></label>
+<label class="opt off"><input type="radio" name="inc2" disabled style="margin-top: 2px"><span><b style="font-weight: 500">Weekly full, daily incrementals</b><br><span class="muted" style="font-size: 12px">Incremental native backups are not available yet.</span></span></label>
 </fieldset>
 <div style="display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding-top: 6px; border-top: 1px solid #3c3836">
 <a href="backup-wizard-2-credentials.html" class="btn">Back</a>

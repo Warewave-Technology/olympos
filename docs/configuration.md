@@ -156,9 +156,12 @@ At start the server retries the connection for up to two minutes.
 
 ### `ingest`
 
-> **In development ([#62](https://github.com/Warewave-Technology/olympos/issues/62)): native ClickHouse backups
-> are not available yet.** The endpoint and its keys below exist, but no backup method uses them, so leave
-> `ingest.url` unset in production.
+> **Native ClickHouse backups can be taken, not restored yet
+> ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).** With `ingest.url` set, a ClickHouse job
+> can use the native method: ClickHouse runs `BACKUP` to this endpoint, and the server stores the backup, with
+> a signed manifest, in the job's destinations. Restoring a native backup is not available yet (the backups are
+> kept), and neither are incremental native backups. New ClickHouse jobs start on the logical method, which
+> can be restored; choose native for a job only to try it out next to a logical job.
 
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
 listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS
@@ -374,7 +377,7 @@ managedIdentityClientID: ""}`, `database.dsnRef: ""`, `slack.botTokenRef: ""`, `
 `backup: {globalConcurrency: 4, perClusterConcurrency: 2}`, `changeRequests.ttl: 72h`,
 `ingest: {url: "", maxRuns: 4, maxRunDuration: 6h, maxRunBytes: 0}`. Native ClickHouse backups are off until you set
 `olympos.ingest.url`, for example the in-cluster Service,
-`https://<release>-ingest.<namespace>.svc:9444` (in development, see [`ingest`](#ingest): not available yet). You must at least
+`https://<release>-ingest.<namespace>.svc:9444` (native backups can be taken but not restored yet, see [`ingest`](#ingest)). You must at least
 set `publicURL`, `agentGatewayURL`, `entra.tenantID`, `entra.clientID` and `keyVault.name`.
 
 ### What the chart sets for you

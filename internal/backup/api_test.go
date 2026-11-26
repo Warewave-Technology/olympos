@@ -304,13 +304,18 @@ func TestJobsAPINativeMethod(t *testing.T) {
 		if code, f := create(map[string]any{"method": "fast"}); code != http.StatusUnprocessableEntity || f["method"] == "" {
 			t.Fatalf("ingest %v: unknown method: %d %v", ingest, code, f)
 		}
-		code, f := create(map[string]any{"method": "native", "incremental": "weekly_full_daily"})
+		code, f := create(map[string]any{"method": "native"})
 		if ingest {
 			if code != http.StatusCreated {
 				t.Fatalf("native with ingest on: %d %v", code, f)
 			}
 		} else if code != http.StatusUnprocessableEntity || f["method"] == "" {
 			t.Fatalf("native with ingest off: %d %v", code, f)
+		}
+		// R42: incrementals are refused until they are built (task 13).
+		if code, f := create(map[string]any{"method": "native", "incremental": "weekly_full_daily"}); code != http.StatusUnprocessableEntity ||
+			f["incremental"] != "incremental native backups are not available yet" {
+			t.Fatalf("ingest %v: incrementals: %d %v", ingest, code, f)
 		}
 
 		// Update: a job that is logical now cannot become native without the endpoint.

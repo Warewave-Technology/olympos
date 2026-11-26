@@ -100,14 +100,17 @@ func (fakeEngine) Run(ctx context.Context, ec backup.EngineContext, w io.Writer)
 	return &backup.RunResult{ServerVersion: "fake 1.0", ToolVersion: "fakedump 2", TLS: &tls, Details: map[string]any{"restore": "cat"}}, nil
 }
 
-// CheckOptions mirrors the real engine's method check, which is tested in the
-// engine's own package; here it lets the API tests see the field errors.
+// CheckOptions mirrors the real engine's method and incremental checks, which
+// are tested in the engine's own package; here they let the API tests see
+// the field errors.
 func (fakeEngine) CheckOptions(raw json.RawMessage, env backup.OptionsEnv) map[string]string {
-	var o struct{ Method string }
+	var o struct{ Method, Incremental string }
 	_ = json.Unmarshal(raw, &o)
 	switch {
 	case o.Method != "" && o.Method != "native" && o.Method != "logical":
 		return map[string]string{"method": `must be "native" or "logical"`}
+	case o.Incremental != "":
+		return map[string]string{"incremental": "incremental native backups are not available yet"}
 	case o.Method == "native" && !env.IngestEnabled:
 		return map[string]string{"method": "native backups need the ingest endpoint"}
 	}

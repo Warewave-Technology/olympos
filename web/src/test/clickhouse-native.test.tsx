@@ -89,26 +89,33 @@ function keepJobs() {
 }
 
 describe('Backup wizard · ClickHouse method', () => {
-  it('starts a new job on Native when the ingest endpoint is on, and sends method and incremental', async () => {
+  it('starts a new job on Logical with Native selectable, not recommended, and incrementals off (R42)', async () => {
     const user = userEvent.setup();
     const reset = keepJobs();
     await toMethod(user);
     expect(screen.getByText('Step 3 of 5')).toBeInTheDocument();
+    // until native restore lands, a new job starts on Logical, even with the ingest endpoint on
+    expect(screen.getByRole('radio', { name: /^Logical/ })).toBeChecked();
     const native = screen.getByRole('radio', { name: /^Native/ });
-    expect(native).toBeChecked();
+    expect(native).not.toBeChecked();
     expect(native).toBeEnabled();
-    expect(within(native.closest('label')!).getByText('Recommended')).toBeInTheDocument();
+    expect(within(native.closest('label')!).queryByText('Recommended')).toBeNull();
+    expect(native).toHaveAccessibleDescription(/Native restore is not available yet; the backups are kept\./);
+    await user.click(native);
     // the note on egress and the certificate
     const note = screen.getByText('Before the first native run').closest('.note')!;
     expect(note).toHaveTextContent(/ingest\.url/);
     expect(note).toHaveTextContent(/egress from the ClickHouse pods/);
     expect(note).toHaveTextContent(/openSSL\.client\.caConfig/);
+    // incrementals are not built yet
     expect(screen.getByRole('radio', { name: /^Off/ })).toBeChecked();
-    await user.click(screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ }));
+    const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });
+    expect(weekly).toBeDisabled();
+    expect(weekly).toHaveAccessibleDescription('Incremental native backups are not available yet.');
 
     await toReview(user);
     const dt = await screen.findByText('Method', { selector: 'dt' }, T);
-    expect(dt.nextElementSibling).toHaveTextContent('Native · weekly full, daily incrementals');
+    expect(dt.nextElementSibling).toHaveTextContent('Native · every run a full backup');
     // a native dry run backs up the structure only (R40)
     expect(screen.getByText(/A dry run takes a structure-only native backup \(the definitions, no data\)/)).toBeInTheDocument();
 
@@ -117,7 +124,7 @@ describe('Backup wizard · ClickHouse method', () => {
       await user.click(screen.getByRole('button', { name: 'Create job and run dry run' }));
       await waitFor(() => expect(rec.sent.some((c) => c.path.endsWith('/backup/jobs'))).toBe(true), T);
       const create = rec.sent.find((c) => c.method === 'POST' && c.path.endsWith('/backup/jobs'))!;
-      expect(create.body.engine_options).toEqual({ databases: [], method: 'native', incremental: 'weekly_full_daily' });
+      expect(create.body.engine_options).toEqual({ databases: [], method: 'native', incremental: '' });
     } finally {
       rec.restore();
       reset();
@@ -136,25 +143,11 @@ describe('Backup wizard · ClickHouse method', () => {
     expect(screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ })).toBeDisabled();
   });
 
-  it('disables incrementals for Logical', async () => {
-    const user = userEvent.setup();
-    await toMethod(user);
-    const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });
-    await user.click(weekly);
-    expect(weekly).toBeChecked();
-    await user.click(screen.getByRole('radio', { name: /^Logical/ }));
-    expect(weekly).toBeDisabled();
-    expect(weekly).not.toBeChecked();
-    expect(screen.getByRole('radio', { name: /^Off/ })).toBeChecked();
-    expect(weekly).toHaveAccessibleDescription('Incrementals need the native method.');
-    await user.click(screen.getByRole('radio', { name: /^Native/ }));
-    expect(weekly).toBeEnabled();
-  });
-
   it('shows a refused method on the method step', async () => {
     const user = userEvent.setup();
     const reset = keepJobs();
     await toMethod(user);
+    await user.click(screen.getByRole('radio', { name: /^Native/ }));
     await toReview(user);
     const msg = 'native backups need the ingest endpoint, which is off (set ingest.url)';
     const rec = recordRequests((method, path) =>

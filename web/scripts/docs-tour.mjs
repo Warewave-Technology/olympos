@@ -688,15 +688,16 @@ const stages = {
       await dbs.press('Enter');
       await page.getByRole('button', { name: 'Next: method' }).click();
       await page.getByRole('heading', { name: 'Backup method' }).waitFor();
-      // a new job starts on Native when the server takes native backups
+      // a new job starts on Logical until native restore lands (R42); incrementals are not available yet
+      await page.getByRole('radio', { name: /^Logical/ }).and(page.locator(':checked')).waitFor();
+      await page.getByText('Native', { exact: true }).click();
       await page.getByRole('radio', { name: /^Native/ }).and(page.locator(':checked')).waitFor();
-      await page.getByText('Weekly full, daily incrementals', { exact: true }).click();
       await dump(page, 'native method step');
       await shot(page, 'clickhouse-native-01-method');
       await page.getByRole('button', { name: 'Next: destination' }).click();
       await page.locator('label.opt').filter({ hasText: 'lab-copies' }).click();
       await page.getByRole('button', { name: /^Next/ }).click();
-      await page.getByText('Native · weekly full, daily incrementals').waitFor();
+      await page.getByText('Native · every run a full backup').waitFor();
       await page.getByRole('button', { name: 'Create job and run dry run' }).click();
       await page.getByRole('button', { name: 'Enable backup' }).and(page.locator(':enabled')).waitFor({ timeout: 300_000 });
       await dump(page, 'native dry run done');

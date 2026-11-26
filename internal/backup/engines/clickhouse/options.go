@@ -153,6 +153,8 @@ func ParseOptions(raw json.RawMessage) (Options, error) {
 // CheckOptions implements backup.OptionsChecker: the field errors of a job's
 // engine_options at create and update. Native needs the ingest endpoint; the
 // version and sharding of the target are checked when the run starts.
+// Incrementals are refused until they are built (R42; task 13 lifts it), so
+// no job is saved with one that every run would ignore.
 func (Engine) CheckOptions(raw json.RawMessage, env backup.OptionsEnv) map[string]string {
 	o, err := ParseOptions(raw)
 	if err != nil {
@@ -162,10 +164,20 @@ func (Engine) CheckOptions(raw json.RawMessage, env backup.OptionsEnv) map[strin
 		}
 		return map[string]string{"engine_options": strings.TrimPrefix(err.Error(), "clickhouse engine_options: ")}
 	}
-	if o.Native() && !env.IngestEnabled {
-		return map[string]string{"method": "native backups need the ingest endpoint, which is off (set ingest.url)"}
+	var fields map[string]string
+	add := func(field, msg string) {
+		if fields == nil {
+			fields = map[string]string{}
+		}
+		fields[field] = msg
 	}
-	return nil
+	if o.Incremental != "" {
+		add("incremental", "incremental native backups are not available yet")
+	}
+	if o.Native() && !env.IngestEnabled {
+		add("method", "native backups need the ingest endpoint, which is off (set ingest.url)")
+	}
+	return fields
 }
 
 func normalizeNames(field string, in []string) ([]string, error) {
