@@ -109,8 +109,8 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <li><span class="what"><span class="mono">events_by_day</span> <span class="kind">materialized view</span></span><span class="badge ok">Restored</span></li>
 <li><span class="what"><span class="mono">daily_totals</span> <span class="kind">table</span></span><span class="badge ok">Restored</span></li>
 <li><span class="what"><span class="mono">top_pages</span> <span class="kind">view</span></span><span class="badge ok">Restored</span></li>
-<li class="out" aria-disabled="true"><span class="what"><span class="mono">events_all</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The Distributed engine is not on the restore allowlist</span></li>
-<li class="out" aria-disabled="true"><span class="what"><span class="mono">live_events</span> <span class="kind">other</span></span><span class="badge mute">Left out</span><span class="why">A live view is not restored</span></li>
+<li class="out"><span class="what"><span class="mono">events_all</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The Distributed engine is not on the restore allowlist</span></li>
+<li class="out"><span class="what"><span class="mono">live_events</span> <span class="kind">other</span></span><span class="badge mute">Left out</span><span class="why">A live view is not restored</span></li>
 </ul>
 </div>
 
@@ -118,7 +118,7 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <label class="db-head"><input type="checkbox" checked><span class="mono">dicts</span> <span class="badge ok">New</span> <span class="muted" style="font-size: 12px">1 of 2 objects restored</span></label>
 <ul class="objs" aria-label="Objects of dicts">
 <li><span class="what"><span class="mono">countries</span> <span class="kind">table</span></span><span class="badge ok">Restored</span></li>
-<li class="out" aria-disabled="true"><span class="what"><span class="mono">geo</span> <span class="kind">dictionary</span></span><span class="badge mute">Left out</span><span class="why">Its ClickHouse source names a host</span></li>
+<li class="out"><span class="what"><span class="mono">geo</span> <span class="kind">dictionary</span></span><span class="badge mute">Left out</span><span class="why">Its ClickHouse source names a host</span></li>
 </ul>
 </div>
 
@@ -151,9 +151,9 @@ a{color:#83a598}a:hover{color:#8ec07c}
 <div class="db">
 <div class="db-head"><span class="mono">analytics</span> <span class="muted" style="font-size: 12px">0 of 6 objects restored</span></div>
 <ul class="objs" aria-label="Objects of analytics">
-<li class="out" aria-disabled="true"><span class="what"><span class="mono">events</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
-<li class="out" aria-disabled="true"><span class="what"><span class="mono">events_by_day</span> <span class="kind">materialized view</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
-<li class="out" aria-disabled="true"><span class="what muted">&hellip; 4 more, each with the same reason</span><span></span></li>
+<li class="out"><span class="what"><span class="mono">events</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
+<li class="out"><span class="what"><span class="mono">events_by_day</span> <span class="kind">materialized view</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
+<li class="out"><span class="what muted">&hellip; 4 more, each with the same reason</span><span></span></li>
 </ul>
 </div>
 <p class="muted" style="margin: 0; font-size: 12.5px">A backup whose signed manifests do not verify is never restored. The server log names the run and the reason; check the destination for a changed or missing sidecar, or restore another run.</p>

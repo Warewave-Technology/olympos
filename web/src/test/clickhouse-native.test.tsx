@@ -367,7 +367,6 @@ describe('restore dialog · native run', () => {
       const left = within(objs).getByText('events_all').closest('li')!;
       expect(left).toHaveTextContent('Left out');
       expect(left).toHaveTextContent('The Distributed engine is not on the restore allowlist');
-      expect(left).toHaveAttribute('aria-disabled', 'true');
       // nothing per object can be selected: no control on a left out object (nor on a restored one)
       expect(within(left).queryByRole('checkbox')).toBeNull();
       expect(within(objs).queryAllByRole('checkbox')).toHaveLength(0);

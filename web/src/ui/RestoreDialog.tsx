@@ -112,8 +112,8 @@ const restoredOf = (objs: RestoreNativeObject[]) => `${objs.filter((o) => o.allo
 function NativeObjects({ db, objects }: { db: string; objects: RestoreNativeObject[] }) {
   return (
     <ul className="plain-list native-objs" aria-label={`Objects of ${db}`}>
-      {objects.map((o) => (
-        <li key={o.name} className={o.allowed ? undefined : 'out'} aria-disabled={o.allowed ? undefined : true}>
+      {objects.map((o, i) => (
+        <li key={`${o.kind}/${o.name}/${i}`} className={o.allowed ? undefined : 'out'}>
           <span className="what">
             <span className="mono">{o.name}</span> <span className="muted small">{KIND_NAME[o.kind] ?? o.kind}</span>
           </span>
