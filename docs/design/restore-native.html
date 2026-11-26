@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Olympos — Restore a native ClickHouse backup</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;family=Space+Grotesk:wght@600;700&amp;family=JetBrains+Mono:wght@400;500&amp;display=swap">
+<style>
+body{margin:0;background:#1d2021}
+a{color:#83a598}a:hover{color:#8ec07c}
+.card{background:#282828;border:1px solid #3c3836;border-radius:10px}
+.mono{font-family:'JetBrains Mono',monospace;font-size:12.5px}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:12px;font-weight:500;white-space:nowrap}
+.ok{background:#2f3317;color:#b8bb26}.warn{background:#3d3014;color:#fabd2f}.crit{background:#3c1f1e;color:#fc7f6f}.info{background:#273436;color:#83a598}.mute{background:#3c3836;color:#d5c4a1}
+.btn{font:inherit;font-size:13px;font-weight:500;padding:9px 16px;border-radius:7px;border:1px solid #504945;background:#3c3836;color:#ebdbb2;cursor:pointer;min-height:40px;display:inline-flex;align-items:center;justify-content:center;gap:8px;text-decoration:none;box-sizing:border-box}
+.btn:hover{color:#fbf1c7}
+.btn.pri{background:#d79921;border-color:#d79921;color:#1d2021}
+.in{font:inherit;font-size:13px;background:#1d2021;border:1px solid #504945;border-radius:7px;color:#ebdbb2;padding:10px 12px;box-sizing:border-box;min-height:40px;width:100%}
+.lbl{display:block;font-size:12px;color:#a89984;margin-bottom:6px}
+.muted{color:#a89984}
+.hint{font-size:12px;color:#a89984;margin-top:6px}
+.opt{display:flex;gap:12px;align-items:flex-start;padding:14px;border:1px solid #504945;border-radius:8px;font-size:13px;cursor:pointer}
+.opt.on{border-color:#d79921;background:#32302f}
+.chk{display:flex;gap:10px;align-items:center;font-size:13px;padding:6px 0}
+.kv{display:grid;grid-template-columns:140px minmax(0,1fr);gap:8px 16px;font-size:13px;margin:0}
+.kv dt{color:#a89984}.kv dd{margin:0}
+.note{padding:14px 16px;border-radius:8px;background:#1d2021;border:1px solid #3c3836;font-size:12.5px;line-height:1.55;color:#a89984}
+.note.warn{border-color:#d79921;background:#2b2516;color:#d5c4a1}
+.note.crit{border-color:#cc241d;background:#2a1a19;color:#d5c4a1}
+.note-title{font-weight:600;color:#ebdbb2;margin-bottom:4px;font-size:13px}
+.ico-ok{color:#b8bb26}.ico-crit{color:#fc7f6f}
+.state{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:#a89984;margin:8px 0 -6px}
+.db{border:1px solid #3c3836;border-radius:8px;overflow:hidden}
+.db-head{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 14px;background:#32302f;font-size:13px}
+.objs{list-style:none;margin:0;padding:0}
+.objs li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 12px;padding:9px 14px 9px 40px;border-top:1px solid #3c3836;font-size:13px}
+.objs li.out{background:#252321}
+.objs .what{min-width:0;overflow-wrap:anywhere}
+.objs .why{grid-column:1 / -1;font-size:12px;color:#d5c4a1}
+.kind{font-size:12px;color:#a89984}
+</style>
+</head>
+<body>
+<div style="min-height: 1100px; font-family: Inter, system-ui, sans-serif; color: #ebdbb2; background: #1d2021; padding: 28px 32px; box-sizing: border-box; display: flex; flex-direction: column; gap: 20px">
+<header>
+<h1 style="margin: 0; font-size: 24px; font-weight: 600">Restore a native ClickHouse backup</h1>
+<p class="muted" style="margin: 6px 0 0; font-size: 13px; max-width: 820px">Mockup for issue #62, Milestone E (design <a href="clickhouse-native.md">clickhouse-native.md</a> §6). The restore dialog is the one every engine uses (<a href="backups.html#restore-dialog">backups.html</a>); for a native run the check also verifies the signed manifests of the copy's chain and lists every object of the selected databases with what the restore does with it. The maker selects databases; an object the allowlist leaves out is shown with its reason and cannot be selected.</p>
+</header>
+
+<p class="state">The run page of a native run: Restore… is offered; a daily copy that a later incremental is based on is kept at least as long as weekly</p>
+<section class="card" role="dialog" aria-labelledby="r-t" style="max-width: 980px; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Backup run</div>
+<h2 id="r-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600"><span class="mono" style="font-size: 18px">events-ch</span></h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">eks-fra-data · schedule · Mon 03:30</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<dl class="kv">
+<dt>Result</dt><dd><span class="badge ok">Succeeded</span></dd>
+<dt>Method</dt><dd><span class="badge info">Native</span> <span class="muted" style="font-size: 12.5px">1,284 objects</span></dd>
+<dt>Tier</dt><dd>daily <span class="muted" style="font-size: 12.5px">· kept at least as long as weekly: a later incremental is based on it</span></dd>
+<dt>Destination</dt><dd><span class="mono">blob-weu-backups</span></dd>
+<dt>Size</dt><dd>2.4 GB</dd>
+<dt>Duration</dt><dd>1 m 25 s</dd>
+<dt>Directory</dt><dd class="mono" style="font-size: 12px; overflow-wrap: anywhere">olympos/eks-fra-data/analytics/events-ch/clickhouse/2026/11/23/7f3c2a90-5e1b-4c39-9a61-0c1d4f2b8e17</dd>
+</dl>
+<div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap">
+<p style="margin: 0; font-size: 12.5px"><b style="font-weight: 500">Restore…</b> loads this backup into a new target after a second person approves it.</p>
+<a href="#restore-ok" class="btn pri">Restore&hellip;</a>
+</div>
+<p class="muted" style="margin: 0; font-size: 12.5px">A native backup has no commands to restore by hand: ClickHouse reads it back through the ingest endpoint.</p>
+</section>
+
+<p class="state">The check passed: the chain verifies, the target can take it. Objects grouped by database; what is left out is listed with its reason and cannot be selected</p>
+<section class="card" role="dialog" id="restore-ok" aria-labelledby="d1-t" style="max-width: 980px; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore &middot; events-ch</div>
+<h2 id="d1-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Restore events-ch into a new target</h2>
+<div class="muted" style="font-size: 13px; margin-top: 6px">ClickHouse &middot; native backup &middot; run of Wed 03:30 &middot; eks-fra-data</div>
+</div>
+<button class="btn" aria-label="Close" style="padding: 8px; min-width: 40px"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#ebdbb2" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M3 3l10 10M13 3 3 13"/></svg></button>
+</div>
+<div class="note">The backup is loaded into a new target that Olympos discovered, in any cluster, never the backup's own. Nothing on the target is dropped or replaced: a database that exists there with data in it stops the request. A second person with operate on both clusters approves it before anything is written.</div>
+
+<div><label class="lbl" for="t1">Target (ClickHouse)</label><select id="t1" class="in mono"><option>eks-fra-dr / analytics / events-ch-dr &middot; ClickHouse 25.8</option></select><div class="hint">Discovered targets of the same engine, in any cluster.</div></div>
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px">
+<div><label class="lbl" for="u1">Username</label><input id="u1" class="in mono" value="admin"></div>
+<div><label class="lbl" for="k1">Key Vault</label><input id="k1" class="in mono" value="kv-dr-fra"></div>
+<div><label class="lbl" for="s1">Secret name (holds the password)</label><input id="s1" class="in mono" value="events-ch-dr-admin"></div>
+</div>
+<div style="display: flex; justify-content: flex-end"><button class="btn">Check again</button></div>
+
+<div style="border: 1px solid #3c3836; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px"><b style="font-weight: 600; font-size: 13px">Target check</b><span class="muted mono" style="font-size: 12px">ClickHouse 25.8 &middot; nothing was written</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The target can take this restore.</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The credential works</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-ok" aria-label="Passed" role="img"><path d="M5 12l5 5 9-10"/></svg><span>The signed manifests verify: this run and the 2 runs it is based on</span></div>
+
+<fieldset style="border: 0; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 10px">
+<legend class="lbl">Databases (2 of 3 in the backup selected) and what is restored</legend>
+
+<div class="db">
+<label class="db-head"><input type="checkbox" checked><span class="mono">analytics</span> <span class="badge ok">New</span> <span class="muted" style="font-size: 12px">4 of 6 objects restored</span></label>
+<ul class="objs" aria-label="Objects of analytics">
+<li><span class="what"><span class="mono">events</span> <span class="kind">table</span></span><span class="badge ok">Restored</span></li>
+<li><span class="what"><span class="mono">events_by_day</span> <span class="kind">materialized view</span></span><span class="badge ok">Restored</span></li>
+<li><span class="what"><span class="mono">daily_totals</span> <span class="kind">table</span></span><span class="badge ok">Restored</span></li>
+<li><span class="what"><span class="mono">top_pages</span> <span class="kind">view</span></span><span class="badge ok">Restored</span></li>
+<li class="out" aria-disabled="true"><span class="what"><span class="mono">events_all</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The Distributed engine is not on the restore allowlist</span></li>
+<li class="out" aria-disabled="true"><span class="what"><span class="mono">live_events</span> <span class="kind">other</span></span><span class="badge mute">Left out</span><span class="why">A live view is not restored</span></li>
+</ul>
+</div>
+
+<div class="db">
+<label class="db-head"><input type="checkbox" checked><span class="mono">dicts</span> <span class="badge ok">New</span> <span class="muted" style="font-size: 12px">1 of 2 objects restored</span></label>
+<ul class="objs" aria-label="Objects of dicts">
+<li><span class="what"><span class="mono">countries</span> <span class="kind">table</span></span><span class="badge ok">Restored</span></li>
+<li class="out" aria-disabled="true"><span class="what"><span class="mono">geo</span> <span class="kind">dictionary</span></span><span class="badge mute">Left out</span><span class="why">Its ClickHouse source names a host</span></li>
+</ul>
+</div>
+
+<div class="db">
+<label class="db-head"><input type="checkbox"><span class="mono">scratch</span> <span class="muted" style="font-size: 12px">not selected</span></label>
+</div>
+</fieldset>
+
+<div class="note"><div class="note-title">What a native restore creates</div>ClickHouse restores the selected databases from the backup itself, with their tables, views, materialized views and dictionaries as they were defined. An object that could reach outside the target, or that Olympos cannot read with certainty, is left out with the reason above. Left out objects are re-applied by hand after the restore. A Replicated table gets a Keeper path of its own (<span class="mono">/olympos-restore/&lt;request id&gt;/&lt;db&gt;/&lt;table&gt;</span>), so it never joins the source's replicas. The checker sees this list with the request.</div>
+</div>
+
+<div><label class="lbl" for="w1">Justification</label><textarea id="w1" class="in" rows="2">events-ch lost its volumes in eks-fra-data (INC-5120). Restore Wednesday's backup into the DR server.</textarea><div class="hint">10 to 2000 characters. The checker and the audit log see it.</div></div>
+<div style="display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; align-items: center">
+<span class="muted" style="font-size: 12px">Restoring <span class="mono">events-ch</span> &rarr; <span class="mono">eks-fra-dr / analytics / events-ch-dr</span></span>
+<button class="btn">Cancel</button>
+<button class="btn pri">Submit for approval</button>
+</div>
+</section>
+
+<p class="state">The check refused: a manifest of the chain does not verify. The objects of the copy's own signed manifest are listed, all left out; nothing can be submitted</p>
+<section class="card" role="dialog" aria-labelledby="d2-t" style="max-width: 980px; box-sizing: border-box; padding: 24px; border-color: #504945; box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5); display: flex; flex-direction: column; gap: 18px">
+<div>
+<div class="muted" style="font-size: 12px; text-transform: uppercase; letter-spacing: .05em">Restore &middot; events-ch</div>
+<h2 id="d2-t" style="margin: 6px 0 0; font-size: 19px; font-weight: 600">Restore events-ch into a new target</h2>
+</div>
+<div class="note crit" role="alert">The backup's manifest does not verify</div>
+<div style="border: 1px solid #3c3836; border-radius: 8px; padding: 16px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px"><b style="font-weight: 600; font-size: 13px">Target check</b><span class="muted mono" style="font-size: 12px">nothing was written</span></div>
+<div class="chk"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" class="ico-crit" aria-label="Failed" role="img"><path d="M6 6l12 12M18 6 6 18"/></svg><span>Invalid restore request. Check the highlighted fields.</span></div>
+<div class="db">
+<div class="db-head"><span class="mono">analytics</span> <span class="muted" style="font-size: 12px">0 of 6 objects restored</span></div>
+<ul class="objs" aria-label="Objects of analytics">
+<li class="out" aria-disabled="true"><span class="what"><span class="mono">events</span> <span class="kind">table</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
+<li class="out" aria-disabled="true"><span class="what"><span class="mono">events_by_day</span> <span class="kind">materialized view</span></span><span class="badge mute">Left out</span><span class="why">The backup's manifest does not verify</span></li>
+<li class="out" aria-disabled="true"><span class="what muted">&hellip; 4 more, each with the same reason</span><span></span></li>
+</ul>
+</div>
+<p class="muted" style="margin: 0; font-size: 12.5px">A backup whose signed manifests do not verify is never restored. The server log names the run and the reason; check the destination for a changed or missing sidecar, or restore another run.</p>
+</div>
+<div style="display: flex; gap: 10px; justify-content: flex-end">
+<button class="btn">Cancel</button>
+<button class="btn pri" disabled style="opacity: .55">Submit for approval</button>
+</div>
+</section>
+
+<p class="state">Other refusals of the check, shown the same way on the copy: the chain was taken through another ingest.url; a run of the chain has no copy on this destination; the chain is longer than 32 runs</p>
+<div class="note crit" style="max-width: 980px; box-sizing: border-box">The backup chain was taken through another ingest endpoint (https://olympos-ingest.old.example:9444): ClickHouse would read its base from there. Restore a full backup, or the next chain taken through this one</div>
+</div>
+</body>
+</html>
