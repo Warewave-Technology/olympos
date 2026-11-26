@@ -159,9 +159,9 @@ At start the server retries the connection for up to two minutes.
 > **Native ClickHouse backups can be taken, not restored yet
 > ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).** With `ingest.url` set, a ClickHouse job
 > can use the native method: ClickHouse runs `BACKUP` to this endpoint, and the server stores the backup, with
-> a signed manifest, in the job's destinations. Restoring a native backup is not available yet (the backups are
-> kept), and neither are incremental native backups. New ClickHouse jobs start on the logical method, which
-> can be restored; choose native for a job only to try it out next to a logical job.
+> a signed manifest, in the job's destinations, as full backups or as weekly fulls with daily incrementals.
+> Restoring a native backup is not available yet (the backups are kept). New ClickHouse jobs start on the
+> logical method, which can be restored; choose native for a job only to try it out next to a logical job.
 
 The endpoint native ClickHouse backups use: ClickHouse writes and reads its backup files over S3 to this
 listener (`listen.ingest`), and the server stores them in the backup destination. It is served over HTTPS
@@ -182,17 +182,33 @@ because a run's session and its credential live in the one process that opened t
 
 **The byte limit of a native run.** A run may write at most the largest of:
 
-- twice the job's last full native run that succeeded or partly succeeded (not a dry run);
-- 1.5 times what the run's databases hold on disk, the `bytes_on_disk` of their active parts in
-  `system.parts`, which the server reads on the target just before the `BACKUP`;
+- twice the job's last full native run that succeeded or partly succeeded (not a dry run), but no more than
+  twice what the run's databases hold: a run that wrote far more than its databases hold does not raise the
+  limit of the next one;
+- 1.5 times what the run's databases hold, which the server reads on the target just before the `BACKUP`:
+  the `bytes_on_disk` of their active parts in `system.parts`, and the `total_bytes` in `system.tables` of
+  the tables `system.parts` does not hold (Log, TinyLog, StripeLog, Memory);
 - 1 GiB.
 
-So a large database is backed up the first time, and one that grew is backed up after its growth. A file
+When `ingest.maxRunBytes` is set, the server does not read the databases' size. So a large database is
+backed up the first time, and one that grew is backed up after its growth. A file
 that ClickHouse sends again whole (a retry) is not counted twice. The limit stops a client that writes far
 more than the database holds; it is not a retention or cost control. A run that goes over it is ended with
 `KILL QUERY` and fails with `native byte limit: the run wrote more than <limit> (…); set ingest.maxRunBytes to
 allow more`. The way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to
 every native job), or back to `0` for the automatic limit.
+
+**Incrementals.** A native job with *Weekly full, daily incrementals* (`engine_options.incremental:
+weekly_full_daily`) takes a full backup on the first run of each week (Monday, in the job's time zone) and an
+incremental on the other runs. An incremental stores only what changed since its base: the latest run of the
+job that succeeded on every destination of the run and whose signed manifests verify. ClickHouse reads the
+base chain through the endpoint, which serves it from the run's first destination, and only the objects the
+chain's verified manifests list, each checked against its manifest. The run is a full backup instead when the
+latest run is partial, when an incremental failed after it, when the chain is not on every destination of the
+run, when its manifests do not verify, or when the chain has 32 runs. A dry run is always a full, structure
+only, and never a base. When an incremental's retention tier is longer than its base's (a monthly incremental
+on a weekly full), the server re-tags the base chain's objects and manifests to the longer tier, so the base
+is kept as long as the incremental.
 
 **Dry runs.** The dry run of a native job (*Review & test run* in the backup wizard) is a `BACKUP` with
 `structure_only = 1`: ClickHouse writes the databases' definitions and no data, through the endpoint to the

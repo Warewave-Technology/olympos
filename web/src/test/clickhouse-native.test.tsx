@@ -89,7 +89,7 @@ function keepJobs() {
 }
 
 describe('Backup wizard · ClickHouse method', () => {
-  it('starts a new job on Logical with Native selectable, not recommended, and incrementals off (R42)', async () => {
+  it('starts a new job on Logical with Native selectable, not recommended, and incrementals off until Native is picked (R42)', async () => {
     const user = userEvent.setup();
     const reset = keepJobs();
     await toMethod(user);
@@ -107,15 +107,16 @@ describe('Backup wizard · ClickHouse method', () => {
     expect(note).toHaveTextContent(/ingest\.url/);
     expect(note).toHaveTextContent(/egress from the ClickHouse pods/);
     expect(note).toHaveTextContent(/openSSL\.client\.caConfig/);
-    // incrementals are not built yet
+    // incrementals are off, and can be picked with Native (task 13)
     expect(screen.getByRole('radio', { name: /^Off/ })).toBeChecked();
     const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });
-    expect(weekly).toBeDisabled();
-    expect(weekly).toHaveAccessibleDescription('Incremental native backups are not available yet.');
+    expect(weekly).toBeEnabled();
+    expect(weekly).toHaveAccessibleDescription(/^The first run of each week, in the job's timezone, is a full backup\./);
+    await user.click(weekly);
 
     await toReview(user);
     const dt = await screen.findByText('Method', { selector: 'dt' }, T);
-    expect(dt.nextElementSibling).toHaveTextContent('Native · every run a full backup');
+    expect(dt.nextElementSibling).toHaveTextContent('Native · weekly full, daily incrementals');
     // a native dry run backs up the structure only (R40)
     expect(screen.getByText(/A dry run takes a structure-only native backup \(the definitions, no data\)/)).toBeInTheDocument();
 
@@ -124,7 +125,7 @@ describe('Backup wizard · ClickHouse method', () => {
       await user.click(screen.getByRole('button', { name: 'Create job and run dry run' }));
       await waitFor(() => expect(rec.sent.some((c) => c.path.endsWith('/backup/jobs'))).toBe(true), T);
       const create = rec.sent.find((c) => c.method === 'POST' && c.path.endsWith('/backup/jobs'))!;
-      expect(create.body.engine_options).toEqual({ databases: [], method: 'native', incremental: '' });
+      expect(create.body.engine_options).toEqual({ databases: [], method: 'native', incremental: 'weekly_full_daily' });
     } finally {
       rec.restore();
       reset();
@@ -189,6 +190,9 @@ describe('Backup wizard · ClickHouse method', () => {
       expect(native).not.toBeChecked();
       expect(screen.getByRole('radio', { name: /^Logical/ })).toBeChecked();
       expect(screen.queryByText('Before the first native run')).toBeNull();
+      const weekly = screen.getByRole('radio', { name: /^Weekly full, daily incrementals/ });
+      expect(weekly).toBeDisabled();
+      expect(weekly).toHaveAccessibleDescription('Incrementals need the native method.');
     } finally {
       dropJob(j);
     }

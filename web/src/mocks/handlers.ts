@@ -245,8 +245,6 @@ function clickHouseOptionErrors(o: Record<string, unknown> | undefined): MockRes
   if (incremental && incremental !== 'weekly_full_daily') return invalid('invalid job', { incremental: 'must be "weekly_full_daily" or empty' });
   if (incremental && method !== 'native') return invalid('invalid job', { incremental: 'needs method "native"' });
   if (method === 'native' && tables.length) return invalid('invalid job', { tables: 'cannot be used with method "native", which backs up whole databases' });
-  // R42: until task 13 builds them
-  if (incremental) return invalid('invalid job', { incremental: 'incremental native backups are not available yet' });
   if (method === 'native' && ingestOff()) return invalid('invalid job', { method: 'native backups need the ingest endpoint, which is off (set ingest.url)' });
   return null;
 }

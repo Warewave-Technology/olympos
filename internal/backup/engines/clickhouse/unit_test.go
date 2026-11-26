@@ -135,10 +135,14 @@ func TestCheckOptions(t *testing.T) {
 	if f := e.CheckOptions(native, off); f["method"] == "" || len(f) != 1 {
 		t.Fatalf("native with ingest off: %v", f)
 	}
-	// R42: until incrementals are built (task 13), the API refuses them.
+	// Incrementals of a native job are taken (task 13 lifted R42's refusal);
+	// they need the method native, as ParseOptions says.
 	incr := json.RawMessage(`{"method":"native","incremental":"weekly_full_daily"}`)
-	if f := e.CheckOptions(incr, on); f["incremental"] != "incremental native backups are not available yet" || len(f) != 1 {
+	if f := e.CheckOptions(incr, on); f != nil {
 		t.Fatalf("incrementals: %v", f)
+	}
+	if f := e.CheckOptions(json.RawMessage(`{"method":"logical","incremental":"weekly_full_daily"}`), on); !strings.Contains(f["incremental"], `method "native"`) {
+		t.Fatalf("logical incrementals: %v", f)
 	}
 	// A native run backs up whole databases, so a table filter is refused.
 	tables := json.RawMessage(`{"method":"native","databases":["a"],"tables":["a.t"]}`)

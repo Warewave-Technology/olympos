@@ -29,9 +29,6 @@ const stepsFor = (engine: string): Step[] => (engine === 'clickhouse' ? ['target
 type Method = 'native' | 'logical';
 type Incremental = '' | 'weekly_full_daily';
 
-/** Incremental native backups are not built yet (R42): the option is shown disabled and the API refuses it. Task 13 lifts both. */
-const incrementalsAvailable = false;
-
 /** Native ClickHouse backups need 24.8 or later; an unknown version is checked when the run starts. */
 export function belowNativeVersion(version: string | undefined): boolean {
   const m = /^(\d+)\.(\d+)/.exec(version ?? '');
@@ -215,7 +212,7 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
   const nativeChecking = isClickHouse && settingsQ.isPending;
   // A new job starts on Logical until native restore lands (R42); Task 16 makes Native the default again when the server takes native backups.
   const method: Method = f.method || 'logical';
-  const incremental: Incremental = method === 'native' && incrementalsAvailable ? f.incremental : '';
+  const incremental: Incremental = method === 'native' ? f.incremental : '';
   const cluster = clusterQ.data;
   const dest = f.groupId ? undefined : destQ.data?.items.find((d) => d.id === f.destinationId);
   const group = f.groupId ? groupsQ.data?.items.find((g) => g.id === f.groupId) : undefined;
@@ -748,17 +745,15 @@ function Wizard({ target, job, crumbs }: { target: Target; job?: BackupJob; crum
                     name="incremental"
                     checked={incremental === 'weekly_full_daily'}
                     onChange={() => set('incremental', 'weekly_full_daily')}
-                    disabled={method !== 'native' || !incrementalsAvailable}
+                    disabled={method !== 'native'}
                     aria-describedby="w-inc-weekly-t2"
                   />
                   <span>
                     <span className="t1">Weekly full, daily incrementals</span>
                     <span className="t2" id="w-inc-weekly-t2">
-                      {!incrementalsAvailable
-                        ? 'Incremental native backups are not available yet.'
-                        : method === 'native'
-                          ? "The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination."
-                          : 'Incrementals need the native method.'}
+                      {method === 'native'
+                        ? "The first run of each week, in the job's timezone, is a full backup. The others store only what changed since the last run that succeeded on every destination."
+                        : 'Incrementals need the native method.'}
                     </span>
                   </span>
                 </label>

@@ -286,6 +286,26 @@ The existing flow, with these changes for a native source:
   than its base's (a monthly incremental on a weekly full), the server re-tags the base chain's objects and
   manifests to that tier.
 - **Restore.** A restore resolves the chain from the manifests and verifies every link (§6).
+- **Decided while building Milestone D (Task 13).**
+  - The week starts on Monday at 00:00 in the job's time zone. The base is the latest run of the week (not a
+    test run) that ended succeeded or partial; a partial one makes the run a full. Its chain is its
+    credential's read scope and itself, and every run of it must have succeeded and be of the job, the first
+    within the week.
+  - An incremental that failed after the base makes the next run a full: it may have failed on its base (an
+    object that no longer matches its manifest fails every incremental on that base).
+  - A chain longer than 32 runs makes the run a full: it bounds what a run reads and verifies before its
+    `BACKUP`.
+  - Every run of the chain must have a succeeded copy, of the same manifest, on every destination of the run.
+    The manifests are read from the run's first destination and verified there as a chain; anything that
+    does not hold makes the run a full, with a warning in the log.
+  - A test run is always a full (structure only) and is never a base.
+  - The base chain is re-tagged on each destination whose copy's tier is longer than the chain's, before the
+    incremental's objects are tagged complete; a copy whose re-tag fails fails. The copy rows keep the tier
+    each run was written with.
+  - A count.txt partly in the base (a Log table's, `base_size` < `size`) is the base's count.txt of that
+    size and `base_checksum`, whose rows the base's manifest holds, followed by the bytes the run stored.
+  - A full backup's DDL keys are all its own; in a chain, a DDL key is an object of its run or of a run
+    before it.
 
 ### 8. Network and TLS
 
@@ -300,7 +320,11 @@ The existing flow, with these changes for a native source:
 
 - **Bytes per run (R39).** A run may write the largest of twice its job's last full native run (not a test
   run), 1.5 times the size on disk of its databases (`bytes_on_disk` of their active parts, read on the target
-  before the `BACKUP`) and 1 GiB. `ingest.maxRunBytes` replaces it when set. Bytes ClickHouse sends again for an
+  before the `BACKUP`) and 1 GiB. `ingest.maxRunBytes` replaces it when set.
+  - **Decided while building Milestone D (R44).** Twice the last full counts up to twice the databases' size,
+    so a run that wrote junk up to its limit does not double the next limit. The size also counts the tables
+    `system.parts` does not hold, by their `total_bytes` in `system.tables` (Log, TinyLog, StripeLog, Memory:
+    seen on 24.8 and 25.8). It is not read when `ingest.maxRunBytes` is set. Bytes ClickHouse sends again for an
   object already stored (a repeat, R35) are drained and not counted.
 - **Requests per run.** 200 per second.
 - **Concurrent runs.** At most `ingest.maxRuns` (default 4).
@@ -319,8 +343,9 @@ The existing flow, with these changes for a native source:
 - **Job setting.** `engine_options.method`: `native` or `logical` (the default for existing jobs, which keep
   their behaviour). New ClickHouse jobs default to `native` when the endpoint is configured and the target is
   24.8 or later. Until native restore lands (Milestone E, Task 16) they default to `logical`, and Native is
-  offered without "Recommended" and with the note that native backups cannot be restored yet (R42). Until
-  incrementals land (Task 13) the API refuses `incremental` (422) and the wizard shows the option disabled.
+  offered without "Recommended" and with the note that native backups cannot be restored yet (R42).
+  Incrementals are taken since Task 13: the API takes `incremental` with the native method, and the wizard
+  offers it for native jobs.
 - **UI.** The backup wizard gets a ClickHouse step:
   - the method;
   - incrementals (native only);
