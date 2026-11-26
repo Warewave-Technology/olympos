@@ -25,9 +25,13 @@ const PEOPLE = {
 };
 const env = readFileSync(join(ROOT, 'test', 'e2e', '.work', 'ENV.md'), 'utf8');
 const vaultToken = (name) => env.match(new RegExp(`${name} +\\([^)]+\\): +(\\S+)`))?.[1];
-// The lab's native-ready ClickHouse (24.8 or later, trusting the Olympos CA) and its lab password.
+// The lab's native-ready ClickHouse (24.8 or later, trusting the Olympos CA), the ClickHouse its backups are
+// restored into, and their lab logins (test/e2e/manifests/targets.yaml).
 const NATIVE_CH = process.env.NATIVE_CH ?? 'native-ch';
 const NATIVE_CH_PASSWORD = 'CANARY-lab-native-ch-password';
+const NATIVE_CH_ADMIN_PASSWORD = 'CANARY-lab-native-ch-admin-password';
+const NATIVE_RESTORE_CH = 'restore-native-ch';
+const NATIVE_RESTORE_CH_PASSWORD = 'CANARY-lab-restore-native-ch-password';
 
 mkdirSync(OUT, { recursive: true });
 const browser = await chromium.launch(process.env.CHROME ? { executablePath: process.env.CHROME } : { channel: 'chrome' });
@@ -655,28 +659,45 @@ const stages = {
     }
   },
 
-  // ClickHouse native (docs/design/backup-wizard-clickhouse.html): the Backup
-  // method step of the wizard, then a native run and its run page. Needs the
-  // server's ingest endpoint (ingest.url) and a native-ready ClickHouse in the
-  // lab; ClickHouse reaches the endpoint directly, not through the agent.
-  // A lab without them skips the stage, so the later stages still run.
+  // ClickHouse native (docs/clickhouse-backups.md, docs/restore.md "A native backup"): the Backup method step
+  // of the wizard, a native run and its run page, then the restore dialog into restore-native-ch with what the
+  // restore leaves out, and the request the checker approves with that list. Needs the server's ingest endpoint
+  // (ingest.url) and the lab's native-ch and restore-native-ch, which trust the Olympos CA once it is copied
+  // from the agent (syncNativeCA); ClickHouse reaches the endpoint directly, not through the agent. A lab
+  // without them skips the stage, so the later stages still run. Removes the job and the databases it creates.
   async clickhouseNative() {
     const page = await signIn('admin');
     const ingest = (await apiCall(page, 'GET', '/backup/settings')).ingest_enabled;
-    const target = (await apiCall(page, 'GET', '/targets')).items.find((x) => x.service === NATIVE_CH && x.cluster_name === 'lab' && x.status !== 'gone');
-    if (!ingest || !target) {
-      console.log(`  skipped: ${!ingest ? 'the lab server has no ingest.url (native ClickHouse backups are off)' : `no ${NATIVE_CH} target in the lab cluster`}`);
+    const targets = (await apiCall(page, 'GET', '/targets')).items.filter((x) => x.cluster_name === 'lab' && x.status !== 'gone');
+    const target = targets.find((x) => x.service === NATIVE_CH);
+    if (!ingest || !target || !targets.some((x) => x.service === NATIVE_RESTORE_CH)) {
+      console.log(`  skipped: ${!ingest ? 'the lab server has no ingest.url (native ClickHouse backups are off)' : `no ${NATIVE_CH} and ${NATIVE_RESTORE_CH} targets in the lab cluster`}`);
       await page.context().close();
       return;
     }
-    const dropCH = () => chSQL(NATIVE_CH, 'backup', NATIVE_CH_PASSWORD, ['DROP DATABASE IF EXISTS shop SYNC']);
+    // The checker needs operate on both clusters; signing in first creates the principal (a lab without the access stage).
+    const approver = await signIn('approver');
+    await apiCall(page, 'POST', '/grants', { object_id: PEOPLE.approver.oid, roles: ['operator'], scope: 'env=lab' }, [201, 409]);
+    const lab = (await apiCall(page, 'GET', '/clusters')).items.find((c) => c.name === 'lab');
+    // A second run of the stage: the job of the first one goes, so the wizard offers the target again.
+    for (const j of (await apiCall(page, 'GET', '/backup/jobs')).items.filter((x) => x.target.id === target.id)) await apiCall(page, 'DELETE', `/backup/jobs/${j.id}`, undefined, [204]);
+    syncNativeCA();
+    const admin = (statements) => chSQL(NATIVE_CH, 'admin', NATIVE_CH_ADMIN_PASSWORD, statements);
+    const dropCH = () => {
+      admin(['DROP DATABASE IF EXISTS shop SYNC']);
+      chSQL(NATIVE_RESTORE_CH, 'restore', NATIVE_RESTORE_CH_PASSWORD, ['DROP DATABASE IF EXISTS shop SYNC']);
+    };
     dropCH();
     try {
-      chSQL(NATIVE_CH, 'backup', NATIVE_CH_PASSWORD, [
+      await apiCall(page, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'compressed' }); // the lab ClickHouse has no TLS
+      admin([
         'CREATE DATABASE IF NOT EXISTS shop',
-        'CREATE TABLE IF NOT EXISTS shop.orders (id UInt64, placed Date, total Decimal(10, 2) CODEC(ZSTD(3)), note String DEFAULT \'\') ENGINE = MergeTree PARTITION BY toYYYYMM(placed) ORDER BY id TTL placed + INTERVAL 5 YEAR',
-        "INSERT INTO shop.orders (id, placed, total) SELECT number, toDate('2026-10-01') + number % 60, (number % 97) * 1.25 FROM numbers(20000)",
+        "CREATE TABLE IF NOT EXISTS shop.orders (id UInt64, placed Date, customer LowCardinality(String), total Decimal(10, 2) CODEC(ZSTD(3)), note String DEFAULT '', INDEX total_minmax total TYPE minmax GRANULARITY 4) ENGINE = MergeTree PARTITION BY toYYYYMM(placed) ORDER BY id TTL placed + INTERVAL 5 YEAR",
+        "INSERT INTO shop.orders (id, placed, customer, total) SELECT number, toDate('2026-10-01') + number % 60, ['acme', 'globex', 'initech'][1 + number % 3], (number % 97) * 1.25 FROM numbers(20000)",
+        'CREATE TABLE IF NOT EXISTS shop.daily_revenue (placed Date, revenue Decimal(18, 2)) ENGINE = SummingMergeTree ORDER BY placed',
+        'CREATE MATERIALIZED VIEW IF NOT EXISTS shop.daily_revenue_mv TO shop.daily_revenue AS SELECT placed, sum(total) AS revenue FROM shop.orders GROUP BY placed',
         'CREATE VIEW IF NOT EXISTS shop.orders_by_day AS SELECT placed, count() AS n FROM shop.orders GROUP BY placed',
+        "CREATE TABLE IF NOT EXISTS shop.supplier_feed (line String) ENGINE = URL('https://suppliers.example/feed.csv', 'LineAsString')",
       ]);
       await openWizard(page, 'lab', NATIVE_CH);
       await page.getByRole('button', { name: 'Next: credentials' }).click();
@@ -707,14 +728,39 @@ const stages = {
       if (run.status !== 'succeeded' || run.method !== 'native' || !run.objects) throw new Error(`native run ended ${run.status} (${run.method}, ${run.objects} objects): ${run.error}`);
       await openRun(page, NATIVE_CH, (rows) => rows.filter({ hasText: 'Succeeded' }).filter({ hasNotText: 'test' }));
       const dlg = page.getByRole('dialog');
-      await dlg.getByText(/^· [\d,]+ objects?$/).waitFor();
+      await dlg.getByText(/^\s*· [\d,]+ objects?$/).waitFor(); // " · 30 objects" next to the Native badge
       await dlg.getByText('A native backup has no commands to restore by hand', { exact: false }).waitFor();
       await dlg.getByRole('button', { name: 'Restore…' }).waitFor();
       await dump(page, 'native run dialog');
       await shot(page, 'clickhouse-native-02-run', dlg);
       await page.keyboard.press('Escape');
+
+      // The restore dialog: the check verifies the signed manifests and lists every object of shop with what the
+      // restore does with it; the URL table is left out, with the reason.
+      const rs = await openRestoreDialog(page, NATIVE_CH, NATIVE_RESTORE_CH);
+      await rs.getByText('Store in Olympos', { exact: true }).click();
+      await rs.getByLabel('Username', { exact: true }).fill('restore');
+      await rs.getByLabel('Password', { exact: true }).fill(NATIVE_RESTORE_CH_PASSWORD);
+      await checkTarget(rs);
+      await rs.getByRole('list', { name: 'Objects of shop' }).getByText('Left out').first().waitFor();
+      await rs.getByLabel('Justification', { exact: true }).fill('INC-2043: native-ch lost with its volume, restore shop into restore-native-ch');
+      await dump(page, 'native restore dialog');
+      await shot(page, 'clickhouse-native-03-restore', rs);
+      const id = await submitRestore(page, rs);
+
+      // The checker approves what the restore leaves out, as it was checked when the request was opened.
+      await approver.goto(`${URL}/approvals?restore=${id}`);
+      await approver.getByRole('button', { name: 'Approve restore' }).waitFor();
+      await approver.getByText('Recorded when the request was opened.', { exact: false }).waitFor();
+      await dump(approver, 'native restore waiting for the checker');
+      await shot(approver, 'clickhouse-native-04-approval', approver.locator('.split-detail'));
+      await approver.getByRole('button', { name: 'Approve restore' }).click();
+      await waitRestoreDone(approver, id);
     } finally {
+      await apiCall(page, 'PATCH', `/clusters/${lab.id}`, { transfer_mode: 'e2e-tls' });
+      for (const j of (await apiCall(page, 'GET', '/backup/jobs')).items.filter((x) => x.target.id === target.id)) await apiCall(page, 'DELETE', `/backup/jobs/${j.id}`, undefined, [204]);
       dropCH();
+      await approver.context().close();
     }
   },
 
@@ -1089,6 +1135,43 @@ function chSQL(deploy, user, password, statements) {
       env: { ...process.env, KUBECONFIG },
       stdio: ['ignore', 'ignore', 'inherit'],
     });
+}
+
+/**
+ * Copies the Olympos CA from the lab agent's ConfigMap into lab/olympos-ca, which native-ch and restore-native-ch
+ * trust for the ingest endpoint (docs/install.md "ClickHouse trusts the endpoint"), and restarts both when theirs
+ * differs: ClickHouse reads the file when it starts, and Olympos has a new CA after every reset.
+ */
+function syncNativeCA() {
+  const kc = (...args) => execFileSync('kubectl', ['--context', 'kind-olympos-lab', ...args], { env: { ...process.env, KUBECONFIG }, encoding: 'utf8' });
+  const ca = kc('-n', 'olympos-system', 'get', 'configmap', 'olympos-agent-ca', '-o', 'jsonpath={.data.ca\\.crt}');
+  const cm = kc('-n', 'lab', 'create', 'configmap', 'olympos-ca', `--from-literal=ca.crt=${ca}`, '--dry-run=client', '-o', 'yaml');
+  execFileSync('kubectl', ['--context', 'kind-olympos-lab', 'apply', '-f', '-'], { env: { ...process.env, KUBECONFIG }, input: cm, stdio: ['pipe', 'ignore', 'inherit'] });
+  for (const d of [NATIVE_CH, NATIVE_RESTORE_CH]) {
+    let has = '';
+    try {
+      has = kc('-n', 'lab', 'exec', `deploy/${d}`, '-c', 'ch', '--', 'cat', '/etc/clickhouse-server/olympos-ca/ca.crt');
+    } catch {
+      // no CA mounted yet
+    }
+    if (has === ca) continue;
+    kc('-n', 'lab', 'rollout', 'restart', `deploy/${d}`);
+    kc('-n', 'lab', 'rollout', 'status', `deploy/${d}`, '--timeout=240s');
+  }
+  for (const [d, user, password] of [
+    [NATIVE_CH, 'admin', NATIVE_CH_ADMIN_PASSWORD],
+    [NATIVE_RESTORE_CH, 'restore', NATIVE_RESTORE_CH_PASSWORD],
+  ]) {
+    for (let i = 0; ; i++) {
+      try {
+        kc('-n', 'lab', 'exec', `deploy/${d}`, '-c', 'ch', '--', 'clickhouse-client', '--user', user, '--password', password, '--query', "SELECT count() FROM system.zookeeper WHERE path = '/'");
+        break;
+      } catch (e) {
+        if (i === 60) throw e;
+        execFileSync('sleep', ['2']);
+      }
+    }
+  }
 }
 
 /** The lab's Azurite SAS from ENV.md (lab only: signed with Azurite's well-known key). */
