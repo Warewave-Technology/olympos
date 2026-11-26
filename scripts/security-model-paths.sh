@@ -19,6 +19,7 @@ paths=(
   internal/ingest
   internal/backup/engines/clickhouse/native_manifest.go
   internal/backup/engines/clickhouse/backupmeta.go
+  internal/backup/engines/clickhouse/allowlist.go
   internal/backup/engines/clickhouse/native.go
   internal/backup/native.go
   internal/backup/native_chain.go

@@ -101,6 +101,18 @@ if printf 'internal/backup/engines/clickhouse/backupmeta_test.go\ninternal/backu
   echo "FAIL: --files matched a test next to the native metadata parsers" >&2
   fail=1
 fi
+# The restore allowlist decides which objects of a backup a native RESTORE
+# creates on the target.
+if ! out=$(printf 'internal/backup/engines/clickhouse/restore.go\ninternal/backup/engines/clickhouse/allowlist.go\n' | "$script" --files) ||
+  [ "$out" != internal/backup/engines/clickhouse/allowlist.go ]; then
+  echo "FAIL: --files with the restore allowlist: exit $?, output \"$out\"" >&2
+  fail=1
+fi
+if printf 'internal/backup/engines/clickhouse/allowlist_test.go\ninternal/backup/engines/clickhouse/allowlist.go.orig\n' |
+  "$script" --files >/dev/null; then
+  echo "FAIL: --files matched a file next to the restore allowlist" >&2
+  fail=1
+fi
 # The native run puts the run's credential into the BACKUP statement and
 # keeps it out of the logs.
 if ! out=$(printf 'internal/backup/engines/clickhouse/nativeformat.go\ninternal/backup/engines/clickhouse/native.go\n' | "$script" --files) ||
