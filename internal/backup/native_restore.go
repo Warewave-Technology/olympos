@@ -538,7 +538,13 @@ func (s *NativeRestoreSource) Open(ctx context.Context, key string) (io.ReadClos
 	rec := ingest.ObjectRecord{Key: key, Size: obj.size, SHA256: hex.EncodeToString(obj.sha[:])}
 	o, err := s.r.Open(ctx, s.dirs[obj.run]+strings.TrimPrefix(key, s.runs[obj.run]))
 	if err != nil {
-		// A signed object that cannot be read is the source's failure.
+		if cerr := ctx.Err(); cerr != nil {
+			// The reader went away: the request's own end, which the
+			// endpoint does not take for a failed source.
+			return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %w", key, cerr)
+		}
+		// A signed object that cannot be read is the source's failure, not
+		// a key that does not exist: not wrapped.
 		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %v", key, err)
 	}
 	if o.Size() != obj.size {

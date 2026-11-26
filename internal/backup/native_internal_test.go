@@ -660,3 +660,52 @@ func TestSelectBaseUnknownTimezone(t *testing.T) {
 		t.Fatalf("no warning: %q", logs.String())
 	}
 }
+
+// blockingReader holds every Open until its context ends, then fails it
+// with an error of its own that does not wrap the context's, as a
+// destination's SDK may.
+type blockingReader struct{ opened chan struct{} }
+
+func (b blockingReader) Open(ctx context.Context, _ string) (blob.Object, error) {
+	close(b.opened)
+	<-ctx.Done()
+	return nil, errors.New("destination: the request was cancelled")
+}
+
+// TestSourcesKeepTheRequestsEnd: when the request reading an object ends
+// while the destination opens it, both chain sources return the context's
+// error (the endpoint then cuts the reply and does not stop the run); a
+// destination's own failure with the context alive stays a failure, never
+// a missing key nor a context error.
+func TestSourcesKeepTheRequestsEnd(t *testing.T) {
+	const run = "3c1d5e2f-0a4b-4c6d-8e9f-0a1b2c3d4e5f"
+	key := run + "/data/x.bin"
+	ms := []NativeChainManifest{{RunID: run, Objects: []ingest.ObjectRecord{{Key: key, Size: 1, SHA256: strings.Repeat("0", 64)}}}}
+	sources := map[string]func(r blob.Reader) (ingest.Source, error){
+		"chain": func(r blob.Reader) (ingest.Source, error) {
+			return newChainSourceOn(r, []string{"p/" + run}, ms, slog.New(slog.DiscardHandler))
+		},
+		"restore": func(r blob.Reader) (ingest.Source, error) {
+			return NewNativeRestoreSource(r, ms, []string{"p/" + run}, slog.New(slog.DiscardHandler))
+		},
+	}
+	for name, mk := range sources {
+		t.Run(name, func(t *testing.T) {
+			br := blockingReader{opened: make(chan struct{})}
+			s, err := mk(br)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() { <-br.opened; cancel() }()
+			if _, _, err := s.Open(ctx, key); !errors.Is(err, context.Canceled) {
+				t.Fatalf("a request that ended: %v", err)
+			}
+			s, _ = mk(memReader{&memWriter{objs: map[string][]byte{}}})
+			_, _, err = s.Open(context.Background(), key)
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, fs.ErrNotExist) || errors.Is(err, ingest.ErrNotServed) {
+				t.Fatalf("a signed object gone: %v", err)
+			}
+		})
+	}
+}

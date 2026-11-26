@@ -412,6 +412,11 @@ func (s *chainSource) Open(ctx context.Context, key string) (io.ReadCloser, inge
 	}
 	o, err := s.r.Open(ctx, obj.path)
 	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			// The reader went away: the request's own end, which the
+			// endpoint does not take for a failed source.
+			return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %w", key, cerr)
+		}
 		// A signed object that cannot be read is the source's failure, not a
 		// key that does not exist: not wrapped.
 		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s: %v", key, err)
