@@ -714,7 +714,10 @@ const stages = {
       // with the ingest endpoint on, a new job on 24.8 or later starts on Native, recommended (R42 lifted in task 16)
       await page.getByRole('radio', { name: /^Native/ }).and(page.locator(':checked')).waitFor();
       await dump(page, 'native method step');
+      // The method step is taller than the window: a taller window keeps Back and Next in the picture.
+      await page.setViewportSize({ width: 1440, height: 1250 });
       await shot(page, 'clickhouse-native-01-method');
+      await page.setViewportSize({ width: 1440, height: 900 });
       await page.getByRole('button', { name: 'Next: destination' }).click();
       await page.locator('label.opt').filter({ hasText: 'lab-copies' }).click();
       await page.getByRole('button', { name: /^Next/ }).click();
