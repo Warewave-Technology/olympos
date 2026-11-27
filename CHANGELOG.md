@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.4.1] - unreleased
+## [0.4.1] - 2026-11-27
 
 The web UI in the VM packages.
 
@@ -513,7 +513,8 @@ For anyone testing the release candidates. Nothing here needs action when upgrad
   referenceable.
 - Findings of the independent review fixed or accepted: [docs/security-review-v0.1.md](docs/security-review-v0.1.md).
 
-[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.4.1
 [0.4.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.0

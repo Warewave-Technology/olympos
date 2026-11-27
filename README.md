@@ -17,9 +17,10 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
-> **Status:** v0.4.0 is the latest release: native ClickHouse backups and restores through the server, and
+> **Status:** v0.4.1 is the latest release: native ClickHouse backups and restores through the server, and
 > installs with Argo CD or Flux, on top of v0.3's synthetic monitoring and v0.2's restore from the UI and
-> destination groups, on one server instance with Microsoft Entra ID and Azure Key Vault.
+> destination groups, on one server instance with Microsoft Entra ID and Azure Key Vault. v0.4.1 adds the web
+> UI to the VM packages, which had shipped without it.
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
