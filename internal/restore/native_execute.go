@@ -174,7 +174,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 	defer sess.Revoke(nativeRestoreEnded)
 	tr.Track(backup.Credential{Secret: []byte(cred.Secret)})
 	run.URL, run.RunID = backup.NativeRunURL(cfg.URL, src.CopyRunID.String()), src.CopyRunID.String()
-	run.AccessKey, run.Secret, run.Stop = cred.AccessKey, cred.Secret, sess.Stopped()
+	run.AccessKey, run.Secret, run.Stop, run.Sent = cred.AccessKey, cred.Secret, sess.Stopped(), sess.Sent
 	x.Log.Info("restore: native restore starting", "restore_id", j.id, "copy_run_id", src.CopyRunID, "runs", len(prefixes),
 		"objects", source.Objects(), "access_key", cred.AccessKey)
 
@@ -182,6 +182,9 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 	pw.phase("restore")
 	rc := backup.RestoreContext{EngineContext: ec, RequestID: j.id.String(), Databases: j.databases, Options: raw, Progress: pw.report}
 	out, err := runner.RestoreNativeBackup(ctx, rc, run)
+	// Read before Revoke, which a timer firing as the restore ends can no
+	// longer change.
+	stopped := sess.StopReason()
 	sess.Revoke(nativeRestoreEnded)
 	failed := ""
 	if key := source.Failed(); key != "" {
@@ -190,7 +193,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 		// The target's own error is not added: what it says is about the
 		// aborted read, and it may quote the backup's DDL (R52).
 		failed = fmt.Sprintf("the restore failed: the backup's object %s does not match its signed manifest; its read was aborted", key)
-	} else if err != nil && sess.StopReason() == ingest.ReasonNoRequest {
+	} else if err != nil && stopped == ingest.ReasonNoRequest {
 		failed = "the restore failed: " + backup.NoRequestError(cfg.URL, backup.FirstRequestOr(cfg.FirstRequest)) + ": " + err.Error()
 	}
 	return x.restored(res, out, err, tr, failed)

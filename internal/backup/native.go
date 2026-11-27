@@ -107,6 +107,10 @@ type NativeRun struct {
 	// Stop delivers why the run's ingest session stopped (a quota, a failed
 	// destination, a server shutting down): the engine ends the backup.
 	Stop <-chan string
+	// Sent, when set, is called just before the BACKUP statement goes to the
+	// target: the ingest session's FirstRequest window starts then
+	// (ingest.Session.Sent).
+	Sent func()
 	// Before, when set, is called once the target is checked and before the
 	// BACKUP is sent, with what the engine read on the target. It returns
 	// the runs among t.Running whose backups the engine ends first (R41). An
@@ -569,7 +573,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	}
 	version, runErr := n.eng.BackupNative(ctx, n.ec, NativeRun{URL: NativeRunURL(cfg.URL, runID), AccessKey: cred.AccessKey,
 		Secret: secret, RunID: runID, Databases: n.opts.Databases, StructureOnly: test, Base: base, SkipSize: cfg.MaxRunBytes > 0,
-		Stop: stopped.ch, Before: before})
+		Stop: stopped.ch, Before: before, Sent: sess.Sent})
 	cred = ingest.Credential{}
 	reason := done()
 	sess.Revoke(nativeRunEnded)

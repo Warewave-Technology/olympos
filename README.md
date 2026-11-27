@@ -19,7 +19,7 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 > **Status:** v0.3.1 is the latest release: synthetic monitoring from a probe in every cluster, with one alert
 > per synthetic credential that cannot be resolved, on top of v0.2's restore from the UI and destination
-> groups, on one server instance with Microsoft Entra ID and Azure Key Vault. v0.4.0-rc.2 is the release
+> groups, on one server instance with Microsoft Entra ID and Azure Key Vault. v0.4.0-rc.3 is the release
 > candidate for v0.4.0 (native ClickHouse backups and restores through the server, installs with Argo CD or
 > Flux).
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).

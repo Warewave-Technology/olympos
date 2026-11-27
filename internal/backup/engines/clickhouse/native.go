@@ -93,7 +93,7 @@ func (Engine) NativeJob(raw json.RawMessage) (backup.NativeJob, error) {
 // BackupNative implements backup.NativeEngine with RunNative.
 func (e Engine) BackupNative(ctx context.Context, ec backup.EngineContext, run backup.NativeRun) (string, error) {
 	nr := NativeRun{URL: run.URL, AccessKey: run.AccessKey, Secret: run.Secret, RunID: run.RunID,
-		Databases: run.Databases, StructureOnly: run.StructureOnly, SkipSize: run.SkipSize, Stop: run.Stop, Before: run.Before}
+		Databases: run.Databases, StructureOnly: run.StructureOnly, SkipSize: run.SkipSize, Stop: run.Stop, Before: run.Before, Sent: run.Sent}
 	if run.Base != nil {
 		nr.Base = &NativeBase{URL: run.Base.URL, RunID: run.Base.RunID}
 	}
@@ -142,6 +142,8 @@ type NativeRun struct {
 	// storm, expiry). ClickHouse retries refused uploads almost forever, so
 	// the run is then ended with KILL QUERY (spike §3).
 	Stop <-chan string
+	// Sent, when set, is called just before the BACKUP is sent.
+	Sent func()
 	// Before, when set, is called once the target is checked and before the
 	// BACKUP is sent, with what nativeTargetState read on the run's
 	// connection. The backups of the runs it returns, among t.Running, are
@@ -641,6 +643,9 @@ func (s *session) runBackup(ctx context.Context, nr NativeRun, again redial) err
 	stmt := backupStatement(nr)
 	queryID := nativeQueryID(nr.RunID)
 	log.Info("clickhouse: starting a native backup", "query_id", queryID, "statement", redactStatement(stmt))
+	if nr.Sent != nil {
+		nr.Sent()
+	}
 	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, queryID, nativeBackupSettings...); err != nil {
 		msg := maskSecret(err.Error(), nr.Secret)
 		if _, refused := ch.AsException(err); refused {

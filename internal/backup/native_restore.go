@@ -496,6 +496,10 @@ type NativeRestoreRun struct {
 	// Stop delivers why the restore's ingest session stopped (a source that
 	// failed, expiry): the restore is then ended on the target.
 	Stop <-chan string
+	// Sent, when set, is called just before the RESTORE statement goes to the
+	// target: the ingest session's FirstRequest window starts then
+	// (ingest.Session.Sent).
+	Sent func()
 }
 
 // String and LogValue keep the secret out of every print and log of a run.
