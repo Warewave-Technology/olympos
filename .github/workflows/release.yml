@@ -145,6 +145,11 @@ jobs:
       - uses: sigstore/cosign-installer@v3
         if: env.SIGN == 'true'
       - uses: anchore/sbom-action/download-syft@v0
+      # The web UI is built into the binary (scripts/package.sh).
+      - uses: pnpm/action-setup@v6
+        with: {version: 10.24.0}
+      - uses: actions/setup-node@v7
+        with: {node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml}
       - name: Binary, tarball, .deb, .rpm (release build)
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3

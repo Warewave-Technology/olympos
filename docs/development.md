@@ -39,6 +39,12 @@ Key Vault, so tests, lab and e2e images are built with `-tags dev` (`--build-arg
 image). Release builds have neither and refuse `devMode: true` at startup. `make test-release` runs the
 untagged tests and `scripts/check-release-binary.sh` (symbol and string check).
 
+The web UI is embedded in the server binary (`web/embed.go`). The committed `web/dist/index.html` is a
+placeholder that loads no assets, so the server builds without Node. `make web` replaces it with the built UI;
+do not commit that file, whose assets are never committed (`TestEmbeddedAssetsExist` fails). The server image
+builds the UI itself, and `scripts/package.sh` builds it before the binary and stops when the binary does not
+embed what `index.html` loads.
+
 Tests that need Docker skip without it, or fail with `OLYMPOS_REQUIRE_DOCKER=1`. `OLYMPOS_SKIP_DOCKER=1` skips them
 even then: CI's release-build job sets it, since the dev-build job runs the same Docker tests and what differs
 between the builds is not in them.

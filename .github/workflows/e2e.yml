@@ -91,6 +91,11 @@ jobs:
       - uses: azure/setup-helm@v5
       - uses: helm/kind-action@v1
         with: {install_only: true}
+      # The web UI is built into the binary (scripts/package.sh).
+      - uses: pnpm/action-setup@v6
+        with: {version: 10.24.0}
+      - uses: actions/setup-node@v7
+        with: {node-version: 22, cache: pnpm, cache-dependency-path: web/pnpm-lock.yaml}
       - name: "Build the .deb (dev build: local key vault for CI, no Azure)"
         run: |
           go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.41.3
