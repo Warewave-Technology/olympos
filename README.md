@@ -17,11 +17,9 @@ stolen agent token could read values ([trade-offs](docs/security-review-v0.1.md#
 
 ![Fleet overview](docs/images/dashboard.png)
 
-> **Status:** v0.3.1 is the latest release: synthetic monitoring from a probe in every cluster, with one alert
-> per synthetic credential that cannot be resolved, on top of v0.2's restore from the UI and destination
-> groups, on one server instance with Microsoft Entra ID and Azure Key Vault. v0.4.0-rc.3 is the release
-> candidate for v0.4.0 (native ClickHouse backups and restores through the server, installs with Argo CD or
-> Flux).
+> **Status:** v0.4.0 is the latest release: native ClickHouse backups and restores through the server, and
+> installs with Argo CD or Flux, on top of v0.3's synthetic monitoring and v0.2's restore from the UI and
+> destination groups, on one server instance with Microsoft Entra ID and Azure Key Vault.
 > Changes are in [CHANGELOG.md](CHANGELOG.md), what comes next under [Roadmap](#roadmap).
 
 ## Is it for you?
@@ -100,7 +98,13 @@ scans, with a screenshot for every step. `./test/e2e/env.sh down` removes the la
 
 ## Roadmap
 
-Released in v0.3 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+Released in v0.4 ([all roadmap issues](https://github.com/Warewave-Technology/olympos/issues?q=is%3Aissue+label%3Aroadmap)):
+
+- ClickHouse backups with ClickHouse's own `BACKUP`/`RESTORE`, written through Olympos ([#62](https://github.com/Warewave-Technology/olympos/issues/62))
+- Identity Secrets and the database password survive GitOps syncs ([#59](https://github.com/Warewave-Technology/olympos/issues/59))
+- A release candidate for every security-model change ([#60](https://github.com/Warewave-Technology/olympos/issues/60))
+
+Released in v0.3:
 
 - Synthetic monitoring: scenarios that run from every cluster, with alerts ([#46](https://github.com/Warewave-Technology/olympos/issues/46))
 
@@ -110,17 +114,14 @@ Released in v0.2:
 - More than one destination per backup job, one dump stored in each ([#32](https://github.com/Warewave-Technology/olympos/issues/32))
 - Signature verification of the pinned kube-bench image ([#26](https://github.com/Warewave-Technology/olympos/issues/26))
 
-Planned for v0.4 ([milestone](https://github.com/Warewave-Technology/olympos/milestone/3)):
-
-- ClickHouse backups with ClickHouse's own `BACKUP`/`RESTORE`, written through Olympos ([#62](https://github.com/Warewave-Technology/olympos/issues/62))
-- Before v0.4.0: an acceptance run on real Azure ([#58](https://github.com/Warewave-Technology/olympos/issues/58)), identity
-  Secrets that survive GitOps syncs ([#59](https://github.com/Warewave-Technology/olympos/issues/59)), a release candidate for
-  every security-model change ([#60](https://github.com/Warewave-Technology/olympos/issues/60)), and published recovery time
-  and data-loss figures ([#61](https://github.com/Warewave-Technology/olympos/issues/61))
+Next, on the first installation on real Azure: an acceptance run end to end
+([#58](https://github.com/Warewave-Technology/olympos/issues/58)) and published recovery time and data-loss figures
+([#61](https://github.com/Warewave-Technology/olympos/issues/61)). v0.4.0 was tested in the kind lab, not on real Azure.
 
 Planned for v0.5 ([milestone](https://github.com/Warewave-Technology/olympos/milestone/6)):
 
 - Runtime security: what running containers do, seen by Falco, detection only ([#63](https://github.com/Warewave-Technology/olympos/issues/63))
+- Backups locked at write time for their own tier, on S3 and Azure ([#79](https://github.com/Warewave-Technology/olympos/issues/79))
 
 Later, not scheduled ([milestone](https://github.com/Warewave-Technology/olympos/milestone/4)): more than one approval for
 Vault changes ([#23](https://github.com/Warewave-Technology/olympos/issues/23)), S3 destinations with IAM roles
