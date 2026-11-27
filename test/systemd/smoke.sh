@@ -97,6 +97,16 @@ sudo -u olympos olympos-server check-config -db
 systemctl enable --now olympos-server
 for i in $(seq 60); do curl -fsS http://127.0.0.1:9090/readyz >/dev/null 2>&1 && break; sleep 2; done
 curl -fsS http://127.0.0.1:9090/readyz
+# The web UI is in the package: the page and the script it loads (a package
+# without the UI served a page whose script came back as text/html, 0.4.1).
+page=$(curl -fsS "$URL/")
+js=$(grep -o '"/assets/index-[^"]*\.js"' <<<"$page" | tr -d '"' | head -1)
+[ -n "$js" ] || { echo "the page loads no script: the package has no web UI"; echo "$page" | head -20; exit 1; }
+ctype=$(curl -fsS -o /dev/null -w '%{content_type}' "$URL$js")
+case "$ctype" in *javascript*) ;; *) echo "$js is served as $ctype"; exit 1 ;; esac
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/assets/not-in-the-build.js")
+[ "$code" = 404 ] || { echo "a missing asset answers $code, not 404"; exit 1; }
+echo "web UI: $js ($ctype)"
 systemd-analyze security olympos-server --threshold=30 | tail -1
 olympos-server version
 

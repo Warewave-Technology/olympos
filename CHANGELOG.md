@@ -6,6 +6,28 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - unreleased
+
+The web UI in the VM packages.
+
+### Fixed
+- **The tarball, `.deb` and `.rpm` had no web UI** (every release up to v0.4.0). `scripts/package.sh` built
+  the server binary without building the UI, so the binary embedded only a stale `web/dist/index.html` whose
+  scripts it did not contain. The browser showed a blank page; its console said that
+  `/assets/index-….js` came back as `text/html`. The API and the agent gateway were not affected, and the
+  container images were not either: they build the UI. Found on the first VM install of v0.4.0.
+  - `scripts/package.sh` builds the UI first, and stops when `index.html` loads a file that the build did not
+    write or that the binary does not embed. The release workflow sets up Node and pnpm for it.
+  - The systemd smoke test of the `.deb` loads the page and its script, and checks that the script is served
+    as JavaScript.
+  - The committed `web/dist/index.html` is a placeholder that loads no assets and says the build has no UI. A
+    test fails when the embedded `index.html` loads an asset that is not embedded.
+  - An `/assets/` file that is not in the build answers 404 instead of `index.html`.
+
+### Upgrade notes
+- From v0.4.0 nothing needs action. On a VM, upgrading the package brings the UI; for example, run
+  olympos-ansible again with `olympos_version: v0.4.1`.
+
 ## [0.4.0] - 2026-11-27
 
 Native ClickHouse backups and restores with ClickHouse's own `BACKUP` and `RESTORE`, written through a new

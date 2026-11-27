@@ -121,7 +121,8 @@ func (s *Server) accessLog(next http.Handler) http.Handler {
 }
 
 // spaHandler serves static assets and falls back to index.html for client
-// routes.
+// routes. An asset that is not in the build is a 404: index.html in its
+// place only makes the browser refuse it as text/html.
 func (s *Server) spaHandler() http.Handler {
 	files := http.FileServer(http.FS(s.SPA))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +138,10 @@ func (s *Server) spaHandler() http.Handler {
 					files.ServeHTTP(w, r)
 					return
 				}
+			}
+			if strings.HasPrefix(p, "assets/") {
+				http.NotFound(w, r)
+				return
 			}
 		}
 		b, err := fs.ReadFile(s.SPA, "index.html")
