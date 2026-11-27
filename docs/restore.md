@@ -270,12 +270,12 @@ selected.
 
 ![The restore dialog of a native backup: the check verified the manifests, and the URL table is left out](images/clickhouse-native-03-restore.png)
 
-**Definers.** A view or materialized view defined with `DEFINER = <user> SQL SECURITY DEFINER` is restored as it
-was, and `RESTORE` does not need that user on the target. Until a user of that name exists there, reading the view
-fails with `UNKNOWN_USER`, and so does every `INSERT` into the table a materialized view of that kind reads from.
-Create the user on the target (with `SELECT` on what the view reads and, for a materialized view, `INSERT` on its
-`TO` table), or re-create the view with `SQL SECURITY INVOKER` or another definer. A view without `DEFINER`
-needs nothing.
+**Definers.** A view or materialized view defined with `DEFINER = <user> SQL SECURITY DEFINER` is restored
+as it was, and `RESTORE` does not need that user on the target. Until a user of that name exists there,
+reading the view fails with `UNKNOWN_USER`, and so does every `INSERT` into the table a materialized view of
+that kind reads from. Create the user on the target (with `SELECT` on what the view reads and, for a
+materialized view, `INSERT` on its `TO` table), or re-create the view with `SQL SECURITY INVOKER` or another
+definer. A view without `DEFINER` needs nothing.
 
 **Atomic databases only.** The restore creates its databases as `Atomic`. A selected database that is another
 engine in the backup (`Replicated`, `Lazy`, …) is refused at the check, with the reason: leave it out of the
@@ -354,6 +354,13 @@ restore ClickHouse.
   also removes their Replicated tables' Keeper data), then remove what is left under the request's Keeper path
   with `clickhouse-keeper-client` on the target: `rmr '/olympos-restore/<request id>'`. Do not remove the path
   of a restore whose tables you keep.
+
+**When the target does not reach the endpoint, or is lost.** A `RESTORE` whose target sends no request to the
+endpoint within 5 minutes is ended with `KILL QUERY`, and the request fails with *no request from the target
+reached the ingest endpoint …*: check the target's egress and its trust of the endpoint's certificate, as for a
+backup ([ClickHouse backups](clickhouse-backups.md#when-a-native-run-fails)). A target that restarts or stops
+answering during the restore fails the request with *the native restore may still be running on the target …*
+and the `KILL QUERY` that ends it, if it still runs.
 
 
 ### What a Vault or OpenBao restore does

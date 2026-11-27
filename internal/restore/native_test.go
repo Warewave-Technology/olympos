@@ -257,7 +257,10 @@ type nativeRunner struct {
 	reg   *ingest.Registry
 	read  []string
 	block bool // hold until the restore's context ends
-	err   error
+	// silent sends no request: a target that cannot reach the endpoint,
+	// whose RESTORE retries until the session stops and it is KILLed.
+	silent bool
+	err    error
 
 	mu       sync.Mutex
 	calls    []backup.NativeRestoreRun
@@ -291,6 +294,10 @@ func (f *nativeRunner) RestoreNativeBackup(ctx context.Context, rc backup.Restor
 		if err != nil {
 			return &backup.RestoreResult{Created: []string{"shop"}}, errors.New("clickhouse: native restore RESTORE_FAILED: S3 error")
 		}
+	}
+	if f.silent {
+		reason := <-run.Stop
+		return &backup.RestoreResult{}, errors.New("clickhouse: native restore ended (the ingest session stopped: " + reason + "): KILL QUERY made it RESTORE_FAILED")
 	}
 	if f.block {
 		<-ctx.Done()
@@ -502,6 +509,26 @@ func TestNativeExecuteObjectChanged(t *testing.T) {
 		"databases created and left in place: shop"
 	if s.Status != restore.StatusFailed || s.Error != want {
 		t.Fatalf("request: %+v", s)
+	}
+	x.noCanary()
+}
+
+// Found in the lab test of v0.4.0-rc.1: a restore whose target sends no
+// request to the endpoint within FirstRequest is KILLed and fails saying what
+// to check; nothing was created.
+func TestNativeExecuteNoRequest(t *testing.T) {
+	x, f := nativeExec(t)
+	f.silent = true
+	x.ex.Native.FirstRequest = 200 * time.Millisecond
+	id, _ := x.approvedNative(nativeSchema, "shop")
+	x.claim(id)
+	x.ex.Execute(context.Background(), id)
+	s := x.stored(id)
+	want := "the restore failed: no request from the target reached the ingest endpoint " + nativeIngestURL + " within 200ms: check the egress " +
+		"of the ClickHouse pods to its host and port, and that ClickHouse trusts its certificate: clickhouse: native restore ended " +
+		"(the ingest session stopped: no request): KILL QUERY made it RESTORE_FAILED"
+	if s.Status != restore.StatusFailed || s.Error != want {
+		t.Fatalf("request: %q %q\nwant %q", s.Status, s.Error, want)
 	}
 	x.noCanary()
 }

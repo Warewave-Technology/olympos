@@ -164,7 +164,7 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 		ttl = nativeRestoreTTL
 	}
 	sess, cred, err := cfg.Registry.Open(ctx, ingest.OpenOptions{RunID: j.id, Kind: ingest.KindRestore,
-		Scope: ingest.Scope{Read: prefixes}, TTL: ttl, Source: source})
+		Scope: ingest.Scope{Read: prefixes}, TTL: ttl, Source: source, FirstRequest: backup.FirstRequestOr(cfg.FirstRequest)})
 	if errors.Is(err, ingest.ErrTooManyRuns) {
 		return fail(errNativeBusy)
 	}
@@ -190,6 +190,8 @@ func (x *Executor) performNative(ctx context.Context, j *job, src *backup.Restor
 		// The target's own error is not added: what it says is about the
 		// aborted read, and it may quote the backup's DDL (R52).
 		failed = fmt.Sprintf("the restore failed: the backup's object %s does not match its signed manifest; its read was aborted", key)
+	} else if err != nil && sess.StopReason() == ingest.ReasonNoRequest {
+		failed = "the restore failed: " + backup.NoRequestError(cfg.URL, backup.FirstRequestOr(cfg.FirstRequest)) + ": " + err.Error()
 	}
 	return x.restored(res, out, err, tr, failed)
 }

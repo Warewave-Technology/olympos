@@ -564,6 +564,7 @@ func (q *request) authenticate() *s3Error {
 		return denied("Requests must be signed with AWS4-HMAC-SHA256 in the Authorization header.")
 	}
 	q.s, q.payloadHash = s, payloadHash
+	s.signed()
 	// Over the rate, the request is refused before its body is read, and
 	// the run goes on; only a storm stops it (R17).
 	if ok, storm := s.allow(now, q.h.rate); !ok {

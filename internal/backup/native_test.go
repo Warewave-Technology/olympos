@@ -162,6 +162,9 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		Running     []string `json:"native_running"`
 		// Extra stores an object the .backup does not list.
 		Extra bool `json:"native_extra"`
+		// Silent sends no request: a ClickHouse that cannot reach the
+		// endpoint, which retries until the run KILLs it.
+		Silent bool `json:"native_silent"`
 	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
@@ -180,6 +183,14 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		nativeCalls.mu.Lock()
 		call.quota = s.MaxBytes()
 		nativeCalls.mu.Unlock()
+	}
+	if o.Silent {
+		select {
+		case reason := <-run.Stop:
+			return "", kill(reason)
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	steps := []nativeObject{{".lock", []byte("lock")}}
 	if o.Extra {
@@ -886,6 +897,31 @@ func TestNativeRunQuota(t *testing.T) {
 	if r.Status != "failed" || !strings.HasPrefix(r.Error, "native byte limit: the run wrote more than 1000 B (ingest.maxRunBytes)") ||
 		!strings.Contains(r.Error, "raise ingest.maxRunBytes") {
 		t.Fatalf("run: %+v", r)
+	}
+}
+
+// Found in the lab test of v0.4.0-rc.1: a target that never reaches the
+// endpoint (no egress, an untrusted certificate) is KILLed once no request
+// came within FirstRequest, and the run fails saying what to check, instead
+// of staying running until the credential's TTL.
+func TestNativeRunNoRequest(t *testing.T) {
+	db := testutil.DB(t)
+	e := seedNative(t, db)
+	e.W.Native.FirstRequest = 200 * time.Millisecond
+	setOptions(t, db, e.Job, `{"method":"native","native_silent":true}`)
+	run := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, run)
+	if call := nativeCallOf(t, run); call.killed != ingest.ReasonNoRequest {
+		t.Fatalf("killed for %q, want %q", call.killed, ingest.ReasonNoRequest)
+	}
+	r := loadRun(t, db, run)
+	if r.Status != "failed" || !strings.HasPrefix(r.Error, "no request from the target reached the ingest endpoint "+e.W.Native.URL+" within 200ms: "+
+		"check the egress of the ClickHouse pods to its host and port, and that ClickHouse trusts its certificate: clickhouse: native backup ended") {
+		t.Fatalf("run: %+v", r)
+	}
+	if backup.NoRequestError("https://x:9444", backup.NativeFirstRequest) != "no request from the target reached the ingest endpoint https://x:9444 "+
+		"within 5 minutes: check the egress of the ClickHouse pods to its host and port, and that ClickHouse trusts its certificate" {
+		t.Errorf("default wording: %s", backup.NoRequestError("https://x:9444", backup.NativeFirstRequest))
 	}
 }
 

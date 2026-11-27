@@ -115,7 +115,9 @@ nothing was deleted, was rejected.
 - **Lifetime (my call).** Jobs have no timeout today, so the credential ends at the earliest of:
   - the run's end;
   - `ingest.maxRunDuration` after it is minted (default 6 h, configurable). A run that reaches it is ended
-    with `KILL QUERY`.
+    with `KILL QUERY`;
+  - 5 minutes after it is minted, when no signed request came by then (added after the v0.4.0-rc.1 lab test:
+    a target that cannot reach the endpoint retried until the 6 h limit). The run is ended with `KILL QUERY`.
   A restore's credential is minted when the restore starts executing, not when it is approved, and has the same
   limit.
 - **Storage (my call: memory only).** SigV4 needs the secret itself to check a signature, so a hash cannot
