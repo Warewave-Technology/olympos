@@ -6,12 +6,11 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.4.0] - unreleased
+## [0.4.0] - 2026-11-27
 
 Native ClickHouse backups and restores with ClickHouse's own `BACKUP` and `RESTORE`, written through a new
 ingest endpoint of the server and signed; installs with Argo CD or Flux; backup storage immutability as the
-storage owner's choice; a release candidate first for every security-model change. Release candidates:
-v0.4.0-rc.1, v0.4.0-rc.2.
+storage owner's choice; a release candidate first for every security-model change.
 
 ### Added
 - **Native ClickHouse backups and restores** ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).
@@ -492,7 +491,8 @@ For anyone testing the release candidates. Nothing here needs action when upgrad
   referenceable.
 - Findings of the independent review fixed or accepted: [docs/security-review-v0.1.md](docs/security-review-v0.1.md).
 
-[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/Warewave-Technology/olympos/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.4.0
 [0.3.1]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Warewave-Technology/olympos/releases/tag/v0.2.0
