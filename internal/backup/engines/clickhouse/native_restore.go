@@ -739,7 +739,7 @@ func (op nativeOp) kill(s *session, log *slog.Logger, again redial, why string) 
 
 // orphanKill is the last try to end a restore the run lost track of: one
 // KILL QUERY … SYNC on a new connection, within nativeKillWait. When that
-// does not end it either, the error wraps ErrNativeOrphan and names the
+// does not end it either, the error wraps ErrNativeRestoreOrphan and names the
 // statement that ends it.
 func (op nativeOp) orphanKill(log *slog.Logger, again redial, why string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), nativeKillWait)
@@ -764,9 +764,9 @@ func (op nativeOp) orphanKill(log *slog.Logger, again redial, why string) error 
 	}
 	end := "; run " + op.hint + " on the target"
 	if err != nil {
-		err = fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v%s", ErrNativeOrphan, why, err, end)
+		err = fmt.Errorf("%w (%s); KILL QUERY on a new connection failed: %v%s", ErrNativeRestoreOrphan, why, err, end)
 	} else {
-		err = fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s%s", ErrNativeOrphan, why, statusText(status), end)
+		err = fmt.Errorf("%w (%s); after KILL QUERY on a new connection it is %s%s", ErrNativeRestoreOrphan, why, statusText(status), end)
 	}
 	log.Error("clickhouse: the native restore may still run on the server", "query_id", op.queryID, "err", err)
 	return err
