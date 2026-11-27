@@ -73,3 +73,28 @@ left-out objects served, the encrypt functions' masked arguments).
   - With `identity.manageSecrets=false` the chart renders no identity Secret.
   - The generated commands put the one-time token only in `kubectl create secret … | kubectl apply`, never in Git values.
   - The probe Secret gets the cluster token as it already did with plain Helm.
+
+## Addendum: v0.4.0-rc.2
+
+The diff since `v0.4.0-rc.1` (`68f11d8..b33b7d1`, PR #99) was reviewed independently on 2026-11-27, read against
+`docs/security-model.md`. PR #99 adds a 5-minute first-request limit to the native ingest session and a
+restore-specific orphan error.
+
+**Verdict.** Neither change weakens the security model:
+
+- Only a request whose SigV4 signature has verified counts as the first request. A forged or unauthenticated
+  request cannot hold a session open, and no request can shorten one.
+- A session stopped for *no request* takes the same path as every other stop reason:
+  - its key is refused at once;
+  - the engine ends the statement with `KILL QUERY`, falling back to a new connection;
+  - the credential is revoked and its slot freed.
+- The new error text holds only `ingest.url` and a duration, and passes through the existing scrubbers.
+- A target or network attacker gains nothing beyond a failed run: without a captured `.backup` no manifest is
+  signed.
+- `ErrNativeRestoreOrphan` still unwraps to `ErrNativeOrphan` for the caller that looks for it.
+
+| # | Severity | Finding | Status |
+|---|---|---|---|
+| 1 | Low | The window counted from when the credential was minted, before the engine connected. Slow work before the statement counted against it: reading sizes, ending left-over backups (up to 30 s each), and a restore's `CREATE DATABASE` and Replicated `CREATE TABLE`s. That work could fail a large restore, or a backup with many orphans, every time, with advice to check the egress. Only availability was affected. | **Fixed** (rc.3): the engine calls `Sent` just before the `BACKUP` or `RESTORE` is sent, and the window starts then (`ingest.Session.Sent`). Tests: a slow start of a backup and of a restore succeeds. |
+| 2 | Info | Doc sentences were slightly off about when the window starts, and about the `KILL QUERY` of a statement that had not been sent. | **Fixed** (rc.3): the window starts at the statement, so a stopped session always has one to end. The docs say so. |
+| 3 | Info | Races at the 5-minute boundary, which change only an error's wording and one metric. A timer that fired as the run ended could still `Stop` a revoked session. The restore executor read the stop reason after `Revoke`. | **Fixed** (rc.3), except one race that comes with any deadline: `Stop` does nothing once the session is revoked, and the executor reads the reason before `Revoke`. A signed request that arrives at the very moment the window ends can still lose to the timer, and the run then fails as *no request*. That outcome is harmless. |

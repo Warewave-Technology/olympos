@@ -259,8 +259,11 @@ type nativeRunner struct {
 	block bool // hold until the restore's context ends
 	// silent sends no request: a target that cannot reach the endpoint,
 	// whose RESTORE retries until the session stops and it is KILLed.
-	silent bool
-	err    error
+	// slowStart is the work before the RESTORE (CREATE DATABASE, Replicated
+	// tables), which does not count against FirstRequest.
+	silent    bool
+	slowStart time.Duration
+	err       error
 
 	mu       sync.Mutex
 	calls    []backup.NativeRestoreRun
@@ -281,6 +284,10 @@ func (f *nativeRunner) RestoreNativeBackup(ctx context.Context, rc backup.Restor
 	f.mu.Unlock()
 	if !ok || secret != run.Secret {
 		return nil, errors.New("the credential is not a live session")
+	}
+	time.Sleep(f.slowStart)
+	if run.Sent != nil {
+		run.Sent() // the RESTORE goes to the target
 	}
 	for _, key := range f.read {
 		rc, _, err := s.Source().Open(ctx, key)
@@ -514,8 +521,9 @@ func TestNativeExecuteObjectChanged(t *testing.T) {
 }
 
 // Found in the lab test of v0.4.0-rc.1: a restore whose target sends no
-// request to the endpoint within FirstRequest is KILLed and fails saying what
-// to check; nothing was created.
+// request to the endpoint within FirstRequest of the RESTORE is KILLed and
+// fails saying what to check; nothing was created. The work before the
+// RESTORE does not count (review of v0.4.0-rc.2).
 func TestNativeExecuteNoRequest(t *testing.T) {
 	x, f := nativeExec(t)
 	f.silent = true
@@ -531,6 +539,21 @@ func TestNativeExecuteNoRequest(t *testing.T) {
 		t.Fatalf("request: %q %q\nwant %q", s.Status, s.Error, want)
 	}
 	x.noCanary()
+}
+
+// TestNativeExecuteSlowStart: work before the RESTORE (CREATE DATABASE,
+// Replicated tables) that takes longer than FirstRequest does not count: the
+// window starts when the RESTORE is sent (review of v0.4.0-rc.2).
+func TestNativeExecuteSlowStart(t *testing.T) {
+	x, f := nativeExec(t)
+	f.slowStart = 500 * time.Millisecond
+	x.ex.Native.FirstRequest = 200 * time.Millisecond
+	id, _ := x.approvedNative(nativeSchema, "shop")
+	x.claim(id)
+	x.ex.Execute(context.Background(), id)
+	if s := x.stored(id); s.Status != restore.StatusSucceeded {
+		t.Fatalf("a restore with a slow start: %q %q", s.Status, s.Error)
+	}
 }
 
 // TestNativeExecuteStopped: a native restore whose request ended elsewhere

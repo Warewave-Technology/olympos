@@ -46,9 +46,9 @@ const (
 	// ReasonRestart is the revoke reason start-up recovery records
 	// (MarkInterrupted): the run belonged to the process before.
 	ReasonRestart = "server restart"
-	// ReasonNoRequest: no signed request came within FirstRequest of the
-	// open, so the target most likely cannot reach the endpoint (egress, its
-	// trust of the certificate) and would otherwise retry until the TTL.
+	// ReasonNoRequest: no signed request came within FirstRequest of Sent,
+	// so the target most likely cannot reach the endpoint (egress, its trust
+	// of the certificate) and would otherwise retry until the TTL.
 	ReasonNoRequest = "no request"
 )
 
@@ -142,7 +142,8 @@ type OpenOptions struct {
 	// backup).
 	MaxBytes int64
 	// FirstRequest is how long the session waits for its first signed
-	// request before it stops with ReasonNoRequest; 0 waits until the TTL.
+	// request after Sent before it stops with ReasonNoRequest; 0 waits until
+	// the TTL.
 	FirstRequest time.Duration
 }
 
@@ -302,13 +303,7 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 	}
 	// The TTL ends the session even when no request comes to notice it.
 	s.stopExpiry = r.afterFunc(o.TTL, func() { s.Stop(ReasonExpired) })
-	if o.FirstRequest > 0 {
-		s.stopFirst = r.afterFunc(o.FirstRequest, func() {
-			if !s.requested.Load() {
-				s.Stop(ReasonNoRequest)
-			}
-		})
-	}
+	s.firstRequest = o.FirstRequest
 	return s, cred, nil
 }
 
@@ -413,10 +408,12 @@ type Session struct {
 	// stopExpiry cancels the timer that stops the session with ReasonExpired
 	// when the TTL passes; Revoke calls it. Set once in open.
 	stopExpiry func() bool
-	// stopFirst cancels the FirstRequest timer (nil without one); requested
-	// is set by the first signed request.
-	stopFirst func() bool
-	requested atomic.Bool
+	// firstRequest is OpenOptions.FirstRequest. stopFirst cancels its timer,
+	// which Sent starts (nil until then; guarded by mu); requested is set by
+	// the first signed request.
+	firstRequest time.Duration
+	stopFirst    func() bool
+	requested    atomic.Bool
 
 	mu         sync.Mutex
 	secret     string // dropped on Revoke
@@ -477,12 +474,13 @@ func (s *Session) Revoke(reason string) {
 	}
 	s.revoked = true
 	s.secret = ""
+	stopFirst := s.stopFirst
 	s.mu.Unlock()
 	if s.stopExpiry != nil {
 		s.stopExpiry()
 	}
-	if s.stopFirst != nil {
-		s.stopFirst()
+	if stopFirst != nil {
+		stopFirst()
 	}
 	s.end()
 	s.reg.forget(s.accessKey)
@@ -507,23 +505,51 @@ func (s *Session) StopReason() string {
 	return s.stopReason
 }
 
+// Sent starts the FirstRequest window: the run's owner has just sent the
+// target the statement that makes it call the endpoint (BACKUP, RESTORE),
+// so what came before (connecting, reading sizes, ending orphans, creating
+// databases) does not count. Only the first call counts; it does nothing
+// without FirstRequest, after a signed request, or once the session ended.
+func (s *Session) Sent() {
+	if s.firstRequest <= 0 || s.requested.Load() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.revoked || s.stopReason != "" || s.stopFirst != nil {
+		return
+	}
+	s.stopFirst = s.reg.afterFunc(s.firstRequest, func() {
+		if !s.requested.Load() {
+			s.Stop(ReasonNoRequest)
+		}
+	})
+}
+
 // signed records that a signed request came (FirstRequest), and stops
 // waiting for one.
 func (s *Session) signed() {
-	if !s.requested.Swap(true) && s.stopFirst != nil {
-		s.stopFirst()
+	if s.requested.Swap(true) {
+		return
+	}
+	s.mu.Lock()
+	stopFirst := s.stopFirst
+	s.mu.Unlock()
+	if stopFirst != nil {
+		stopFirst()
 	}
 }
 
 // Stop stops the session for reason: Lookup no longer finds its key, and
-// Stopped delivers the reason. Only the first call counts. It is the
-// handler's hook; it does not revoke the credential.
+// Stopped delivers the reason. Only the first call counts, and none after
+// Revoke (a timer that fired as the run ended). It is the handler's hook; it
+// does not revoke the credential.
 func (s *Session) Stop(reason string) {
 	if reason == "" {
 		reason = "stopped"
 	}
 	s.mu.Lock()
-	if s.stopReason != "" {
+	if s.stopReason != "" || s.revoked {
 		s.mu.Unlock()
 		return
 	}

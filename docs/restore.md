@@ -356,11 +356,11 @@ restore ClickHouse.
   of a restore whose tables you keep.
 
 **When the target does not reach the endpoint, or is lost.** A `RESTORE` whose target sends no request to the
-endpoint within 5 minutes is ended with `KILL QUERY`, and the request fails with *no request from the target
-reached the ingest endpoint …*: check the target's egress and its trust of the endpoint's certificate, as for a
-backup ([ClickHouse backups](clickhouse-backups.md#when-a-native-run-fails)). A target that restarts or stops
-answering during the restore fails the request with *the native restore may still be running on the target …*
-and the `KILL QUERY` that ends it, if it still runs.
+endpoint within 5 minutes of the statement is ended with `KILL QUERY`, and the request fails with *no request
+from the target reached the ingest endpoint …*: check the target's egress and its trust of the endpoint's
+certificate, as for a backup ([ClickHouse backups](clickhouse-backups.md#when-a-native-run-fails)). A target
+that restarts or stops answering during the restore fails the request with *the native restore may still be
+running on the target …* and the `KILL QUERY` that ends it, if it still runs.
 
 
 ### What a Vault or OpenBao restore does

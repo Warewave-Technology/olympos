@@ -165,6 +165,9 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		// Silent sends no request: a ClickHouse that cannot reach the
 		// endpoint, which retries until the run KILLs it.
 		Silent bool `json:"native_silent"`
+		// SlowStartMS is how long the work before the BACKUP takes (sizes,
+		// orphan KILLs): it does not count against FirstRequest.
+		SlowStartMS int `json:"native_slow_start_ms"`
 	}
 	_ = json.Unmarshal(ec.Options, &o)
 	if o.LeakSecret {
@@ -183,6 +186,10 @@ func (fakeEngine) BackupNative(ctx context.Context, ec backup.EngineContext, run
 		nativeCalls.mu.Lock()
 		call.quota = s.MaxBytes()
 		nativeCalls.mu.Unlock()
+	}
+	time.Sleep(time.Duration(o.SlowStartMS) * time.Millisecond)
+	if run.Sent != nil {
+		run.Sent() // the BACKUP goes to the target
 	}
 	if o.Silent {
 		select {
@@ -902,8 +909,9 @@ func TestNativeRunQuota(t *testing.T) {
 
 // Found in the lab test of v0.4.0-rc.1: a target that never reaches the
 // endpoint (no egress, an untrusted certificate) is KILLed once no request
-// came within FirstRequest, and the run fails saying what to check, instead
-// of staying running until the credential's TTL.
+// came within FirstRequest of the BACKUP, and the run fails saying what to
+// check, instead of staying running until the credential's TTL. The work
+// before the BACKUP does not count (review of v0.4.0-rc.2).
 func TestNativeRunNoRequest(t *testing.T) {
 	db := testutil.DB(t)
 	e := seedNative(t, db)
@@ -918,6 +926,15 @@ func TestNativeRunNoRequest(t *testing.T) {
 	if r.Status != "failed" || !strings.HasPrefix(r.Error, "no request from the target reached the ingest endpoint "+e.W.Native.URL+" within 200ms: "+
 		"check the egress of the ClickHouse pods to its host and port, and that ClickHouse trusts its certificate: clickhouse: native backup ended") {
 		t.Fatalf("run: %+v", r)
+	}
+
+	// Work before the BACKUP longer than the window: the window starts when
+	// the BACKUP is sent, and the run succeeds.
+	setOptions(t, db, e.Job, `{"method":"native","native_slow_start_ms":500}`)
+	slow := queue(t, db, e.Job, "manual", nil)
+	claimAndRun(t, e.W, slow)
+	if r := loadRun(t, db, slow); r.Status != "succeeded" || nativeCallOf(t, slow).killed != "" {
+		t.Fatalf("a run with a slow start: %+v, killed %q", r, nativeCallOf(t, slow).killed)
 	}
 	if backup.NoRequestError("https://x:9444", backup.NativeFirstRequest) != "no request from the target reached the ingest endpoint https://x:9444 "+
 		"within 5 minutes: check the egress of the ClickHouse pods to its host and port, and that ClickHouse trusts its certificate" {

@@ -275,14 +275,14 @@ TLS end to end in `e2e-tls`). Its scope is the run:
 
 It can never delete (except its own `.lock`) or overwrite: a stored object is written once, a repeat with the
 same body is answered with the stored one, and another body stops the run. It ends when the run ends, after
-`ingest.maxRunDuration` (6 hours), or when no signed request came in its first 5 minutes, and a server restart
-ends every one. The secret lives only in the server's memory; the database keeps the key ID, the scope, the
-expiry and an HMAC fingerprint, and the secret is never logged, stored or returned by the API (Olympos logs
-the statement with the secret replaced). ClickHouse 24.8 and 25.8 mask it themselves (`[HIDDEN]`) in
-`query_log`, `system.backups`, the process list and their log, and the server checks that a target runs 24.8
-or later before it sends the statement, so an older one never receives a secret. A stolen credential can write
-into its own run, up to that run's limits, or read what its restore reads, until its run ends; it reaches no
-other run and no storage credential.
+`ingest.maxRunDuration` (6 hours), or when no signed request came in the 5 minutes after the run sent its
+statement, and a server restart ends every one. The secret lives only in the server's memory; the database
+keeps the key ID, the scope, the expiry and an HMAC fingerprint, and the secret is never logged, stored or
+returned by the API (Olympos logs the statement with the secret replaced). ClickHouse 24.8 and 25.8 mask it
+themselves (`[HIDDEN]`) in `query_log`, `system.backups`, the process list and their log, and the server
+checks that a target runs 24.8 or later before it sends the statement, so an older one never receives a
+secret. A stolen credential can write into its own run, up to that run's limits, or read what its restore
+reads, until its run ends; it reaches no other run and no storage credential.
 
 **A signing key.** The server signs every native run's manifest (the objects ClickHouse declared, with sizes
 and SHA-256, the databases, objects and rows) with the Key Vault key `olympos-manifest` (EC P-256, ES256,

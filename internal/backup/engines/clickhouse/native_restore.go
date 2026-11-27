@@ -327,6 +327,8 @@ type NativeRestore struct {
 	// Stop delivers why the restore's ingest session stopped: the restore
 	// is then ended with KILL QUERY.
 	Stop <-chan string
+	// Sent, when set, is called just before the RESTORE is sent.
+	Sent func()
 }
 
 // String and LogValue keep the secret out of every print and log.
@@ -344,7 +346,7 @@ var _ backup.NativeRestorer = Engine{}
 // RestoreNativeBackup implements backup.NativeRestorer with RestoreNative.
 func (e Engine) RestoreNativeBackup(ctx context.Context, rc backup.RestoreContext, run backup.NativeRestoreRun) (*backup.RestoreResult, error) {
 	nr := NativeRestore{URL: run.URL, RunID: run.RunID, AccessKey: run.AccessKey, Secret: run.Secret, DDL: run.DDL, Rows: run.Rows,
-		Definitions: run.Definitions, Stop: run.Stop}
+		Definitions: run.Definitions, Stop: run.Stop, Sent: run.Sent}
 	for _, d := range run.Decisions {
 		nr.Decisions = append(nr.Decisions, Decision(d))
 	}
@@ -657,6 +659,9 @@ func (s *session) runRestore(ctx context.Context, log *slog.Logger, p *nativeRes
 	op := restoreOp(requestID, nr.Secret)
 	stmt := restoreStatement(p, nr, requestID)
 	log.Info("clickhouse: starting a native restore", "query_id", op.queryID, "statement", redactStatement(stmt))
+	if nr.Sent != nil {
+		nr.Sent()
+	}
 	if err := s.nativeExec(context.WithoutCancel(ctx), stmt, op.queryID, nativeRestoreSettings...); err != nil {
 		if e, refused := ch.AsException(err); refused {
 			// The server refused the statement: no restore runs. Its message
