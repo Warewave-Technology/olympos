@@ -378,6 +378,9 @@ describe('restore dialog · native run', () => {
       expect(within(report).getByRole('list', { name: 'Objects of dicts' })).toHaveTextContent('Its ClickHouse source names a host');
       // the note on what a native restore creates
       expect(within(dlg).getByText('What a native restore creates').closest('.note')).toHaveTextContent('Left out objects are re-applied by hand after the restore.');
+      expect(within(dlg).getByText('What a native restore creates').closest('.note')).toHaveTextContent(
+        'the target can read through Olympos only what it restores: the backup\'s file lists and the definitions and data of the objects it creates, never a database or an object left out.',
+      );
 
       // the decisions are for the selection: a view that reads a database left out is left out
       await user.click(within(report).getByRole('checkbox', { name: /^dicts/ }));

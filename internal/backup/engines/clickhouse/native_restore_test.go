@@ -209,6 +209,11 @@ func TestCheckNativeRestoreSelection(t *testing.T) {
 	if d := nrDecisions(got.Objects); !reflect.DeepEqual(d, want) {
 		t.Fatalf("shop only:\n got %q\nwant %q", d, want)
 	}
+	// The definition of every allowed object, which the restore compares
+	// the target's with (security review v0.4, finding 1).
+	if want := map[string][]byte{restoreKey("shop", "orders"): []byte(nrSchema[0].ddl)}; !reflect.DeepEqual(got.Definitions, want) {
+		t.Fatalf("definitions %q, want %q", got.Definitions, want)
+	}
 	if !reflect.DeepEqual(got.Databases, []string{"shop", "stats", "x"}) {
 		t.Fatalf("a selection lists every database of the backup: %v", got.Databases)
 	}
@@ -359,6 +364,8 @@ func TestNativeRestoreStatement(t *testing.T) {
 		},
 		DDL:  map[string][]byte{restoreKey("shop", "r"): []byte(repl)},
 		Rows: map[string]uint64{restoreKey("shop", "orders"): 3, restoreKey("shop", "r"): 2},
+		Definitions: map[string][]byte{restoreKey("shop", "orders"): []byte("CREATE TABLE shop.orders (`id` UInt64) ENGINE = Log"),
+			restoreKey("shop", "r"): []byte(repl), restoreKey("stats", "v"): []byte("CREATE VIEW stats.v AS SELECT 1")},
 	}
 	p, err := planNativeRestore(req, []string{"shop", "stats"}, nr)
 	if err != nil {
@@ -387,7 +394,7 @@ func TestNativeRestoreStatement(t *testing.T) {
 		t.Helper()
 		c := nr
 		c.Decisions = slices.Clone(nr.Decisions)
-		c.DDL, c.Rows = maps.Clone(nr.DDL), maps.Clone(nr.Rows)
+		c.DDL, c.Rows, c.Definitions = maps.Clone(nr.DDL), maps.Clone(nr.Rows), maps.Clone(nr.Definitions)
 		if mut != nil {
 			mut(&c)
 		}
@@ -407,6 +414,8 @@ func TestNativeRestoreStatement(t *testing.T) {
 		c.DDL[restoreKey("shop", "r")] = []byte("CREATE TABLE shop.r (`id` UInt64) ENGINE = ReplicatedMergeTree ORDER BY id")
 	})
 	bad("no row count", func(c *NativeRestore) { delete(c.Rows, restoreKey("shop", "orders")) })
+	bad("no approved definition", func(c *NativeRestore) { delete(c.Definitions, restoreKey("stats", "v")) })
+	bad("a definition of an object not decided", func(c *NativeRestore) { c.Definitions[restoreKey("shop", "other")] = []byte(repl) })
 }
 
 // TestRestoreNativeRefusesInput: RestoreNative checks its input before it
@@ -465,43 +474,186 @@ func TestServerErrorSummary(t *testing.T) {
 
 // TestRestoredObjects: after RESTORED the restored databases hold
 // exactly the allowed objects, with the inner tables of the allowed
-// materialized views; an object left out that is there, an object no one
-// decided, or an allowed one that is missing fails the restore, named.
+// materialized views, each as it was approved; an object left out that is
+// there, an object no one decided, an allowed one that is missing, or one
+// that is not what was approved (security review v0.4, finding 1) fails the
+// restore, named. What the restore created other than approved, or left out,
+// is dropped; what no one decided is not.
 func TestRestoredObjects(t *testing.T) {
 	const req = "4b1d6c2e-7f3a-4e5b-8c9d-0a1b2c3d4e5f"
+	const mvUUID = "6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60"
+	defs := map[string]string{
+		"orders": "CREATE TABLE shop.orders UUID '33333333-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192",
+		"mv": "CREATE MATERIALIZED VIEW shop.mv UUID '" + mvUUID + "' TO INNER UUID '11111111-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`id` UInt64) " +
+			"ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id FROM shop.orders",
+		"d": "CREATE DICTIONARY shop.d UUID '22222222-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`id` UInt64) PRIMARY KEY id " +
+			"SOURCE(CLICKHOUSE(DB 'shop' TABLE 'orders' USER 'u' PASSWORD 'pw')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())",
+		"v":   "CREATE VIEW shop.v UUID '44444444-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`id` UInt64) AS SELECT id FROM shop.orders",
+		"bad": "CREATE VIEW shop.bad (`id` UInt64) AS SELECT id FROM shop.ext",
+	}
 	nr := NativeRestore{Decisions: []Decision{
 		{Database: "shop", Name: "orders", Kind: KindTable, Allowed: true},
 		{Database: "shop", Name: "mv", Kind: KindMaterializedView, Allowed: true},
 		{Database: "shop", Name: "d", Kind: KindDictionary, Allowed: true},
+		{Database: "shop", Name: "v", Kind: KindView, Allowed: true},
+		// Allowed, and reading what is left out: a decision the check never
+		// makes.
+		{Database: "shop", Name: "bad", Kind: KindView, Allowed: true},
 		{Database: "shop", Name: "ext", Kind: KindTable, Reason: "the URL engine is not on the restore allowlist"},
-	}, Rows: map[string]uint64{restoreKey("shop", "orders"): 1}}
+	}, Rows: map[string]uint64{restoreKey("shop", "orders"): 1}, Definitions: map[string][]byte{}}
+	for name, d := range defs {
+		nr.Definitions[restoreKey("shop", name)] = []byte(d)
+	}
 	p, err := planNativeRestore(req, []string{"shop"}, nr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const mvUUID = "6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60"
-	good := []restoredObject{{"shop", ".inner_id." + mvUUID, "11111111-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree"},
-		{"shop", "d", "22222222-0d8e-4b7a-9c1e-1a2b3c4d5e60", "Dictionary"}, {"shop", "mv", mvUUID, "MaterializedView"},
-		{"shop", "orders", "33333333-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree"}}
-	if err := p.restoredObjects(good); err != nil {
-		t.Fatalf("what was decided: %v", err)
+	// What ClickHouse 24.8 and 25.8 show for them: no UUIDs, the password
+	// hidden.
+	inner := restoredObject{"shop", ".inner_id." + mvUUID, "11111111-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree",
+		"CREATE TABLE shop.`.inner_id." + mvUUID + "` (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192"}
+	good := []restoredObject{inner,
+		{"shop", "d", "22222222-0d8e-4b7a-9c1e-1a2b3c4d5e60", "Dictionary", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id " +
+			"SOURCE(CLICKHOUSE(DB 'shop' TABLE 'orders' USER 'u' PASSWORD '[HIDDEN]')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"},
+		{"shop", "mv", mvUUID, "MaterializedView", "CREATE MATERIALIZED VIEW shop.mv (`id` UInt64) ENGINE = MergeTree ORDER BY id " +
+			"SETTINGS index_granularity = 8192 AS SELECT id FROM shop.orders"},
+		{"shop", "orders", "33333333-0d8e-4b7a-9c1e-1a2b3c4d5e60", "MergeTree", "CREATE TABLE shop.orders (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192"},
+		{"shop", "v", "44444444-0d8e-4b7a-9c1e-1a2b3c4d5e60", "View", "CREATE VIEW shop.v (`id` UInt64) AS SELECT id FROM shop.orders"},
 	}
-	if err := p.restoredObjects(append(slices.Clone(good), restoredObject{"shop", "ext", "", "URL"})); err == nil ||
-		!strings.Contains(err.Error(), "shop.ext was to be left out, and the target holds it") {
-		t.Fatalf("a left out object restored: %v", err)
+	check := func(name string, found []restoredObject, wantDrop []string, want ...string) {
+		t.Helper()
+		problems, drop := p.restoredObjects(found, false)
+		var dropped []string
+		for _, o := range drop {
+			dropped = append(dropped, o.name)
+		}
+		slices.Sort(dropped)
+		if !slices.Equal(dropped, wantDrop) {
+			t.Errorf("%s: dropped %v, want %v", name, dropped, wantDrop)
+		}
+		all := strings.Join(problems, "\n")
+		if len(want) == 0 && len(problems) > 0 {
+			t.Errorf("%s: %s", name, all)
+		}
+		for _, w := range want {
+			if !strings.Contains(all, w) {
+				t.Errorf("%s: problems %q, want %q", name, all, w)
+			}
+		}
 	}
-	if err := p.restoredObjects(append(slices.Clone(good), restoredObject{"shop", ".inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60", "", "MergeTree"},
-		restoredObject{"shop", "surprise", "", "Log"})); err == nil ||
-		!strings.Contains(err.Error(), "shop.surprise is not an object the restore was to create") ||
-		!strings.Contains(err.Error(), "shop..inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60 is not an object") {
-		t.Fatalf("objects no one decided: %v", err)
+	with := func(changed ...restoredObject) []restoredObject {
+		out := slices.Clone(good)
+		for _, c := range changed {
+			if i := slices.IndexFunc(out, func(o restoredObject) bool { return o.name == c.name }); i >= 0 {
+				out[i] = c
+			} else {
+				out = append(out, c)
+			}
+		}
+		return out
 	}
+	badView := restoredObject{"shop", "bad", "", "View", "CREATE VIEW shop.bad (`id` UInt64) AS SELECT id FROM shop.ext"}
+
+	// The allowlist runs again on what the target holds.
+	check("an allowed view that reads what is left out", with(badView), []string{"bad"},
+		"shop.bad is not what was approved (on the target it reads shop.ext, which the restore was not to create); it was dropped")
+	delete(p.allowed, objRef{"shop", "bad"})
+	check("what was decided", good, nil)
+	check("a left out object restored", with(restoredObject{"shop", "ext", "", "URL", "CREATE TABLE shop.ext (`x` UInt8) ENGINE = URL('http://x', 'CSV')"}),
+		[]string{"ext"}, "shop.ext was to be left out, and the target holds it; it was dropped")
+	check("objects no one decided", with(restoredObject{"shop", ".inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60", "", "MergeTree", ""},
+		restoredObject{"shop", "surprise", "", "Log", ""}), nil,
+		"shop.surprise is not an object the restore was to create", "shop..inner_id.99999999-0d8e-4b7a-9c1e-1a2b3c4d5e60 is not an object")
 	// An inner table is never required (the view holds its data).
-	if err := p.restoredObjects(good[1:]); err != nil {
-		t.Fatalf("an allowed view without its inner table: %v", err)
+	check("an allowed view without its inner table", good[1:], nil)
+	check("a missing allowed table", slices.DeleteFunc(slices.Clone(good), func(o restoredObject) bool { return o.name == "orders" }), nil,
+		"shop.orders was to be restored, and the target does not hold it")
+
+	// The review's attack: RESTORE created shop.v from another file of the
+	// same size and checksum. It kept the name and the engine.
+	check("a view other than approved", with(restoredObject{"shop", "v", "", "View", "CREATE VIEW shop.v (`name` String) AS SELECT name FROM system.users"}),
+		[]string{"v"}, "shop.v is not what was approved (its definition is not the approved one); it was dropped")
+	check("a table on another engine", with(restoredObject{"shop", "orders", "", "URL", "CREATE TABLE shop.orders (`id` UInt64) ENGINE = URL('http://example.invalid/x', 'CSV')"}),
+		[]string{"orders"}, "shop.orders is not what was approved (it has the URL engine, not the approved MergeTree); it was dropped")
+	check("a dictionary with a host", with(restoredObject{"shop", "d", "", "Dictionary", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id " +
+		"SOURCE(CLICKHOUSE(HOST 'example.invalid' DB 'shop' TABLE 'orders' USER 'u' PASSWORD '[HIDDEN]')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"}),
+		[]string{"d"}, "shop.d is not what was approved (its definition is not the approved one)")
+	check("another password", with(restoredObject{"shop", "d", "", "Dictionary", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id " +
+		"SOURCE(CLICKHOUSE(DB 'shop' TABLE 'orders' USER 'u' PASSWORD 'other')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"}),
+		[]string{"d"}, "shop.d is not what was approved")
+	check("the password shown", with(restoredObject{"shop", "d", "", "Dictionary", "CREATE DICTIONARY shop.d (`id` UInt64) PRIMARY KEY id " +
+		"SOURCE(CLICKHOUSE(DB 'shop' TABLE 'orders' USER 'u' PASSWORD 'pw')) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"}), nil)
+	check("the UUIDs shown", with(restoredObject{"shop", "orders", "", "MergeTree", defs["orders"]}), nil)
+	// A view calling decrypt, as ClickHouse shows it (fix round 1, C); its
+	// shown first argument changed is not what was approved.
+	p.allowed[objRef{"shop", "dec"}] = Decision{Database: "shop", Name: "dec", Kind: KindView, Allowed: true}
+	p.approved[objRef{"shop", "dec"}] = "CREATE VIEW shop.dec UUID '55555555-0d8e-4b7a-9c1e-1a2b3c4d5e60' (`p` String) AS SELECT decrypt('aes-256-ofb', toString(id), '12345678901234567890123456789012') AS p FROM shop.orders"
+	check("a decrypt view", with(restoredObject{"shop", "dec", "", "View", "CREATE VIEW shop.dec (`p` String) AS SELECT decrypt('aes-256-ofb', '[HIDDEN]') AS p FROM shop.orders"}), nil)
+	check("a decrypt view of another mode", with(restoredObject{"shop", "dec", "", "View", "CREATE VIEW shop.dec (`p` String) AS SELECT decrypt('aes-128-ecb', '[HIDDEN]') AS p FROM shop.orders"}),
+		[]string{"dec"}, "shop.dec is not what was approved (its definition is not the approved one)")
+	delete(p.allowed, objRef{"shop", "dec"})
+	check("an inner table on an S3 disk", with(restoredObject{"shop", inner.name, inner.uuid, "MergeTree",
+		"CREATE TABLE shop.`" + inner.name + "` (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS disk = 's3'"}),
+		[]string{"mv"}, "shop..inner_id."+mvUUID+", the inner table of shop.mv, is not what was approved (the allowlist refuses its definition on the target: "+
+			"its settings put it on the disk s3); shop.mv was dropped")
+	// After a RESTORE that failed: what it did not get to, or what someone
+	// else made, is not named; what it made other than approved is dropped.
+	problems, drop := p.restoredObjects([]restoredObject{good[3], {"shop", "surprise", "", "Log", ""},
+		{"shop", "v", "", "View", "CREATE VIEW shop.v (`name` String) AS SELECT name FROM system.users"}}, true)
+	if len(problems) != 1 || !strings.Contains(problems[0], "shop.v is not what was approved") || len(drop) != 1 || drop[0].name != "v" {
+		t.Errorf("after a failed RESTORE: %q, drop %v", problems, drop)
 	}
-	if err := p.restoredObjects(good[:3]); err == nil || !strings.Contains(err.Error(), "shop.orders was to be restored, and the target does not hold it") {
-		t.Fatalf("a missing allowed table: %v", err)
+	check("an inner table on another engine", with(restoredObject{"shop", inner.name, inner.uuid, "Log", "CREATE TABLE shop.`" + inner.name + "` (`id` UInt64) ENGINE = Log"}),
+		[]string{"mv"}, "it has the Log engine, not its view's MergeTree")
+}
+
+// TestSameDefinition: what ClickHouse 24.8 and 25.8 showed in system.tables
+// after a RESTORE (the same version and from 24.8 into 25.8) is the backup's
+// statement without its UUIDs, a dictionary's password hidden.
+func TestSameDefinition(t *testing.T) {
+	for _, c := range []struct {
+		backup, target string
+		same           bool
+	}{
+		{"CREATE MATERIALIZED VIEW spike.big_amounts UUID '91f4c3f8-6e25-4c4c-b167-e0b90ad3c46c' TO INNER UUID 'ee5f2760-afcf-4347-b812-d3fe2e5f9b80' (`id` UInt64, `amount` Float64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id, amount FROM spike.events WHERE amount > 900",
+			"CREATE MATERIALIZED VIEW spike.big_amounts (`id` UInt64, `amount` Float64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id, amount FROM spike.events WHERE amount > 900", true},
+		{"CREATE DICTIONARY spike.cdict UUID '0b61829d-4e14-4f05-8835-61916bb932b1' (`id` UInt64, `name` String) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'countries' USER 'default' PASSWORD 'pw')) LIFETIME(MIN 0 MAX 0) LAYOUT(HASHED())",
+			"CREATE DICTIONARY spike.cdict (`id` UInt64, `name` String) PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE 'countries' USER 'default' PASSWORD '[HIDDEN]')) LIFETIME(MIN 0 MAX 0) LAYOUT(HASHED())", true},
+		{"CREATE VIEW s2.v3 UUID '9e2f533e-0204-44b3-8c61-7bd3e7173e2d' (`id` UInt64) SQL SECURITY INVOKER AS WITH x AS (SELECT id FROM s2.t) SELECT * FROM x UNION ALL WITH x AS (SELECT id FROM s2.t) SELECT id FROM s2.t SAMPLE 1 / 2 OFFSET 1 / 2",
+			"CREATE VIEW s2.v3 (`id` UInt64) SQL SECURITY INVOKER AS WITH x AS (SELECT id FROM s2.t) SELECT * FROM x UNION ALL WITH x AS (SELECT id FROM s2.t) SELECT id FROM s2.t SAMPLE 1 / 2 OFFSET 1 / 2", true},
+		{"CREATE TABLE s2.t UUID 'cdf07f2a-b886-4c95-9106-dc7273b57ad6' (`id` UInt64, `e` Enum8('a' = 1, 'b' = 2), INDEX i2 n TYPE bloom_filter GRANULARITY 1, PROJECTION p (SELECT id, count() GROUP BY id)) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (id, ts) SAMPLE BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 4096 COMMENT 'hello'",
+			"CREATE TABLE s2.t (`id` UInt64, `e` Enum8('a' = 1, 'b' = 2), INDEX i2 n TYPE bloom_filter GRANULARITY 1, PROJECTION p (SELECT id, count() GROUP BY id)) ENGINE = MergeTree PARTITION BY toYYYYMM(ts) ORDER BY (id, ts) SAMPLE BY id TTL ts + toIntervalYear(1) SETTINGS index_granularity = 4096 COMMENT 'hello'", true},
+		// ClickHouse 24.8 and 25.8 show the arguments of the encrypt functions
+		// from the second on as one '[HIDDEN]' (fix round 1, C).
+		{"CREATE TABLE e.t UUID '31a18b2d-80c8-4023-b266-25e99ee28a06' (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, '12345678901234567890123456789012')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192",
+			"CREATE TABLE e2.t (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', '[HIDDEN]')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192", false},
+		{"CREATE TABLE e.t UUID '31a18b2d-80c8-4023-b266-25e99ee28a06' (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, '12345678901234567890123456789012')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192",
+			"CREATE TABLE e.t (`id` UInt64, `s` String, `c` String DEFAULT encrypt('aes-256-ofb', '[HIDDEN]')) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192", true},
+		{"CREATE VIEW e.v2 UUID 'f902cbd2-9990-4f62-9ca6-6830d9892ff6' (`x` String, `y` Nullable(String)) AS SELECT encrypt('aes-256-gcm', s, '12345678901234567890123456789012', 'iviviviviviv', 'aad') AS x, tryDecrypt('aes-256-ofb', c, '12345678901234567890123456789012') AS y FROM e.t",
+			"CREATE VIEW e.v2 (`x` String, `y` Nullable(String)) AS SELECT encrypt('aes-256-gcm', '[HIDDEN]') AS x, tryDecrypt('aes-256-ofb', '[HIDDEN]') AS y FROM e.t", true},
+		{"CREATE VIEW e.v3 UUID '71c4b1c0-eb9c-4afc-84ed-06039c4a43b9' (`a` String, `b` String, `l` UInt64) AS SELECT aes_encrypt_mysql('aes-128-ecb', s, 'k') AS a, aes_decrypt_mysql('aes-128-ecb', unhex(c), concat('k', s)) AS b, length(encrypt('aes-128-ecb', s, '1234567890123456')) AS l FROM e.t",
+			"CREATE VIEW e.v3 (`a` String, `b` String, `l` UInt64) AS SELECT aes_encrypt_mysql('aes-128-ecb', '[HIDDEN]') AS a, aes_decrypt_mysql('aes-128-ecb', '[HIDDEN]') AS b, length(encrypt('aes-128-ecb', '[HIDDEN]')) AS l FROM e.t", true},
+		// A first argument of any form is kept, and compared.
+		{"CREATE VIEW f.v AS SELECT decrypt(concat('aes-256', '-ofb'), s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt(concat('aes-256', '-ofb'), '[HIDDEN]') AS a FROM f.t", true},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-128-ecb', '[HIDDEN]') AS a FROM f.t", false},
+		// The arguments shown are compared, and only these functions' are
+		// masked: not another function's, not a call with one argument.
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'other') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT concat('a', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT concat('a', '[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT Decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT Decrypt('aes-256-ofb', '[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('[HIDDEN]') AS a FROM f.t", false},
+		{"CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', s, 'k') AS a FROM f.t", "CREATE VIEW f.v AS SELECT decrypt('aes-256-ofb', '[HIDDEN]', '[HIDDEN]') AS a FROM f.t", false},
+		// A UUID elsewhere is not the object's.
+		{"CREATE VIEW s.v AS SELECT 'x' AS UUID", "CREATE VIEW s.v AS SELECT 'y' AS UUID", false},
+		{"CREATE VIEW s.v AS SELECT toUUID('6f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60') AS u", "CREATE VIEW s.v AS SELECT toUUID('7f1c2a52-0d8e-4b7a-9c1e-1a2b3c4d5e60') AS u", false},
+		// [HIDDEN] stands for a password only.
+		{"CREATE VIEW s.v AS SELECT 'pw' AS p", "CREATE VIEW s.v AS SELECT '[HIDDEN]' AS p", false},
+		{"CREATE VIEW s.v AS SELECT 1", "CREATE VIEW s.v AS SELECT 1 -- x", false},
+		{"CREATE VIEW s.v AS SELECT 1", "CREATE VIEW s.v AS SELECT 1, 2", false},
+	} {
+		if got := sameDefinition(c.backup, c.target); got != c.same {
+			t.Errorf("sameDefinition(%q, %q) = %v", c.backup, c.target, got)
+		}
 	}
 }
 

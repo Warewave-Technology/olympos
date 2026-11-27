@@ -48,6 +48,14 @@ type NativeRestoreEngine interface {
 	// nil, lists what the copy's own signed manifest holds, every object
 	// left out; it is never bound for reads.
 	CheckNativeRestore(ctx context.Context, in NativeRestoreInput) (*NativeRestoreCheck, error)
+	// NativeServed returns the keys of the objects of the verified chain ms
+	// (the full first) that the restore of decisions, for databases (empty:
+	// every one), reads: what its RestoreSource serves, nothing else
+	// (security review v0.4, finding 5). read is the chain's checked reader.
+	// A chain whose files cannot be resolved is ErrNativeChain; one that
+	// cannot be read, ErrNativeNotVerified.
+	NativeServed(ctx context.Context, read NativeObjectReader, ms []NativeChainManifest, databases []string,
+		decisions []NativeDecision) (map[string]bool, error)
 }
 
 // NativeRestoreInput is what an engine checks a native restore with.
@@ -96,12 +104,15 @@ type NativeRestoreCheck struct {
 	// Manifests are the chain's verified manifests, the full first; nil
 	// when the chain does not verify.
 	Manifests []NativeChainManifest
-	// DDL and Rows are what the engine's restore of the chain needs, by keys
-	// of the engine's own (NativeRestoreRun): the definitions it creates
-	// itself before RESTORE and the row counts it checks after. nil when
-	// the chain does not verify.
-	DDL  map[string][]byte
-	Rows map[string]uint64
+	// DDL, Rows and Definitions are what the engine's restore of the chain
+	// needs, by keys of the engine's own (NativeRestoreRun): the definitions
+	// it creates itself before RESTORE, the row counts it checks after, and
+	// the definition of every allowed object, which it compares what the
+	// target created with (security review v0.4, finding 1). nil when the
+	// chain does not verify.
+	DDL         map[string][]byte
+	Rows        map[string]uint64
+	Definitions map[string][]byte
 	// RefusedDatabases are the selected databases the restore cannot
 	// create, with the reason (R52: a native restore creates Atomic
 	// databases only): a request with one of them is refused.
@@ -148,6 +159,12 @@ type NativeRestore struct {
 	r    blob.Reader
 	dirs []string
 	log  *slog.Logger
+	// eng and databases are the check's engine and selection: what the
+	// restore source serves (NativeServed). ctx is the check's, with its
+	// limit: RestoreSource reads within it.
+	eng       NativeRestoreEngine
+	databases []string
+	ctx       context.Context
 }
 
 // Source serves the chain's objects as the verified manifests list them,
@@ -160,20 +177,64 @@ func (n *NativeRestore) Source() ingest.Source {
 	return n.src
 }
 
-// nativeRestoreSlots bounds how many native chains are held at once: a
-// chain holds up to nativeMaxChain sidecars of up to MaxNativeSidecarBytes
+// The slots of native checks bound how many native chains are held at once:
+// a chain holds up to nativeMaxChain sidecars of up to MaxNativeSidecarBytes
 // in memory while it is verified, and its verified manifests while it is
 // used. A parsed chain lives only while its caller holds the slot.
-var nativeRestoreSlots = make(chan struct{}, 1)
+//
+// The API's checks (POST /restores/check and /restores) and the executor's
+// check at the start of an approved restore have slots of their own, so
+// checks sent in a loop never hold up a restore (security review v0.4,
+// finding 6): nativeAPISlots for the API, of which a user holds at most
+// nativeChecksPerUser at once, and one for the executor, whose restores
+// verify one after another. A check, the wait for an API slot included,
+// ends after nativeCheckTimeout; the executor's waits for its slot as long
+// as its restore may.
+const (
+	nativeAPISlots      = 2
+	nativeChecksPerUser = 1
+)
 
-// CheckNativeRestore is the restore check of the native copy src for
-// databases (empty: every one): WithNativeRestore, keeping only the
-// databases and the decisions, so nothing of the parsed chain outlives the
-// slot (Manifests is nil). Errors are as WithNativeRestore's.
+var (
+	nativeAPICheckSlots = make(chan struct{}, nativeAPISlots)
+	nativeExecutorSlots = make(chan struct{}, 1)
+	nativeCheckTimeout  = 5 * time.Minute // a test lowers it
+
+	nativeUserChecks = struct {
+		sync.Mutex
+		n map[string]int
+	}{n: map[string]int{}}
+)
+
+// ErrNativeCheckLimit: a native check was not run, or was ended, by one of
+// its limits (one check per user at a time, nativeCheckTimeout); the error
+// says which. Nothing was decided.
+var ErrNativeCheckLimit = errors.New("the native backup's check hit a limit")
+
+// CheckNativeRestore is the API's restore check of the native copy src for
+// databases (empty: every one), for user: WithNativeRestore on an API slot,
+// keeping only the databases and the decisions, so nothing of the parsed
+// chain outlives the slot (Manifests is nil). A user who has a check
+// running gets ErrNativeCheckLimit at once. Errors are as
+// WithNativeRestore's.
 func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
-	src *RestoreSource, databases []string, log *slog.Logger) (*NativeRestoreCheck, error) {
+	src *RestoreSource, databases []string, user string, log *slog.Logger) (*NativeRestoreCheck, error) {
+	nativeUserChecks.Lock()
+	if nativeUserChecks.n[user] >= nativeChecksPerUser {
+		nativeUserChecks.Unlock()
+		return nil, fmt.Errorf("%w: a check of yours runs already (one at a time); check again when it has ended", ErrNativeCheckLimit)
+	}
+	nativeUserChecks.n[user]++
+	nativeUserChecks.Unlock()
+	defer func() {
+		nativeUserChecks.Lock()
+		if nativeUserChecks.n[user]--; nativeUserChecks.n[user] <= 0 {
+			delete(nativeUserChecks.n, user)
+		}
+		nativeUserChecks.Unlock()
+	}()
 	var out *NativeRestoreCheck
-	err := WithNativeRestore(ctx, q, r, eng, cfg, src, databases, log, func(n *NativeRestore) error {
+	err := withNativeRestore(ctx, nativeAPICheckSlots, true, q, r, eng, cfg, src, databases, log, func(n *NativeRestore) error {
 		if n != nil {
 			out = &NativeRestoreCheck{Databases: n.Databases, Objects: n.Objects, RefusedDatabases: n.RefusedDatabases}
 		}
@@ -182,11 +243,12 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 	return out, err
 }
 
-// WithNativeRestore resolves the chain of the native copy src, reads its
-// sidecars from r (the copy's destination), has eng verify and decide for
-// databases (empty: every one), and calls use with the result while it
-// holds a slot (nativeRestoreSlots); the result must not be kept after use
-// returns. use is called with the chain verified and its source bound, or,
+// WithNativeRestore is the executor's check: it resolves the chain of the
+// native copy src, reads its sidecars from r (the copy's destination), has
+// eng verify and decide for databases (empty: every one), and calls use
+// with the result while it holds the executor's slot; the result must not be
+// kept after use returns. The check, use included, ends after
+// nativeCheckTimeout once it holds the slot (ErrNativeCheckLimit). use is called with the chain verified and its source bound, or,
 // with ErrNativeNotVerified, with the decisions eng could list (every
 // object left out, no source). It is not called at all on other errors:
 // an ErrNativeChain, a chain that eng verified but did not bind
@@ -198,18 +260,57 @@ func CheckNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng
 // verification error it cut is logged at Debug).
 func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
 	src *RestoreSource, databases []string, log *slog.Logger, use func(*NativeRestore) error) error {
+	return withNativeRestore(ctx, nativeExecutorSlots, false, q, r, eng, cfg, src, databases, log, use)
+}
+
+// withNativeRestore is WithNativeRestore on slots; waitCounts: the check's
+// limit (nativeCheckTimeout) runs from the start, the wait for a slot
+// included, not from when it holds one.
+func withNativeRestore(parent context.Context, slots chan struct{}, waitCounts bool, q store.Querier, r blob.Reader, eng NativeRestoreEngine,
+	cfg NativeRestoreConfig, src *RestoreSource, databases []string, log *slog.Logger, use func(*NativeRestore) error) error {
 	if log == nil {
 		log = slog.Default()
 	}
+	limit := nativeCheckTimeout
+	ctx, cancel := parent, context.CancelFunc(func() {})
+	if waitCounts {
+		ctx, cancel = context.WithTimeout(parent, limit)
+	}
+	defer cancel()
+	timedOut := false
+	err := func() error {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+		case <-ctx.Done():
+			timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+			return ctx.Err()
+		}
+		ctx := ctx
+		if !waitCounts {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(parent, limit)
+			defer cancel()
+		}
+		err := checkNativeChain(ctx, q, r, eng, cfg, src, databases, log, use)
+		timedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		return err
+	}()
+	if err != nil && parent.Err() == nil && timedOut {
+		// The check's own limit, not its caller's end.
+		log.Warn("native restore: a check took longer than its limit", "copy_run_id", src.CopyRunID, "limit", limit.String(),
+			"err", err.Error())
+		return fmt.Errorf("%w: it took longer than %s; check again, or restore a run with a shorter chain", ErrNativeCheckLimit, limit)
+	}
+	return err
+}
+
+// checkNativeChain is withNativeRestore once it holds a slot.
+func checkNativeChain(ctx context.Context, q store.Querier, r blob.Reader, eng NativeRestoreEngine, cfg NativeRestoreConfig,
+	src *RestoreSource, databases []string, log *slog.Logger, use func(*NativeRestore) error) error {
 	runs, copies, err := restoreChain(ctx, q, src)
 	if err != nil {
 		return ended(ctx, log, src, err)
-	}
-	select {
-	case nativeRestoreSlots <- struct{}{}:
-		defer func() { <-nativeRestoreSlots }()
-	case <-ctx.Done():
-		return ctx.Err()
 	}
 	signed := make([][]byte, len(runs))
 	for i, run := range runs {
@@ -243,7 +344,7 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		SHA256: copies[len(copies)-1].sha256, Signed: signed, IngestURL: cfg.URL, Bind: bind, Databases: databases})
 	var out *NativeRestore
 	if check != nil {
-		out = &NativeRestore{NativeRestoreCheck: *check, Runs: runs, r: r, log: log}
+		out = &NativeRestore{NativeRestoreCheck: *check, Runs: runs, r: r, log: log, eng: eng, databases: databases, ctx: ctx}
 	}
 	switch {
 	case ctx.Err() != nil && err != nil:
@@ -259,7 +360,7 @@ func WithNativeRestore(ctx context.Context, q store.Querier, r blob.Reader, eng 
 		// What eng could list of a chain that did not verify: no
 		// manifests, no source.
 		if out != nil {
-			out.Manifests, out.DDL, out.Rows, out.RefusedDatabases = nil, nil, nil, nil
+			out.Manifests, out.DDL, out.Rows, out.Definitions, out.RefusedDatabases = nil, nil, nil, nil, nil
 			if uerr := use(out); uerr != nil {
 				return uerr
 			}
@@ -365,7 +466,8 @@ type NativeRestorer interface {
 	// RestoreNativeBackup creates the selected databases (rc.Databases) and what
 	// the engine creates itself (run.DDL), has the target restore the rest
 	// of the allowed objects, leaving out every other object, and checks
-	// the row counts against run.Rows. When run.Stop delivers, or ctx ends,
+	// the row counts against run.Rows and what it created against
+	// run.Definitions. When run.Stop delivers, or ctx ends,
 	// it ends the restore on the target and returns an error. The result is
 	// filled as far as it got, Created listing the databases it created.
 	// The secret goes to the target and nowhere else.
@@ -383,10 +485,11 @@ type NativeRestoreRun struct {
 	AccessKey, Secret string
 	// Decisions are the check's, for the selected databases.
 	Decisions []NativeDecision
-	// DDL and Rows are the check's (NativeRestoreCheck), by the engine's
-	// keys.
-	DDL  map[string][]byte
-	Rows map[string]uint64
+	// DDL, Rows and Definitions are the check's (NativeRestoreCheck), by
+	// the engine's keys.
+	DDL         map[string][]byte
+	Rows        map[string]uint64
+	Definitions map[string][]byte
 	// Stop delivers why the restore's ingest session stopped (a source that
 	// failed, expiry): the restore is then ended on the target.
 	Stop <-chan string
@@ -418,38 +521,52 @@ func NativeRestoreKillQuery(requestID string) string {
 // slot is held only while the chain is verified and bound. It is nil when
 // the chain was not verified.
 //
-// Its memory bound: it keeps one entry per object of the chain's verified
-// manifests (the key, the size, the SHA-256 as 32 bytes and the run), none
-// of the parsed manifests, definitions or decisions, and refuses a chain
-// past maxServedObjects or maxServedKeyBytes. A server runs at most the
-// executor's Global restores at once.
+// It serves only what the restore's RESTORE reads (the engine's
+// NativeServed: the .backup of every run, the definitions of the selected
+// databases and the data of the objects the restore creates), so the
+// target, which holds the restore's credential while it runs, reads nothing
+// else of the backup: not the databases left unselected, not the objects
+// left out (security review v0.4, finding 5). It reads the chain's .backup
+// files to know that, so it is called while the check's slot is held.
+//
+// Its memory bound: it keeps one entry per object it serves (the key, the
+// size, the SHA-256 as 32 bytes and the run), none of the parsed manifests,
+// definitions or decisions, and refuses a chain past maxServedObjects or
+// maxServedKeyBytes. A server runs at most the executor's Global restores at
+// once.
 //
 // A manifest key that the endpoint would not serve (ingest.ValidKey: a
 // backslash, a control character, an empty, "." or ".." segment), or that
 // is not under its run, refuses the source: keys are only ever looked up,
 // and mapped to a path only below their run's directory.
 func (n *NativeRestore) RestoreSource() (*NativeRestoreSource, error) {
-	if n == nil || n.src == nil {
+	if n == nil || n.src == nil || n.eng == nil {
 		return nil, errors.New("the chain was not verified")
 	}
-	return NewNativeRestoreSource(n.r, n.Manifests, n.dirs, n.log)
+	served, err := n.eng.NativeServed(n.ctx, n.src.read, n.Manifests, n.databases, n.Objects)
+	if err != nil {
+		return nil, err
+	}
+	return NewNativeRestoreSource(n.r, n.Manifests, n.dirs, served, n.log)
 }
 
-// NewNativeRestoreSource serves the verified manifests ms (the full first)
-// from r, each run's objects from its directory in dirs (as ms): the
-// RestoreSource of a NativeRestore. Only verified manifests may be given.
-func NewNativeRestoreSource(r blob.Reader, ms []NativeChainManifest, dirs []string, log *slog.Logger) (*NativeRestoreSource, error) {
+// NewNativeRestoreSource serves, of the verified manifests ms (the full
+// first), the objects whose keys are in served, from r, each run's objects
+// from its directory in dirs (as ms): the RestoreSource of a NativeRestore.
+// Only verified manifests may be given; a served key they do not list is
+// refused (ErrNativeChain).
+func NewNativeRestoreSource(r blob.Reader, ms []NativeChainManifest, dirs []string, served map[string]bool,
+	log *slog.Logger) (*NativeRestoreSource, error) {
 	if len(ms) == 0 || len(ms) != len(dirs) || len(ms) > nativeMaxChain {
 		return nil, fmt.Errorf("%d manifests for %d directories", len(ms), len(dirs))
 	}
 	if log == nil {
 		log = slog.Default()
 	}
-	count, err := servedBound(ms)
-	if err != nil {
+	if _, err := servedBound(ms); err != nil {
 		return nil, err
 	}
-	s := &NativeRestoreSource{r: r, log: log, objects: make(map[string]servedObject, count)}
+	s := &NativeRestoreSource{r: r, log: log, objects: make(map[string]servedObject, len(served))}
 	for i, m := range ms {
 		s.runs = append(s.runs, m.RunID+"/")
 		s.dirs = append(s.dirs, dirs[i]+"/")
@@ -457,6 +574,9 @@ func NewNativeRestoreSource(r blob.Reader, ms []NativeChainManifest, dirs []stri
 			rel, ok := strings.CutPrefix(o.Key, m.RunID+"/")
 			if !ok || rel == "" || !ingest.ValidKey(o.Key) {
 				return nil, fmt.Errorf("%w: the manifest of run %s lists %q, which the endpoint does not serve", ErrNativeChain, m.RunID, clipKey(o.Key))
+			}
+			if !served[o.Key] {
+				continue
 			}
 			sum, err := hex.DecodeString(o.SHA256)
 			if err != nil || len(sum) != sha256.Size || o.Size < 0 {
@@ -466,6 +586,11 @@ func NewNativeRestoreSource(r blob.Reader, ms []NativeChainManifest, dirs []stri
 			so.size, so.run = o.Size, uint8(i)
 			copy(so.sha[:], sum)
 			s.objects[o.Key] = so
+		}
+	}
+	for k := range served {
+		if _, ok := s.objects[k]; !ok {
+			return nil, fmt.Errorf("%w: the restore reads %q, which the verified manifests do not list", ErrNativeChain, clipKey(k))
 		}
 	}
 	return s, nil
@@ -510,11 +635,11 @@ func servedBound(ms []NativeChainManifest) (int, error) {
 
 // NativeRestoreSource is the ingest.Source of a native restore
 // (NativeRestore.RestoreSource): the objects of the chain's verified
-// manifests, read from the copy's destination, each checked against its
-// size and SHA-256 while it streams (the last read of an object that does
-// not match fails, so the endpoint aborts the connection and the reader
-// never gets all of it). A key the manifests do not list is refused
-// (ingest.ErrNotServed, 403). It serves whole objects only.
+// manifests that the restore reads, read from the copy's destination, each
+// checked against its size and SHA-256 while it streams (the last read of an
+// object that does not match fails, so the endpoint aborts the connection
+// and the reader never gets all of it). Any other key, of the manifests or
+// not, is refused (ingest.ErrNotServed, 403). It serves whole objects only.
 type NativeRestoreSource struct {
 	r          blob.Reader
 	runs, dirs []string // "<run-id>/" and "<dir>/", the full first
@@ -543,7 +668,7 @@ func (*NativeRestoreSource) WholeObjects() {}
 func (s *NativeRestoreSource) Open(ctx context.Context, key string) (io.ReadCloser, ingest.ObjectRecord, error) {
 	obj, ok := s.objects[key]
 	if !ok {
-		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s is not an object of the backup's signed manifests: %w", clipKey(key), ingest.ErrNotServed)
+		return nil, ingest.ObjectRecord{}, fmt.Errorf("%s is not an object of the backup that this restore reads: %w", clipKey(key), ingest.ErrNotServed)
 	}
 	rec := ingest.ObjectRecord{Key: key, Size: obj.size, SHA256: hex.EncodeToString(obj.sha[:])}
 	o, err := s.r.Open(ctx, s.dirs[obj.run]+strings.TrimPrefix(key, s.runs[obj.run]))
@@ -567,7 +692,7 @@ func (s *NativeRestoreSource) Open(ctx context.Context, key string) (io.ReadClos
 	return &checkedObject{o: o, key: key, size: obj.size, want: rec.SHA256, h: sha256.New(), log: s.log, onFail: s.fail}, rec, nil
 }
 
-// List implements ingest.Source: the chain's objects under prefix.
+// List implements ingest.Source: the objects it serves under prefix.
 func (s *NativeRestoreSource) List(_ context.Context, prefix string) ([]ingest.ObjectRecord, error) {
 	var out []ingest.ObjectRecord
 	for k, o := range s.objects {

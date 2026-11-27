@@ -105,6 +105,33 @@ func (f MetaFile) Written() bool {
 	return f.Size > f.BaseSize && f.DataFile == ""
 }
 
+// contentKey is what ClickHouse finds a file of a backup by: its size and
+// checksum.
+type contentKey struct {
+	size     uint64
+	checksum string
+}
+
+func (f MetaFile) content() contentKey { return contentKey{f.Size, f.Checksum} }
+
+// holders indexes m's files by content: the first file listed with each
+// size and checksum, the one ClickHouse reads for any file of that content.
+// An empty file has none.
+func (m *BackupMeta) holders() map[contentKey]int {
+	out := map[contentKey]int{}
+	for i, f := range m.Files {
+		if _, ok := out[f.content()]; !ok && f.Size > 0 {
+			out[f.content()] = i
+		}
+	}
+	return out
+}
+
+// isMetadataFile: a definition, metadata/<db>.sql or metadata/<db>/<name>.sql.
+func isMetadataFile(name string) bool {
+	return strings.HasPrefix(name, "metadata/") && strings.HasSuffix(name, ".sql")
+}
+
 // ---------------------------------------------------------------- .backup
 
 // ParseBackupMeta parses a .backup strictly: the elements ClickHouse 24.8
@@ -113,7 +140,9 @@ func (f MetaFile) Written() bool {
 // versions as decimal, checksums as 32 lower-case hex digits, names as
 // relative paths, UUIDs canonical. It also checks the file list itself:
 // use_base only in an incremental, a base_size below the size, a data_file
-// that names a stored file of the run with the same size, checksum and base.
+// that names a stored file of the run with the same size, checksum and base,
+// and every definition (metadata/*.sql) the first file listed with its size
+// and checksum, the file ClickHouse reads it from.
 func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 	if len(b) > MaxBackupMetaBytes {
 		return nil, metaErr(".backup is larger than %d bytes", MaxBackupMetaBytes)
@@ -209,6 +238,17 @@ func ParseBackupMeta(b []byte) (*BackupMeta, error) {
 		}
 		byName[f.Name] = len(m.Files)
 		m.Files = append(m.Files, f)
+	}
+	// ClickHouse reads a file by its size and checksum, from the first file
+	// listed with them (its own data_file, or the base by that pair), and
+	// never checks the checksum against the bytes (security review v0.4,
+	// finding 1): a definition another file comes first for would be read
+	// from that file.
+	first := m.holders()
+	for _, f := range m.Files {
+		if h := m.Files[first[f.content()]]; f.Size > 0 && isMetadataFile(f.Name) && h.Name != f.Name {
+			return nil, metaErr(".backup: file %s: ClickHouse reads its size and checksum from %s, listed before it", clip(f.Name), clip(h.Name))
+		}
 	}
 	for _, f := range m.Files {
 		if f.DataFile == "" {

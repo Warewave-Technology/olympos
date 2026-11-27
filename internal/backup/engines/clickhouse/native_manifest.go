@@ -631,17 +631,30 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 		}
 	}
 
+	if err := sameContentSameBytes(meta, b.Objects, run); err != nil {
+		return nil, err
+	}
+	// Each definition is read from where ClickHouse reads it (security
+	// review v0.4, finding 1): ParseBackupMeta checked that it is the first
+	// file of its size and checksum, so a written one is its own object; an
+	// unchanged one is the base chain's file of that size and checksum
+	// (R23), which must be the same definition there.
+	chain := baseChainMeta(b, baseMeta, body)
 	metadata := map[string][]byte{}
 	for _, f := range meta.Files {
-		if !strings.HasPrefix(f.Name, "metadata/") || !strings.HasSuffix(f.Name, ".sql") {
+		if !isMetadataFile(f.Name) {
 			continue
 		}
 		key := run + f.Name
-		if !f.Written() {
-			// Unchanged metadata is the base chain's object (R23).
-			if key, err = baseObject(b.Base, f); err != nil {
+		switch {
+		case f.UseBase && f.BaseSize == f.Size:
+			if key, err = chain.definition(f, len(b.Base)-1); err != nil {
 				return nil, err
 			}
+		case f.UseBase:
+			return nil, metaErr("%s: a definition partly in the base, which Olympos does not read", clip(f.Name))
+		case !f.Written():
+			return nil, metaErr("%s: a definition stored under another file's name, which Olympos does not read", clip(f.Name))
 		}
 		if metadata[key], err = body(key); err != nil {
 			return nil, err
@@ -675,16 +688,110 @@ func BuildNativeManifest(b NativeBuild) (*NativeManifest, error) {
 	return m, nil
 }
 
-// baseObject is the key of the base chain's object that holds f, a file of
-// an incremental that is all in its base: the newest run of the chain that
-// stored a file of that name.
-func baseObject(base []*NativeManifest, f MetaFile) (string, error) {
-	if !f.UseBase || f.BaseSize != f.Size {
-		return "", metaErr("%s was not stored and is not in the base", clip(f.Name))
+// sameContentSameBytes refuses a run in which two files it wrote have the
+// same size and checksum and other bytes (security review v0.4, finding 1):
+// ClickHouse reads both from the first, so the second's bytes would be
+// signed and never read. Identical files written twice (deduplicate_files
+// = 0) are the same bytes either way.
+func sameContentSameBytes(meta *BackupMeta, objects []ingest.ObjectRecord, run string) error {
+	sha := map[string]string{}
+	for _, o := range objects {
+		sha[o.Key] = o.SHA256
 	}
-	for i := len(base) - 1; i >= 0; i-- {
-		key := base[i].RunID + "/" + f.Name
-		if slices.ContainsFunc(base[i].Objects, func(o ingest.ObjectRecord) bool { return o.Key == key }) {
+	type stored struct {
+		name, baseChecksum, sha string
+		baseSize                uint64
+	}
+	seen := map[contentKey]stored{}
+	for _, f := range meta.Files {
+		if !f.Written() {
+			continue
+		}
+		s := stored{f.Name, f.BaseChecksum, sha[run+f.Name], f.BaseSize}
+		first, ok := seen[f.content()]
+		switch {
+		case !ok:
+			seen[f.content()] = s
+		case first.sha != s.sha || first.baseSize != s.baseSize || first.baseChecksum != s.baseChecksum:
+			return metaErr("%s has the size and checksum of %s and other bytes: ClickHouse would read the bytes of %s for both",
+				clip(f.Name), clip(first.name), clip(first.name))
+		}
+	}
+	return nil
+}
+
+// chainMeta reads the .backup files of an incremental's base chain (the
+// full first), each once, when a definition is resolved through them.
+type chainMeta struct {
+	base  []*NativeManifest
+	metas []*BackupMeta
+	// holders and objects are each run's, made when it is first read.
+	holders []map[contentKey]int
+	objects []map[string]bool
+	body    func(string) ([]byte, error)
+}
+
+func baseChainMeta(b NativeBuild, last *BackupMeta, body func(string) ([]byte, error)) *chainMeta {
+	n := len(b.Base)
+	c := &chainMeta{base: b.Base, metas: make([]*BackupMeta, n), holders: make([]map[contentKey]int, n), objects: make([]map[string]bool, n),
+		body: body}
+	if n > 0 {
+		c.metas[n-1] = last
+	}
+	return c
+}
+
+// meta is base run k's .backup, with the index of its files by content and
+// the set of its objects.
+func (c *chainMeta) meta(k int) (*BackupMeta, error) {
+	if c.metas[k] == nil {
+		raw, err := c.body(c.base[k].RunID + "/.backup")
+		if err != nil {
+			return nil, err
+		}
+		m, err := ParseBackupMeta(raw)
+		if err != nil {
+			return nil, fmt.Errorf("the .backup of base run %s: %w", c.base[k].RunID, err)
+		}
+		c.metas[k] = m
+	}
+	if c.holders[k] == nil {
+		c.holders[k] = c.metas[k].holders()
+		c.objects[k] = make(map[string]bool, len(c.base[k].Objects))
+		for _, o := range c.base[k].Objects {
+			c.objects[k][o.Key] = true
+		}
+	}
+	return c.metas[k], nil
+}
+
+// definition is the key of the object ClickHouse reads for f, a definition
+// all in the base, from base run k back: the first file of that run's
+// .backup with f's size and checksum, which must be f's own name there, and
+// either written by that run or itself all in its base.
+func (c *chainMeta) definition(f MetaFile, k int) (string, error) {
+	for ; k >= 0; k-- {
+		m, err := c.meta(k)
+		if err != nil {
+			return "", err
+		}
+		i, ok := c.holders[k][f.content()]
+		if !ok {
+			return "", metaErr("%s is in the base, and base run %s has no file of its size and checksum", clip(f.Name), c.base[k].RunID)
+		}
+		switch h := m.Files[i]; {
+		case h.Name != f.Name:
+			return "", metaErr("%s: ClickHouse reads it from the base's %s, which is not that definition", clip(f.Name), clip(h.Name))
+		case h.UseBase && h.BaseSize == h.Size:
+			continue
+		case !h.Written() || h.BaseSize > 0:
+			return "", metaErr("%s: base run %s holds it partly in its own base or under another file's name, which Olympos does not read",
+				clip(f.Name), c.base[k].RunID)
+		default:
+			key := c.base[k].RunID + "/" + f.Name
+			if !c.objects[k][key] {
+				return "", metaErr("%s is in the base, and base run %s did not store it", clip(f.Name), c.base[k].RunID)
+			}
 			return key, nil
 		}
 	}
@@ -741,8 +848,12 @@ func baseCounts(base []*NativeManifest, baseMeta *BackupMeta) func(name string, 
 	if len(base) > 0 && baseMeta != nil {
 		last := base[len(base)-1]
 		for _, bf := range baseMeta.Files {
+			k := [2]string{strconv.FormatUint(bf.Size, 10), bf.Checksum}
+			if _, seen := byContent[k]; seen {
+				continue // ClickHouse reads the first file of a size and checksum
+			}
 			if n, ok := last.PartRows[bf.Name]; ok && path.Base(bf.Name) == "count.txt" {
-				byContent[[2]string{strconv.FormatUint(bf.Size, 10), bf.Checksum}] = n
+				byContent[k] = n
 			}
 		}
 	}

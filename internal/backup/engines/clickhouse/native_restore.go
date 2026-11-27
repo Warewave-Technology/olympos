@@ -71,7 +71,7 @@ func (Engine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInp
 	if check.RefusedDatabases, err = refusedDatabases(ctx, read, chain, last.Databases, selected); err != nil {
 		return check, err
 	}
-	check.DDL, check.Rows = map[string][]byte{}, map[string]uint64{}
+	check.DDL, check.Rows, check.Definitions = map[string][]byte{}, map[string]uint64{}, map[string][]byte{}
 	objects := map[string]NativeObject{}
 	for _, d := range last.Databases {
 		for _, o := range d.Objects {
@@ -80,13 +80,18 @@ func (Engine) CheckNativeRestore(ctx context.Context, in backup.NativeRestoreInp
 	}
 	for _, dec := range classify(last.Databases, selected, ddl) {
 		check.Objects = append(check.Objects, backup.NativeDecision(dec))
-		if !dec.Allowed || dec.Kind != KindTable {
+		if !dec.Allowed {
+			continue
+		}
+		// What the restore compares the target's object with.
+		key := restoreKey(dec.Database, dec.Name)
+		o := objects[key]
+		check.Definitions[key] = ddl[o.DDLKey]
+		if dec.Kind != KindTable {
 			continue
 		}
 		// What the restore needs of an allowed table: its row count, and the
 		// definition of a Replicated one, which it creates itself.
-		key := restoreKey(dec.Database, dec.Name)
-		o := objects[key]
 		check.Rows[key] = o.Rows
 		if body := ddl[o.DDLKey]; readDefinition(dec.Database, dec.Name, body).replicated {
 			check.DDL[key] = body
@@ -313,9 +318,12 @@ type NativeRestore struct {
 	// DDL holds the definitions of the allowed Replicated tables, by
 	// restoreKey: the restore creates them itself, with their Keeper path
 	// rewritten, before RESTORE fills them. Rows holds every allowed table's
-	// row count in the backup, by restoreKey.
-	DDL  map[string][]byte
-	Rows map[string]uint64
+	// row count in the backup, by restoreKey. Definitions holds every
+	// allowed object's definition, by restoreKey: what the target's objects
+	// are compared with after RESTORE (security review v0.4, finding 1).
+	DDL         map[string][]byte
+	Rows        map[string]uint64
+	Definitions map[string][]byte
 	// Stop delivers why the restore's ingest session stopped: the restore
 	// is then ended with KILL QUERY.
 	Stop <-chan string
@@ -335,7 +343,8 @@ var _ backup.NativeRestorer = Engine{}
 
 // RestoreNativeBackup implements backup.NativeRestorer with RestoreNative.
 func (e Engine) RestoreNativeBackup(ctx context.Context, rc backup.RestoreContext, run backup.NativeRestoreRun) (*backup.RestoreResult, error) {
-	nr := NativeRestore{URL: run.URL, RunID: run.RunID, AccessKey: run.AccessKey, Secret: run.Secret, DDL: run.DDL, Rows: run.Rows, Stop: run.Stop}
+	nr := NativeRestore{URL: run.URL, RunID: run.RunID, AccessKey: run.AccessKey, Secret: run.Secret, DDL: run.DDL, Rows: run.Rows,
+		Definitions: run.Definitions, Stop: run.Stop}
 	for _, d := range run.Decisions {
 		nr.Decisions = append(nr.Decisions, Decision(d))
 	}
@@ -350,8 +359,11 @@ type nativeRestorePlan struct {
 	// creates the CREATE TABLE of each Replicated one, by restoreKey.
 	tables  map[string][]Decision
 	creates map[string]string
-	// allowed are every allowed object, by database and name.
-	allowed map[objRef]Decision
+	// allowed are every allowed object, by database and name, and approved
+	// the definition each was allowed with: the backup's, or for a
+	// Replicated table the statement the restore creates it with.
+	allowed  map[objRef]Decision
+	approved map[objRef]string
 	// except are the objects left out, by database.
 	except map[string][]Decision
 }
@@ -363,7 +375,7 @@ type nativeRestorePlan struct {
 // (the check ran the same rewrite).
 func planNativeRestore(requestID string, databases []string, nr NativeRestore) (*nativeRestorePlan, error) {
 	p := &nativeRestorePlan{tables: map[string][]Decision{}, creates: map[string]string{}, except: map[string][]Decision{},
-		allowed: map[objRef]Decision{}}
+		allowed: map[objRef]Decision{}, approved: map[objRef]string{}}
 	selected := map[string]bool{}
 	for _, db := range databases {
 		if db == "" || strings.ContainsRune(db, 0) || isSystemDatabase(db) {
@@ -388,7 +400,12 @@ func planNativeRestore(requestID string, databases []string, nr NativeRestore) (
 		}
 		seen[key] = true
 		if d.Allowed {
+			body, ok := nr.Definitions[key]
+			if !ok {
+				return nil, fmt.Errorf("clickhouse: the approved definition of %s.%s is missing", clip(d.Database), clip(d.Name))
+			}
 			p.allowed[objRef{d.Database, d.Name}] = d
+			p.approved[objRef{d.Database, d.Name}] = string(body)
 		}
 		switch {
 		case !d.Allowed:
@@ -401,12 +418,18 @@ func planNativeRestore(requestID string, databases []string, nr NativeRestore) (
 					return nil, fmt.Errorf("clickhouse: %s.%s: %w", clip(d.Database), clip(d.Name), err)
 				}
 				p.creates[key] = stmt
+				p.approved[objRef{d.Database, d.Name}] = stmt
 			}
 		}
 	}
 	for key := range nr.DDL {
 		if _, ok := p.creates[key]; !ok {
 			return nil, fmt.Errorf("clickhouse: a definition to create (%s) is not of an allowed table", clip(key))
+		}
+	}
+	for key := range nr.Definitions {
+		if !seen[key] {
+			return nil, fmt.Errorf("clickhouse: an approved definition (%s) is not of a decided object", clip(key))
 		}
 	}
 	for _, ts := range p.tables {
@@ -448,12 +471,13 @@ func restoreStatement(p *nativeRestorePlan, nr NativeRestore, requestID string) 
 }
 
 // RestoreNative restores a native copy into the target of rc (design §6,
-// Execute), on one connection: it creates the selected databases that do
+// Execute): it creates the selected databases that do
 // not exist (an existing one must be empty), then every allowed Replicated
 // table from the backup's own CREATE TABLE with its Keeper path rewritten
 // and its UUID dropped (replicatedCreate), then sends RESTORE … EXCEPT
-// TABLES <every object left out> with async = 1, which fills the tables it
-// finds and creates the others, and polls system.backups every 5 s. When
+// TABLES <every object left out> with async = 1, on a new connection in the
+// first restored database, which fills the tables it finds and creates the
+// others, and polls system.backups every 5 s. When
 // nr.Stop delivers or ctx is cancelled, it KILLs the RESTORE on that
 // connection, and on a new one when it lost track of it (an error wrapping
 // backup.ErrNativeOrphan says that did not end it either). After RESTORED,
@@ -542,14 +566,34 @@ func (Engine) RestoreNative(ctx context.Context, rc backup.RestoreContext, nr Na
 		}
 	}
 
-	// 3. RESTORE, polled as a backup is.
+	// 3. RESTORE, polled as a backup is, on a connection whose default
+	// database is the first restored one (security review v0.4, finding 4):
+	// RESTORE qualifies a definition's unqualified names with the session's
+	// database, and that one held nothing before this restore (it created it
+	// or found it empty), so such a name can only reach what the restore
+	// creates, never system's tables. The allowlist refuses such a name, and
+	// the definitions are compared after the restore, besides.
+	s.close()
+	if s, err = connectIn(ctx, rc.EngineContext, opts, plan.databases[0]); err != nil {
+		return res, err
+	}
 	again := func(ctx context.Context) (*session, error) { return connect(ctx, rc.EngineContext, opts) }
 	if err := s.runRestore(ctx, log, plan, nr, rc.RequestID, again); err != nil {
+		// A RESTORE that failed or was ended leaves what it created (R52):
+		// what of that is not what was approved, or was to be left out, is
+		// dropped all the same (security review v0.4, finding 1). Not while
+		// it may still run.
+		if !errors.Is(err, ErrNativeOrphan) {
+			if perr := s.checkAfterRestore(context.WithoutCancel(ctx), log, plan, again); perr != nil {
+				err = fmt.Errorf("%w; besides, %v", err, strings.TrimPrefix(perr.Error(), "clickhouse: "))
+			}
+		}
 		return res, err
 	}
 
-	// 4. What the target holds now: exactly what was allowed.
-	if err := s.checkRestoredObjects(ctx, plan); err != nil {
+	// 4. What the target holds now: exactly what was allowed, as it was
+	// approved.
+	if err := s.checkRestoredObjects(ctx, log, plan, false); err != nil {
 		return res, err
 	}
 
@@ -811,30 +855,90 @@ var (
 // to create, fails the restore, named; so does an allowed one that is
 // missing. A materialized view's inner table belongs to an allowed view of
 // its database: .inner_id.<its UUID> or .inner.<its name>.
-func (s *session) checkRestoredObjects(ctx context.Context, p *nativeRestorePlan) error {
+//
+// Each allowed object must also be what was approved (security review v0.4,
+// finding 1): its engine and create_table_query those of its approved
+// definition, which the allowlist allows again, reading only what the
+// restore was to create (restoredMismatch, innerMismatch). An object
+// RESTORE created other than approved, or created although it was left out,
+// is dropped at once, and the restore fails naming it: those databases held
+// nothing before this restore, so the object is this restore's, and it may
+// reach outside the target. An object the restore was not to create at all
+// is someone else's: it is named, never dropped.
+//
+// After a RESTORE that failed (failed), what it did not get to is not a
+// problem: only what it created other than approved, or left out, is.
+func (s *session) checkRestoredObjects(ctx context.Context, log *slog.Logger, p *nativeRestorePlan, failed bool) error {
 	quoted := make([]string, len(p.databases))
 	for i, db := range p.databases {
 		quoted[i] = quoteString(db)
 	}
-	rows, err := s.queryStrings(ctx, "SELECT database, name, toString(uuid), engine FROM system.tables WHERE database IN ("+
-		strings.Join(quoted, ", ")+") ORDER BY database, name")
+	rows, err := s.queryStrings(ctx, "SELECT database, name, toString(uuid), engine, create_table_query FROM system.tables WHERE database IN ("+
+		strings.Join(quoted, ", ")+") ORDER BY database, name", schemaSettings...)
 	if err != nil {
 		return fmt.Errorf("clickhouse: list the restored objects: %w", err)
 	}
 	found := make([]restoredObject, len(rows))
 	for i, r := range rows {
-		found[i] = restoredObject{db: r[0], name: r[1], uuid: r[2], engine: r[3]}
+		found[i] = restoredObject{db: r[0], name: r[1], uuid: r[2], engine: r[3], query: r[4]}
 	}
-	return p.restoredObjects(found)
+	problems, drop := p.restoredObjects(found, failed)
+	for _, o := range drop {
+		stmt := dropStatement(o)
+		if err := s.client.Do(ctx, ch.Query{Body: stmt, Settings: append(slices.Clone(ddlSettings), dropSettings...)}); err != nil {
+			log.Error("clickhouse: could not drop an object the restore created other than approved", "database", o.db, "name", o.name,
+				"err", err.Error())
+			problems = append(problems, fmt.Sprintf("%s could not be dropped (%s): run %s on the target", objRef{o.db, o.name},
+				serverErrorSummary(err.Error(), 0, ""), stmt))
+			continue
+		}
+		log.Warn("clickhouse: dropped an object the restore created other than approved", "database", o.db, "name", o.name)
+	}
+	if len(problems) == 0 {
+		return nil
+	}
+	slices.Sort(problems)
+	if len(problems) > 5 {
+		problems = append(problems[:5], fmt.Sprintf("and %d more", len(problems)-5))
+	}
+	return fmt.Errorf("clickhouse: the restored databases do not hold what was decided: %s", strings.Join(problems, "; "))
 }
 
-// restoredObject is a row of system.tables.
-type restoredObject struct{ db, name, uuid, engine string }
+// checkAfterRestore is checkRestoredObjects after a RESTORE that did not end
+// RESTORED, within nativeKillWait, on s or, when s fails, on a new
+// connection.
+func (s *session) checkAfterRestore(ctx context.Context, log *slog.Logger, p *nativeRestorePlan, again redial) error {
+	ctx, cancel := context.WithTimeout(ctx, nativeKillWait)
+	defer cancel()
+	err := s.checkRestoredObjects(ctx, log, p, true)
+	if _, refused := ch.AsException(err); err == nil || refused || !strings.Contains(err.Error(), "list the restored objects") {
+		return err
+	}
+	ns, cerr := again(ctx)
+	if cerr != nil {
+		log.Error("clickhouse: could not check what a failed restore created", "err", cerr.Error())
+		return err
+	}
+	defer ns.close()
+	return ns.checkRestoredObjects(ctx, log, p, true)
+}
 
-// restoredObjects is checkRestoredObjects on the rows found.
-func (p *nativeRestorePlan) restoredObjects(found []restoredObject) error {
+// dropSettings let a drop go ahead when other objects depend on the one
+// dropped (a dictionary on a table, a view on a view): what is dropped is
+// not what was approved, whatever depends on it.
+var dropSettings = []ch.Setting{{Key: "check_table_dependencies", Value: "0"}, {Key: "check_referential_table_dependencies", Value: "0"}}
+
+// restoredObject is a row of system.tables.
+type restoredObject struct{ db, name, uuid, engine, query string }
+
+// restoredObjects is checkRestoredObjects on the rows found: the problems,
+// and the objects to drop (each once: an inner table's view for the inner
+// table).
+func (p *nativeRestorePlan) restoredObjects(found []restoredObject, failed bool) (problems []string, drop []restoredObject) {
 	views := map[string]string{} // "<db>\x00.inner_id.<uuid>" or ".inner.<name>" → the view
+	byRef := map[objRef]restoredObject{}
 	for _, o := range found {
+		byRef[objRef{o.db, o.name}] = o
 		if d, ok := p.allowed[objRef{o.db, o.name}]; ok && d.Kind == KindMaterializedView {
 			views[o.db+"\x00.inner_id."+o.uuid] = o.name
 			views[o.db+"\x00.inner."+o.name] = o.name
@@ -846,31 +950,41 @@ func (p *nativeRestorePlan) restoredObjects(found []restoredObject) error {
 			excluded[objRef{db, d.Name}] = true
 		}
 	}
-	var problems []string
+	dropped := map[objRef]bool{}
+	dropIt := func(o restoredObject) {
+		if r := (objRef{o.db, o.name}); !dropped[r] {
+			dropped[r] = true
+			drop = append(drop, o)
+		}
+	}
 	seen := map[objRef]bool{}
 	for _, o := range found {
 		r := objRef{o.db, o.name}
 		seen[r] = true
-		switch {
+		switch view := views[o.db+"\x00"+o.name]; {
 		case p.allowed[r].Name != "":
-		case isInnerName(o.name) && views[o.db+"\x00"+o.name] != "":
+			if why := restoredMismatch(o, p.allowed[r].Kind, p.approved[r], p.allowed); why != "" {
+				problems = append(problems, r.String()+" is not what was approved ("+why+"); it was dropped")
+				dropIt(o)
+			}
+		case isInnerName(o.name) && view != "":
+			mv := objRef{o.db, view}
+			if why := innerMismatch(o, mv, p.approved[mv]); why != "" {
+				problems = append(problems, r.String()+", the inner table of "+mv.String()+", is not what was approved ("+why+"); "+
+					mv.String()+" was dropped")
+				dropIt(byRef[mv])
+			}
 		case excluded[r]:
-			problems = append(problems, r.String()+" was to be left out, and the target holds it")
-		default:
+			problems = append(problems, r.String()+" was to be left out, and the target holds it; it was dropped")
+			dropIt(o)
+		case !failed:
 			problems = append(problems, r.String()+" is not an object the restore was to create")
 		}
 	}
 	for r := range p.allowed {
-		if !seen[r] {
+		if !seen[r] && !failed {
 			problems = append(problems, r.String()+" was to be restored, and the target does not hold it")
 		}
 	}
-	if len(problems) == 0 {
-		return nil
-	}
-	slices.Sort(problems)
-	if len(problems) > 5 {
-		problems = append(problems[:5], fmt.Sprintf("and %d more", len(problems)-5))
-	}
-	return fmt.Errorf("clickhouse: the restored databases do not hold what was decided: %s", strings.Join(problems, "; "))
+	return problems, drop
 }

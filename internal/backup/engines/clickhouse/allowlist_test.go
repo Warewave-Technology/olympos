@@ -226,7 +226,6 @@ func TestClassifyViews(t *testing.T) {
 	runAlCases(t, []alCase{
 		{name: "a view on a restored table", allowed: true, objs: view("CREATE VIEW db.x UUID '59ceceba-0bb1-42b7-a667-1067790fc917' (`id` UInt64) AS SELECT id FROM db.events WHERE id > (now() - toIntervalDay(1))")},
 		{name: "a view on a view", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.v")},
-		{name: "unqualified names are of the view's database", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM events")},
 		{name: "backquoted names", allowed: true, objs: view("CREATE VIEW db.x AS SELECT `id` FROM `db`.`events` AS `e`")},
 		{name: "joins, a comma join, subqueries and IN", allowed: true, objs: view(
 			"CREATE VIEW db.x AS SELECT e.id FROM db.events AS e INNER JOIN db.logs AS l ON e.id = l.id, db.v AS w " +
@@ -283,11 +282,12 @@ func TestClassifyViews(t *testing.T) {
 		{name: "joinGet on a table left out", reason: "it reads db.ext, which is not restored", objs: view("CREATE VIEW db.x AS SELECT joinGet(db.ext, 'v', id) AS s FROM db.events")},
 		{name: "dictGet on an expression", reason: "it calls dictGet on a name Olympos cannot read", objs: view("CREATE VIEW db.x AS SELECT dictGet(concat('db.', 'dict'), 'msg', id) AS s FROM db.events")},
 		// A CTE is visible in its own SELECT only: the same name in the
-		// outer query or another branch of a union is a table.
-		{name: "a CTE does not reach the outer query", reason: "it reads db.ext, which is not restored", objs: view("CREATE VIEW db.x AS SELECT id FROM ext WHERE id IN (WITH ext AS (SELECT id FROM db.events) SELECT id FROM ext)")},
-		{name: "a CTE does not reach another union branch", reason: "it reads db.ext, which is not restored", objs: view("CREATE VIEW db.x AS WITH ext AS (SELECT id FROM db.events) SELECT id FROM ext UNION ALL SELECT id FROM ext")},
+		// outer query or another branch of a union is a table, named without
+		// its database.
+		{name: "a CTE does not reach the outer query", reason: "it reads ext without naming its database", objs: view("CREATE VIEW db.x AS SELECT id FROM ext WHERE id IN (WITH ext AS (SELECT id FROM db.events) SELECT id FROM ext)")},
+		{name: "a CTE does not reach another union branch", reason: "it reads ext without naming its database", objs: view("CREATE VIEW db.x AS WITH ext AS (SELECT id FROM db.events) SELECT id FROM ext UNION ALL SELECT id FROM ext")},
 		{name: "a qualified name is not a CTE", reason: "it reads db.ext, which is not restored", objs: view("CREATE VIEW db.x AS WITH ext AS (SELECT id FROM db.events) SELECT id FROM db.ext")},
-		{name: "a CTE does not see itself", reason: "it reads db.ext, which is not restored", objs: view("CREATE VIEW db.x AS WITH ext AS (SELECT id FROM ext) SELECT id FROM ext")},
+		{name: "a CTE does not see itself", reason: "it reads ext without naming its database", objs: view("CREATE VIEW db.x AS WITH ext AS (SELECT id FROM ext) SELECT id FROM ext")},
 		{name: "a recursive CTE", reason: "cannot be parsed with certainty", objs: view("CREATE VIEW db.x AS WITH RECURSIVE r AS (SELECT 1 AS n) SELECT n FROM r")},
 		{name: "a function's FROM is a table", reason: "cannot be parsed with certainty", objs: view("CREATE VIEW db.x AS SELECT substring(msg FROM 1) FROM db.logs")},
 		{name: "unbalanced parentheses", reason: "cannot be parsed with certainty", objs: view("CREATE VIEW db.x AS SELECT (id FROM db.events")},
@@ -301,10 +301,165 @@ func TestClassifyViews(t *testing.T) {
 	})
 }
 
+// TestClassifyFromClause: SAMPLE … OFFSET is part of the table expression,
+// and a word after AS is an alias, so neither ends the FROM clause: the
+// sources after them are read (security review v0.4, finding 2).
+func TestClassifyFromClause(t *testing.T) {
+	runAlCases(t, []alCase{
+		{name: "SAMPLE as ClickHouse writes it", allowed: true, objs: view("CREATE VIEW db.x (`id` UInt64) AS SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2 WHERE id > 0")},
+		{name: "SAMPLE a ratio", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE 0.1")},
+		{name: "SAMPLE rows, then a comma join", allowed: true, objs: view("CREATE VIEW db.x AS SELECT e.id FROM db.events AS e SAMPLE 10000, db.logs AS l")},
+		{name: "FINAL and SAMPLE, then a join", allowed: true, objs: view("CREATE VIEW db.x AS SELECT e.id FROM db.events AS e FINAL SAMPLE 1 / 10 OFFSET 1 / 2 INNER JOIN db.logs AS l ON e.id = l.id LIMIT 10 OFFSET 5")},
+		{name: "LIMIT with an offset", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events ORDER BY id LIMIT 5, 10")},
+
+		// The review's reproductions.
+		{name: "SAMPLE … OFFSET, then a table", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1/2 OFFSET 1/2, other.secret")},
+		{name: "SAMPLE … OFFSET, then a table function", reason: "it reads the table function merge",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1/2 OFFSET 1/2, merge('system', '^users$')")},
+		{name: "SAMPLE 1 OFFSET 0, then a table", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events SAMPLE 1 OFFSET 0, other.secret")},
+		{name: "a source aliased limit", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events AS limit, other.secret")},
+		{name: "a source aliased offset, then a table function", reason: "it reads the table function remote",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events AS offset, remote('h:9000', system.users)")},
+		{name: "SAMPLE … OFFSET in a subquery", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id FROM db.logs WHERE id IN (SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2, other.secret)")},
+		{name: "SAMPLE … OFFSET in a union branch", reason: "it reads other.secret, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id FROM db.logs UNION ALL SELECT id FROM db.events SAMPLE 1 / 2 OFFSET 1 / 2, other.secret")},
+		// What Olympos does not read with certainty.
+		{name: "a clause word as an alias without AS", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT * FROM db.events limit, other.secret")},
+		{name: "SAMPLE an expression", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE id")},
+		{name: "SAMPLE OFFSET an expression", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events SAMPLE 1 / 2 OFFSET (1 / 2)")},
+	})
+}
+
+// TestClassifyInForms: the function forms of IN, and a table name in
+// brackets after IN, read a table (security review v0.4, finding 3).
+// ClickHouse itself writes "x IN db.t" and "in(x, db.t)" as
+// "x IN (db.t)".
+func TestClassifyInForms(t *testing.T) {
+	cases := []alCase{
+		{name: "IN (a restored table)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (id IN (db.logs)) AND (id GLOBAL NOT IN (db.v))")},
+		{name: "in() on a restored table", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE in(id, db.logs)")},
+		{name: "in() on a tuple", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE in(id, (1, 2)) AND notIn(id, tuple(3)) AND globalIn(id, [4, 5])")},
+		{name: "in() on a subquery", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE globalNotIn(id, (SELECT id FROM db.logs))")},
+		{name: "IN a CTE in brackets", allowed: true, objs: view("CREATE VIEW db.x AS WITH c AS (SELECT id FROM db.logs) SELECT id FROM db.events WHERE id IN (c)")},
+
+		// The review's reproductions.
+		{name: "in() on a table outside the backup", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE in(id, other.ids)")},
+		{name: "IN (a table outside the backup)", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id IN (other.ids)")},
+		{name: "IN ((a table)) outside the backup", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id NOT IN ((other.ids))")},
+		{name: "IN (a table left out)", reason: "it reads db.ext, which is not restored",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE id GLOBAL IN (db.ext)")},
+		{name: "in() on a table function", reason: "it reads the table function url",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE notIn(id, url('http://example.invalid/ids', CSV, 'id UInt64'))")},
+		{name: "in() on a table function in brackets", reason: "it reads the table function numbers",
+			objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE in(id, (numbers(10)))")},
+		// The operator follows an operand, the function starts one.
+		{name: "the operator on a tuple with a call", allowed: true, objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (id IN (1, toUInt64(2))) AND (toString(id) NOT IN ('a', lower('B')))")},
+		{name: "NOT in()", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE NOT in(id, other.ids)")},
+		{name: "in () after AND", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id > 0 AND in (id, other.ids)")},
+		{name: "in() in brackets", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE (in(id, other.ids))")},
+		{name: "in() in the select list", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT in(id, other.ids) AS f FROM db.events")},
+		// After SELECT's modifiers (TOP n [WITH TIES], DISTINCT ON (…)) the
+		// select list starts: in( there is the function (fix round 1, A).
+		{name: "in() after TOP n", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP 10 in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after TOP n WITH TIES", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP 10 WITH TIES in(id, other.ids) AS m FROM db.events ORDER BY id")},
+		{name: "in() after TOP (n)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT TOP (10) in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after DISTINCT ON (…)", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) in(id, other.ids) AS m FROM db.events")},
+		{name: "in() after DISTINCT ON (a, b) in a subquery", reason: "it reads other.ids, which is not in the backup", objs: view("CREATE VIEW db.x AS SELECT m FROM (SELECT DISTINCT ON (id, arr) in(id, other.ids) AS m FROM db.events)")},
+		// After AS (INTERPOLATE (m AS …)) an expression starts (fix round 2).
+		{name: "in() in INTERPOLATE", reason: "it reads other.ids, which is not in the backup",
+			objs: view("CREATE VIEW db.x AS SELECT id, 1 AS m FROM db.events ORDER BY id WITH FILL INTERPOLATE (m AS in(id, other.ids))")},
+		{name: "in() as an index's expression", reason: "it reads other.ids, which is not in the backup", objs: tbl("CREATE TABLE db.x (`id` UInt64, INDEX i in(id, other.ids) TYPE minmax GRANULARITY 1) ENGINE = MergeTree ORDER BY id")},
+		{name: "the operator after TOP n and DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT TOP 10 id IN (1, toUInt64(2)) AS m FROM db.events")},
+		{name: "the operator after DISTINCT ON (…)", allowed: true, objs: view("CREATE VIEW db.x AS SELECT DISTINCT ON (id) id IN (1, toUInt64(2)) AS m FROM db.events")},
+		{name: "in() with three arguments", reason: reasonUncertain, objs: view("CREATE VIEW db.x AS SELECT notIn(id, 1, 2) AS f FROM db.events")},
+		{name: "in() in a column default", reason: "it reads other.ids, which is not in the backup",
+			objs: tbl("CREATE TABLE db.x (`id` UInt64, `f` UInt8 DEFAULT in(id, other.ids)) ENGINE = Log")},
+		{name: "IN (a table) in a dictionary's query", reason: "it reads other.ids, which is not in the backup",
+			objs: dictOn("CLICKHOUSE(QUERY 'SELECT id, msg FROM db.logs WHERE id IN (other.ids)')", "FLAT()")},
+	}
+	// Every form of the in family, the global ones too, with a table in
+	// brackets or not.
+	for _, f := range []string{"in", "notIn", "globalIn", "globalNotIn", "nullIn", "notNullIn", "globalNullIn", "globalNotNullIn",
+		"inIgnoreSet", "notInIgnoreSet", "globalInIgnoreSet", "globalNotInIgnoreSet", "nullInIgnoreSet", "notNullInIgnoreSet",
+		"globalNullInIgnoreSet", "globalNotNullInIgnoreSet"} {
+		for _, arg := range []string{"other.ids", "(other.ids)"} {
+			cases = append(cases, alCase{name: f + " " + arg, reason: "it reads other.ids, which is not in the backup",
+				objs: view("CREATE VIEW db.x AS SELECT * FROM db.events WHERE " + f + "(id, " + arg + ")")})
+		}
+	}
+	runAlCases(t, cases)
+}
+
+// TestClassifyEncryptFunctions (fix round 2): ClickHouse hides the
+// arguments of the encrypt functions from the second on in system.tables, so
+// the comparison after RESTORE cannot see them; the allowlist takes only a
+// literal or a column there.
+func TestClassifyEncryptFunctions(t *testing.T) {
+	const why = " with an argument that is not a literal or a column, which the target hides from the check after the restore"
+	const key = "'12345678901234567890123456789012'"
+	cases := []alCase{
+		{name: "literals and columns", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-256-ofb', msg, " + key + ") AS a, " +
+			"encrypt('aes-256-gcm', msg, " + key + ", 'iviviviviviv', 'aad') AS b, tryDecrypt('aes-256-ofb', `msg`, " + key + ") AS c, " +
+			"aes_encrypt_mysql('aes-128-ecb', msg, 'k') AS d, aes_decrypt_mysql('aes-128-ecb', msg, 16) AS e FROM db.logs")},
+		{name: "a column default", allowed: true, objs: tbl("CREATE TABLE db.x (`s` String, `c` String DEFAULT encrypt('aes-256-ofb', s, " + key + ")) ENGINE = Log")},
+		{name: "a first argument of any form", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt(concat('aes-256', '-ofb'), msg, " + key + ") AS a FROM db.logs")},
+		{name: "no arguments, one argument", allowed: true, objs: view("CREATE VIEW db.x AS SELECT decrypt() AS a, encrypt(msg) AS b FROM db.logs")},
+		{name: "a function named like one in another case", allowed: true, objs: view("CREATE VIEW db.x AS SELECT lower(DECRYPT) AS a FROM (SELECT msg AS DECRYPT FROM db.logs)")},
+
+		{name: "a function call", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-256-ofb', unhex(msg), " + key + ") AS a FROM db.logs")},
+		{name: "a subquery", reason: "it calls encrypt" + why, objs: view("CREATE VIEW db.x AS SELECT encrypt('aes-256-ofb', msg, (SELECT any(msg) FROM db.logs)) AS a FROM db.logs")},
+		{name: "a table's name", reason: "it calls tryDecrypt" + why, objs: view("CREATE VIEW db.x AS SELECT tryDecrypt('aes-256-ofb', msg, db.logs) AS a FROM db.logs")},
+		{name: "an expression", reason: "it calls aes_encrypt_mysql" + why, objs: view("CREATE VIEW db.x AS SELECT aes_encrypt_mysql('aes-128-ecb', msg, 'k' || msg) AS a FROM db.logs")},
+		{name: "a dictGet", reason: "it calls aes_decrypt_mysql" + why, objs: view("CREATE VIEW db.x AS SELECT aes_decrypt_mysql('aes-128-ecb', msg, dictGet('db.dict', 'msg', id)) AS a FROM db.logs")},
+		{name: "a nested call", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-128-ecb', encrypt('aes-128-ecb', msg, '1234567890123456'), '1234567890123456') AS a FROM db.logs")},
+		{name: "a column default with a call", reason: "it calls encrypt" + why, objs: tbl("CREATE TABLE db.x (`id` UInt64, `c` String DEFAULT encrypt('aes-256-ofb', toString(id), " + key + ")) ENGINE = Log")},
+		{name: "a negative number", reason: "it calls encrypt" + why, objs: view("CREATE VIEW db.x AS SELECT encrypt('aes-128-ecb', msg, -1) AS a FROM db.logs")},
+		{name: "a qualified column", reason: "it calls decrypt" + why, objs: view("CREATE VIEW db.x AS SELECT decrypt('aes-128-ecb', l.msg, '1234567890123456') AS a FROM db.logs AS l")},
+	}
+	runAlCases(t, cases)
+}
+
+// TestClassifyUnqualified: an unqualified table name is refused, because
+// ClickHouse resolves it against the database of the session that creates
+// the object (the restore's), not against the object's own (security review
+// v0.4, finding 4). A CTE's name is not a table, and a dictionary's
+// CLICKHOUSE source without DB reads the dictionary's own database
+// whatever the session's (checked on 24.8 and 25.8).
+func TestClassifyUnqualified(t *testing.T) {
+	runAlCases(t, []alCase{
+		{name: "a CTE", allowed: true, objs: view("CREATE VIEW db.x AS WITH c AS (SELECT id FROM db.events) SELECT id FROM c")},
+		{name: "a dictionary source without DB", allowed: true, objs: dictOn("CLICKHOUSE(TABLE 'logs' USER 'u' PASSWORD 'p')", "HASHED()")},
+
+		// The review's reproduction.
+		{name: "a view", reason: "it reads events without naming its database", objs: view("CREATE VIEW db.x AS SELECT id FROM events")},
+		{name: "a view on a name system holds", reason: "it reads users without naming its database",
+			objs: []alObj{{"db", "users", KindTable, "CREATE TABLE db.users (`name` String) ENGINE = Log"}, {"db", "x", KindView, "CREATE VIEW db.x AS SELECT name FROM users"}}},
+		{name: "a join", reason: "it reads logs without naming its database", objs: view("CREATE VIEW db.x AS SELECT e.id FROM db.events AS e JOIN logs AS l ON e.id = l.id")},
+		{name: "after a comma", reason: "it reads logs without naming its database", objs: view("CREATE VIEW db.x AS SELECT 1 FROM db.events, logs")},
+		{name: "IN", reason: "it reads logs without naming its database", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN logs")},
+		{name: "IN in brackets", reason: "it reads logs without naming its database", objs: view("CREATE VIEW db.x AS SELECT id FROM db.events WHERE id IN (logs)")},
+		{name: "a materialized view's query", reason: "it reads events without naming its database", objs: mv("CREATE MATERIALIZED VIEW db.x TO db.logs (`id` UInt64) AS SELECT id FROM events")},
+		{name: "a materialized view's TO", reason: "it writes to logs without naming its database", objs: mv("CREATE MATERIALIZED VIEW db.x TO logs AS SELECT id, '' AS msg FROM db.events")},
+		{name: "dictGet", reason: "it reads dict without naming its database", objs: view("CREATE VIEW db.x AS SELECT dictGet('dict', 'msg', id) AS m FROM db.events")},
+		{name: "dictGet on an identifier", reason: "it reads dict without naming its database", objs: view("CREATE VIEW db.x AS SELECT dictGetString(dict, 'msg', id) AS m FROM db.events")},
+		{name: "joinGet", reason: "it reads logs without naming its database", objs: view("CREATE VIEW db.x AS SELECT joinGet(logs, 'msg', id) AS m FROM db.events")},
+		{name: "dictGet in a column default", reason: "it reads dict without naming its database", objs: tbl("CREATE TABLE db.x (`id` UInt64, `msg` String DEFAULT dictGet('dict', 'msg', id)) ENGINE = Log")},
+		{name: "dictGet in a dictionary's expression", reason: "it reads dict without naming its database",
+			objs: dict("CREATE DICTIONARY db.x (`id` UInt64, `msg` String EXPRESSION dictGet('dict', 'msg', id)) PRIMARY KEY id SOURCE(CLICKHOUSE(DB 'db' TABLE 'logs')) LIFETIME(300) LAYOUT(FLAT())")},
+		{name: "a dictionary's query", reason: reasonUncertain, objs: dictOn("CLICKHOUSE(QUERY 'SELECT id, msg FROM logs')", "FLAT()")},
+	})
+}
+
 func TestClassifyMaterializedViews(t *testing.T) {
 	runAlCases(t, []alCase{
 		{name: "TO a restored table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID 'f0128b77-346e-4f76-b6ad-18eb944a2104' TO db.logs (`id` UInt64, `msg` String) AS SELECT id, toString(id) AS msg FROM db.events")},
-		{name: "TO an unqualified table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x TO logs AS SELECT id, '' AS msg FROM events")},
 		{name: "an inner table", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x UUID '73f0f9df-cd2d-4d2f-b190-88f9be7a8aae' TO INNER UUID 'e24ac6f2-3215-4237-b418-e0ef2c318dde' (`id` UInt64) ENGINE = MergeTree ORDER BY id SETTINGS index_granularity = 8192 AS SELECT id FROM db.events WHERE id > 900")},
 		{name: "an inner table, no TO INNER", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64) ENGINE = MergeTree ORDER BY id AS SELECT id FROM db.events")},
 		{name: "an inner table with a codec", allowed: true, objs: mv("CREATE MATERIALIZED VIEW db.x (`id` UInt64 CODEC(Delta(8), ZSTD(1))) ENGINE = ReplacingMergeTree ORDER BY id AS SELECT id FROM db.events")},

@@ -27,12 +27,21 @@ package clickhouse
 // leave something out, never let something in.
 //
 // What a definition reads is collected from every FROM and JOIN source (the
-// subqueries, CTEs and unions in it too), every "IN <table>", and the
-// object a dictGet* or joinGet names. A source followed by "(" is a table
-// function, and so is "IN f(…)" unless f is tuple or array. An unqualified name is of the object's own database, as
-// ClickHouse qualifies a view's names when it creates it; a CTE's name is
-// not a table within the SELECT that defines it. An object is restored only
-// when everything it reads is, to a fixed point.
+// subqueries, CTEs and unions in it too), every "IN <table>" (the table in
+// brackets too, as ClickHouse writes it, and the second argument of in,
+// notIn, globalIn and the rest of the in family), and the object a dictGet*
+// or joinGet names. A FROM clause goes on past a table's
+// alias, FINAL and SAMPLE k [OFFSET m] to the next source; only a clause
+// word of its own level ends it, never an alias. A source followed by "(" is a table
+// function, and so is "IN f(…)" unless f is tuple or array. A table named
+// without its database is refused (security review v0.4, finding 4):
+// ClickHouse resolves it against the session's database when RESTORE
+// creates the object, not against the object's own, and it writes the
+// definitions it stores itself qualified. A CTE's name is not a table
+// within the SELECT that defines it, and a dictionary's CLICKHOUSE source
+// without DB reads the dictionary's own database (24.8 and 25.8 bind it so,
+// whatever the session's). An object is restored only when everything it
+// reads is, to a fixed point.
 
 import (
 	"fmt"
@@ -289,6 +298,7 @@ type definition struct {
 	kind   string   // what the statement creates; "" when its prefix is not read
 	reads  []objRef // the objects it reads, in order
 	target *objRef  // a materialized view's TO table
+	engine string   // a table's engine, a materialized view's inner table's
 	reason string   // why its own text leaves it out; "" when it does not
 	// replicated: a table on a Replicated engine (its Keeper path is
 	// rewritten when it is restored).
@@ -306,7 +316,8 @@ func (d definition) deps() []objRef {
 type reader struct {
 	toks     []token
 	match    []int  // the index of the bracket closing each opening one
-	db       string // the object's database: an unqualified name is of it
+	opening  []int  // the index of the bracket opening each closing one
+	db       string // the object's database (a dictionary source's DB when it names none)
 	embedded bool   // a dictionary source's query: every table must be qualified
 	def      *definition
 }
@@ -329,10 +340,10 @@ func newReader(text, db string, def *definition) (*reader, bool) {
 	if err != nil {
 		return nil, false
 	}
-	match := make([]int, len(toks))
+	match, opening := make([]int, len(toks)), make([]int, len(toks))
 	var open []int
 	for i, t := range toks {
-		match[i] = -1
+		match[i], opening[i] = -1, -1
 		switch {
 		case t.punct(";"):
 			return nil, false
@@ -350,13 +361,13 @@ func newReader(text, db string, def *definition) (*reader, bool) {
 			if (toks[o].val == "(") != (t.val == ")") {
 				return nil, false
 			}
-			match[o] = i
+			match[o], opening[i] = i, o
 		}
 	}
 	if len(open) != 0 {
 		return nil, false
 	}
-	return &reader{toks: toks, match: match, db: db, def: def}, true
+	return &reader{toks: toks, match: match, opening: opening, db: db, def: def}, true
 }
 
 // readDefinition reads the statement of db.name.
@@ -496,6 +507,7 @@ func (r *reader) engine(i int) int {
 	case strings.HasPrefix(name, "Replicated"):
 		r.def.replicated = true
 	}
+	r.def.engine = at(i + 2).val
 	i += 3
 	if at(i).punct("(") {
 		i = r.closing(i) + 1
@@ -606,8 +618,12 @@ func (r *reader) materializedView(i int) {
 			inner, i = true, i+4
 		} else {
 			t, j, ok := r.name(i + 1)
-			if !ok {
+			switch {
+			case !ok:
 				r.uncertain()
+				return
+			case j-i == 2:
+				r.fail("it writes to " + shortName(t.name) + " without naming its database")
 				return
 			}
 			r.def.target, i = &t, j
@@ -870,7 +886,8 @@ func (r *reader) queryAt(i int) bool {
 	return t.is("SELECT") || t.is("WITH") || t.punct("(") && r.queryAt(i+1)
 }
 
-// name reads "db.name" or "name" at i, and returns the index after it.
+// name reads "db.name" or "name" at i, and returns the index after it; an
+// unqualified name gets db, the object's database.
 func (r *reader) name(i int) (objRef, int, bool) {
 	if !r.at(i).ident() {
 		return objRef{}, i, false
@@ -885,12 +902,16 @@ func (r *reader) name(i int) (objRef, int, bool) {
 }
 
 // read records that the definition reads o, unless o is an unqualified
-// CTE's name.
+// CTE's name. Any other unqualified name is refused (security review v0.4,
+// finding 4): ClickHouse resolves it against the database of the session
+// that creates the object, which on a restore is not the object's own.
 func (r *reader) read(o objRef, unqualified bool, ctes map[string]bool) {
 	switch {
 	case unqualified && ctes[o.name]:
 	case unqualified && r.embedded:
 		r.uncertain()
+	case unqualified:
+		r.fail("it reads " + shortName(o.name) + " without naming its database")
 	default:
 		r.def.reads = append(r.def.reads, o)
 	}
@@ -935,8 +956,27 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 			source = !arrayJoin
 		case t.punct(","):
 			source = from && !arrayJoin
+		case t.is("IN") && r.at(i+1).punct("(") && r.inFunctionAt(i):
+			// in(x, s), the function form of "x IN s" (finding 3); walk
+			// then reads its arguments.
+			r.inCall(i, ctes)
 		case t.is("IN"):
 			i = r.inTable(i, ctes)
+		case t.is("AS") && r.at(i+1).kind == tokWord && !r.at(i+2).punct("("):
+			// The word after AS is an alias (or CAST's type), never a
+			// keyword: "FROM db.t AS limit, other.t" goes on with a source
+			// (security review v0.4, finding 2).
+			i++
+		case t.is("AS") && from && r.at(i+1).kind == tokWord:
+			r.uncertain() // an alias followed by "(": not read
+		case from && t.is("SAMPLE"):
+			// SAMPLE k [OFFSET m] is part of the table expression: its
+			// OFFSET does not end the FROM clause (finding 2).
+			i = r.sample(i)
+		case (t.is("UNION") || t.is("EXCEPT") || t.is("INTERSECT") || t.kind == tokWord && fromEnds[strings.ToUpper(t.val)]) && r.at(i+1).punct(","):
+			// A clause word followed by a comma is an alias without AS, or
+			// not SQL: not read.
+			r.uncertain()
 		case t.is("UNION") || t.is("EXCEPT") || t.is("INTERSECT"):
 			from, arrayJoin = false, false
 			k := i + 1
@@ -959,12 +999,36 @@ func (r *reader) walk(lo, hi int, outer map[string]bool, query bool) {
 				r.function(j, false)
 			}
 		case t.ident() && r.at(i+1).punct("("):
+			if inFunctions[strings.ToLower(t.val)] {
+				r.inCall(i, ctes)
+			}
 			r.function(i, true)
 		}
 	}
 	if source {
 		r.uncertain() // FROM or JOIN with nothing after it
 	}
+}
+
+// sample reads "SAMPLE k [OFFSET m]" at toks[i], k and m each a number or
+// "a / b", and returns the index of its last token. Anything else is not
+// read with certainty.
+func (r *reader) sample(i int) int {
+	ratio := func(j int) int {
+		if r.at(j).kind != tokNumber {
+			r.uncertain()
+			return j
+		}
+		if r.at(j+1).punct("/") && r.at(j+2).kind == tokNumber {
+			return j + 2
+		}
+		return j
+	}
+	j := ratio(i + 1)
+	if !r.failed() && r.at(j+1).is("OFFSET") {
+		j = ratio(j + 2)
+	}
+	return j
 }
 
 // with reads the WITH clause at toks[i] and returns the index of the SELECT
@@ -1038,9 +1102,13 @@ func (r *reader) from(i int, ctes map[string]bool) int {
 
 // inTable reads what follows IN at toks[i] and returns the index of its
 // last token read: a table ("IN db.t"), or "IN f(…)", where f is a table
-// function unless it is tuple or array. A bracket (a tuple or a subquery)
-// is left to walk.
+// function unless it is tuple or array. A bracket is read by inOperand
+// (a table in brackets, as ClickHouse writes "IN db.t") and left to walk.
 func (r *reader) inTable(i int, ctes map[string]bool) int {
+	if r.at(i + 1).punct("(") {
+		r.inOperand(i+1, r.closing(i+1)+1, ctes)
+		return i
+	}
 	o, j, ok := r.name(i + 1)
 	switch {
 	case !ok:
@@ -1056,6 +1124,127 @@ func (r *reader) inTable(i int, ctes map[string]bool) int {
 	return j - 1
 }
 
+// inOperand reads toks[lo:hi], the right side of an IN, in brackets or as
+// the second argument of the in family: a (qualified) name, in any number
+// of brackets, is a table, and f(…) a table function unless f is tuple or
+// array (security review v0.4, finding 3). Anything else (a tuple, an
+// array, a subquery) is an expression, which walk reads.
+func (r *reader) inOperand(lo, hi int, ctes map[string]bool) {
+	for lo < hi && r.at(lo).punct("(") && r.closing(lo) == hi-1 {
+		lo, hi = lo+1, hi-1
+	}
+	o, j, ok := r.name(lo)
+	switch {
+	case !ok:
+	case j == hi:
+		r.read(o, j-lo == 1, ctes)
+	case r.at(j).punct("(") && r.closing(j) == hi-1:
+		if f := strings.ToLower(r.at(j - 1).val); j-lo == 1 && (f == "tuple" || f == "array") {
+			return
+		}
+		r.fail("it reads the table function " + shortName(r.at(j-1).val))
+	}
+}
+
+// inFunctions are the function forms of IN (lower-case): f(x, s) is
+// "x IN s", global or not, with or without the set (the IgnoreSet forms
+// ClickHouse uses for its indexes).
+var inFunctions = func() map[string]bool {
+	m := map[string]bool{}
+	for _, g := range []string{"", "global"} {
+		for _, f := range []string{"in", "notin", "nullin", "notnullin"} {
+			m[g+f] = true
+			m[g+f+"ignoreset"] = true
+		}
+	}
+	return m
+}()
+
+// inFunctionAt reports whether "in(" at toks[i] is the function in, not
+// the operator IN: as ClickHouse parses it, the operator follows an operand
+// (a name, a literal, a bracket; NOT and GLOBAL are part of it), and the
+// function starts one: after the start of a bracket, punctuation, a keyword
+// that an expression follows, or a clause that ends like an operand and is
+// followed by an expression (exprStartAfter).
+func (r *reader) inFunctionAt(i int) bool {
+	j := i - 1
+	for r.at(j).is("NOT") || r.at(j).is("GLOBAL") {
+		j--
+	}
+	if r.exprStartAfter(j) {
+		return true
+	}
+	switch p := r.at(j); p.kind {
+	case tokPunct:
+		return p.val != ")" && p.val != "]"
+	case tokWord:
+		return exprKeywords[strings.ToUpper(p.val)]
+	}
+	return false
+}
+
+// exprStartAfter reports whether an expression starts after toks[j] although
+// toks[j] ends like an operand (fix round 1 of the security review v0.4, A):
+// the clauses that end in a number, a bracket or a name and are followed by
+// an expression, not by an operator. They are SELECT's modifiers before its
+// list (TOP n, TOP (n), WITH TIES, DISTINCT ON (…)), an index's name
+// (INDEX name expression TYPE …) and AS (INTERPOLATE (m AS expression)).
+func (r *reader) exprStartAfter(j int) bool {
+	p := r.at(j)
+	switch {
+	case p.kind == tokNumber:
+		return r.at(j - 1).is("TOP")
+	case p.punct(")"):
+		o := -1
+		if j >= 0 && j < len(r.opening) {
+			o = r.opening[j]
+		}
+		return o >= 0 && (r.at(o-1).is("TOP") || r.at(o-1).is("ON") && r.at(o-2).is("DISTINCT"))
+	case p.is("TIES"):
+		return r.at(j - 1).is("WITH")
+	case p.is("AS"):
+		// An alias or CAST's type follows AS, never an operator: before
+		// "in(" it is INTERPOLATE (m AS in(…)) (fix round 2).
+		return true
+	case p.ident():
+		return r.at(j - 1).is("INDEX")
+	}
+	return false
+}
+
+// exprKeywords are the words an expression can follow in a definition:
+// "<word> in(…)" is the function in after one of them, and the operator IN
+// after any other word (a column's name).
+var exprKeywords = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(`ALIAS ALL AND ANY ARRAY ASSUME BETWEEN BY CASE CHECK CODEC DEFAULT DISTINCT
+		ELSE EPHEMERAL ESCAPE EXISTS EXPRESSION FILL FROM GRANULARITY HAVING ILIKE IN INTERPOLATE INTERVAL IS JOIN KEY
+		LIKE LIMIT MATERIALIZED OFFSET ON OR PREWHERE QUALIFY RECURSIVE SELECT SETTINGS SOME STALENESS STEP THEN TO TOP
+		TTL USING WHEN WHERE WITH XOR`) {
+		m[w] = true
+	}
+	return m
+}()
+
+// inCall reads the arguments of an in-family function at toks[i]: exactly
+// two, the second of which is IN's right side (inOperand).
+func (r *reader) inCall(i int, ctes map[string]bool) {
+	open := i + 1
+	end := r.closing(open)
+	d := r.toks[open].depth + 1
+	var commas []int
+	for j := open + 1; j < end; j++ {
+		if r.toks[j].punct(",") && r.toks[j].depth == d {
+			commas = append(commas, j)
+		}
+	}
+	if len(commas) != 1 || commas[0] == open+1 || commas[0] == end-1 {
+		r.uncertain()
+		return
+	}
+	r.inOperand(commas[0]+1, end, ctes)
+}
+
 // function checks the function at toks[i], called with its arguments or,
 // after APPLY, by name: one that reads outside the server is refused; a
 // dictGet* or joinGet reads the object its first argument names.
@@ -1069,6 +1258,12 @@ func (r *reader) function(i int, called bool) {
 		r.fail(reasonInlineDisk)
 	case outsideCalls[name]:
 		r.fail("it calls " + shortName(r.toks[i].val) + ", which reads outside the restored set")
+	case called && secretArgumentFunctions[r.toks[i].val] && !plainArguments(r.toks, i+1, r.closing(i+1)):
+		// ClickHouse hides these arguments from the second on in
+		// system.tables, so the check after RESTORE cannot compare them: only
+		// what cannot read anything is allowed there (fix round 2).
+		r.fail("it calls " + shortName(r.toks[i].val) + " with an argument that is not a literal or a column, " +
+			"which the target hides from the check after the restore")
 	case strings.HasPrefix(name, "dictget") || strings.HasPrefix(name, "dicthas") || strings.HasPrefix(name, "dictisin") ||
 		name == "joinget" || name == "joingetornull":
 		if !called {
@@ -1077,6 +1272,22 @@ func (r *reader) function(i int, called bool) {
 		}
 		r.namedObject(i)
 	}
+}
+
+// plainArguments reports whether every argument of the call whose brackets
+// are toks[open] and toks[end], from the second on, is one token: a string,
+// a number or an unqualified name (a column).
+func plainArguments(toks []token, open, end int) bool {
+	args := splitArgs(toks, open, end)
+	if len(args) < 2 {
+		return true // nothing hidden: ClickHouse shows a call with one argument whole
+	}
+	for _, a := range args[1:] {
+		if len(a) != 1 || !(a[0].kind == tokString || a[0].kind == tokNumber || a[0].ident()) {
+			return false
+		}
+	}
+	return true
 }
 
 // namedObject reads the object a dictGet* or joinGet at toks[i] names in

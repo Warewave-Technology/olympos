@@ -210,6 +210,20 @@ destination and verifies their signatures and how they link. A chain that does n
 alone, its objects are listed, every one left out for that reason. A chain with an incremental taken through
 another `ingest.url` is refused, naming that URL: set `ingest.url` back to restore it.
 
+**How many checks run.** Checking a native copy holds its chain in memory, so the server checks few at once.
+These limits are fixed, not settings:
+
+- The checks of the restore dialog and of opening a request share 2 slots; each user runs one check at a time.
+  A second check while yours runs is refused at once (*a check of yours runs already*): check again when it
+  has ended.
+- The check at the start of an approved restore has a slot of its own, so checks in the dialog never hold up
+  an approved restore.
+- A check ends after 5 minutes (*it took longer than 5m0s*), the wait for a slot included in the dialog. At the
+  start of a restore the 5 minutes run from when it holds its slot; the request then fails before anything is
+  sent to the target.
+- Two users who check over and over can keep both slots of the dialog busy, so another user's check waits up to
+  5 minutes for one; approved restores are not held up.
+
 **What is created: the allowlist.** Olympos reads each object's definition from the verified backup, with a
 strict parser, and creates only what it can prove harmless:
 
@@ -221,6 +235,13 @@ strict parser, and creates only what it can prove harmless:
   materialized view's `TO` table must be restored too;
 - dictionaries whose source is a table or query of the local ClickHouse (no `HOST` or `PORT`) on objects that
   are restored, with a layout that keeps nothing on the server's disk (not `SSD_CACHE`).
+
+What a definition reads is every table after `FROM` and `JOIN` (a `SAMPLE … OFFSET` or an alias does not end
+the list), every table after `IN` (bare or in brackets, as ClickHouse writes it, and the second argument of
+`in`, `notIn`, `globalIn` and the rest of that family), and the object a `dictGet*` or `joinGet` names. Each must
+be named with its database: ClickHouse writes the definitions it stores that way, and it would resolve a name
+without one against the restore's session, not the object's database. A dictionary's local source with
+`TABLE` and no `DB` is the exception: ClickHouse reads it from the dictionary's own database.
 
 Everything else is **left out**, listed in the check with its reason, and not created:
 
@@ -234,6 +255,12 @@ Everything else is **left out**, listed in the check with its reason, and not cr
 - a definition that reads a table function or calls a function that reads outside the server (`url`, `s3`,
   `file`, `remote`, `mysql`, `executable`, …), and a column default or TTL that holds a query;
 - an object that reads one that is left out, or one in a database you did not select;
+- an object that names a table without its database (*it reads events without naming its database*);
+- an object that calls `encrypt`, `decrypt`, `tryDecrypt`, `aes_encrypt_mysql` or `aes_decrypt_mysql` with
+  anything but a literal or a column name from the second argument on (a function call, a subquery, an
+  expression, a table name): ClickHouse hides those arguments on the target, so Olympos cannot check them after
+  the restore (*it calls decrypt with an argument that is not a literal or a column …*). Pass the key, the IV and
+  the value as literals or columns;
 - anything Olympos cannot read with certainty.
 
 A mistake in these rules can only leave something out, never let something in. That is also why `x IN f(…)` is
@@ -265,20 +292,39 @@ request was approved: …*): open a new request.
 **What the server does**, after the steps every restore takes ([above](#what-the-server-does)):
 
 1. It opens a read-only ingest session over the chain, with its own short-lived credential (it counts against
-   `ingest.maxRuns` and ends with the restore).
+   `ingest.maxRuns` and ends with the restore). The session serves only what the `RESTORE` reads: the `.backup`
+   file of every run, the definitions of the selected databases, and the definitions and data of the objects it
+   creates. The target holds the credential while the restore runs, so it can read nothing else of the backup:
+   not a database you did not select, not the definition or data of an object left out (a request for one is
+   refused, `403`). A file whose bytes are those of a file the restore reads is served, whatever its name:
+   ClickHouse reads a file of a backup by its size and checksum. The `.backup` files list every file of the
+   backup with its size, so the target learns the names of what it does not restore, not their contents.
 2. It creates the selected databases (`ENGINE = Atomic`), or uses an existing empty one.
 3. It creates every allowed Replicated table itself, from the backup's own `CREATE TABLE`, with only the
    engine's Keeper path and replica changed to `/olympos-restore/<request id>/<db>/<table>` and `{replica}` and
    the backup's `UUID` removed, so the table shares nothing in Keeper with the source. A table whose path and
    replica cannot be found exactly in its definition is left out at the check.
-4. It runs `RESTORE DATABASE … EXCEPT TABLES <what is left out> FROM S3('<ingest.url>/olympos/<run id>/', …)`.
+4. It runs `RESTORE DATABASE … EXCEPT TABLES <what is left out> FROM S3('<ingest.url>/olympos/<run id>/', …)`,
+   in the first restored database (the default database of its session, which held nothing before the restore).
    ClickHouse reads the backup through the endpoint, which serves only the objects the verified manifests list,
    whole, and checks each one's SHA-256 while it streams; an object that does not match is cut off, and the
    request fails naming it, with the databases of steps 2 and 3 left in place. ClickHouse's server-side copy for S3 disks is off (`allow_s3_native_copy = 0`), so
    nothing is copied past that check.
 5. When the `RESTORE` is done, the restored databases must hold exactly the allowed objects (and the inner tables
-   of the allowed materialized views), and every allowed table the backup's row count. Anything else fails the
-   request, named.
+   of the allowed materialized views), each as it was approved, and every allowed table the backup's row count.
+   Anything else fails the request, named. *As it was approved* means that the object's engine and definition on
+   the target (`system.tables`) are the definition the check allowed, and that the allowlist allows that
+   definition again; an inner table must be one the allowlist allows, on its view's engine.
+6. An object the `RESTORE` created other than approved, or created although it was left out, is **dropped**
+   (`DROP … SYNC`), and the request fails naming it (*… is not what was approved (…); it was dropped*). The
+   restored databases held nothing before the restore, so that object is the restore's own, and what it is was
+   never approved: it could read the target's other tables or reach outside it. This is checked after a
+   `RESTORE` that fails or is ended too. An object in those databases that the restore was not to create at all
+   is someone else's: it is named, never dropped. A drop that fails is named with the statement to run. Do not
+   create objects in a database that is being restored: one created there under the name of an object of the
+   backup while the restore runs is taken for the restore's own, and may be dropped. An honest object that calls
+   `encrypt` or `decrypt` with literals and columns is restored as approved, although ClickHouse hides its key
+   arguments (`'[HIDDEN]'`).
 
 **Errors.** ClickHouse's error message can quote the backup's DDL, which can hold a password (a dictionary's
 source, for example), so the result keeps only its code, its name and the start of its first line. The whole
