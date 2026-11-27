@@ -65,7 +65,17 @@ var (
 	// server, retrying its uploads with the revoked credential. It wraps
 	// backup.ErrNativeOrphan, which the worker looks for.
 	ErrNativeOrphan = fmt.Errorf("clickhouse: %w", backup.ErrNativeOrphan)
+	// ErrNativeRestoreOrphan is ErrNativeOrphan for a restore: the RESTORE
+	// may still run on the target.
+	ErrNativeRestoreOrphan error = restoreOrphan{}
 )
+
+type restoreOrphan struct{}
+
+func (restoreOrphan) Error() string {
+	return "clickhouse: the native restore may still be running on the target"
+}
+func (restoreOrphan) Unwrap() error { return ErrNativeOrphan }
 
 // Engine takes native backups for the worker.
 var _ backup.NativeEngine = Engine{}

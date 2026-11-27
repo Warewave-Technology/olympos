@@ -178,7 +178,7 @@ because a run's session and its credential live in the one process that opened t
 | `ingest.tlsCertFile` | path | — | no | Externally issued certificate for the endpoint (needs an `https` `ingest.url`). Set together with `tlsKeyFile`. Reloaded on `SIGHUP`. Empty: the internal CA issues one for the host of `ingest.url`, and ClickHouse has to trust that CA. |
 | `ingest.tlsKeyFile` | path | — | no | Key for `tlsCertFile`. |
 | `ingest.maxRuns` | int | `4` | no | Native runs that may hold an ingest session at once. A run that finds none free fails and is retried by its schedule. |
-| `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. |
+| `ingest.maxRunDuration` | duration | `6h` | no | How long a run's credential and session last. A run still going at that point is ended. A run whose target sends no request to the endpoint within 5 minutes of its start is ended sooner (not configurable): the target cannot reach the endpoint. |
 | `ingest.maxRunBytes` | int (bytes) | `0` (automatic) | no | How many bytes one native run may write, for every job alike. `0` is the automatic limit below; a positive value replaces it, for example `536870912000` for 500 GiB. |
 | `ingest.spillDir` | path | operating system's temporary directory | no | Where parts that arrive out of order wait for their turn: up to 1 GiB per run, so size the volume for `maxRuns` × 1 GiB. When a run's parts fill its 1 GiB, ClickHouse is told to send the next early part again later (`503 SlowDown`); the run goes on. Files a crash left here (`olympos-ingest-*.part`) are removed when the server starts. The Helm chart mounts a volume for it. |
 
@@ -203,8 +203,10 @@ counted twice.
 
 The limit stops a client that writes far more than the database holds; it is not a retention or cost control.
 A run that goes over it is ended with `KILL QUERY` and fails with `native byte limit: the run wrote more than
-<limit> (…); set ingest.maxRunBytes to allow more`. The way out is `ingest.maxRunBytes`: set it above the
-largest backup you expect (it applies to every native job), or back to `0` for the automatic limit.
+<limit> (…); set ingest.maxRunBytes to allow more` (the automatic limit) or `native byte limit: the run wrote
+more than <limit> (ingest.maxRunBytes); raise ingest.maxRunBytes, or set it to 0 for the automatic limit`. The
+way out is `ingest.maxRunBytes`: set it above the largest backup you expect (it applies to every native job), or
+back to `0` for the automatic limit.
 
 **Incrementals.** A native job with *Weekly full, daily incrementals* (`engine_options.incremental:
 weekly_full_daily`) takes a full backup on the first run of each week (Monday, in the job's time zone), on the

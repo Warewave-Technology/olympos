@@ -46,6 +46,10 @@ const (
 	// ReasonRestart is the revoke reason start-up recovery records
 	// (MarkInterrupted): the run belonged to the process before.
 	ReasonRestart = "server restart"
+	// ReasonNoRequest: no signed request came within FirstRequest of the
+	// open, so the target most likely cannot reach the endpoint (egress, its
+	// trust of the certificate) and would otherwise retry until the TTL.
+	ReasonNoRequest = "no request"
 )
 
 const (
@@ -137,6 +141,9 @@ type OpenOptions struct {
 	// MaxBytes is how many bytes a backup may write in all (required for a
 	// backup).
 	MaxBytes int64
+	// FirstRequest is how long the session waits for its first signed
+	// request before it stops with ReasonNoRequest; 0 waits until the TTL.
+	FirstRequest time.Duration
 }
 
 func (o OpenOptions) validate() error {
@@ -295,6 +302,13 @@ func (r *Registry) open(ctx context.Context, o OpenOptions) (*Session, Credentia
 	}
 	// The TTL ends the session even when no request comes to notice it.
 	s.stopExpiry = r.afterFunc(o.TTL, func() { s.Stop(ReasonExpired) })
+	if o.FirstRequest > 0 {
+		s.stopFirst = r.afterFunc(o.FirstRequest, func() {
+			if !s.requested.Load() {
+				s.Stop(ReasonNoRequest)
+			}
+		})
+	}
 	return s, cred, nil
 }
 
@@ -399,6 +413,10 @@ type Session struct {
 	// stopExpiry cancels the timer that stops the session with ReasonExpired
 	// when the TTL passes; Revoke calls it. Set once in open.
 	stopExpiry func() bool
+	// stopFirst cancels the FirstRequest timer (nil without one); requested
+	// is set by the first signed request.
+	stopFirst func() bool
+	requested atomic.Bool
 
 	mu         sync.Mutex
 	secret     string // dropped on Revoke
@@ -463,6 +481,9 @@ func (s *Session) Revoke(reason string) {
 	if s.stopExpiry != nil {
 		s.stopExpiry()
 	}
+	if s.stopFirst != nil {
+		s.stopFirst()
+	}
 	s.end()
 	s.reg.forget(s.accessKey)
 
@@ -478,6 +499,21 @@ func (s *Session) Revoke(reason string) {
 // destination or a bad digest. The run's owner then ends the run (KILL
 // QUERY) and revokes the session. It delivers one value, once.
 func (s *Session) Stopped() <-chan string { return s.stopped }
+
+// StopReason is the reason the session was stopped for, "" while it was not.
+func (s *Session) StopReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.stopReason
+}
+
+// signed records that a signed request came (FirstRequest), and stops
+// waiting for one.
+func (s *Session) signed() {
+	if !s.requested.Swap(true) && s.stopFirst != nil {
+		s.stopFirst()
+	}
+}
 
 // Stop stops the session for reason: Lookup no longer finds its key, and
 // Stopped delivers the reason. Only the first call counts. It is the

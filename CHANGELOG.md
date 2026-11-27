@@ -10,8 +10,8 @@ All notable changes to this project are documented here. The format follows
 
 Native ClickHouse backups and restores with ClickHouse's own `BACKUP` and `RESTORE`, written through a new
 ingest endpoint of the server and signed; installs with Argo CD or Flux; backup storage immutability as the
-storage owner's choice; a release candidate first for every security-model change. Release candidate:
-v0.4.0-rc.1.
+storage owner's choice; a release candidate first for every security-model change. Release candidates:
+v0.4.0-rc.1, v0.4.0-rc.2.
 
 ### Added
 - **Native ClickHouse backups and restores** ([#62](https://github.com/Warewave-Technology/olympos/issues/62)).
@@ -46,6 +46,12 @@ v0.4.0-rc.1.
     signature covers; plain HTTP (`devMode`) still needs a body signed with its SHA-256, and `aws-chunked` is
     refused. Over TLS the signature binds the body only through its MD5: `docs/spec-changes.md` #28,
     `docs/security-model.md`.
+  - Found in the lab test of v0.4.0-rc.1: a native backup or restore whose target sends no request to the
+    endpoint within 5 minutes is ended with `KILL QUERY` and fails with *no request from the target reached the
+    ingest endpoint …*, which points at the ClickHouse pods' egress and their trust of the certificate. Before,
+    a ClickHouse that could not reach the endpoint kept retrying, and the run stayed *running* until
+    `ingest.maxRunDuration` (6 hours). A restore whose target is lost fails with *the native restore may still
+    be running on the target …* instead of *the native backup …*.
 - **Install with Argo CD or Flux** ([#59](https://github.com/Warewave-Technology/olympos/issues/59)). Argo CD
   and other tools that render the charts with `helm template` could not keep two Secrets that the charts keep with `lookup`:
   every sync wrote the spent bootstrap token into the agent's identity Secrets again (the probe then retried

@@ -142,6 +142,9 @@ type NativeRestoreConfig struct {
 	// (ingest.maxRunDuration, 6 h when 0). Only the executor uses them.
 	Registry       *ingest.Registry
 	MaxRunDuration time.Duration
+	// FirstRequest is how long a restore waits for the target's first
+	// request (NativeFirstRequest when 0).
+	FirstRequest time.Duration
 }
 
 // NativeRestore is a native copy checked for a restore: the chain, read

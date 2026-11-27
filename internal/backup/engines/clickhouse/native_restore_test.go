@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"net"
 	"reflect"
@@ -697,5 +698,22 @@ func TestCheckNativeRestoreDatabaseEngine(t *testing.T) {
 	delete(c2.bodies, nrFull+"/metadata/shop.sql")
 	if got, err := (Engine{}).CheckNativeRestore(context.Background(), c2.input()); err == nil {
 		t.Fatalf("an unreadable database definition: %v", got.RefusedDatabases)
+	}
+}
+
+// TestRestoreOrphanSaysRestore: a restore the run lost track of, which a KILL
+// on a new connection does not end either, is reported as a restore that may
+// still run, and is still an ErrNativeOrphan for the callers that look for
+// one.
+func TestRestoreOrphanSaysRestore(t *testing.T) {
+	op := restoreOp("2b1c7c1e-5d0a-4a43-9c2f-0d3b7a2f6e11", "secret")
+	again := func(context.Context) (*session, error) { return nil, errors.New("dial: tunnel rejected by agent") }
+	err := op.orphanKill(slog.New(slog.DiscardHandler), again, "read system.backups: EOF")
+	if !errors.Is(err, ErrNativeOrphan) || !errors.Is(err, backup.ErrNativeOrphan) {
+		t.Fatalf("not an orphan: %v", err)
+	}
+	if !strings.HasPrefix(err.Error(), "clickhouse: the native restore may still be running on the target (read system.backups: EOF)") ||
+		strings.Contains(err.Error(), "native backup") || !strings.Contains(err.Error(), "olympos-restore-2b1c7c1e-5d0a-4a43-9c2f-0d3b7a2f6e11") {
+		t.Fatalf("restore orphan: %v", err)
 	}
 }

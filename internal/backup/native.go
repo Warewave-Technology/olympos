@@ -220,6 +220,9 @@ type NativeConfig struct {
 	// KV and ManifestKeyName sign the manifests (keyVault.manifestKeyName).
 	KV              secrets.KeyVault
 	ManifestKeyName string
+	// FirstRequest is how long a run waits for the target's first request
+	// (NativeFirstRequest when 0).
+	FirstRequest time.Duration
 	// MaxRunBytes is how many bytes a run may write (ingest.maxRunBytes);
 	// 0 is the automatic limit (nativeQuota).
 	MaxRunBytes int64
@@ -251,6 +254,12 @@ const (
 	// whose server shuts down.
 	nativeRunEnded = "run ended"
 	nativeShutdown = "server shutting down"
+	// NativeFirstRequest is how long a native backup or restore waits for
+	// the target's first signed request to the endpoint before the session
+	// stops (ingest.ReasonNoRequest) and the run ends. ClickHouse sends one
+	// within seconds of its BACKUP or RESTORE; a target that cannot reach the
+	// endpoint would retry until the credential's TTL.
+	NativeFirstRequest = 5 * time.Minute
 )
 
 // StateTag marks the objects of a native run (design §3): StateIncomplete
@@ -531,7 +540,7 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 
 	sink := newNativeSink(ctx, runID, live)
 	opts := ingest.OpenOptions{RunID: r.id, Kind: ingest.KindBackup, Scope: ingest.Scope{Write: runID + "/"}, TTL: ttl, Sink: sink,
-		MaxBytes: quota}
+		MaxBytes: quota, FirstRequest: FirstRequestOr(cfg.FirstRequest)}
 	var base *NativeBase
 	if chain != nil {
 		opts.Scope.Read, opts.Source = chain.prefixes(), src
@@ -575,8 +584,11 @@ func (w *Worker) runNative(ctx context.Context, r *runRow, job *Job, n nativeJob
 	rr := &RunResult{ServerVersion: version}
 	if runErr != nil {
 		msg := scrub(runErr.Error())
-		if reason == ingest.ReasonQuota {
+		switch reason {
+		case ingest.ReasonQuota:
 			msg = quotaError(quota, cfg.MaxRunBytes > 0) + ": " + msg
+		case ingest.ReasonNoRequest:
+			msg = NoRequestError(cfg.URL, FirstRequestOr(cfg.FirstRequest)) + ": " + msg
 		}
 		if errors.Is(runErr, ErrNativeOrphan) {
 			w.Log.Error("native backup: the BACKUP may still be running on the target, and its revoked credential does not end "+
@@ -915,6 +927,26 @@ func nativeQuota(lastFull, databases, override int64) int64 {
 		return override
 	}
 	return max(min(2*lastFull, 2*databases), databases+databases/2, nativeQuotaMin)
+}
+
+// FirstRequestOr is d, or NativeFirstRequest when d is 0: how long a run
+// waits for the target's first request.
+func FirstRequestOr(d time.Duration) time.Duration {
+	if d > 0 {
+		return d
+	}
+	return NativeFirstRequest
+}
+
+// NoRequestError says that the target sent no request to the endpoint at
+// url within d, and what to check.
+func NoRequestError(url string, d time.Duration) string {
+	within := d.String()
+	if d%time.Minute == 0 {
+		within = fmt.Sprintf("%d minutes", int(d.Minutes()))
+	}
+	return fmt.Sprintf("no request from the target reached the ingest endpoint %s within %s: check the egress of the "+
+		"ClickHouse pods to its host and port, and that ClickHouse trusts its certificate", url, within)
 }
 
 // quotaError says that a run went over its byte limit, and how to allow more.
